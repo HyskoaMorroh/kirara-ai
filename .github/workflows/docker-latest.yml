@@ -3,10 +3,6 @@ name: Docker build latest
 on:
   workflow_dispatch:
 
-env:
-  # 镜像名称，通过仓库变量 DOCKERHUB_IMAGE 配置，未配置时回落到 <用户名>/kirara-agent-framework
-  IMAGE_NAME: ${{ vars.DOCKERHUB_IMAGE || format('{0}/kirara-agent-framework', secrets.DOCKERHUB_USERNAME) }}
-
 jobs:
   docker:
     runs-on: ubuntu-latest
@@ -14,6 +10,16 @@ jobs:
       -
         name: Checkout
         uses: actions/checkout@v4
+      -
+        name: Resolve image name
+        id: image
+        run: |
+          IMAGE_NAME="${{ vars.DOCKERHUB_IMAGE }}"
+          if [ -z "$IMAGE_NAME" ]; then
+            IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/kirara-agent-framework"
+          fi
+          echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "Resolved image name: $IMAGE_NAME"
       -
         name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -36,6 +42,6 @@ jobs:
           context: .
           push: true
           platforms: 'linux/amd64,linux/arm64'
-          tags: ${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.image.outputs.name }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

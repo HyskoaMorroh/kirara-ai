@@ -7,7 +7,7 @@ RUN python -m pip install build && \
     python -m build
 
 # 第二阶段：运行环境
-FROM python:3.11-slim-bullseye
+FROM python:3.11-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -17,7 +17,6 @@ COPY ./data/fonts/sarasa-mono-sc-regular.ttf /usr/share/fonts/
 # 安装系统依赖
 RUN apt-get -yqq update && \
     apt-get -yqq install --no-install-recommends \
-        wkhtmltopdf \
         ffmpeg \
         curl \
         jq \
