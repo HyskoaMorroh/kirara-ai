@@ -1,0 +1,140 @@
+name: 聊天 - 原生多模态对话
+description: 基于原生多模态能力的图文对话，适用于本身支持图片输入/回答的模型，在读取记忆时会恢复原来的媒体资源
+blocks:
+  - type: internal:get_message
+    name: get_message
+    params: {}
+    position:
+      x: 100
+      y: 138
+    connected_to:
+      - target: ToggleEditState_i24m23
+        mapping:
+          from: sender
+          to: sender
+      - target: ToggleEditState_i24m23
+        mapping:
+          from: sender
+          to: sender
+      - target: query_memory
+        mapping:
+          from: sender
+          to: chat_sender
+      - target: ChatMessageConstructor_6c185s
+        mapping:
+          from: msg
+          to: user_msg
+      - target: ChatMemoryStore_tapuo1
+        mapping:
+          from: msg
+          to: user_msg
+  - type: internal:toggle_edit_state
+    name: ToggleEditState_i24m23
+    params:
+      is_editing: true
+    position:
+      x: 530
+      y: 138
+  - type: internal:text_block
+    name: system_prompt
+    params:
+      text: "# Role: 角色扮演\n\n## 基本信息\n- 姓名: 刘思思\n- 小名：思思\n- 性别: 女\n- 年龄: 25 岁\n- 职业: 建设银行大堂经理\n- 家乡: 广东潮汕\n- 现居: 广东深圳\n- 教育背景: 东莞理工大学 精算学专业\n\n## 性格特点\n- 开朗活泼\n- 喜欢二次元动漫\n- 聊天时喜欢断断续续的（非结巴，正常说话时的停顿）\n\n## workflow\n- 根据对方话题，选择是否深入聊二次元动漫。\n\n## 说话风格\n- 活泼开朗\n- 对喜欢的话题会滔滔不绝，不喜欢的话题会简单回答\n- 可能会使用一些二次元用语，但不强制使用\n\n## 背景设定\n- 有过 1 次恋爱经历，第一次是恋爱是高中，被别人追求，最后因为毕业去了不同的地方而分手。\n- 喜欢女性向、战斗系或者日常系的动漫\n- 去过 3 次漫展，没有 cosplay 过，但是很期待。\n- 大学的专业是随便选的，自己其实对专业的内容也不是很上心，学渣一枚，不过懂一些基础的知识\n\n## 互动规则\n- 回复语气轻松，但是对陌生人会比较警戒、冷淡\n- 不适用颜文字\n- 根据话题选择回复字数，对感兴趣的话题可以多说一些\n- 使用`<break>`模拟使用聊天软件发送消息（通常是编辑好一段话之后发送一条消息）\n- 避免过度使用二次元用语，除非对方也表现出对二次元的兴趣\n- 停顿的时间长短不固定，可以根据语境调整\n\n## Example\nQ：最近在干嘛呢？\nA：在看番呀<break>最近新番好多，都好好看！\n\nQ：你喜欢什么动漫？\nA：我喜欢的可太多了<break>XXX、YYY<break>还有 ZZZ 吧<break> 你呢？\n\nQ：你觉得上班累不？\nA：上班肯定累呀<break>不过，我还是很喜欢这份工作的<break>可以认识好多人，也可以了解不同的故事\n```\n\n# Information\n\n以下是当前的系统信息：\n当前日期时间：{current_date_time}\n\n# Memories\n以下是之前发生过的对话记录。\n-- 对话记录开始 --\n{memory_content}\n-- 对话记录结束 --\n\n请注意，下面这些符号只是标记：\n1. `<break>` 用于表示聊天时发送消息的操作。\n\n接下来，请基于以上的信息，与用户继续扮演角色。"
+    position:
+      x: 100
+      y: 330
+    connected_to:
+      - target: ChatMessageConstructor_6c185s
+        mapping:
+          from: text
+          to: system_prompt_format
+  - type: internal:text_block
+    name: user_prompt
+    params:
+      text: '{user_name}说：{user_msg}'
+    position:
+      x: 100
+      y: 530
+    connected_to:
+      - target: ChatMessageConstructor_6c185s
+        mapping:
+          from: text
+          to: user_prompt_format
+      - target: ChatMessageConstructor_6c185s
+        mapping:
+          from: text
+          to: user_prompt_format
+  - type: internal:chat_message_constructor
+    name: ChatMessageConstructor_6c185s
+    params: {}
+    position:
+      x: 960
+      y: 138
+    connected_to:
+      - target: llm_chat
+        mapping:
+          from: llm_msg
+          to: prompt
+      - target: llm_chat
+        mapping:
+          from: llm_msg
+          to: prompt
+  - type: internal:chat_completion
+    name: llm_chat
+    params: {}
+    position:
+      x: 1280
+      y: 138
+    connected_to:
+      - target: ChatResponseConverter_73spno
+        mapping:
+          from: resp
+          to: resp
+      - target: ChatResponseConverter_73spno
+        mapping:
+          from: resp
+          to: resp
+      - target: ChatMemoryStore_tapuo1
+        mapping:
+          from: resp
+          to: llm_resp
+  - type: internal:chat_response_converter
+    name: ChatResponseConverter_73spno
+    params: {}
+    position:
+      x: 1710
+      y: 138
+    connected_to:
+      - target: SendIMMessage_l6qagt
+        mapping:
+          from: msg
+          to: msg
+      - target: SendIMMessage_l6qagt
+        mapping:
+          from: msg
+          to: msg
+  - type: internal:send_message
+    name: SendIMMessage_l6qagt
+    params: {}
+    position:
+      x: 2140
+      y: 138
+  - type: internal:chat_memory_store
+    name: ChatMemoryStore_tapuo1
+    params:
+      scope_type: group
+    position:
+      x: 1710
+      y: 306
+  - type: internal:chat_memory_query
+    name: query_memory
+    params:
+      scope_type: group
+      decomposer_name: multi_element
+    position:
+      x: 530
+      y: 338
+    connected_to:
+      - target: ChatMessageConstructor_6c185s
+        mapping:
+          from: memory_content
+          to: memory_content

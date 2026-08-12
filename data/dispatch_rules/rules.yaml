@@ -1,0 +1,110 @@
+- rule_id: chat_normal
+  name: 群聊AI对话
+  description: 群聊中使用 /chat 开头对话或者 被@ 时触发聊天
+  workflow_id: chat:normal
+  priority: 5
+  enabled: true
+  rule_groups:
+  - operator: or
+    rules:
+    - type: prefix
+      config:
+        prefix: /chat
+    - type: bot_mention
+      config: {}
+  - operator: or
+    rules:
+    - type: chat_type
+      config:
+        chat_type: 群聊
+  metadata:
+    category: chat
+    permission: user
+    temperature: 0.7
+- rule_id: chat_creative
+  name: 私聊AI对话
+  description: 私聊时直接发送内容触发对话
+  workflow_id: chat:normal
+  priority: 5
+  enabled: true
+  rule_groups:
+  - operator: or
+    rules:
+    - type: chat_type
+      config:
+        chat_type: 私聊
+  metadata:
+    category: chat
+    permission: user
+    temperature: 0.9
+- rule_id: game_dice
+  name: 骰子
+  description: 骰子游戏，支持 XdY 格式
+  workflow_id: game:dice
+  priority: 5
+  enabled: true
+  rule_groups:
+  - operator: or
+    rules:
+    - type: regex
+      config:
+        pattern: ^[.。]roll\s*(\d+)?d(\d+)
+  metadata: {}
+- rule_id: game_gacha
+  name: 抽卡
+  description: 抽卡模拟器
+  workflow_id: game:gacha
+  priority: 5
+  enabled: true
+  rule_groups:
+  - operator: or
+    rules:
+    - type: keyword
+      config:
+        keywords:
+        - 抽卡
+        - 十连
+        - 单抽
+  metadata: {}
+- rule_id: system_help
+  name: 帮助命令
+  description: 显示帮助信息
+  workflow_id: system:help
+  priority: 10
+  enabled: true
+  rule_groups:
+  - operator: or
+    rules:
+    - type: prefix
+      config:
+        prefix: /help
+  metadata:
+    category: system
+    permission: user
+- rule_id: system_clear_memory
+  name: 清空记忆
+  description: 清空当前对话的记忆
+  workflow_id: system:clear_memory
+  priority: 10
+  enabled: true
+  rule_groups:
+  - operator: or
+    rules:
+    - type: prefix
+      config:
+        prefix: /清空记忆
+  metadata:
+    category: system
+    permission: user
+- rule_id: fallback
+  name: 默认规则
+  description: 当上述规则均没有匹配成功时，执行此工作流。
+  workflow_id: chat:memory_store
+  priority: 0
+  enabled: true
+  rule_groups:
+  - operator: or
+    rules:
+    - type: fallback
+      config: {}
+  metadata: {}

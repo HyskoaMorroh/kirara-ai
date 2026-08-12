@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  kirara-agent:
+    # 镜像地址，可通过环境变量 KIRARA_IMAGE 覆盖
+    # 例：KIRARA_IMAGE=你的用户名/kirara-agent-framework:latest docker-compose up -d
+    image: ${KIRARA_IMAGE:-lss233/kirara-agent-framework:latest}
+    container_name: kirara-agent
+    restart: always
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      # 数据目录
+      - ./data:/app/data
+      # ============================================================
+      # 以下挂载仅用于「基于官方镜像热替换补丁」的场景。
+      # 如果使用自行构建并推送到 Docker Hub 的镜像（补丁已打入镜像内），
+      # 请整段注释掉，避免宿主机文件覆盖镜像内的正确版本。
+      # ============================================================
+      - ./kirara_ai/plugins/llm_preset_adapters/openai_adapter.py:/usr/local/lib/python3.11/site-packages/kirara_ai/plugins/llm_preset_adapters/openai_adapter.py:ro
+      - ./kirara_ai/plugins/llm_preset_adapters/claude_adapter.py:/usr/local/lib/python3.11/site-packages/kirara_ai/plugins/llm_preset_adapters/claude_adapter.py:ro
+      - ./kirara_ai/plugins/llm_preset_adapters/gemini_adapter.py:/usr/local/lib/python3.11/site-packages/kirara_ai/plugins/llm_preset_adapters/gemini_adapter.py:ro
+      - ./kirara_ai/plugins/llm_preset_adapters/ollama_adapter.py:/usr/local/lib/python3.11/site-packages/kirara_ai/plugins/llm_preset_adapters/ollama_adapter.py:ro
+      - ./kirara_ai/plugins/im_wecom_adapter/adapter.py:/usr/local/lib/python3.11/site-packages/kirara_ai/plugins/im_wecom_adapter/adapter.py:ro
+      - ./kirara_ai/plugins/im_wecom_adapter/delegates.py:/usr/local/lib/python3.11/site-packages/kirara_ai/plugins/im_wecom_adapter/delegates.py:ro
+      - ./kirara_ai/workflow/core/dispatch/dispatcher.py:/usr/local/lib/python3.11/site-packages/kirara_ai/workflow/core/dispatch/dispatcher.py:ro
+      - ./kirara_ai/workflow/core/execution/executor.py:/usr/local/lib/python3.11/site-packages/kirara_ai/workflow/core/execution/executor.py:ro
+      - ./kirara_ai/workflow/implementations/blocks/llm/chat.py:/usr/local/lib/python3.11/site-packages/kirara_ai/workflow/implementations/blocks/llm/chat.py:ro
+      - ./kirara_ai/workflow/implementations/blocks/system/basic.py:/usr/local/lib/python3.11/site-packages/kirara_ai/workflow/implementations/blocks/system/basic.py:ro
+      - ./kirara_ai/workflow/implementations/blocks/system_blocks.py:/usr/local/lib/python3.11/site-packages/kirara_ai/workflow/implementations/blocks/system_blocks.py:ro
+      # 模型列表定时自动检测（新增 scheduler 子包，需整目录挂载）
+      - ./kirara_ai/scheduler:/usr/local/lib/python3.11/site-packages/kirara_ai/scheduler:ro
+      - ./kirara_ai/config/global_config.py:/usr/local/lib/python3.11/site-packages/kirara_ai/config/global_config.py:ro
+      - ./kirara_ai/web/api/llm/routes.py:/usr/local/lib/python3.11/site-packages/kirara_ai/web/api/llm/routes.py:ro
+      - ./kirara_ai/entry.py:/usr/local/lib/python3.11/site-packages/kirara_ai/entry.py:ro
+      # ============================================================
+
+
+    ports:
+      - "8759:8080"
+
+    # 健康检查（可选，但推荐）
+    # 方式1: TCP端口检查（推荐 - 不依赖特定端点）
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 8080 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+    # 方式2: HTTP端点检查（如果应用提供 /health 端点）
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 40s
+
+    # 方式3: 进程检查（最简单，但可靠性较低）
+    # healthcheck:
+    #   test: ["CMD-SHELL", "pgrep -f python || exit 1"]
+    #   interval: 30s
+    #   timeout: 5s
+    #   retries: 3
+    #   start_period: 40s
+
+    # 日志配置（可选）
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

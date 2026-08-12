@@ -1,0 +1,180 @@
+name: Project Check
+
+on:
+  push:
+    branches: [ "master" ]
+  merge_group:
+    branches: [ "master" ]
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'python' ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+          python -m pip install mypy types-requests types-setuptools
+          mypy --python-version 3.10 --ignore-missing-imports kirara_ai || true # run mypy to generate type dependencies
+          python -m mypy --install-types --non-interactive
+      - name: Run mypy
+        run: |
+          mypy --python-version 3.10 --show-column-numbers --show-error-codes --ignore-missing-imports kirara_ai --output json > mypy_output.json
+        continue-on-error: true
+
+      - name: Create mypy issue content
+        if: always()
+        run: |
+          cat > create_mypy_issue.py << 'EOF'
+          #!/usr/bin/env python3
+          import json
+          import os
+          import sys
+          from datetime import datetime
+          from collections import defaultdict
+
+          # 读取 mypy JSON 输出
+          try:
+              with open("mypy_output.json", "r") as f:
+                  content = f.read()
+                  if content.strip():
+                      mypy_results = [json.loads(line) for line in content.splitlines() if line.strip()]
+                  else:
+                      print("mypy_output.json 文件为空")
+                      mypy_results = []
+          except FileNotFoundError:
+              print("警告：mypy_output.json 文件不存在。创建空结果列表。")
+              mypy_results = []
+          except json.JSONDecodeError as e:
+              print(f"解析 JSON 时出错: {e}")
+              with open("mypy_output.json", "r") as f:
+                  print(f"文件内容: {f.read()[:1000]}")
+              mypy_results = []
+          
+          # 如果没有结果，则退出
+          if not mypy_results:
+              print("没有发现类型错误，不创建 issue")
+              sys.exit(0)
+          
+          # 获取仓库信息
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          run_id = os.environ.get("GITHUB_RUN_ID", "")
+          sha = os.environ.get("GITHUB_SHA", "")[:7]
+          
+          # 获取分支信息
+          ref_name = os.environ.get("GITHUB_REF_NAME", "")
+          event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+          
+          if event_name == "merge_group":
+              branch_info = f"合并到 {ref_name} 分支"
+          else:
+              branch_info = f"{ref_name} 分支"
+          
+          # 格式化当前时间
+          now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+          
+          # 按文件分组错误
+          errors_by_file = defaultdict(list)
+          # 按错误类型分组
+          errors_by_type = defaultdict(int)
+          
+          for result in mypy_results:
+              file_path = result.get("file", "unknown")
+              error_code = result.get("code", "未知")
+              errors_by_file[file_path].append(result)
+              errors_by_type[error_code] += 1
+          
+          # 创建 issue 标题
+          issue_title = f"对{branch_info}的类型检查发现了 {len(mypy_results)} 个问题 ({sha})"
+          
+          # 直接设置环境变量而不是写入文件
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write(f"ISSUE_TITLE={issue_title}\n")
+          
+          # 创建 issue 内容
+          issue_body = f"""## mypy 类型检查报告
+          
+          **时间**: {now}  
+          **分支**: {branch_info}  
+          **Commit**: {sha}  
+          **工作流**: [查看运行详情](https://github.com/{repo}/actions/runs/{run_id})
+                    
+          mypy 共发现 {len(mypy_results)} 个类型问题:
+                    
+          """
+          
+          # 添加错误类型统计
+          issue_body += "### 错误类型统计\n\n"
+          issue_body += "| 错误代码 | 出现次数 | 占比 |\n"
+          issue_body += "| -------- | -------- | ---- |\n"
+          for error_code, count in sorted(errors_by_type.items(), key=lambda x: x[1], reverse=True):
+              percentage = (count / len(mypy_results)) * 100
+              issue_body += f"| `{error_code}` | {count} | {percentage:.1f}% |\n"
+          
+          # 添加每个文件的问题摘要
+          issue_body += "\n### 问题摘要\n\n"
+          issue_body += "| 文件 | 问题数量 | 详情 |\n"
+          issue_body += "| ---- | -------- | ---- |\n"
+          for file_path, errors in sorted(errors_by_file.items(), key=lambda x: len(x[1]), reverse=True):
+              file_short = file_path.split("/")[-1]
+              issue_body += f"| `{file_path}` | {len(errors)} | [查看详情](#file-{file_short.replace('.', '-')}) |\n"
+          
+          issue_body += "\n### 详细问题\n\n"
+          
+          # 添加每个文件的详细问题
+          for file_path, errors in sorted(errors_by_file.items(), key=lambda x: x[0]):
+              file_short = file_path.split("/")[-1]
+              issue_body += f"<a id=\"file-{file_short.replace('.', '-')}\"></a>\n"
+              issue_body += f"#### {file_path}\n\n"
+              issue_body += "| 行号 | 列号 | 错误代码 | 错误消息 |\n"
+              issue_body += "| ---- | ---- | -------- | -------- |\n"
+              
+              # 按行号排序错误
+              for error in sorted(errors, key=lambda x: (x.get("line", 0), x.get("column", 0))):
+                  line = error.get("line", "-")
+                  column = error.get("column", "-")
+                  error_code = error.get("code", "未知")
+                  message = error.get("message", "").replace("|", "\\|")  # 转义管道符号，避免破坏表格
+                  
+                  issue_body += f"| {line} | {column} | `{error_code}` | {message} |\n"
+              
+              issue_body += "\n"
+          
+          # 将内容写入文件，供 GitHub Action 使用
+          with open("issue_body.md", "w", encoding="utf-8") as f:
+              f.write(issue_body)
+              
+          print(f"成功创建 mypy 问题报告，共 {len(mypy_results)} 个问题")
+          EOF
+          
+          python create_mypy_issue.py
+
+      - name: Create GitHub Issue
+        if: always()
+        uses: peter-evans/create-issue-from-file@v4
+        with:
+          title: ${{ env.ISSUE_TITLE }}
+          content-filepath: ./issue_body.md
+          labels: |
+            type-check
+            automated-report
+            bug

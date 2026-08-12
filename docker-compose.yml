@@ -1,0 +1,29 @@
+services:
+  kirara-agent:
+    image: swhesong/kirara-agent-framework:latest
+    container_name: kirara-agent
+    restart: always
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      # 数据目录
+      - ./data:/app/data
+
+    ports:
+      - "8759:8080"
+
+    # 健康检查（可选，但推荐）
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 8080 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+
+    # 日志配置（可选）
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

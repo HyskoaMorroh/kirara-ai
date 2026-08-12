@@ -1,0 +1,326 @@
+name: PR Code Review
+
+on:
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  mypy-review:
+    name: MyPy Type Check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+          python -m pip install mypy types-requests types-setuptools
+          mypy --python-version 3.10 --ignore-missing-imports kirara_ai || true # run mypy to generate type dependencies
+          python -m mypy --install-types --non-interactive
+
+      - name: Get changed Python files
+        id: changed-files
+        run: |
+          BASE_SHA=$(git merge-base ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }})
+          CHANGED_FILES=$(git diff --name-only $BASE_SHA ${{ github.event.pull_request.head.sha }} | grep '\.py$' || echo "")
+          VALID_FILES=""
+          for file in $CHANGED_FILES; do
+            if [ -f "$file" ]; then
+              VALID_FILES="$VALID_FILES $file"
+            fi
+          done
+          echo "files=${VALID_FILES}" >> $GITHUB_OUTPUT
+          echo "Changed Python files: ${VALID_FILES}"
+
+      - name: Run mypy on changed files
+        id: run-mypy
+        run: |
+          CHANGED_FILES="${{ steps.changed-files.outputs.files }}"
+          if [[ -z "$CHANGED_FILES" ]]; then
+            echo "No Python files changed in this PR."
+            echo "has_changed_files=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "has_changed_files=true" >> $GITHUB_OUTPUT
+          # 将输出保存到文本和JSON两种格式
+          mypy --python-version 3.10 --show-column-numbers --show-error-codes --ignore-missing-imports $CHANGED_FILES > mypy_output.txt || true
+          mypy --python-version 3.10 --show-column-numbers --show-error-codes --ignore-missing-imports $CHANGED_FILES --output json > mypy_output.json || true
+        continue-on-error: true
+
+      - name: Get PR diff information
+        id: get-diff
+        if: steps.run-mypy.outputs.has_changed_files == 'true'
+        run: |
+          # 获取被修改的文件和行号
+          BASE_SHA=$(git merge-base ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }})
+          git diff -U0 $BASE_SHA ${{ github.event.pull_request.head.sha }} > pr_diff.txt
+
+          # 解析diff，提取修改的行
+          python - <<'EOF'
+          import re
+          import json
+          
+          changed_lines = {}
+          current_file = None
+          
+          with open('pr_diff.txt', 'r') as f:
+              for line in f:
+                  # 从diff头部获取文件名
+                  file_match = re.match(r'^\+\+\+ b/(.+)', line)
+                  if file_match:
+                      current_file = file_match.group(1)
+                      changed_lines[current_file] = []
+                      continue
+                  
+                  # 解析代码块修改，格式如：@@ -1,5 +1,9 @@
+                  hunk_match = re.match(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', line)
+                  if hunk_match and current_file:
+                      start_line = int(hunk_match.group(1))
+                      if hunk_match.group(2):
+                          count = int(hunk_match.group(2))
+                      else:
+                          count = 1
+                          
+                      # 将这个块中所有增加或修改的行添加到列表
+                      for i in range(count):
+                          changed_lines[current_file].append(start_line + i)
+          
+          # 将结果写入文件
+          with open('changed_lines.json', 'w') as f:
+              json.dump(changed_lines, f)
+          EOF
+        env:
+          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+
+      - name: Process mypy results
+        id: process-results
+        if: steps.run-mypy.outputs.has_changed_files == 'true'
+        run: |
+          python - <<'EOF'
+          #!/usr/bin/env python3
+          import json
+          import os
+          import re
+          
+          # 读取diff信息，获取修改的行
+          try:
+              with open("changed_lines.json", "r") as f:
+                  changed_lines = json.load(f)
+          except FileNotFoundError:
+              changed_lines = {}
+          
+          # 读取文本输出
+          try:
+              with open("mypy_output.txt", "r") as f:
+                  text_output = f.read()
+          except FileNotFoundError:
+              text_output = ""
+          
+          # 读取JSON输出
+          mypy_results = []
+          try:
+              with open("mypy_output.json", "r") as f:
+                  content = f.read().strip()
+                  if content:
+                      for line in content.splitlines():
+                          try:
+                              mypy_results.append(json.loads(line))
+                          except json.JSONDecodeError:
+                              continue
+          except FileNotFoundError:
+              pass
+              
+          # 如果JSON解析失败，尝试从文本解析错误
+          if not mypy_results and text_output:
+              pattern = r"(.*?):(\d+):(\d+): (\w+): (.*)"
+              matches = re.findall(pattern, text_output)
+              for match in matches:
+                  file_path, line, column, error_type, message = match
+                  mypy_results.append({
+                      "file": file_path,
+                      "line": int(line),
+                      "column": int(column),
+                      "code": error_type,
+                      "message": message
+                  })
+          
+          # 过滤掉不在PR变更文件中的错误，使用标准化路径和精确匹配来避免伪阳性错误
+          changed_files = os.environ.get('CHANGED_FILES', '').split()
+          if changed_files:
+              normalized_changed_files = [os.path.normpath(f) for f in changed_files]
+              mypy_results = [error for error in mypy_results if os.path.normpath(error.get('file', '')) in normalized_changed_files]
+          
+          # 只保留diff中的错误
+          review_comments = []
+          diff_errors = [] # 存储在diff中的错误
+          
+          for error in mypy_results:
+              file_path = error.get("file", "unknown")
+              line_num = error.get("line", 0)
+              col_num = error.get("column", 0)
+              message = error.get("message", "未知错误")
+              code = error.get("code", "unknown")
+              
+              # 检查这一行是否在PR diff中被修改
+              is_changed_line = False
+              for changed_file in changed_lines:
+                  if file_path.endswith(changed_file) and line_num in changed_lines[changed_file]:
+                      is_changed_line = True
+                      break
+              
+              if is_changed_line:
+                  # 如果是修改的行，创建行级评论
+                  review_comments.append({
+                      "path": file_path,
+                      "line": line_num,
+                      "body": f"**MyPy 类型错误**: {message} ({code})\n\n详细信息请参考 [mypy 文档](https://mypy.readthedocs.io/en/stable/error_code_list.html#{code.lower() if code != 'unknown' else 'error-codes'})。"
+                  })
+                  diff_errors.append(error)
+          
+          # 创建摘要信息
+          if diff_errors:
+              status = "fail"
+              message = f"在 PR 修改的代码行中发现了 {len(diff_errors)} 个类型问题，需要修复。"
+          else:
+              status = "pass"
+              message = f"PR 修改的代码行通过了类型检查。"
+          
+          summary = {
+              "status": status,
+              "diff_error_count": len(diff_errors),
+              "review_comment_count": len(review_comments),
+              "message": message
+          }
+          
+          # 将评论数据保存为JSON文件
+          with open("mypy_review_comments.json", "w") as f:
+              json.dump(review_comments, f)
+              
+          # 将摘要保存为JSON文件
+          with open("mypy_summary.json", "w") as f:
+              json.dump(summary, f)
+              
+          # 写入输出
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"result={status}\n")
+              f.write(f"diff_error_count={len(diff_errors)}\n")
+              f.write(f"review_comment_count={len(review_comments)}\n")
+          EOF
+        env:
+          CHANGED_FILES: ${{ steps.changed-files.outputs.files }}
+
+      - name: Post line-level PR review comments
+        if: steps.process-results.outputs.diff_error_count != '0'
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const fs = require('fs');
+            
+            // 读取评论数据
+            const reviewComments = JSON.parse(fs.readFileSync('mypy_review_comments.json', 'utf8'));
+            const summary = JSON.parse(fs.readFileSync('mypy_summary.json', 'utf8'));
+            
+            // 创建PR审查
+            const review = await github.rest.pulls.createReview({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              body: `## MyPy 类型检查结果 ❌\n\n${summary.message}\n\n已对修改的代码行创建了 ${reviewComments.length} 个行级评论。`,
+              event: 'COMMENT',
+              comments: reviewComments
+            });
+            
+            console.log(`Created review with ${reviewComments.length} comments`);
+
+      - name: Post success comment
+        if: steps.process-results.outputs.result == 'pass'
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const fs = require('fs');
+            const summary = JSON.parse(fs.readFileSync('mypy_summary.json', 'utf8'));
+            
+            // 查找之前的评论
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(c => {
+              return c.user.type === 'Bot' && 
+                     (c.body.includes('MyPy 类型检查通过') || c.body.includes('MyPy 类型检查结果'));
+            });
+            
+            const comment = `## MyPy 类型检查通过 ✅\n\n${summary.message}`;
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
+
+      - name: Post notification if no Python files changed
+        if: steps.run-mypy.outputs.has_changed_files == 'false'
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(comment => {
+              return comment.user.type === 'Bot' && 
+                     (comment.body.includes('MyPy 类型检查通过') || comment.body.includes('MyPy 类型检查结果'));
+            });
+            
+            const comment = "## MyPy 类型检查\n\nPR 中没有修改任何 Python 文件，跳过类型检查。";
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
+
+      - name: Fail if type issues found in diff
+        if: steps.process-results.outputs.diff_error_count != '0'
+        run: exit 1
