@@ -63,5 +63,7 @@ jobs:
           push: true
           platforms: 'linux/amd64,linux/arm64'
           tags: ${{ steps.image.outputs.name }}:${{ steps.vars.outputs.tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            VITE_APP_VERSION=${{ steps.vars.outputs.tag }}
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
+          cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true

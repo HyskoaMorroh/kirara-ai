@@ -107,8 +107,8 @@ class Http {
   }
 
   ws(path: string) {
-    const wsUrl = new URL(window.location.href)
-    wsUrl.protocol = window.location.protocol === 'https' ? 'wss' : 'ws'
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const wsUrl = new URL(`${wsProtocol}//${window.location.host}`)
     wsUrl.pathname = `${BASE_URL}${path}`
     return new WebSocket(wsUrl.toString())
   }

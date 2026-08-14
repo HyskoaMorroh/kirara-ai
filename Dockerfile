@@ -5,13 +5,16 @@ WORKDIR /webui
 COPY webui/package.json webui/yarn.lock ./
 RUN corepack enable && yarn install --frozen-lockfile
 COPY webui/ ./
+ARG VITE_APP_VERSION
+ENV VITE_APP_VERSION=${VITE_APP_VERSION}
 RUN yarn build
 
 # 第二阶段：构建wheel包
 FROM python:3.11-slim AS builder
 
 WORKDIR /build
-COPY . .
+COPY pyproject.toml README.md LICENSE MANIFEST.in ./
+COPY kirara_ai ./kirara_ai
 RUN python -m pip install build && \
     python -m build
 

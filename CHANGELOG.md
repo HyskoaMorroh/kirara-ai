@@ -2,7 +2,7 @@
 
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的分类方式，记录**源代码、默认配置、部署文件、文档与测试**变化。
 
-比较基线为`3.2.0`，比较目标为当前工作区的 `3.3.0a4`。本文件是源码变更说明，不代表已经创建 GitHub Release、推送镜像或发布版本。
+比较基线为`3.2.0`，比较目标为当前工作区的 `3.3.0a5`。本文件是源码变更说明，不代表已经创建 GitHub Release、推送镜像或发布版本。
 
 > 不纳入比较：`.git/`、编辑器缓存、测试缓存、运行日志、`data/db/`、记忆/媒体/插件运行数据、虚拟环境和任何本地密钥或密码文件。这些内容会随机器和使用状态变化，不属于可复现的产品功能。
 
@@ -24,6 +24,8 @@
 
 - **模型列表在 WebUI 中空白**：Docker 不再从 npm 的 `latest` 或可变 `beta` 标签拉取前端，而是构建仓库内固定的 `kirara-ai-webui` 0.1.1-beta.3 源码。该版本按 `model.id` / `model.type` / `model.ability` 渲染，与 3.3 后端的 `ModelConfig` 对象数组兼容，因此模型卡片会正常显示名称和能力。
 - **MCP 提示词与资源列表接口返回 500**：`/mcp/servers/<id>/prompts` 与 `/mcp/servers/<id>/resources` 此前直接 `jsonify` MCP 原始对象，`Resource.uri` 是 `AnyUrl` 类型无法被 JSON 序列化。现统一转换为 `MCPPromptInfo` / `MCPResourceInfo`，并补上 WebUI 需要的 `id` 字段。
+- **HTTPS 实时连接与工作流白屏**：WebSocket 客户端在 HTTPS 页面自动使用 `wss://`，避免浏览器拦截不安全连接；前端构建产物使用内容哈希文件名，避免代理缓存把旧入口文件与新懒加载模块混用。
+- **非编辑页面首屏负担与配置日志泄露**：Monaco/VSC 编辑器运行时不再随控制台、设置、模型、插件等路由预加载，仅在编辑器页面按需下载；保存配置时不再向浏览器控制台输出密码相关设置。
 
 ### Changed
 
@@ -34,6 +36,9 @@
 - **Docker Hub 自动发布流程**：`.github/workflows/docker-latest.yml` 会为每个非草稿 GitHub Release 构建并推送 `<Release 标签>` 镜像；只有 GitHub 标记为当前 Latest 的正式 Release 才额外更新 `latest`。预发布和非 Latest Release 仍可获得自己的版本镜像，不会覆盖稳定版。`.github/workflows/docker-tag.yml` 不再监听 Tag 推送，仅作为需要单独重建版本标签时的手动应急入口。工作流增加并发控制及 Docker Hub 账号、令牌、镜像名的前置校验。
 - **Compose 部署来源**：`docker-compose.yml` 和示例文件改用环境变量解析镜像；示例 Compose 移除源码热挂载，生产部署以镜像内容为准，降低“仓库已更新、容器仍运行旧代码”的风险。
 - **前端构建来源**：Docker 新增固定 WebUI 构建阶段，使用项目内 `webui/` 源码和锁文件生成静态资源。锁文件统一改为 npm 官方源，避免把本机不可用的镜像地址带进 Docker 构建。
+- **发布构建版本标识**：Docker 与 Windows 快速启动包在构建时注入 GitHub Release 标签，镜像内不再依赖 `.git` 获取前端版本；状态栏会显示发布版本，前端更新比较兼容 `3.3.0a5` 这类预发布编号。
+- **Windows 发布资格**：预发布与非 Latest 正式 Release 不再触发 Windows 快速启动包构建；手动触发仅保留临时 Actions Artifact，只有 GitHub 当前 Latest 的正式 Release 才会生成并上传 Windows Release 附件。
+- **发布前快速门禁**：新增 `Release Preflight`，在 `main`、`master` 的推送和 Pull Request 上并行执行发布契约检查与 WebUI 类型检查、生产构建；该检查不构建镜像、不发布 Windows 包、不使用部署密钥。
 - **部署说明**：README 增加 Docker Hub、环境变量、默认工作流初始化和完整备份恢复说明，强调已有 `data/` 卷不会被新镜像自动覆盖。
 - **忽略规则**：`.gitignore` 忽略本机 `.env`，防止部署参数和敏感配置被误提交。
 

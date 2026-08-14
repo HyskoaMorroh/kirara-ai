@@ -8,6 +8,11 @@ import { execSync } from 'child_process'
 
 // 获取 Git 信息
 function getGitVersion(): string {
+  const configuredVersion = process.env.VITE_APP_VERSION?.trim()
+  if (configuredVersion) {
+    return configuredVersion
+  }
+
   try {
     let tag = '';
     try {
@@ -63,26 +68,12 @@ export default defineConfig({
     rollupOptions: {
       output: {
         compact: true,
-        entryFileNames: `assets/[name].js`,
-        chunkFileNames: `assets/[name].js`,
-        assetFileNames: `assets/[name].[ext]`,
+        entryFileNames: `assets/[name]-[hash].js`,
+        chunkFileNames: `assets/[name]-[hash].js`,
+        assetFileNames: `assets/[name]-[hash][extname]`,
         manualChunks: {
           'cryptojs': ['crypto-js'],
           'naiveui': ['naive-ui'],
-          'vsc': [
-            '@codingame/monaco-vscode-api', 
-            '@codingame/monaco-vscode-extension-api', 
-            '@codingame/monaco-vscode-languages-service-override', 
-            '@codingame/monaco-vscode-theme-service-override', 
-            '@codingame/monaco-vscode-textmate-service-override',
-            '@codingame/monaco-vscode-language-pack-zh-hans',
-            'monaco-editor',
-            'vscode',
-            'vscode-languageclient',
-            'vscode-ws-jsonrpc',
-            'vscode-languageserver-protocol',
-            'vscode-jsonrpc'
-          ]
         }
       }
       

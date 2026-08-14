@@ -1,11 +1,15 @@
-import { compare as semverCompare } from 'semver'
+import { compare as semverCompare, valid as semverValid } from 'semver'
 
 export const version = {
   /**
    * 获取当前前端版本
    */
   getCurrentVersion(): string {
-    return import.meta.env.VITE_APP_VERSION.replace(/^v/, '') || '0.0.0'
+    const currentVersion = import.meta.env.VITE_APP_VERSION
+      .replace(/^v/, '')
+      .replace(/^(\d+\.\d+\.\d+)a(\d+)$/, '$1-a$2')
+
+    return semverValid(currentVersion) ? currentVersion : '0.0.0'
   },
 
   /**

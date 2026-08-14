@@ -2,11 +2,9 @@ name: Windows Quickstart
 
 on:
   workflow_dispatch:
-  push:
-    branches: ['master']
-    tags: ['**']
-  pull_request:
-    branches: ['master']
+  release:
+    types:
+      - published
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,15 +18,62 @@ env:
   PACKAGE_NAME: "quickstart-windows-kirara-ai-amd64"
 
 jobs:
+  release:
+    name: Verify latest release eligibility
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.eligibility.outputs.build }}
+      publish: ${{ steps.eligibility.outputs.publish }}
+    steps:
+      - name: Decide whether to build a Windows package
+        id: eligibility
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}
+          RELEASE_IS_DRAFT: ${{ github.event.release.draft }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "build=true" >> $GITHUB_OUTPUT
+            echo "publish=false" >> $GITHUB_OUTPUT
+            echo "Manual request will create a temporary artifact only." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          if [ "$RELEASE_IS_DRAFT" = "true" ] || [ "$RELEASE_IS_PRERELEASE" = "true" ]; then
+            echo "build=false" >> $GITHUB_OUTPUT
+            echo "publish=false" >> $GITHUB_OUTPUT
+            echo "Windows package skipped because the release is not a formal Latest release." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
+          if [ "$RELEASE_TAG" != "$latest_tag" ]; then
+            echo "build=false" >> $GITHUB_OUTPUT
+            echo "publish=false" >> $GITHUB_OUTPUT
+            echo "Windows package skipped because $RELEASE_TAG is not the current Latest release ($latest_tag)." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          echo "build=true" >> $GITHUB_OUTPUT
+          echo "publish=true" >> $GITHUB_OUTPUT
+          echo "Windows package approved for current Latest release $RELEASE_TAG." >> $GITHUB_STEP_SUMMARY
+
   build:
     name: Windows Quickstart
     runs-on: windows-latest
+    needs: release
+    if: needs.release.outputs.build == 'true'
     permissions:
       contents: write
     
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.release.tag_name || github.sha }}
 
     - name: Set up Python for building
       uses: actions/setup-python@v5
@@ -92,9 +137,13 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: '20'
+        cache: 'yarn'
+        cache-dependency-path: webui/yarn.lock
 
     - name: Build bundled Web UI
       working-directory: webui
+      env:
+        VITE_APP_VERSION: ${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}
       run: |
         corepack enable
         yarn install --frozen-lockfile
@@ -118,12 +167,12 @@ jobs:
         path: ${{ env.DIST_DIR }}
 
     - name: Create release archive
-      if: startsWith(github.ref, 'refs/tags/')
+      if: needs.release.outputs.publish == 'true'
       run: |
         Compress-Archive -Path "${{ env.DIST_DIR }}/*" -DestinationPath "${{ env.BUILD_DIR }}/${{ env.PACKAGE_NAME }}.zip"
 
     - name: Upload release archive
-      if: startsWith(github.ref, 'refs/tags/')
+      if: needs.release.outputs.publish == 'true'
       uses: svenstaro/upload-release-action@v2
       with:
         repo_token: ${{ secrets.GITHUB_TOKEN }}
