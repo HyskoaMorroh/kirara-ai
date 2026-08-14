@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, List, cast
+from typing import Any, List, Optional, cast
 
 import aiohttp
 import requests
@@ -11,7 +11,7 @@ from kirara_ai.llm.adapter import AutoDetectModelsProtocol, LLMBackendAdapter, L
 from kirara_ai.llm.format.message import (LLMChatContentPartType, LLMChatImageContent, LLMChatMessage,
                                           LLMChatTextContent, LLMToolCallContent, LLMToolResultContent)
 from kirara_ai.llm.format.request import LLMChatRequest, Tool
-from kirara_ai.llm.format.response import LLMChatResponse, Message, Usage
+from kirara_ai.llm.format.response import Function, LLMChatResponse, Message, ToolCall, Usage
 from kirara_ai.llm.format.embedding import LLMEmbeddingRequest, LLMEmbeddingResponse
 from kirara_ai.llm.model_types import LLMAbility, ModelType
 from kirara_ai.logger import get_logger
@@ -20,6 +20,21 @@ from kirara_ai.tracing import trace_llm_chat
 
 from .openai_adapter import convert_tools_to_openai_format
 from .utils import generate_tool_call_id, pick_tool_calls
+
+
+def resolve_tool_calls(response_data: dict[str, dict]) -> Optional[list[ToolCall]]:
+    if tool_calls := response_data["message"].get("tool_calls"):
+        return [
+            ToolCall(
+                model="ollama",
+                function=Function(
+                    name=call["function"]["name"],
+                    arguments=call["function"].get("arguments"),
+                ),
+            )
+            for call in tool_calls
+        ]
+    return None
 
 
 class OllamaConfig(BaseModel):

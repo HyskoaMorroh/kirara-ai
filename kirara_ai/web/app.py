@@ -222,7 +222,8 @@ class WebServer:
         self.container = container
         global_config = container.resolve(GlobalConfig)
         # 兜底：secret_key 为空时 PyJWT 会抛 InvalidKeyError，导致首次设置密码/登录失败
-        if not global_config.web.secret_key:
+        if (not global_config.web.secret_key
+                or global_config.web.secret_key == "please-change-this-to-a-secure-secret-key"):
             global_config.web.secret_key = secrets.token_hex(32)
             logger.warning("Web secret_key is empty, generated a temporary secret_key")
         container.register(

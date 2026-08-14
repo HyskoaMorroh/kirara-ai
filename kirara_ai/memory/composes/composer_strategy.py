@@ -133,12 +133,14 @@ class IMMessageProcessor(MessageProcessor):
         result = f"{message.sender.display_name} 说: \n"
 
         for element in message.message_elements:
+            processor_found = False
             for process_type, processor in self.element_processors.items():
                 if isinstance(element, process_type):
                     result += processor.process(element, context)
+                    processor_found = True
                     break
-                else:
-                    result += f"{element.to_plain()}\n"
+            if not processor_found:
+                result += f"{element.to_plain()}\n"
 
         return result
 

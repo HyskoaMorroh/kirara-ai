@@ -24,7 +24,7 @@
 - rule_id: chat_creative
   name: 私聊AI对话
   description: 私聊时直接发送内容触发对话
-  workflow_id: chat:normal
+  workflow_id: chat:dsr_thinking
   priority: 5
   enabled: true
   rule_groups:

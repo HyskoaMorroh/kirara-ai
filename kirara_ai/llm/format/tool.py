@@ -14,6 +14,7 @@ class MediaContent(BaseModel):
     data: bytes
 
 ToolResponseTypes = List[Union[TextContent, MediaContent]]
+ModelTypes = Literal["openai", "gemini", "claude", "ollama"]
 
 class LLMToolResultContent(BaseModel):
     """
@@ -23,15 +24,15 @@ class LLMToolResultContent(BaseModel):
     """
     type: Literal["tool_result"] = "tool_result"
     # call id，对应 LLMToolCallContent 的 id
-    id: str
+    id: Optional[str] = None
     name: str
     # 各家工具要求返回的content格式不同. 等待后续规范化。
-    content: ToolResponseTypes
+    content: Any
     isError: bool = False
 
 class Function(BaseModel):
     # 工具名称
-    name: str
+    name: Optional[str] = None
     # 这个字段类似于 python 的关键字参数，你可以直接使用`**arguments`
     arguments: Optional[dict] = None
 
@@ -43,10 +44,12 @@ class Function(BaseModel):
 
 class ToolCall(BaseModel):
     # call id，对应 LLMToolCallContent 的 id
-    id: str
+    id: Optional[str] = None
     # type这个字段目前不知道有什么用
     type: Optional[str] = None
-    function: Function
+    # 此参数用于向后端传递响应的模型类型，方便后端tool_result返回类型正确的content字段
+    model: Optional[ModelTypes] = "openai"
+    function: Optional[Function] = None
     
 T = TypeVar('T', bound=Callable)
 
@@ -98,10 +101,10 @@ class Tool(BaseModel):
     parameters: Union[ToolInputSchema, dict]
     strict: Optional[bool] = False
     
-    invokeFunc: CallableWrapper[ToolInvokeFunc] = Field(exclude=True)
+    invokeFunc: Optional[CallableWrapper[ToolInvokeFunc]] = Field(default=None, exclude=True)
     
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     @field_serializer("invokeFunc")
-    def serialize_invoke_func(self, invoke_func: CallableWrapper[ToolInvokeFunc]) -> str:
+    def serialize_invoke_func(self, invoke_func: Optional[CallableWrapper[ToolInvokeFunc]]) -> str:
         return "..."

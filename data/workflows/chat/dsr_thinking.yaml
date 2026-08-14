@@ -149,7 +149,6 @@ blocks:
   - type: internal:chat_completion
     name: llm_chat
     params:
-      model_name: deepseek-r1:7b
     position:
       x: 1280
       y: 138

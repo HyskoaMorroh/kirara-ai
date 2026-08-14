@@ -1,6 +1,6 @@
 import asyncio
 import base64
-from typing import Any, Dict, List, Literal, cast
+from typing import Any, Dict, List, Literal, Optional, cast
 
 import aiohttp
 import requests
@@ -12,7 +12,7 @@ from kirara_ai.llm.adapter import AutoDetectModelsProtocol, LLMBackendAdapter, L
 from kirara_ai.llm.format.message import (LLMChatContentPartType, LLMChatImageContent, LLMChatMessage,
                                           LLMChatTextContent, LLMToolCallContent, LLMToolResultContent, RoleType)
 from kirara_ai.llm.format.request import LLMChatRequest, Tool
-from kirara_ai.llm.format.response import LLMChatResponse, Message, Usage
+from kirara_ai.llm.format.response import Function, LLMChatResponse, Message, ToolCall, Usage
 from kirara_ai.llm.format.embedding import LLMEmbeddingRequest, LLMEmbeddingResponse
 from kirara_ai.llm.model_types import LLMAbility, ModelType
 from kirara_ai.logger import get_logger
@@ -20,6 +20,15 @@ from kirara_ai.media import MediaManager
 from kirara_ai.tracing import trace_llm_chat
 
 from .utils import generate_tool_call_id, pick_tool_calls
+
+
+def resolve_function_call(calls: list[LLMChatContentPartType]) -> Optional[list[ToolCall]]:
+    tool_calls = [
+        ToolCall(model="gemini", function=Function(name=call.name, arguments=call.parameters))
+        for call in calls
+        if isinstance(call, LLMToolCallContent)
+    ]
+    return tool_calls if tool_calls else None
 
 SAFETY_SETTINGS = [{
     "category": "HARM_CATEGORY_HARASSMENT",

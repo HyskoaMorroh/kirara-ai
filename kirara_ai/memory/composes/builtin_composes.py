@@ -1,11 +1,14 @@
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Union
 
-from kirara_ai.im.message import IMMessage
+from kirara_ai.im.message import IMMessage, MediaMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
-from kirara_ai.llm.format.message import LLMChatMessage
+from kirara_ai.llm.format.message import (LLMChatContentPartType, LLMChatImageContent, LLMChatMessage,
+                                          LLMChatTextContent, RoleType)
 from kirara_ai.llm.format.response import Message
 from kirara_ai.logger import get_logger
+from kirara_ai.media.manager import MediaManager
 from kirara_ai.memory.entry import MemoryEntry
 
 from .base import ComposableMessageType, MemoryComposer, MemoryDecomposer
@@ -73,6 +76,16 @@ class DefaultMemoryDecomposer(MemoryDecomposer):
         # 使用策略解析记忆条目
         return self.strategy.decompose(entries, context)
 
+    def get_time_str(self, time_diff: timedelta) -> str:
+        if time_diff.days > 0:
+            return f"{time_diff.days}天前"
+        elif time_diff.seconds > 3600:
+            return f"{time_diff.seconds // 3600}小时前"
+        elif time_diff.seconds > 60:
+            return f"{time_diff.seconds // 60}分钟前"
+        else:
+            return "刚刚"
+
 
 class MultiElementDecomposer(MemoryDecomposer):
     logger = get_logger("MultiElementDecomposer")
@@ -92,3 +105,32 @@ class MultiElementDecomposer(MemoryDecomposer):
         
         # 使用策略解析记忆条目
         return self.strategy.decompose(entries, context)
+
+    def create_llm_chat_message(self, content: str, role: RoleType, sender: ChatSender) -> Union[LLMChatMessage, None]:
+        message_content: List[LLMChatContentPartType] = []
+        media_msg_pattern = re.compile(r'<media_msg id=(.*?) desc="(.*?)" />')
+        matches = media_msg_pattern.findall(content)
+        last_index = 0
+
+        for media_id, description in matches:
+            media_tag = f'<media_msg id={media_id} desc="{description}" />'
+            start_index = content.find(media_tag, last_index)
+            if start_index > last_index:
+                message_content.append(LLMChatTextContent(text=content[last_index:start_index]))
+
+            media_object = self.container.resolve(MediaManager).get_media(media_id)
+            if media_object:
+                message_content.append(LLMChatImageContent(media_id=media_id))
+            else:
+                self.logger.warning(f"媒体资源无效: {media_id}")
+                message_content.append(LLMChatTextContent(
+                    text=f'<media_msg id={media_id} desc="{description}" status="error: 媒体资源无效"/> '
+                ))
+            last_index = start_index + len(media_tag)
+
+        if last_index < len(content):
+            message_content.append(LLMChatTextContent(text=content[last_index:]))
+
+        if message_content:
+            return LLMChatMessage(role=role, content=message_content)
+        return None

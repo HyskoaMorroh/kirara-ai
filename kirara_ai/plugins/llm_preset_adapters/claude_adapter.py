@@ -1,6 +1,6 @@
 import asyncio
 import base64
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 import requests
@@ -11,12 +11,25 @@ from kirara_ai.llm.adapter import AutoDetectModelsProtocol, LLMBackendAdapter, L
 from kirara_ai.llm.format.message import (LLMChatContentPartType, LLMChatImageContent, LLMChatMessage,
                                           LLMChatTextContent, LLMToolCallContent, LLMToolResultContent)
 from kirara_ai.llm.format.request import LLMChatRequest, Tool
-from kirara_ai.llm.format.response import LLMChatResponse, Message, Usage
+from kirara_ai.llm.format.response import Function, LLMChatResponse, Message, ToolCall, Usage
 from kirara_ai.logger import get_logger
 from kirara_ai.media.manager import MediaManager
 from kirara_ai.tracing.decorator import trace_llm_chat
 
 from .utils import generate_tool_call_id, pick_tool_calls
+
+
+def resolve_tool_calls(content: list[dict]) -> Optional[list[ToolCall]]:
+    tool_calls = []
+    for part in content:
+        if part.get("type") == "tool_use":
+            tool_calls.append(ToolCall(
+                model="claude",
+                id=part.get("id"),
+                type=part.get("type"),
+                function=Function(name=part.get("name"), arguments=part.get("input")),
+            ))
+    return tool_calls if tool_calls else None
 
 
 class ClaudeConfig(BaseModel):

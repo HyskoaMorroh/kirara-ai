@@ -24,7 +24,7 @@ class LLMToolCallContent(BaseModel):
     """
     type: Literal["tool_call"] = "tool_call"
     # call id，部分模型用此字段区分不同函数的调用，若没有返回则由 Adapter 生成
-    id: str
+    id: Optional[str] = None
     name: str
     parameters: Optional[dict] = None
 
