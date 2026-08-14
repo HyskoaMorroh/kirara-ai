@@ -23,6 +23,8 @@ jobs:
   build:
     name: Windows Quickstart
     runs-on: windows-latest
+    permissions:
+      contents: write
     
     steps:
     - name: Checkout repository
@@ -86,25 +88,22 @@ jobs:
       run: |
         Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "${{ env.DIST_DIR }}/【语音功能依赖】vc_redist.x64.exe"
 
-    - name: Setup Web UI
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Set up Node.js for Web UI
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Build bundled Web UI
+      working-directory: webui
       run: |
-        # 下载 Web UI 压缩包到临时目录
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/DarkSkyTeam/chatgpt-for-bot-webui/releases" -Headers @{Authorization = "Bearer $env:GH_TOKEN"}
-        $web_ui_url = $release[0].assets[0].browser_download_url
-        $zip_file = "${{ env.BUILD_DIR }}/webui.zip"
-        Invoke-WebRequest -Uri $web_ui_url -OutFile $zip_file
+        corepack enable
+        yarn install --frozen-lockfile
+        yarn build
 
-        # 解压到临时目录
-        $temp_dir = "${{ env.BUILD_DIR }}/webui_temp"
-        mkdir $temp_dir
-        Expand-Archive -Path $zip_file -DestinationPath $temp_dir
-
+    - name: Setup Web UI
+      run: |
         New-Item -ItemType Directory -Force -Path "${{ env.DIST_DIR }}/web"
-
-        # 移动 dist 文件夹到目标位置
-        Copy-Item -Path "$temp_dir/dist/*" -Destination "${{ env.DIST_DIR }}/web" -Force -Recurse
+        Copy-Item -Path "webui/dist/*" -Destination "${{ env.DIST_DIR }}/web" -Force -Recurse
 
     - name: Copy startup scripts
       run: |

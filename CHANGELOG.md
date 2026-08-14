@@ -2,7 +2,7 @@
 
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的分类方式，记录**源代码、默认配置、部署文件、文档与测试**变化。
 
-比较基线为`3.2.0`，比较目标为当前工作区的 `3.3.0a2`。本文件是源码变更说明，不代表已经创建 GitHub Release、推送镜像或发布版本。
+比较基线为`3.2.0`，比较目标为当前工作区的 `3.3.0a4`。本文件是源码变更说明，不代表已经创建 GitHub Release、推送镜像或发布版本。
 
 > 不纳入比较：`.git/`、编辑器缓存、测试缓存、运行日志、`data/db/`、记忆/媒体/插件运行数据、虚拟环境和任何本地密钥或密码文件。这些内容会随机器和使用状态变化，不属于可复现的产品功能。
 
@@ -26,6 +26,8 @@
 - **MCP 提示词与资源列表接口返回 500**：`/mcp/servers/<id>/prompts` 与 `/mcp/servers/<id>/resources` 此前直接 `jsonify` MCP 原始对象，`Resource.uri` 是 `AnyUrl` 类型无法被 JSON 序列化。现统一转换为 `MCPPromptInfo` / `MCPResourceInfo`，并补上 WebUI 需要的 `id` 字段。
 
 ### Changed
+
+- **发布构建一致性**：Windows 快速启动包改为构建仓库内与 Docker 镜像相同的固定 WebUI 源码，不再下载独立仓库的最新前端产物；发布附件工作流明确申请 `contents: write`，并将前端 TypeScript 编译器升级至与 Vue 3.5 类型声明兼容的 5.2 系列。
 
 - **默认聊天工作流与实际使用配置对齐**：`data/workflows/chat/` 下 5 个工作流按当前线上配置更新，部署后无需在 WebUI 里手动调整。`normal.yaml` 换为「刘思思（全能专家版）」人设并配置 `grok-4.5` 主模型加 4 个备用模型；`dsr_thinking.yaml` 精简为专家视角提示词并配置 `claude-opus-4-8` 主模型加 4 个备用模型；`normal_multimodal.yaml` 精简提示词并指定 `gemini-3-pro-preview`；三个文件同时清理了重复的 `connected_to` 连线（同一对端口被声明两次）。`memory_store.yaml` 与 `talk_break.yaml` 内容与线上一致，未改动。所有文件区块数量保持不变，无功能块增减。
 

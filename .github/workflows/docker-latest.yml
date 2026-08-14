@@ -27,13 +27,21 @@ jobs:
         run: |
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             echo "publish=true" >> $GITHUB_OUTPUT
+            echo "publish_latest=true" >> $GITHUB_OUTPUT
             echo "Manual publish requested." >> $GITHUB_STEP_SUMMARY
             exit 0
           fi
 
-          if [ "$RELEASE_IS_PRERELEASE" = "true" ] || [ "$RELEASE_IS_DRAFT" = "true" ]; then
+          if [ "$RELEASE_IS_DRAFT" = "true" ]; then
             echo "publish=false" >> $GITHUB_OUTPUT
-            echo "Published release $RELEASE_TAG is a draft or prerelease; Docker Hub publish skipped." >> $GITHUB_STEP_SUMMARY
+            echo "Published release $RELEASE_TAG is a draft; Docker Hub publish skipped." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          if [ "$RELEASE_IS_PRERELEASE" = "true" ]; then
+            echo "publish=true" >> $GITHUB_OUTPUT
+            echo "publish_latest=false" >> $GITHUB_OUTPUT
+            echo "Published prerelease $RELEASE_TAG will publish only its versioned Docker image." >> $GITHUB_STEP_SUMMARY
             exit 0
           fi
 
@@ -45,6 +53,7 @@ jobs:
           fi
 
           echo "publish=true" >> $GITHUB_OUTPUT
+          echo "publish_latest=true" >> $GITHUB_OUTPUT
           echo "Published release $RELEASE_TAG is the current Latest release; Docker Hub publish approved." >> $GITHUB_STEP_SUMMARY
       -
         name: Checkout
@@ -56,13 +65,17 @@ jobs:
         name: Resolve image name
         id: image
         if: steps.release.outputs.publish == 'true'
+        env:
+          IMAGE_NAME_VARIABLE: ${{ vars.DOCKERHUB_IMAGE }}
+          IMAGE_NAME_SECRET: ${{ secrets.DOCKERHUB_IMAGE }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
-          IMAGE_NAME="${{ vars.DOCKERHUB_IMAGE }}"
+          IMAGE_NAME="${IMAGE_NAME_VARIABLE:-$IMAGE_NAME_SECRET}"
           if [ -z "$IMAGE_NAME" ]; then
-            IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/kirara-agent-framework"
+            IMAGE_NAME="${DOCKERHUB_USERNAME}/kirara-agent-framework"
           fi
           if [ -z "$IMAGE_NAME" ]; then
-            echo "Set repository variable DOCKERHUB_IMAGE or secret DOCKERHUB_USERNAME before publishing."
+            echo "Set DOCKERHUB_IMAGE as a repository variable or secret, or set DOCKERHUB_USERNAME before publishing."
             exit 1
           fi
           echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
@@ -77,9 +90,11 @@ jobs:
         run: |
           {
             echo "tags<<EOF"
-            echo "$IMAGE_NAME:latest"
             if [ "$GITHUB_EVENT_NAME" = "release" ]; then
               echo "$IMAGE_NAME:$RELEASE_TAG"
+            fi
+            if [ "${{ steps.release.outputs.publish_latest }}" = "true" ]; then
+              echo "$IMAGE_NAME:latest"
             fi
             echo "EOF"
           } >> $GITHUB_OUTPUT
