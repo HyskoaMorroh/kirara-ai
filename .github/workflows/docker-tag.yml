@@ -2,9 +2,11 @@ name: Docker build with tags
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - '**'
+    inputs:
+      image_tag:
+        description: Docker Hub image tag to publish from the current default branch
+        required: true
+        type: string
 
 jobs:
   docker:
@@ -12,7 +14,13 @@ jobs:
     steps:
       - name: Set output
         id: vars
-        run: echo "tag=${GITHUB_REF#refs/*/}" >> $GITHUB_OUTPUT
+        run: |
+          TAG_NAME="${{ inputs.image_tag }}"
+          if [ -z "$TAG_NAME" ]; then
+            echo "Set image_tag before manually publishing a versioned image."
+            exit 1
+          fi
+          echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
       - name: Check output
         env:
           RELEASE_VERSION: ${{ steps.vars.outputs.tag }}

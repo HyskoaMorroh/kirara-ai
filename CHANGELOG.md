@@ -18,7 +18,7 @@
 
 ### Changed
 
-- **Docker Hub 自动发布流程**：`.github/workflows/docker-latest.yml` 改为在正式 GitHub Release 发布后校验其是否为当前 Latest，只有通过校验才构建并推送 `latest` 镜像；普通提交、草稿、预发布和非 Latest Release 不会推送，同时保留手动触发。工作流增加并发控制及 Docker Hub 账号、令牌、镜像名的前置校验。
+- **Docker Hub 自动发布流程**：`.github/workflows/docker-latest.yml` 改为在正式 GitHub Release 发布后校验其是否为当前 Latest，只有通过校验才执行一次多架构构建，并同时推送 `<Release 标签>` 与 `latest` 镜像；普通提交、草稿、预发布和非 Latest Release 不会推送，同时保留手动触发。`.github/workflows/docker-tag.yml` 不再监听 Tag 推送，仅作为需要单独重建版本标签时的手动应急入口。工作流增加并发控制及 Docker Hub 账号、令牌、镜像名的前置校验。
 - **Compose 部署来源**：`docker-compose.yml` 和示例文件改用环境变量解析镜像；示例 Compose 移除源码热挂载，生产部署以镜像内容为准，降低“仓库已更新、容器仍运行旧代码”的风险。
 - **部署说明**：README 增加 Docker Hub、环境变量、默认工作流初始化和完整备份恢复说明，强调已有 `data/` 卷不会被新镜像自动覆盖。
 - **忽略规则**：`.gitignore` 忽略本机 `.env`，防止部署参数和敏感配置被误提交。
@@ -103,6 +103,7 @@
 - 修正默认工作流与分发规则之间的不完整对应关系：标准聊天工作流文件已补齐，私聊规则不再依赖写死的特定本地模型配置。
 - 修正模型能力、请求格式和适配器实现之间的兼容性边界，并以新增的回归测试覆盖常见模型协议场景。
 - 增强工作流执行、规则匹配、媒体处理和平台消息发送的错误处理与容错路径，降低单一模型、长消息或不兼容输入使整条链路中断的概率。
+- 修正 Windows Quickstart 对已下线 FFmpeg 固定版本路径的依赖，改用官方 release essentials 稳定下载别名、SHA-256 校验和动态目录定位，避免上游版本更新后出现 404 或解压目录名不匹配。
 
 ### Tests
 

@@ -60,9 +60,27 @@ jobs:
 
     - name: Download and setup FFmpeg
       run: |
-        Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-7.0.2-essentials_build.7z" -OutFile "${{ env.BUILD_DIR }}/ffmpeg.7z"
-        7z x "${{ env.BUILD_DIR }}/ffmpeg.7z" -o"${{ env.DIST_DIR }}/ffmpeg"
-        mv "${{ env.DIST_DIR }}/ffmpeg/ffmpeg-7.0.2-essentials_build" "${{ env.DIST_DIR }}/ffmpeg/bin"
+        $ffmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+        $archivePath = "${{ env.BUILD_DIR }}/ffmpeg.zip"
+        $extractPath = "${{ env.BUILD_DIR }}/ffmpeg-extract"
+        Invoke-WebRequest -Uri $ffmpegUrl -OutFile $archivePath
+
+        $expectedHash = ((Invoke-RestMethod -Uri "$ffmpegUrl.sha256").Trim() -split '\s+')[0].ToUpperInvariant()
+        $actualHash = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToUpperInvariant()
+        if ($actualHash -ne $expectedHash) {
+          throw "FFmpeg archive SHA-256 verification failed."
+        }
+
+        Expand-Archive -Path $archivePath -DestinationPath $extractPath -Force
+        $sourceBin = Get-ChildItem -Path $extractPath -Directory -Recurse |
+          Where-Object { Test-Path (Join-Path $_.FullName "ffmpeg.exe") } |
+          Select-Object -First 1
+        if ($null -eq $sourceBin) {
+          throw "FFmpeg executable was not found in the downloaded archive."
+        }
+
+        New-Item -ItemType Directory -Path "${{ env.DIST_DIR }}/ffmpeg" -Force | Out-Null
+        Move-Item -Path $sourceBin.FullName -Destination "${{ env.DIST_DIR }}/ffmpeg/bin"
 
     - name: Download VC++ Runtime
       run: |

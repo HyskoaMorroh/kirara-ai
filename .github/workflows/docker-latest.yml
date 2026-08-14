@@ -68,6 +68,22 @@ jobs:
           echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
           echo "Resolved image name: $IMAGE_NAME"
       -
+        name: Resolve image tags
+        id: tags
+        if: steps.release.outputs.publish == 'true'
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          {
+            echo "tags<<EOF"
+            echo "$IMAGE_NAME:latest"
+            if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+              echo "$IMAGE_NAME:$RELEASE_TAG"
+            fi
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+      -
         name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         if: steps.release.outputs.publish == 'true'
@@ -94,6 +110,6 @@ jobs:
           context: .
           push: true
           platforms: 'linux/amd64,linux/arm64'
-          tags: ${{ steps.image.outputs.name }}:latest
+          tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
