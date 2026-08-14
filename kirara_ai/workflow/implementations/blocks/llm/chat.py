@@ -1,3 +1,4 @@
+import asyncio
 import re
 import time
 from datetime import datetime
@@ -10,10 +11,10 @@ from kirara_ai.im.sender import ChatSender
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.llm.format import LLMChatMessage, LLMChatTextContent
 from kirara_ai.llm.format.message import LLMChatContentPartType, LLMChatImageContent
-from kirara_ai.llm.format.request import LLMChatRequest
+from kirara_ai.llm.format.request import LLMChatRequest, Tool
 from kirara_ai.llm.format.response import LLMChatResponse
 from kirara_ai.llm.llm_manager import LLMManager
-from kirara_ai.llm.llm_registry import LLMAbility
+from kirara_ai.llm.model_types import LLMAbility, ModelType
 from kirara_ai.logger import get_logger
 from kirara_ai.memory.composes.base import ComposableMessageType
 from kirara_ai.workflow.core.block import Block, Input, Output, ParamMeta
@@ -22,7 +23,7 @@ from kirara_ai.workflow.core.execution.executor import WorkflowExecutor
 
 def model_name_options_provider(container: DependencyContainer, block: Block) -> List[str]:
     llm_manager: LLMManager = container.resolve(LLMManager)
-    return sorted(llm_manager.get_supported_models(LLMAbility.TextChat))
+    return sorted(llm_manager.get_supported_models(ModelType.LLM, LLMAbility.TextChat))
 
 class ChatMessageConstructor(Block):
     name = "chat_message_constructor"
@@ -439,3 +440,91 @@ class FunctionCalling(Block):
             raise ValueError(f"{error_details}. Last error: {last_error}") from last_error
         else:
             raise ValueError(error_details)
+
+
+class ChatCompletionWithTools(Block):
+    """
+    支持工具调用的LLM对话块
+    """
+    name = "chat_completion_with_tools"
+    inputs = {
+        "msg": Input("msg", "LLM 对话记录", List[LLMChatMessage], "LLM 的 prompt，即由 system、user、assistant和工具调用及结果的完整对话记录"),
+        "tools": Input("tools", "工具列表", List[Tool], "工具列表")
+    }
+    outputs = {
+        "resp": Output("resp", "LLM 消息回应", LLMChatResponse, "模型返回给用户的消息"),
+        "iteration_msgs": Output("iteration_msgs", "中间步骤消息", List[ComposableMessageType], "迭代过程中产生的所有消息，可以用记忆存储")
+    }
+
+    container: DependencyContainer
+
+    def __init__(self, model_name: Annotated[
+        str,
+        ParamMeta(
+            label="模型 ID, 需要支持函数调用",
+            description="支持函数调用的模型",
+            options_provider=model_name_options_provider)
+    ],
+        max_iterations: Annotated[
+        int,
+        ParamMeta(
+            label="最大迭代次数",
+            description="允许调用模型请求的最大次数，在进行最后一次请求时，模型将不允许调用工具")
+    ] = 4):
+        self.model_name = model_name
+        self.max_iterations = max_iterations
+        self.logger = get_logger("Block.ChatCompletionWithTools")
+
+    def execute(self, msg: List[LLMChatMessage], tools: List[Tool]) -> Dict[str, Any]:
+        if not self.model_name:
+            raise ValueError(
+                "need a model name which support function calling")
+        else:
+            self.logger.info(
+                f"Using  model: {self.model_name} to execute function calling")
+
+        loop = self.container.resolve(asyncio.AbstractEventLoop)
+        llm = self.container.resolve(LLMManager).get_llm(self.model_name)
+        if not llm:
+            raise ValueError(
+                f"LLM {self.model_name} not found, please check the model name")
+
+        iteration_msgs: List[LLMChatMessage] = []
+        iter_count = 0
+        while iter_count < self.max_iterations:
+            # 在这里指定llm的model
+            self.logger.debug(
+                f"Iteration {iter_count+1} of {self.max_iterations}")
+            request_body = LLMChatRequest(
+                messages=msg + iteration_msgs, model=self.model_name)
+            if tools is not None and len(tools) > 0:
+                request_body.tools = tools
+
+            # 最后一次迭代不调用工具
+            if iter_count == self.max_iterations - 1:
+                request_body.tool_choice = "none"
+
+            tools_mapping = {t.name: t for t in tools}
+
+            response: LLMChatResponse = llm.chat(request_body)
+            iter_count += 1
+            if response.message.tool_calls:
+                iteration_msgs.append(response.message)
+                self.logger.debug("Tool calls found, attempt to invoke tools")
+                for tool_call in response.message.tool_calls:
+                    actual_tool = tools_mapping.get(tool_call.function.name)
+                    if actual_tool:
+                        self.logger.debug(
+                            f"Invoking tool: {actual_tool.name}({tool_call.function.arguments})")
+                        resp_future = asyncio.run_coroutine_threadsafe(
+                            actual_tool.invokeFunc(tool_call), loop
+                        )
+                        tool_result_msg = LLMChatMessage(
+                            role="tool", content=[resp_future.result()])
+                        iteration_msgs.append(tool_result_msg)
+            else:
+                self.logger.debug(
+                    "No tool calls found, return response directly")
+                return {"resp": response, "iteration_msgs": iteration_msgs}
+
+        return {"resp": response, "iteration_msgs": iteration_msgs}

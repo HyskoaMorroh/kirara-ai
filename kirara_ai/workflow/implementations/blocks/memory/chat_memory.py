@@ -12,7 +12,7 @@ from kirara_ai.workflow.core.block import Block, Input, Output, ParamMeta
 
 
 def scope_type_options_provider(container: DependencyContainer, block: Block) -> List[str]:
-    return ["global", "member", "group"]
+    return ["global", "group", "member"]
 
 
 def decomposer_name_options_provider(container: DependencyContainer, block: Block) -> List[str]:
@@ -36,7 +36,7 @@ class ChatMemoryQuery(Block):
             Optional[str],
             ParamMeta(
                 label="级别",
-                description="要查询记忆的级别",
+                description="要查询记忆的级别，代表记忆可以被共享的粒度。（例如：member 级别下，同一群聊下不同用户的记忆互相隔离； group 级别下，同一群组内所有成员记忆共享，但不同群组之间记忆互相隔离）",
                 options_provider=scope_type_options_provider,
             ),
         ],
@@ -48,9 +48,17 @@ class ChatMemoryQuery(Block):
                 options_provider=decomposer_name_options_provider,
             ),
         ] = "default",
+        extra_identifier: Annotated[
+            Optional[str],
+            ParamMeta(
+                label="额外隔离标识符",
+                description="仅支持输入英文，可为空。对于同一用户，不同标识符之间的记忆互相隔离。可用于避免不同工作流之间记忆互相干扰。",
+            ),
+        ] = None,
     ):
         self.scope_type = scope_type
         self.decomposer_name: str = decomposer_name or "default"
+        self.extra_identifier = extra_identifier
 
     def execute(self, chat_sender: ChatSender) -> Dict[str, Any]:
         self.memory_manager = self.container.resolve(MemoryManager)
@@ -68,7 +76,7 @@ class ChatMemoryQuery(Block):
         self.decomposer = decomposer_registry.get_decomposer(
             self.decomposer_name)
 
-        entries = self.memory_manager.query(self.scope, chat_sender)
+        entries = self.memory_manager.query(self.scope, chat_sender, self.extra_identifier)
         memory_content = self.decomposer.decompose(entries)
         return {"memory_content": memory_content}
 
@@ -79,8 +87,11 @@ class ChatMemoryStore(Block):
     inputs = {
         "user_msg": Input("user_msg", "用户消息", IMMessage, "用户消息", nullable=True),
         "llm_resp": Input(
-            "llm_resp", "LLM 响应", LLMChatResponse, "LLM 响应", nullable=True
+            "llm_resp", "LLM 回复", LLMChatResponse, "LLM 回复", nullable=True
         ),
+        "middle_steps": Input(
+            "middle_steps", "中间步骤消息", List[ComposableMessageType], "中间步骤消息", nullable=True
+        )
     }
     outputs = {}
     container: DependencyContainer
@@ -91,18 +102,27 @@ class ChatMemoryStore(Block):
             Optional[str],
             ParamMeta(
                 label="级别",
-                description="要查询记忆的级别",
+                description="要查询记忆的级别，代表记忆可以被共享的粒度。（例如：member 级别下，同一群聊下不同用户的记忆互相隔离； group 级别下，同一群组内所有成员记忆共享，但不同群组之间记忆互相隔离）",
                 options_provider=scope_type_options_provider,
             ),
         ],
+        extra_identifier: Annotated[
+            Optional[str],
+            ParamMeta(
+                label="额外隔离标识符",
+                description="仅支持输入英文，可为空。对于同一用户，不同标识符之间的记忆互相隔离。可用于避免不同工作流之间记忆互相干扰。",
+            ),
+        ] = None,
     ):
         self.scope_type = scope_type
         self.logger = get_logger("Block.ChatMemoryStore")
+        self.extra_identifier = extra_identifier
 
     def execute(
         self,
         user_msg: Optional[IMMessage] = None,
         llm_resp: Optional[LLMChatResponse] = None,
+        middle_steps: Optional[List[ComposableMessageType]] = None,
     ) -> Dict[str, Any]:
         self.memory_manager = self.container.resolve(MemoryManager)
 
@@ -123,6 +143,10 @@ class ChatMemoryStore(Block):
             composed_messages: List[ComposableMessageType] = []
         else:
             composed_messages = [user_msg]
+            
+        if middle_steps is not None:
+            composed_messages.extend(middle_steps)
+
         if llm_resp is not None:
             if llm_resp.message:
                 composed_messages.append(llm_resp.message)
@@ -132,6 +156,6 @@ class ChatMemoryStore(Block):
         self.logger.debug(f"Composed messages: {composed_messages}")
         memory_entries = self.composer.compose(
             user_msg.sender if user_msg else None, composed_messages)
-        self.memory_manager.store(self.scope, memory_entries)
+        self.memory_manager.store(self.scope, memory_entries, self.extra_identifier)
 
         return {}

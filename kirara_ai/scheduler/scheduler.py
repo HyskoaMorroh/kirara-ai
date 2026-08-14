@@ -4,15 +4,17 @@ import os
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from kirara_ai.config import DATA_PATH
 from kirara_ai.config.config_loader import CONFIG_FILE, ConfigLoader
-from kirara_ai.config.global_config import GlobalConfig
+from kirara_ai.config.global_config import GlobalConfig, ModelConfig
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.llm.adapter import AutoDetectModelsProtocol
 from kirara_ai.llm.llm_manager import LLMManager
+from kirara_ai.llm.model_types import LLMAbility, ModelType
 from kirara_ai.logger import get_logger
 
 # 记录每个后端上次自动检测时间的状态文件
-STATE_FILE = "data/auto_detect_state.json"
+STATE_FILE = os.path.join(DATA_PATH, "auto_detect_state.json")
 
 # 后台循环的检查周期（秒），每 24 小时检查一次是否有到期的后端
 CHECK_INTERVAL_SECONDS = 86400
@@ -107,10 +109,21 @@ class TaskScheduler:
             self.logger.warning(f"Backend {backend_name} not found in config, skip update")
             return False
 
-        old_models = list(backend_config.models)
-        new_models = sorted(set(models))
+        # 3.3 起 auto_detect_models 返回 ModelConfig 列表，按模型 ID 去重并排序
+        deduped_models: Dict[str, ModelConfig] = {}
+        for model in models:
+            model_config = (
+                model
+                if isinstance(model, ModelConfig)
+                else ModelConfig(id=str(model), type=ModelType.LLM.value, ability=LLMAbility.TextChat.value)
+            )
+            deduped_models[model_config.id] = model_config
 
-        if old_models == new_models:
+        old_models = [m.id for m in backend_config.models]
+        new_models = [deduped_models[model_id] for model_id in sorted(deduped_models)]
+        new_model_ids = [m.id for m in new_models]
+
+        if old_models == new_model_ids:
             self.logger.info(f"Backend {backend_name} model list unchanged ({len(new_models)} models)")
             return True
 

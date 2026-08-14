@@ -12,7 +12,8 @@ from kirara_ai.ioc.inject import Inject
 from kirara_ai.logger import get_logger
 from kirara_ai.workflow.core.block import Block, ConditionBlock, LoopBlock
 from kirara_ai.workflow.core.block.registry import BlockRegistry
-from kirara_ai.workflow.core.execution.exceptions import BlockExecutionFailedException
+from kirara_ai.workflow.core.execution.exceptions import (BlockExecutionFailedException,
+                                                          WorkflowExecutionTimeoutException)
 from kirara_ai.workflow.core.workflow import Workflow
 
 
@@ -68,7 +69,6 @@ class WorkflowExecutor:
             # 将目标块添加到源块的执行图中
             self.execution_graph[wire.source_block].append(wire.target_block)
             # self.logger.debug(f"Added edge: {wire.source_block.name} -> {wire.target_block.name}")
-
     async def run(self) -> Dict[str, Any]:
         """
         执行工作流，返回每个块的执行结果。
@@ -79,11 +79,20 @@ class WorkflowExecutor:
         self.event_bus.post(WorkflowExecutionBegin(self.workflow, self))
         self.logger.info("Starting workflow execution")
         loop = asyncio.get_event_loop()
+        max_timeout = self.workflow.config.max_execution_time
+        if max_timeout <= 0:
+            # 如果超时时间小于等于0，则不限制超时
+            max_timeout = None
         with ThreadPoolExecutor() as executor:
             # 从入口节点开始执行
             entry_blocks = [block for block in self.workflow.blocks if not block.inputs]
             # self.logger.debug(f"Identified entry blocks: {[b.name for b in entry_blocks]}")
-            await self._execute_nodes(entry_blocks, executor, loop)
+            try:
+                async with asyncio.timeout(max_timeout): # type: ignore
+                    await self._execute_nodes(entry_blocks, executor, loop)
+            except asyncio.TimeoutError as e:
+                self.event_bus.post(WorkflowExecutionEnd(self.workflow, self, self.results))
+                raise WorkflowExecutionTimeoutException(f"Workflow execution timed out after {max_timeout} seconds") from e
 
         self.logger.info("Workflow execution completed")
         self.event_bus.post(WorkflowExecutionEnd(self.workflow, self, self.results))
@@ -232,7 +241,9 @@ class WorkflowExecutor:
                     wire.target_block == block
                     and wire.target_input == input_name
                     and wire.source_block.name in self.results
+                    and wire.source_output in self.results[wire.source_block.name]
                 ):
+                    self.logger.debug(f"Input [{block.name}.{input_name}] satisfied by [{wire.source_block.name}.{wire.source_output}] with value {self.results[wire.source_block.name][wire.source_output]}")
                     input_satisfied = True
                     break
 
@@ -240,8 +251,7 @@ class WorkflowExecutor:
             if not input_satisfied and not block.inputs[input_name].nullable:
                 self.logger.info(f"Input [{block.name}.{input_name}] not satisfied")
                 return False
-
-        # self.logger.debug("All inputs satisfied and predecessors completed")
+        self.logger.debug(f"All inputs satisfied and predecessors completed for block {block.name}")
         return True
 
     def _gather_inputs(self, block: Block) -> Dict[str, Any]:
@@ -259,14 +269,14 @@ class WorkflowExecutor:
         for input_name in block.inputs:
             if input_name in input_wire_map:
                 wire = input_wire_map[input_name]
-                if wire.source_block.name in self.results:
+                if wire.source_block.name in self.results and wire.source_output in self.results[wire.source_block.name]:
                     inputs[input_name] = self.results[wire.source_block.name][
                         wire.source_output
                     ]
                     # self.logger.debug(f"Resolved input {input_name} from {wire.source_block.name}.{wire.source_output}")
                 else:
                     raise BlockExecutionFailedException(
-                        f"Source block {wire.source_block.name} not executed for input {input_name}"
+                        f"Current block {block.name} depends on source block {wire.source_block.name} not executed for input {input_name}"
                     )
             elif not block.inputs[input_name].nullable:
                 raise BlockExecutionFailedException(

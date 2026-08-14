@@ -1,3 +1,4 @@
+import mimetypes
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
@@ -10,8 +11,8 @@ class MediaMetadata:
     def __init__(
         self,
         media_id: str,
-        media_type: Optional[MediaType] = None,
-        format: Optional[str] = None,
+        media_type: MediaType,
+        format: str,
         size: Optional[int] = None,
         created_at: Optional[datetime] = None,
         source: Optional[str] = None,
@@ -60,19 +61,29 @@ class MediaMetadata:
 
 
     @property
-    def mime_type(self) -> Optional[str]:
+    def mime_type(self) -> str:
         """获取 MIME 类型"""
-        if self.media_type is None or self.format is None:
-            return None
         return f"{self.media_type.value}/{self.format}"
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'MediaMetadata':
         """从字典创建元数据"""
+        # 兼容 3.2.0 及更早版本写入的元数据：这些文件在 media_type/format 为空时不会写入对应字段。
+        # 此处做兜底推断，避免旧数据在升级后加载失败而丢失媒体索引。
+        format = data.get("format")
+        if not format:
+            path = data.get("path") or data.get("url") or ""
+            format = path.rsplit(".", 1)[-1].split("?")[0] if "." in path else "bin"
+        if data.get("media_type"):
+            media_type = MediaType(data["media_type"])
+        else:
+            # 由扩展名反推 mime，进而得到媒体大类，避免出现 file/png 这类错误的 mime
+            guessed_mime, _ = mimetypes.guess_type(f"x.{format}")
+            media_type = MediaType.from_mime(guessed_mime) if guessed_mime else MediaType.FILE
         return cls(
             media_id=data["media_id"],
-            media_type=MediaType(data["media_type"]) if "media_type" in data else None,
-            format=data.get("format"),
+            media_type=media_type,
+            format=format,
             size=data.get("size"),
             created_at=datetime.fromisoformat(data["created_at"]),
             source=data.get("source"),

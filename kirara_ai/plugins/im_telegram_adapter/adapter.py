@@ -5,6 +5,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 from telegram import Bot, ChatFullInfo, Update, User
+from telegram.constants import MessageEntityType
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegramify_markdown import markdownify
 
@@ -13,6 +14,7 @@ from kirara_ai.im.message import (FileElement, ImageMessage, IMMessage, MentionE
                                   VideoMessage, VoiceMessage)
 from kirara_ai.im.profile import UserProfile
 from kirara_ai.im.sender import ChatSender, ChatType
+from kirara_ai.im.text_render import convert_markdown_tables
 from kirara_ai.logger import get_logger
 from kirara_ai.workflow.core.dispatch import WorkflowDispatcher
 
@@ -24,6 +26,95 @@ def get_display_name(user: User | ChatFullInfo):
         return user.username
     else:
         return str(user.id)
+
+
+# Telegram 单条消息上限 4096 字符，留出安全余量
+TELEGRAM_MESSAGE_LIMIT = 3900
+
+
+def split_telegram_message(text: str, max_length: int = TELEGRAM_MESSAGE_LIMIT) -> List[str]:
+    """
+    将 MarkdownV2 文本按结构安全分段，避免超过 Telegram 4096 字符上限导致发送失败。
+
+    分段规则：
+    1. 围栏代码块（```）视为整体，超长时按行拆分并为每段补齐围栏，保持缩进与语法高亮；
+    2. 普通文本优先按空行分段，再按行分段，避免把 MarkdownV2 实体截断在中间。
+    """
+    if len(text) <= max_length:
+        return [text]
+
+    # 以围栏为界切分，奇数段即代码块内容
+    segments = text.split("```")
+    chunks: List[str] = []
+    buffer = ""
+
+    def flush_buffer():
+        nonlocal buffer
+        if buffer.strip():
+            chunks.append(buffer.rstrip("\n"))
+        buffer = ""
+
+    def append_plain(content: str):
+        nonlocal buffer
+        for paragraph in content.split("\n\n"):
+            block = paragraph if not buffer else "\n\n" + paragraph
+            if len(buffer) + len(block) <= max_length:
+                buffer += block
+                continue
+            flush_buffer()
+            if len(paragraph) <= max_length:
+                buffer = paragraph
+                continue
+            # 段落自身超长，逐行拆
+            for line in paragraph.split("\n"):
+                candidate = line if not buffer else buffer + "\n" + line
+                if len(candidate) <= max_length:
+                    buffer = candidate
+                else:
+                    flush_buffer()
+                    # 单行仍超长时按字符硬切，保证不超限
+                    while len(line) > max_length:
+                        chunks.append(line[:max_length])
+                        line = line[max_length:]
+                    buffer = line
+
+    for index, segment in enumerate(segments):
+        if index % 2 == 0:
+            append_plain(segment)
+            continue
+
+        # 代码块：首行可能是语言标识
+        lines = segment.split("\n")
+        lang = lines[0].strip() if lines and lines[0].strip() and " " not in lines[0].strip() else ""
+        body_lines = lines[1:] if lang else lines
+        fence_open = f"```{lang}\n" if lang else "```\n"
+        fence_cost = len(fence_open) + len("\n```")
+
+        current: List[str] = []
+        current_len = fence_cost
+        code_chunks: List[str] = []
+        for line in body_lines:
+            line_len = len(line) + 1
+            if current and current_len + line_len > max_length:
+                code_chunks.append(fence_open + "\n".join(current) + "\n```")
+                current = [line]
+                current_len = fence_cost + line_len
+            else:
+                current.append(line)
+                current_len += line_len
+        if current:
+            code_chunks.append(fence_open + "\n".join(current) + "\n```")
+
+        for code_chunk in code_chunks:
+            if buffer and len(buffer) + len(code_chunk) + 1 <= max_length:
+                buffer += "\n" + code_chunk
+            else:
+                flush_buffer()
+                buffer = code_chunk
+        flush_buffer()
+
+    flush_buffer()
+    return [chunk for chunk in chunks if chunk.strip()]
 
 
 class TelegramConfig(BaseModel):
@@ -54,7 +145,7 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
             CommandHandler("start", self.command_start))
         self.application.add_handler(
             MessageHandler(
-                filters.TEXT | filters.VOICE | filters.PHOTO, self.handle_message
+                filters.TEXT | filters.VOICE | filters.PHOTO | filters.VIDEO, self.handle_message
             )
         )
         self.logger = get_logger("Telegram-Adapter")
@@ -104,11 +195,11 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
         message_elements: List[MessageElement] = []
         raw_message_dict = raw_message.message.to_dict()
         # 处理文本消息
-        if raw_message.message.text:
-            text = raw_message.message.text
+        if raw_message.message.text is not None or raw_message.message.caption is not None:
+            text: str = raw_message.message.text or raw_message.message.caption # type: ignore
             offset = 0
-            for entity in raw_message.message.entities or []:
-                if entity.type in ("mention", "text_mention"):
+            for entity in raw_message.message.entities or raw_message.message.caption_entities or []:
+                if entity.type in (MessageEntityType.MENTION, MessageEntityType.TEXT_MENTION):
                     # Extract mention text
                     mention_text = text[entity.offset:entity.offset + entity.length]
 
@@ -200,15 +291,19 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
                 await self.application.bot.send_chat_action(
                     chat_id=chat_id, action="typing"
                 )
-                text = markdownify(element.text)
+                # Telegram 用可变宽字体渲染普通文本，Markdown 表格的竖线会完全错位。
+                # 这里先把表格渲染成等宽框线表格并放进 ``` 围栏，保证表格完整且对齐。
+                text = markdownify(convert_markdown_tables(element.text, fenced=True))
                 # 如果是非首条消息，适当停顿，模拟打字
                 if message.message_elements.index(element) > 0:
                     # 停顿通常和字数有关，但是会带一些随机
                     duration = max(len(element.text) * 0.1, 1) + random.uniform(0, 1) * 0.1
                     await asyncio.sleep(duration)
-                await self.application.bot.send_message(
-                    chat_id=chat_id, text=text, parse_mode="MarkdownV2"
-                )
+                # 超长消息按段落/代码块结构分条发送，避免触发 4096 字符上限
+                for chunk in split_telegram_message(text):
+                    await self.application.bot.send_message(
+                        chat_id=chat_id, text=chunk, parse_mode="MarkdownV2"
+                    )
 
             elif isinstance(element, ImageMessage):
                 await self.application.bot.send_chat_action(
@@ -224,6 +319,13 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
                 await self.application.bot.send_voice(
                     chat_id=chat_id, voice=await element.get_data(), parse_mode="MarkdownV2"
                 )
+            elif isinstance(element, VideoMessage):
+                await self.application.bot.send_chat_action(
+                    chat_id=chat_id, action="upload_video"
+                )
+                await self.application.bot.send_video(
+                    chat_id=chat_id, video=await element.get_data(), parse_mode="MarkdownV2"
+                )    
 
     async def start(self):
         """启动 Bot"""
@@ -238,10 +340,14 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
     async def stop(self):
         """停止 Bot"""
         assert self.application.updater
-        
-        await self.application.updater.stop()
-        await self.application.stop()
-        await self.application.shutdown()
+        try:
+            if self.application.updater.running:
+                await self.application.updater.stop()
+            if self.application.running:
+                await self.application.stop()
+            await self.application.shutdown()
+        except:
+            pass
 
     async def set_chat_editing_state(
         self, chat_sender: ChatSender, is_editing: bool = True

@@ -82,6 +82,7 @@ async def get_workflow(group_id: str, workflow_id: str):
         blocks=blocks,
         wires=wires,
         metadata=getattr(builder, "metadata", None),
+        config=builder.config,
     )
 
     return WorkflowResponse(workflow=workflow_def).model_dump()
@@ -134,6 +135,7 @@ async def create_workflow(group_id: str, workflow_id: str):
 
         # 保存工作流
         file_path = registry.get_workflow_path(group_id, workflow_id)
+        builder.set_config(workflow_def.config)
         builder.save_to_yaml(file_path, g.container)
 
         # 注册工作流
@@ -197,6 +199,7 @@ async def update_workflow(group_id: str, workflow_id: str):
         new_file_path = registry.get_workflow_path(
             data["group_id"], data["workflow_id"]
         )
+        builder.set_config(workflow_def.config)
         builder.save_to_yaml(new_file_path, g.container)
 
         # 更新注册表

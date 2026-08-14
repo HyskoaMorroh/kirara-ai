@@ -3,8 +3,9 @@ from typing import List
 
 from pydantic import Field
 
-from kirara_ai.im.message import IMMessage, MentionElement
+from kirara_ai.im.message import IMMessage, MentionElement, TextMessage
 from kirara_ai.im.sender import ChatSender
+from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.workflow.core.workflow.registry import WorkflowRegistry
 
 from .base import DispatchRule, RuleConfig
@@ -23,7 +24,7 @@ class RegexMatchRule(DispatchRule):
         super().__init__(workflow_registry, workflow_id)
         self.pattern = re.compile(pattern)
 
-    def match(self, message: IMMessage) -> bool:
+    def match(self, message: IMMessage, container: DependencyContainer) -> bool:
         return bool(self.pattern.search(message.content))
 
     def get_config(self) -> RegexRuleConfig:
@@ -46,8 +47,15 @@ class PrefixMatchRule(DispatchRule):
         super().__init__(workflow_registry, workflow_id)
         self.prefix = prefix
 
-    def match(self, message: IMMessage) -> bool:
-        return message.content.startswith(self.prefix)
+    def match(self, message: IMMessage, container: DependencyContainer) -> bool:
+        return next(
+            (
+                message_element.text.startswith(self.prefix)
+                for message_element in message.message_elements
+                if isinstance(message_element, TextMessage)
+            ),
+            False,
+        )
 
     def get_config(self) -> PrefixRuleConfig:
         return PrefixRuleConfig(prefix=self.prefix)
@@ -70,7 +78,7 @@ class KeywordMatchRule(DispatchRule):
         super().__init__(workflow_registry, workflow_id)
         self.keywords = keywords
 
-    def match(self, message: IMMessage) -> bool:
+    def match(self, message: IMMessage, container: DependencyContainer) -> bool:
         return any(keyword in message.content for keyword in self.keywords)
 
     def get_config(self) -> KeywordRuleConfig:
@@ -88,7 +96,7 @@ class BotMentionMatchRule(DispatchRule):
     def __init__(self, workflow_registry: WorkflowRegistry, workflow_id: str):
         super().__init__(workflow_registry, workflow_id)
 
-    def match(self, message: IMMessage) -> bool:
+    def match(self, message: IMMessage, container: DependencyContainer) -> bool:
         bot_sender = ChatSender.get_bot_sender()
         return any(isinstance(element, MentionElement) and element.target == bot_sender for element in message.message_elements)
 

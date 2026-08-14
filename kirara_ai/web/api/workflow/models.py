@@ -2,6 +2,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
+from kirara_ai.workflow.core.workflow.base import WorkflowConfig
+
 
 class Wire(BaseModel):
     """工作流连线"""
@@ -30,6 +32,7 @@ class WorkflowDefinition(BaseModel):
     description: str
     blocks: List[BlockInstance]
     wires: List[Wire]
+    config: WorkflowConfig = WorkflowConfig()
     metadata: Optional[Dict[str, Any]] = None
 
 

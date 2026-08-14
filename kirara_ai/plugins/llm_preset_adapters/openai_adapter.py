@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import Optional, cast
+from typing import Any, Dict, Optional, cast, Literal, TypedDict
 
 import aiohttp
 import requests
@@ -8,14 +8,20 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from pydantic import BaseModel, ConfigDict
 
-from kirara_ai.llm.adapter import AutoDetectModelsProtocol, LLMBackendAdapter
+import kirara_ai.llm.format.tool as tools
+from kirara_ai.config.global_config import ModelConfig
+from kirara_ai.llm.adapter import AutoDetectModelsProtocol, LLMBackendAdapter, LLMChatProtocol, LLMEmbeddingProtocol
 from kirara_ai.llm.format.message import (LLMChatContentPartType, LLMChatImageContent, LLMChatMessage,
                                           LLMChatTextContent, LLMToolCallContent, LLMToolResultContent)
-from kirara_ai.llm.format.request import LLMChatRequest
-from kirara_ai.llm.format.response import Function, LLMChatResponse, Message, ToolCall, Usage
+from kirara_ai.llm.format.request import LLMChatRequest, Tool
+from kirara_ai.llm.format.response import LLMChatResponse, Message, Usage
+from kirara_ai.llm.format.tool import Function, ToolCall
+from kirara_ai.llm.format.embedding import LLMEmbeddingRequest, LLMEmbeddingResponse
 from kirara_ai.logger import get_logger
 from kirara_ai.media import MediaManager
 from kirara_ai.tracing import trace_llm_chat
+
+from .utils import guess_openai_model, pick_tool_calls
 
 logger = get_logger("OpenAIAdapter")
 def _raise_for_business_error(response_data: dict, endpoint: str) -> None:
@@ -43,11 +49,32 @@ async def convert_parts_factory(messages: LLMChatMessage, media_manager: MediaMa
     if messages.role == "tool":
         # typing.cast 指定类型，避免mypy报错
         results = cast(list[LLMToolResultContent], messages.content)
-        # 保证 content 为一个字符串
-        return [{"role": "tool", "tool_call_id": result.id, "content": str(result.content)} for result in results]
+        outputs = []
+        for element in results:
+            # 保证 content 为一个字符串
+            output = ""
+            for content in element.content:
+                if isinstance(content, tools.TextContent):
+                    output += content.text
+                elif isinstance(content, tools.MediaContent):
+                    media = media_manager.get_media(content.media_id)
+                    if media is None:
+                        raise ValueError(f"Media {content.media_id} not found")
+                    output += f"<media id={content.media_id} mime_type={content.mime_type} />"
+                else:
+                    raise ValueError(f"Unsupported content type: {type(content)}")
+            if element.isError:
+                output = f"Error: {element.name}\n{output}"
+            outputs.append({
+                "role": "tool",
+                "tool_call_id": element.id,
+                "content": output,
+            })
+        return outputs
     else:
-        parts = []
+        parts: list[dict[str, Any]] = []
         elements = cast(list[LLMChatContentPartType], messages.content)
+        tool_calls: list[dict[str, Any]] = []
         for element in elements:
             if isinstance(element, LLMChatTextContent):
                 parts.append(element.model_dump(mode="json"))
@@ -62,10 +89,21 @@ async def convert_parts_factory(messages: LLMChatMessage, media_manager: MediaMa
                     }
                 })
             elif isinstance(element, LLMToolCallContent):
-                # 忽略tool_call_content，openai api不需要。
-                # 保留这个判断分支，防止openai api接口出现变动。
-                continue
-        return [{"role": messages.role, "content": parts}]
+                # 回传模型此前发起的工具调用，保证多轮工具调用上下文完整
+                tool_calls.append({
+                    "type": "function",
+                    "id": element.id,
+                    "function": {
+                        "name": element.name,
+                        "arguments": json.dumps(element.parameters or {}, ensure_ascii=False),
+                    }
+                })
+        response: Dict[str, Any] = {"role": messages.role}
+        if parts:
+            response["content"] = parts
+        if tool_calls:
+            response["tool_calls"] = tool_calls
+        return [response]
 
 def convert_llm_chat_message_to_openai_message(messages: list[LLMChatMessage], media_manager: MediaManager, loop: asyncio.AbstractEventLoop) -> list[dict]:
     results = loop.run_until_complete(
@@ -74,13 +112,24 @@ def convert_llm_chat_message_to_openai_message(messages: list[LLMChatMessage], m
     # 扁平化结果, 展开所有列表
     return [item for sublist in results for item in sublist]
 
+def convert_tools_to_openai_format(tools: list[Tool]) -> list[dict]:
+    return [{
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters if isinstance(tool.parameters, dict) else tool.parameters.model_dump(),
+            "strict": tool.strict,
+        }
+    } for tool in tools]
+
 def resolve_tool_calls_from_response(tool_calls: Optional[list[dict]]):
     if tool_calls is None:
         return None
     else:
         return [ToolCall(
             id=call["id"],
-            type=call["type"],
+            type=call.get("type"),
             function=Function(
                 name=call["function"]["name"],
                 # openai api 的 arguments 值是一个长得像dict的字符串, 交给 pydantic 验证器转换
@@ -94,7 +143,7 @@ class OpenAIConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
-class OpenAIAdapter(LLMBackendAdapter, AutoDetectModelsProtocol):
+class OpenAIAdapterChatBase(LLMBackendAdapter, LLMChatProtocol, AutoDetectModelsProtocol):
     media_manager: MediaManager
 
     def __init__(self, config: OpenAIConfig):
@@ -145,8 +194,9 @@ class OpenAIAdapter(LLMBackendAdapter, AutoDetectModelsProtocol):
             "temperature": req.temperature,
             "top_p": req.top_p,
             # tool pydantic 模型按照 openai api 格式进行的建立。所以这里直接dump
-            "tools": [tool.model_dump() for tool in req.tools] if req.tools else None,
-            "tool_choice": "auto" if req.tools else None,
+            "tools": convert_tools_to_openai_format(req.tools) if req.tools else None,
+            # 若上层显式指定 tool_choice（例如最后一轮迭代禁止调用工具），则以上层为准
+            "tool_choice": req.tool_choice or ("auto" if req.tools else None),
             "logprobs": req.logprobs,
             "top_logprobs": req.top_logprobs,
         }
@@ -240,7 +290,17 @@ class OpenAIAdapter(LLMBackendAdapter, AutoDetectModelsProtocol):
             ),
         )
 
-    async def auto_detect_models(self) -> list[str]:
+    async def auto_detect_models(self) -> list[ModelConfig]:
+        models = await self.get_models()
+        all_models: list[ModelConfig] = []
+        for model in models:
+            guess_result = guess_openai_model(model)
+            if guess_result is None:
+                continue
+            all_models.append(ModelConfig(id=model, type=guess_result[0].value, ability=guess_result[1]))
+        return all_models
+
+    async def get_models(self) -> list[str]:
         api_url = f"{self.config.api_base}/models"
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.get(
@@ -262,3 +322,61 @@ class OpenAIAdapter(LLMBackendAdapter, AutoDetectModelsProtocol):
                     if isinstance(model, dict)
                     and isinstance(model.get("id"), str)
                 ]
+
+class EmbeddingData(TypedDict):
+    object: Literal["embedding"]
+    embedding: list[float]
+    index: int
+
+class EmbeddingResponse(TypedDict):
+    # 用于描述类型定义
+    object: Literal["list"]
+    data: list[EmbeddingData]
+    model: str
+    usage: dict[Literal["prompt_tokens", "total_tokens"], int]
+
+class OpenAIAdapter(OpenAIAdapterChatBase, LLMEmbeddingProtocol):
+    def embed(self, req: LLMEmbeddingRequest) -> LLMEmbeddingResponse:
+        """
+        此为openai api嵌入式模型接口
+
+        Tips: openai仅在 text-embedding-3 及以后模型中支持设定输出向量维度
+        """
+
+        api_url = f"{self.config.api_base}/embeddings"
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+        }
+        if len(req.inputs) > 2048:
+            # text数组不能超过2048个元素，openai api限制
+            raise ValueError("Text list has too many dimensions, max dimension is 2048")
+        if any(isinstance(input, LLMChatImageContent) for input in req.inputs):
+            # 未在api中发现多模态嵌入api, 等待后续更新
+            raise ValueError("openai does not support multi-modal embedding")
+        # mypy 类型检查修复，如果添加多模态请去除这个标注
+        inputs = cast(list[LLMChatTextContent], req.inputs)
+        data = {
+            "input": [input.text for input in inputs],
+            "model": req.model,
+            "dimensions": req.dimension,
+            "encoding_format": req.encoding_format
+        }
+        # 删除 None 字段
+        data = {k: v for k, v in data.items() if v is not None}
+        logger.debug(f"Request: {data}")
+        response = requests.post(api_url, headers=headers, json=data)
+        try:
+            response.raise_for_status()
+            response_data: EmbeddingResponse = response.json()
+        except Exception as e:
+            logger.error(f"Response: {response.text}")
+            raise e
+        logger.debug(f"Response: {response_data}")
+        return LLMEmbeddingResponse(
+            vectors=[data["embedding"] for data in response_data["data"]],
+            usage=Usage(
+                prompt_tokens=response_data["usage"].get("prompt_tokens", 0),
+                total_tokens=response_data["usage"].get("total_tokens", 0)
+            )
+        )

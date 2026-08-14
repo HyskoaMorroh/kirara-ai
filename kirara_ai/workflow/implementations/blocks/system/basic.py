@@ -1,7 +1,9 @@
 import re
 from datetime import datetime
-from typing import Annotated, Any, Dict
+from typing import Annotated, Any, Dict, List
 
+from kirara_ai.im.text_render import convert_markdown_tables
+from kirara_ai.logger import get_logger
 from kirara_ai.workflow.core.block import Block, Output, ParamMeta
 from kirara_ai.workflow.core.block.input_output import Input
 
@@ -96,15 +98,28 @@ class TextStripMarkdownBlock(Block):
         bullet_char: Annotated[
             str, ParamMeta(label="列表符号", description="无序列表统一替换成的符号，留空则删除")
         ] = "·",
+        table_style: Annotated[
+            str,
+            ParamMeta(
+                label="表格样式",
+                description="box：渲染为等宽框线表格（推荐）；plain：转为空格分隔的纯文本",
+                options_provider=lambda container, block: ["box", "plain"],
+            ),
+        ] = "box",
     ):
         self.keep_heading_text = keep_heading_text
         self.bullet_char = bullet_char
+        self.table_style = table_style
 
     def execute(self, text: str) -> Dict[str, Any]:
         if not text:
             return {"text": text}
 
         result = text
+
+        # 表格：默认先渲染成等宽框线表格，避免后续规则把表格打散成纯文字
+        if self.table_style == "box":
+            result = convert_markdown_tables(result)
 
         # 代码块：去掉围栏，保留内部代码
         result = re.sub(r"```[a-zA-Z0-9_+-]*\n?", "", result)
@@ -146,11 +161,12 @@ class TextStripMarkdownBlock(Block):
         # 分割线：--- *** ___
         result = re.sub(r"^\s{0,3}([-*_])\s*(\1\s*){2,}$", "", result, flags=re.MULTILINE)
 
-        # 表格分隔行：|---|---|
-        result = re.sub(r"^\s*\|?[\s:|-]{3,}\|?\s*$", "", result, flags=re.MULTILINE)
+        if self.table_style != "box":
+            # 表格分隔行：|---|---|
+            result = re.sub(r"^\s*\|?[\s:|-]{3,}\|?\s*$", "", result, flags=re.MULTILINE)
 
-        # 表格竖线：转为空格分隔
-        result = re.sub(r"^\s*\|(.+)\|\s*$", lambda m: m.group(1).replace("|", "  ").strip(), result, flags=re.MULTILINE)
+            # 表格竖线：转为空格分隔
+            result = re.sub(r"^\s*\|(.+)\|\s*$", lambda m: m.group(1).replace("|", "  ").strip(), result, flags=re.MULTILINE)
 
         # 压缩多余空行：连续 3 个以上换行压成 2 个
         result = re.sub(r"\n{3,}", "\n\n", result)
@@ -159,4 +175,59 @@ class TextStripMarkdownBlock(Block):
         result = "\n".join(line.rstrip() for line in result.split("\n"))
 
         return {"text": result.strip()}
+
+
+class CodeBlock(Block):
+    name = "code_block"
+    inputs = {}
+    outputs = {}
+
+    def __init__(self,
+                 inputs: Annotated[List[Dict[str, str]], ParamMeta(label="输入参数", description="输入参数")],
+                 outputs: Annotated[List[Dict[str, str]], ParamMeta(label="输出参数", description="输出参数")],
+                 code: Annotated[str, ParamMeta(label="代码", description="代码")]):
+        # 初始化实例的 inputs 和 outputs
+        self.inputs = {}
+        self.outputs = {}
+        for input_spec in inputs:
+            self.inputs[input_spec["name"]] = Input(input_spec["name"], input_spec["label"], Any, 'user-specified object') # type: ignore
+        for output_spec in outputs:
+            self.outputs[output_spec["name"]] = Output(output_spec["name"], output_spec["label"], Any, 'user-specified object') # type: ignore
+        self.code = code
+
+    def execute(self, **kwargs: Any) -> Dict[str, Any]: # 使用 Any 兼容各种输入类型
+        logger = get_logger("Block.Code")
+
+        exec_globals = globals().copy()
+        exec_locals: Dict[str, Any] = {}
+
+        logger.debug(f"Executing code definition:\n{self.code}")
+        try:
+            exec(self.code, exec_globals, exec_locals)
+        except Exception as e:
+            logger.error(f"Error during code definition execution: {e}", exc_info=True)
+            raise RuntimeError(f"Error in provided code definition: {e}") from e
+
+        if 'execute' not in exec_locals or not callable(exec_locals['execute']):
+            raise ValueError("Provided code must define a callable function named 'execute'")
+
+        exec_locals['__input_kwargs__'] = kwargs
+        exec_globals.update(exec_locals)
+        call_code = "__result__ = execute(**__input_kwargs__)"
+
+        logger.debug(f"Executing function call: execute(**{list(kwargs.keys())})")
+        try:
+            exec(call_code, exec_globals, exec_locals)
+        except Exception as e:
+            logger.error(f"Error during user function 'execute' execution: {e}", exc_info=True)
+            raise RuntimeError(f"Error during execution of user function 'execute': {e}") from e
+
+        if '__result__' not in exec_locals:
+             # 如果 exec(call_code) 成功但没有 __result__，说明有内部问题
+             logger.error("Internal error: Result '__result__' not found after executing user code call.")
+             raise RuntimeError("Failed to retrieve result from user code execution.")
+
+        result = exec_locals['__result__']
+
+        return result
 

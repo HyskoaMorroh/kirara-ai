@@ -11,7 +11,7 @@ from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.workflow.core.block import Block, ConditionBlock, LoopBlock, LoopEndBlock
 from kirara_ai.workflow.core.block.registry import BlockRegistry
 
-from .base import Wire, Workflow
+from .base import Wire, Workflow, WorkflowConfig
 
 
 def get_block_class(type_name: str, registry: BlockRegistry) -> Type[Block]:
@@ -182,6 +182,7 @@ class WorkflowBuilder:
         self.nodes: List[Node] = []  # 存储所有节点
         self.nodes_by_name: Dict[str, Node] = {}
         self.wire_specs: List[Tuple[str, str, str, str]] = []  # (source_name, source_output, target_name, target_input)
+        self.config = WorkflowConfig()
 
     def _generate_unique_name(self, base_name: str) -> str:
         """生成唯一的块名称"""
@@ -466,7 +467,11 @@ class WorkflowBuilder:
             if source_block and target_block:
                 wires.append(Wire(source_block, source_output, target_block, target_input))
 
-        return Workflow(name=self.name, blocks=blocks, wires=wires, id=self.id)
+        return Workflow(name=self.name, blocks=blocks, wires=wires, id=self.id, config=self.config)
+
+    def set_config(self, config: WorkflowConfig):
+        self.config = config
+        return self
 
     def force_connect(
         self,
@@ -506,6 +511,7 @@ class WorkflowBuilder:
             "name": self.name,
             "description": self.description,
             "blocks": [],
+            "config": self.config.model_dump(),
         }
 
         def serialize_node(node: Node) -> dict:
@@ -574,6 +580,7 @@ class WorkflowBuilder:
             workflow_data: Dict[str, Any] = yaml.load(f)
 
         builder: WorkflowBuilder = cls(workflow_data["name"])
+        builder.config = WorkflowConfig.model_validate(workflow_data.get("config", {}))
         builder.description = workflow_data.get("description", "")
         registry: BlockRegistry = container.resolve(BlockRegistry)
 

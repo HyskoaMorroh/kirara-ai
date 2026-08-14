@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
-from kirara_ai.config.global_config import LLMBackendConfig
+from kirara_ai.config.global_config import LLMBackendConfig, ModelConfig
 
 
 class LLMBackendInfo(LLMBackendConfig):
@@ -51,3 +51,10 @@ class LLMAdapterConfigSchema(BaseModel):
 
     error: Optional[str] = None
     configSchema: Optional[Dict[str, Any]] = None
+
+
+class ModelConfigListResponse(BaseModel):
+    """模型配置列表响应"""
+
+    error: Optional[str] = None
+    models: List[ModelConfig] = []

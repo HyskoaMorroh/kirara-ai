@@ -1,5 +1,6 @@
 import asyncio
 import os
+import secrets
 import signal
 import time
 
@@ -17,6 +18,7 @@ from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.llm.llm_registry import LLMBackendRegistry
 from kirara_ai.logger import get_logger
+from kirara_ai.mcp_module.manager import MCPServerManager
 from kirara_ai.media import MediaManager
 from kirara_ai.media.carrier import MediaCarrierRegistry, MediaCarrierService
 from kirara_ai.memory.composes import DefaultMemoryComposer, DefaultMemoryDecomposer, MultiElementDecomposer
@@ -34,6 +36,9 @@ from kirara_ai.workflow.implementations.blocks import register_system_blocks
 from kirara_ai.workflow.implementations.workflows import register_system_workflows
 
 logger = get_logger("Entrypoint")
+
+# config.yaml.example 中的示例密钥，视为未设置
+PLACEHOLDER_SECRET_KEY = "please-change-this-to-a-secure-secret-key"
 
 _interrupt_count = 0  # 添加计数器
 
@@ -141,6 +146,19 @@ def init_application() -> DependencyContainer:
     if hasattr(time, "tzset"):
         time.tzset()
 
+    # 首次使用时 secret_key 为空（或仍是示例占位值），PyJWT 会因空密钥直接报错
+    # InvalidKeyError: HMAC key must not be empty，导致「设置管理员密码」始终提示登录失败。
+    # 这里自动生成一个随机密钥并落盘，保证首次设置密码即可正常签发 token，
+    # 同时避免每次重启都让已登录的 token 失效。
+    if not config.web.secret_key or config.web.secret_key == PLACEHOLDER_SECRET_KEY:
+        config.web.secret_key = secrets.token_hex(32)
+        logger.warning("Web secret_key is not set, generated a new random secret_key")
+        try:
+            ConfigLoader.save_config_with_backup(config_path, config)
+            logger.info(f"Generated secret_key has been saved to {config_path}")
+        except Exception as e:
+            logger.error(f"Failed to persist generated secret_key: {e}")
+
     container = init_container()
     container.register(asyncio.AbstractEventLoop, asyncio.new_event_loop())
     container.register(EventBus, EventBus())
@@ -183,6 +201,9 @@ def init_application() -> DependencyContainer:
 
     container.register(WebServer, WebServer(container))
 
+    mcp_manager = MCPServerManager(container)
+    container.register(MCPServerManager, mcp_manager)
+
     # 初始化记忆系统
     logger.info("Initializing memory system...")
     init_memory_system(container)
@@ -216,6 +237,11 @@ def init_application() -> DependencyContainer:
     logger.info("Loading LLMs")
     llm_manager.load_config()
 
+    # 加载MCP服务器
+    mcp_manager = container.resolve(MCPServerManager)
+    logger.info("Loading MCP servers")
+    mcp_manager.load_servers()
+
     # 注册定时任务调度器（负责按周期自动检测模型列表）
     container.register(TaskScheduler, TaskScheduler(container))
 
@@ -239,9 +265,18 @@ def run_application(container: DependencyContainer):
     im_manager = container.resolve(IMManager)
     im_manager.start_adapters(loop=loop)
 
+    # 加载MCP服务器
+    mcp_manager = container.resolve(MCPServerManager)
+    logger.info("Connecting to MCP servers")
+    mcp_manager.connect_all_servers(loop=loop)
+
     # 启动定时任务调度器
     task_scheduler = container.resolve(TaskScheduler)
     task_scheduler.start(loop)
+
+    # 启动媒体资源定期清理任务
+    media_manager = container.resolve(MediaManager)
+    media_manager.setup_cleanup_task(container)
 
     # 注册信号处理函数
     signal.signal(signal.SIGINT, _signal_handler)
@@ -295,6 +330,7 @@ def run_application(container: DependencyContainer):
         try:
             # 停止所有 adapter
             im_manager.stop_adapters(loop=loop)
+            mcp_manager.disconnect_all_servers(loop=loop)
             # 停止插件
             plugin_loader.stop_plugins()
         except Exception as e:

@@ -5,11 +5,12 @@ from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.llm.adapter import AutoDetectModelsProtocol
 from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.llm.llm_registry import LLMBackendRegistry
+from kirara_ai.llm.model_types import LLMAbility, ModelType
 from kirara_ai.logger import get_logger
 from kirara_ai.scheduler import TaskScheduler
 from kirara_ai.web.api.llm.models import (LLMAdapterConfigSchema, LLMAdapterTypes, LLMBackendCreateRequest,
                                           LLMBackendInfo, LLMBackendList, LLMBackendListResponse, LLMBackendResponse,
-                                          LLMBackendUpdateRequest)
+                                          LLMBackendUpdateRequest, ModelConfigListResponse)
 
 from ...auth.middleware import require_auth
 
@@ -269,8 +270,16 @@ async def auto_detect_models(backend_name: str):
                 ),
                 400,
             )
+        # 自动检测模型并返回完整的 ModelConfig 列表
         models = await adapter.auto_detect_models()
-        return jsonify({"models": models})
+
+        # 确保每个模型都有正确的能力设置
+        for model in models:
+            # 如果模型类型是LLM但没有设置能力，设置默认的TextChat能力
+            if model.type == ModelType.LLM.value and not model.ability:
+                model.ability = LLMAbility.TextChat.value
+
+        return ModelConfigListResponse(models=models).model_dump()
     except Exception as e:
         logger.opt(exception=e).error("Failed to auto-detect models")
         return jsonify({"error": str(e)}), 500

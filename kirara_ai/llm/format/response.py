@@ -1,32 +1,16 @@
-from typing import List, Optional, Literal, Union
-import json
-from pydantic import BaseModel, field_validator
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel
 
 from kirara_ai.llm.format.message import LLMChatMessage
+from kirara_ai.llm.format.tool import Function, ToolCall
 
-
+# 3.2.0 及更早版本在本模块内定义了 Function / ToolCall / ModelTypes，
+# 现已统一到 kirara_ai.llm.format.tool，这里保留再导出以兼容按旧路径导入的插件。
 ModelTypes = Literal["openai", "gemini", "claude", "ollama"]
 
-class Function(BaseModel):
-    name: Optional[str] = None
-    # 这个字段类似于 python 的关键子参数，你可以直接使用`**arguments`
-    arguments: Optional[dict] = None
+__all__ = ["Function", "ToolCall", "ModelTypes", "Message", "Usage", "LLMChatResponse"]
 
-    @classmethod
-    @field_validator("arguments", mode="before")
-    def convert_arguments(cls, v: Optional[Union[str, dict]]) -> Optional[dict]:
-        if isinstance(v, str):
-            return json.loads(v)
-        else:
-            return v
-
-class ToolCall(BaseModel):
-    id: Optional[str] = None
-    # type这个字段目前不知道有什么用
-    type: Optional[str] = None
-    # 此参数用于向后端传递响应的模型类型，方便后端tool_result返回类型正确的content字段
-    model: Optional[ModelTypes] = "openai"
-    function: Optional[Function] = None
 
 class Message(LLMChatMessage):
     tool_calls: Optional[List[ToolCall]] = None

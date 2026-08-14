@@ -1,12 +1,16 @@
 import asyncio
 import io
 import os
+import shutil
+import time
 from typing import Optional
 
 import pytz
 from quart import Blueprint, g, jsonify, request, send_file
 
+from kirara_ai.config.config_loader import CONFIG_FILE, ConfigLoader
 from kirara_ai.config.global_config import GlobalConfig
+from kirara_ai.logger import get_logger
 from kirara_ai.media.manager import MediaManager
 from kirara_ai.media.media_object import Media
 from kirara_ai.media.types.media_type import MediaType
@@ -16,6 +20,7 @@ from .models import MediaBatchDeleteRequest, MediaItem, MediaListResponse, Media
 
 media_bp = Blueprint("media", __name__)
 
+logger = get_logger("Web.Media")
 
 # 生成缩略图
 async def generate_thumbnail(image_data: bytes) -> io.BytesIO:
@@ -220,3 +225,69 @@ async def batch_delete():
             success_count += 1
     
     return jsonify({"success": True, "deleted_count": success_count}) 
+
+@media_bp.route("/system", methods=["GET"])
+@require_auth
+async def get_system_info():
+    """获取系统信息，包括媒体数量、占用空间和磁盘信息"""
+    config: GlobalConfig = g.container.resolve(GlobalConfig)
+    manager: MediaManager = _get_media_manager()
+
+    # 获取媒体总数和总大小
+    all_media_ids = manager.get_all_media_ids()
+    total_media_count = len(all_media_ids)
+    total_media_size = 0
+    for media_id in all_media_ids:
+        metadata = manager.get_metadata(media_id)
+        if metadata and metadata.size:
+            total_media_size += metadata.size
+
+    # 获取磁盘空间信息
+    storage_path = manager.media_dir
+    disk_total, disk_used, disk_free = 0, 0, 0
+    try:
+        # 确保存储路径存在，如果不存在则尝试创建
+        disk_usage = shutil.disk_usage(storage_path)
+        disk_total = disk_usage.total
+        disk_used = disk_usage.used
+        disk_free = disk_usage.free
+    except OSError as e:
+        # 处理获取磁盘信息时可能发生的错误，例如路径不存在或权限问题
+        logger.error(f"Unable to get disk info for {storage_path}: {e}")
+
+    return jsonify({
+        "cleanup_duration": config.media.cleanup_duration,
+        "auto_remove_unreferenced": config.media.auto_remove_unreferenced,
+        "last_cleanup_time": config.media.last_cleanup_time,
+        "total_media_count": total_media_count,
+        "total_media_size": total_media_size,
+        "disk_total": disk_total,
+        "disk_used": disk_used,
+        "disk_free": disk_free,
+    })
+
+# 修改配置
+@media_bp.route("/system/config", methods=["POST"])
+@require_auth
+async def set_config():
+    """设置配置"""
+    manager = _get_media_manager()
+    data = await request.get_json()
+    config = g.container.resolve(GlobalConfig)
+    config.media.cleanup_duration = data.get("cleanup_duration", config.media.cleanup_duration)
+    config.media.auto_remove_unreferenced = data.get("auto_remove_unreferenced", config.media.auto_remove_unreferenced)
+    manager.setup_cleanup_task(g.container)
+    ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
+    return jsonify({"success": True})
+
+@media_bp.route("/system/cleanup-unreferenced", methods=["POST"])
+@require_auth
+async def cleanup_unreferenced():
+    """清理未引用的媒体文件"""
+    manager = _get_media_manager()
+    count = manager.cleanup_unreferenced()
+    config = g.container.resolve(GlobalConfig)
+    config.media.last_cleanup_time = int(time.time())
+    ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
+    manager.setup_cleanup_task(g.container)
+    return jsonify({"success": True, "count": count})

@@ -73,9 +73,11 @@ class MemoryManager(MediaReferenceProvider[List[MemoryEntry]]):
         """注册新的解析器"""
         self.decomposer_registry.register(name, decomposer_class)
 
-    def store(self, scope: MemoryScope, entry: MemoryEntry) -> None:
+    def store(self, scope: MemoryScope, entry: MemoryEntry, extra_identifier: Optional[str] = None) -> None:
         """存储新的记忆"""
         scope_key = scope.get_scope_key(entry.sender)
+        if extra_identifier is not None:
+            scope_key = f"{extra_identifier}-{scope_key}"
 
         if scope_key not in self.memories:
             self.memories[scope_key] = self.persistence.load(scope_key)
@@ -95,10 +97,12 @@ class MemoryManager(MediaReferenceProvider[List[MemoryEntry]]):
 
         self.persistence.save(scope_key, self.memories[scope_key])
 
-    def query(self, scope: MemoryScope, sender: ChatSender) -> List[MemoryEntry]:
+    def query(self, scope: MemoryScope, sender: ChatSender, extra_identifier: Optional[str] = None) -> List[MemoryEntry]:
         """查询历史记忆"""
         relevant_memories = []
         scope_key = scope.get_scope_key(sender)
+        if extra_identifier is not None:
+            scope_key = f"{extra_identifier}-{scope_key}"
 
         if scope_key not in self.memories:
             self.memories[scope_key] = self.persistence.load(scope_key)
@@ -132,6 +136,8 @@ class MemoryManager(MediaReferenceProvider[List[MemoryEntry]]):
         """
         scope_key = scope.get_scope_key(sender)
         # 移除媒体引用
+        if scope_key not in self.memories:
+            return
         self._remove_media_references(self.memories[scope_key], [], scope_key)
         # 清空内存中的记录
         self.memories[scope_key] = []

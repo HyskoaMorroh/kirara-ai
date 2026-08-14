@@ -6,6 +6,9 @@ from urllib.parse import quote
 import aiohttp
 from pydantic import Field
 
+from kirara_ai.config.global_config import ModelConfig
+from kirara_ai.llm.model_types import LLMAbility, ModelType
+
 from .openai_adapter import OpenAIAdapter, OpenAIConfig
 
 
@@ -95,18 +98,65 @@ def normalize_query(params):
     
     return query[:-1].replace("+", "%20") if query else ""
 
+def detect_ability(model: dict) -> int:
+    ability = LLMAbility.TextChat.value
+    # detect visual qa
+    if "VisualQuestionAnswering" in model.get("TaskTypes", []):
+        ability |= LLMAbility.ImageInput.value
+    
+    # detect function calling
+    if "Function Call" in model.get("CustomizedTags", []):
+        ability |= LLMAbility.FunctionCalling.value
+    return ability
+
 class VolcengineAdapter(OpenAIAdapter):
     config: VolcengineConfig
     
     def __init__(self, config: VolcengineConfig):
         super().__init__(config)
 
-    async def auto_detect_models(self) -> list[str]:
-        """获取火山引擎可用的模型列表，支持分页获取所有结果"""
+    async def auto_detect_models(self) -> list[ModelConfig]:
+        """
+        获取火山引擎可用的模型列表，支持分页获取所有结果
+        
+        {
+        "Result": {
+            "TotalCount": 39,
+            "PageNumber": 1,
+            "PageSize": 10,
+            "Items": [
+            {
+                "Name": "doubao-1-5-pro-256k",
+                "VendorName": "字节跳动",
+                "DisplayName": "Doubao-1.5-pro-256k",
+                "ShortName": "",
+                "PrimaryVersion": "250115",
+                "FoundationModelTag": {
+                "Domains": [
+                    "LLM"
+                ],
+                "Languages": [
+                    "中英文"
+                ],
+                "TaskTypes": [
+                    "Chat"
+                ],
+                "ContextLength": "256k",
+                "CustomizedTags": [
+                    "支持体验"
+                ]
+                },
+            }
+            ]
+        }
+        }
+        
+        
+        """
         host = "open.volcengineapi.com"
         path = "/"
         
-        all_models = []
+        all_models: list[ModelConfig] = []
         page_number = 1
         page_size = 100
         total_pages = 1  # 初始值，会在第一次请求后更新
@@ -149,7 +199,8 @@ class VolcengineAdapter(OpenAIAdapter):
                         foundation_model = model.get("FoundationModelTag", {})
                         if ("LLM" in foundation_model.get("Domains", []) and
                             model.get("Name")):
-                            all_models.append(model["Name"])
+                            ability = detect_ability(foundation_model)
+                            all_models.append(ModelConfig(id=model["Name"], type=ModelType.LLM.value, ability=ability))
             # 准备获取下一页
             page_number += 1
         

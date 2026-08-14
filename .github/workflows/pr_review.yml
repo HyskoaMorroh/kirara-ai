@@ -1,7 +1,7 @@
 name: PR Code Review
 
 on:
-  pull_request:
+  pull_request_target:
     branches: [ "master" ]
 
 jobs:
@@ -11,24 +11,26 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      issues: write
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       - name: Install project dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install .
           python -m pip install mypy types-requests types-setuptools
-          mypy --python-version 3.10 --ignore-missing-imports kirara_ai || true # run mypy to generate type dependencies
+          mypy --python-version 3.12 --ignore-missing-imports kirara_ai || true # run mypy to generate type dependencies
           python -m mypy --install-types --non-interactive
 
       - name: Get changed Python files
@@ -57,8 +59,8 @@ jobs:
           
           echo "has_changed_files=true" >> $GITHUB_OUTPUT
           # 将输出保存到文本和JSON两种格式
-          mypy --python-version 3.10 --show-column-numbers --show-error-codes --ignore-missing-imports $CHANGED_FILES > mypy_output.txt || true
-          mypy --python-version 3.10 --show-column-numbers --show-error-codes --ignore-missing-imports $CHANGED_FILES --output json > mypy_output.json || true
+          mypy --python-version 3.12 --show-column-numbers --show-error-codes --ignore-missing-imports $CHANGED_FILES > mypy_output.txt || true
+          mypy --python-version 3.12 --show-column-numbers --show-error-codes --ignore-missing-imports $CHANGED_FILES --output json > mypy_output.json || true
         continue-on-error: true
 
       - name: Get PR diff information
@@ -225,7 +227,7 @@ jobs:
 
       - name: Post line-level PR review comments
         if: steps.process-results.outputs.diff_error_count != '0'
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           github-token: ${{secrets.GITHUB_TOKEN}}
           script: |
@@ -245,11 +247,19 @@ jobs:
               comments: reviewComments
             });
             
+            // 添加失败标签
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['🔴 类型检查：失败']
+            });
+            
             console.log(`Created review with ${reviewComments.length} comments`);
 
       - name: Post success comment
         if: steps.process-results.outputs.result == 'pass'
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           github-token: ${{secrets.GITHUB_TOKEN}}
           script: |
@@ -285,10 +295,30 @@ jobs:
                 body: comment
               });
             }
+            
+            // 移除失败标签（如果存在）并添加成功标签
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: '🔴 类型检查：失败'
+              });
+            } catch (error) {
+              // 标签可能不存在，忽略错误
+            }
+            
+            // 添加成功标签
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['✅ 类型检查：通过']
+            });
 
       - name: Post notification if no Python files changed
         if: steps.run-mypy.outputs.has_changed_files == 'false'
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           github-token: ${{secrets.GITHUB_TOKEN}}
           script: |
@@ -319,6 +349,29 @@ jobs:
                 issue_number: context.issue.number,
                 body: comment
               });
+            }
+            
+            // 移除类型检查相关标签（如果存在）
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: '🔴 类型检查：失败'
+              });
+            } catch (error) {
+              // 标签可能不存在，忽略错误
+            }
+            
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: '✅ 类型检查：通过'
+              });
+            } catch (error) {
+              // 标签可能不存在，忽略错误
             }
 
       - name: Fail if type issues found in diff

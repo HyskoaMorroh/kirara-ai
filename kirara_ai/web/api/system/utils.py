@@ -105,11 +105,13 @@ def get_memory_usage() -> dict:
     """获取内存使用情况"""
     process = psutil.Process()
     system_memory = psutil.virtual_memory()
+    process_mem = process.memory_full_info().uss
+    percent = system_memory.used / (system_memory.total)
     return {
-        "percent": process.memory_percent(),
+        "percent": percent,
         "total": system_memory.total / 1024 / 1024,  # MB
         "free": system_memory.available / 1024 / 1024,  # MB
-        "used": system_memory.used / 1024 / 1024,  # MB
+        "used": process_mem / 1024 / 1024,  # MB
     }
 
 def get_cpu_usage() -> float:

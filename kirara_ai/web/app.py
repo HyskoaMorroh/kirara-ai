@@ -1,6 +1,7 @@
 import asyncio
 import mimetypes
 import os
+import secrets
 import socket
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from .api.block import block_bp
 from .api.dispatch import dispatch_bp
 from .api.im import im_bp
 from .api.llm import llm_bp
+from .api.mcp import mcp_bp
 from .api.media import media_bp
 from .api.plugin import plugin_bp
 from .api.system import system_bp
@@ -81,6 +83,7 @@ def create_web_api_app(container: DependencyContainer) -> Quart:
     app.register_blueprint(system_bp, url_prefix="/api/system")
     app.register_blueprint(media_bp, url_prefix="/api/media")
     app.register_blueprint(tracing_bp, url_prefix="/api/tracing")
+    app.register_blueprint(mcp_bp, url_prefix="/api/mcp")
 
     @app.errorhandler(Exception)
     def handle_exception(error):
@@ -217,14 +220,19 @@ class WebServer:
         self.server_task = None
         self.shutdown_event = asyncio.Event()
         self.container = container
+        global_config = container.resolve(GlobalConfig)
+        # 兜底：secret_key 为空时 PyJWT 会抛 InvalidKeyError，导致首次设置密码/登录失败
+        if not global_config.web.secret_key:
+            global_config.web.secret_key = secrets.token_hex(32)
+            logger.warning("Web secret_key is empty, generated a temporary secret_key")
         container.register(
             AuthService,
             FileBasedAuthService(
-                password_file=Path(container.resolve(GlobalConfig).web.password_file),
-                secret_key=container.resolve(GlobalConfig).web.secret_key,
+                password_file=Path(global_config.web.password_file),
+                secret_key=global_config.web.secret_key,
             ),
         )
-        self.config = container.resolve(GlobalConfig)
+        self.config = global_config
 
         # 配置 hypercorn
         from hypercorn.logging import Logger
@@ -259,6 +267,7 @@ class WebServer:
     def _check_port_available(self, host: str, port: int) -> bool:
         """检查端口是否可用"""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind((host, port))
                 return True

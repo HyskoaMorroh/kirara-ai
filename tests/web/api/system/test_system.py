@@ -71,10 +71,9 @@ class TestSystemStatus:
         """测试获取系统状态"""
         # Mock psutil.Process
         mock_process = MagicMock()
-        mock_process.memory_info.return_value = MagicMock(
-            rss=1024 * 1024 * 100, vms=1024 * 1024 * 500
+        mock_process.memory_full_info.return_value = MagicMock(
+            uss=1024 * 1024 * 100  # 100MB
         )
-        mock_process.memory_percent.return_value = 2.5
         mock_process.cpu_percent.return_value = 1.2
         
         # Mock psutil.virtual_memory
@@ -111,10 +110,10 @@ class TestSystemStatus:
             # 验证资源使用情况
             assert "memory_usage" in status
             assert "cpu_usage" in status
-            assert status["memory_usage"]["percent"] == 2.5
+            assert status["memory_usage"]["percent"] == 0.5  # used/total
             assert status["memory_usage"]["total"] == 8192  # 8GB
             assert status["memory_usage"]["free"] == 4096  # 4GB
-            assert status["memory_usage"]["used"] == 4096  # 4GB
+            assert status["memory_usage"]["used"] == 100  # 100MB (process.memory_full_info().uss)
             assert status["cpu_usage"] == 1.2
 
     @pytest.mark.asyncio

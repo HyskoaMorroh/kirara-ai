@@ -15,6 +15,7 @@ from kirara_ai.im.message import (ImageMessage, IMMessage, MentionElement, Messa
                                   VoiceMessage)
 from kirara_ai.im.profile import UserProfile
 from kirara_ai.im.sender import ChatSender, ChatType
+from kirara_ai.im.text_render import convert_markdown_tables
 from kirara_ai.logger import get_logger
 from kirara_ai.web.app import WebServer
 from kirara_ai.workflow.core.dispatch import WorkflowDispatcher
@@ -194,8 +195,9 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
         # 单次循环处理所有元素
         for element in message.message_elements:
             if isinstance(element, TextMessage):
-                # 如果有文本，直接添加到当前缓冲区
-                current_text += element.text
+                # QQ 机器人只支持纯文本，Markdown 表格的竖线会散成一堆文字，
+                # 这里先渲染成等宽框线表格，保证结构完整可读
+                current_text += convert_markdown_tables(element.text)
                 # 立即发送当前文本缓冲区内容
                 if current_text:
                     modified_text = replace_url_dots(current_text)

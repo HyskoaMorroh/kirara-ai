@@ -1,19 +1,25 @@
 import asyncio
 import base64
-from typing import Any, Dict, List, Literal, Optional, cast
+from typing import Any, Dict, List, Literal, cast
 
 import aiohttp
 import requests
 from pydantic import BaseModel, ConfigDict
 
-from kirara_ai.llm.adapter import AutoDetectModelsProtocol, LLMBackendAdapter
+import kirara_ai.llm.format.tool as tool
+from kirara_ai.config.global_config import ModelConfig
+from kirara_ai.llm.adapter import AutoDetectModelsProtocol, LLMBackendAdapter, LLMChatProtocol, LLMEmbeddingProtocol
 from kirara_ai.llm.format.message import (LLMChatContentPartType, LLMChatImageContent, LLMChatMessage,
-                                          LLMChatTextContent, LLMToolCallContent, LLMToolResultContent)
+                                          LLMChatTextContent, LLMToolCallContent, LLMToolResultContent, RoleType)
 from kirara_ai.llm.format.request import LLMChatRequest, Tool
-from kirara_ai.llm.format.response import Function, LLMChatResponse, Message, ToolCall, Usage
+from kirara_ai.llm.format.response import LLMChatResponse, Message, Usage
+from kirara_ai.llm.format.embedding import LLMEmbeddingRequest, LLMEmbeddingResponse
+from kirara_ai.llm.model_types import LLMAbility, ModelType
 from kirara_ai.logger import get_logger
 from kirara_ai.media import MediaManager
 from kirara_ai.tracing import trace_llm_chat
+
+from .utils import generate_tool_call_id, pick_tool_calls
 
 SAFETY_SETTINGS = [{
     "category": "HARM_CATEGORY_HARASSMENT",
@@ -78,40 +84,84 @@ async def convert_llm_chat_message_to_gemini_message(msg: LLMChatMessage, media_
     if msg.role in ["user", "assistant", "system"]:
         return await convert_non_tool_message(msg, media_manager)
     elif msg.role == "tool":
-        elements = cast(list[LLMToolResultContent], msg.content)
-        # tool_result 的 role 必定为 "tool"。同时 "tool" 角色 messages 中只能是 LLMToolResultContent
-        parts = [{
-            "functionResponse": {
-                "name": element.name,
-                "response": {
-                    "name": element.name,
-                    "content": element.content
-                }
-            }
-        } for element in elements]
-        # 此处按照 API 文档，不指定 role    
-        return {"parts": parts}
+        results = cast(list[LLMToolResultContent], msg.content)
+        return {"role": "user", "parts": [resolve_tool_results(result) for result in results]}
     else:
         raise ValueError(f"Invalid role: {msg.role}")
 
-def resolve_function_call(calls: list[LLMChatContentPartType]) -> Optional[list[ToolCall]]:
-    tool_calls = [
-        ToolCall(
-            model="gemini",
-            function=Function(name=call.name, arguments=call.parameters)
-        ) for call in calls if isinstance(call, LLMToolCallContent)
-    ]
-    if tool_calls:
-        return tool_calls
-    else:
-        return None
+async def convert_all_messages_to_gemini_format(messages: List[LLMChatMessage], media_manager: MediaManager) -> list[dict]:
+    # gather需要先用异步函数封装，然后才能使用asyncio.run()
+    return await asyncio.gather(*[convert_llm_chat_message_to_gemini_message(msg, media_manager) for msg in messages])
 
 def convert_tools_to_gemini_format(tools: list[Tool]) -> list[dict[Literal["function_declarations"], list[dict]]]:
-    return [{
-        "function_declarations": [tool.model_dump(exclude={"strict": True, "parameters": {"additionalProperties": True}}) for tool in tools]
-    }]
+    # 定义允许的字段结构
+    allowed_keys = {
+        "name": True,
+        "description": True,
+        "parameters": {
+            "type": True,
+            "properties": {
+                "*": {
+                    "type": True,
+                    "title": True,
+                    "description": True,
+                    "enum": True,
+                    "default": True,
+                    "items": True,
+                }
+            },
+            "required": True
+        }
+    }
 
-class GeminiAdapter(LLMBackendAdapter, AutoDetectModelsProtocol):
+    def filter_dict(data: dict, allowed: dict) -> dict:
+        """递归过滤字典，只保留允许的字段"""
+        result = {}
+        for key, value in allowed.items():
+            if key == "*" and isinstance(value, dict):
+                # 处理通配符情况，适用于 properties 字典
+                for data_key, data_value in data.items():
+                    if isinstance(data_value, dict):
+                        result[data_key] = filter_dict(data_value, value)
+                    else:
+                        result[data_key] = data_value
+            elif key in data:
+                if isinstance(value, dict) and isinstance(data[key], dict):
+                    # 如果是嵌套字典，递归处理
+                    result[key] = filter_dict(data[key], value)
+                else:
+                    # 否则直接保留值
+                    result[key] = data[key]
+        return result
+
+    function_declarations = []
+    # 注意：循环变量不要用 tool，否则会遮蔽模块级的 kirara_ai.llm.format.tool 导入
+    for tool_item in tools:
+        # 将Tool对象转换为字典
+        tool_dict = tool_item.model_dump()
+        # 过滤出需要的字段
+        filtered_tool = filter_dict(tool_dict, allowed_keys)
+        function_declarations.append(filtered_tool)
+
+    return [{"function_declarations": function_declarations}]
+
+def resolve_tool_results(element: LLMToolResultContent) -> dict:
+    # 全部拼接成字符串
+    output = ""
+    for content in element.content:
+        if isinstance(content, tool.TextContent):
+            output += content.text
+        elif isinstance(content, tool.MediaContent):
+            # FIXME: Gemini 不支持 response 传媒体内容，需要从额外的 message 中传入，类似于 **篡改记忆**
+            output += f"<media id={content.media_id} mime_type={content.mime_type} />"
+    return {
+        "functionResponse": {
+            "name": element.name,
+            "response": {"error": output} if element.isError else {"output": output}
+        }
+    }
+
+class GeminiAdapter(LLMBackendAdapter, AutoDetectModelsProtocol, LLMChatProtocol, LLMEmbeddingProtocol):
 
     media_manager: MediaManager
 
@@ -121,22 +171,19 @@ class GeminiAdapter(LLMBackendAdapter, AutoDetectModelsProtocol):
 
     @trace_llm_chat
     def chat(self, req: LLMChatRequest) -> LLMChatResponse:
-        api_url = f"{self.config.api_base}/models/{req.model}:generateContent"
+        api_url = f"{self.config.api_base}/models/{req.model}:generateContent?key={self.config.api_key}"
         headers = {
-            "x-goog-api-key": self.config.api_key,
+            # 这里的 api key 验证方法和 api reference 不一致。本次处理暂时按照api reference写法更正。 Warning: 未进行实际测试
+            # "x-goog-api-key": self.config.api_key,
             "Content-Type": "application/json",
         }
-
-        # create a new asyncio loop to run the convert_llm_chat_message_to_gemini_message function
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
 
         response_modalities = ["text"]
         if req.model in IMAGE_MODAL_MODELS:
             response_modalities.append("image")
 
         data = {
-            "contents": loop.run_until_complete(asyncio.gather(*[convert_llm_chat_message_to_gemini_message(msg, self.media_manager) for msg in req.messages])),
+            "contents": asyncio.run(convert_all_messages_to_gemini_format(req.messages, self.media_manager)),
             "generationConfig": {
                 "temperature": req.temperature,
                 "topP": req.top_p,
@@ -149,6 +196,8 @@ class GeminiAdapter(LLMBackendAdapter, AutoDetectModelsProtocol):
             "tools": convert_tools_to_gemini_format(req.tools) if req.tools else None,
         }
 
+        self.logger.debug(f"Gemini request: {data}")
+
         # Remove None fields
         data = {k: v for k, v in data.items() if v is not None}
 
@@ -160,12 +209,13 @@ class GeminiAdapter(LLMBackendAdapter, AutoDetectModelsProtocol):
             self.logger.error(f"API Response: {response.text}")
             raise e
         content: List[LLMChatContentPartType] = []
+        role = "assistant"
         for part in response_data["candidates"][0]["content"]["parts"]:
             if "text" in part:
                 content.append(LLMChatTextContent(text=part["text"]))
             elif "inlineData" in part:
                 decoded_image_data = base64.b64decode(part["inlineData"]["data"])
-                media = loop.run_until_complete(
+                media = asyncio.run(
                     self.media_manager.register_from_data(
                         data=decoded_image_data,
                         format=part["inlineData"]["mimeType"].removeprefix(
@@ -174,9 +224,14 @@ class GeminiAdapter(LLMBackendAdapter, AutoDetectModelsProtocol):
                 )
                 content.append(LLMChatImageContent(media_id=media))
             elif "functionCall" in part:
-                # tool_call 部分 gemini 不返回call_id
-                content.append(LLMToolCallContent(name=part["functionCall"]["name"], parameters=part["functionCall"].get("args", None)))
-   
+                content.append(
+                    LLMToolCallContent(
+                            id=generate_tool_call_id(part["functionCall"]["name"]),
+                            name=part["functionCall"]["name"],
+                            parameters=part["functionCall"].get("args", None)
+                        )
+                    )
+
         return LLMChatResponse(
             model=req.model,
             usage=Usage(
@@ -191,14 +246,52 @@ class GeminiAdapter(LLMBackendAdapter, AutoDetectModelsProtocol):
             ),
             message=Message(
                 content=content,
-                role="assistant",
+                role=cast(RoleType, role),
                 finish_reason=response_data["candidates"][0].get("finishReason"),
-                # content格式转好直接用就行
-                tool_calls=resolve_function_call(content)
+                tool_calls=pick_tool_calls(content)
             ),
         )
 
-    async def auto_detect_models(self) -> list[str]:
+    def embed(self, req: LLMEmbeddingRequest) -> LLMEmbeddingResponse:
+        # 使用批量嵌入接口，单次嵌入接口:embedContent
+        # gemini 的 API reference 是这样定义的很奇怪，居然敢在 url 中传递key
+        api_url = f"{self.config.api_base}/models/{req.model}:batchEmbedContents?key={self.config.api_key}"
+        headers = {
+            "Content-Type": "application/json",
+        }
+        # 目前 gemini 没有一个嵌入模型支持多模态嵌入
+        if  any(isinstance(input, LLMChatImageContent) for input in req.inputs):
+            raise ValueError("gemini does not support multi-modal embedding")
+        inputs = cast(list[LLMChatTextContent], req.inputs)
+        data = [
+            {
+                "model": req.model,
+                "content": {
+                    "parts": [{"text": input.text}]
+                },
+                "outputDimensionality": req.dimension
+            } for input in inputs
+        ]
+        # 移除None字段
+        data = [{ k:v for k,v in item.items() if v is not None} for item in data]
+        response = self._post_with_retry(url=api_url,json={"requests": data}, headers=headers)
+        try:
+            # {
+            #     "embeddings": [
+            #         {"values": [0.1, ...]},
+            #         ...
+            #     ]
+            # }
+            response_data: dict[Literal["embeddings"],list[dict[Literal["values"], list[float]]]] = response.json()
+        except Exception as e:
+            self.logger.error(f"API Response: {response.text}")
+            raise e
+        return LLMEmbeddingResponse(
+            # gemini不返回usage
+            vectors=[data["values"] for data in response_data["embeddings"]]
+        )
+
+    async def auto_detect_models(self) -> list[ModelConfig]:
         api_url = f"{self.config.api_base}/models"
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.get(
@@ -209,7 +302,7 @@ class GeminiAdapter(LLMBackendAdapter, AutoDetectModelsProtocol):
                     response.raise_for_status()
                 response_data = await response.json()
                 return [
-                    model["name"].removeprefix("models/")
+                    ModelConfig(id=model["name"].removeprefix("models/"), type=ModelType.LLM.value, ability=LLMAbility.TextChat.value)
                     for model in response_data["models"]
                     if "generateContent" in model["supportedGenerationMethods"]
                 ]

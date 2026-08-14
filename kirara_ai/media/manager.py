@@ -3,11 +3,15 @@ import base64
 import hashlib
 import json
 import shutil
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import aiofiles
 
+from kirara_ai.config.config_loader import CONFIG_FILE, ConfigLoader
+from kirara_ai.config.global_config import GlobalConfig
+from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.logger import get_logger
 from kirara_ai.media.metadata import MediaMetadata
 from kirara_ai.media.types.media_type import MediaType
@@ -33,7 +37,8 @@ class MediaManager:
         self.media_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
         self.files_dir.mkdir(parents=True, exist_ok=True)
-        
+        self._cleanup_task = None
+
         # 加载所有元数据
         self._load_all_metadata()
         
@@ -248,13 +253,14 @@ class MediaManager:
         )
     
     async def register_from_data(
-        self, 
+        self,
         data: bytes,
         format: Optional[str] = None,
         source: Optional[str] = None,
         description: Optional[str] = None,
         tags: Optional[List[str]] = None,
-        reference_id: Optional[str] = None
+        reference_id: Optional[str] = None,
+        media_type: Optional[MediaType] = None
     ) -> str:
         """从二进制数据注册媒体"""
         return await self.register_media(
@@ -263,7 +269,8 @@ class MediaManager:
             source=source,
             description=description,
             tags=tags,
-            reference_id=reference_id
+            reference_id=reference_id,
+            media_type=media_type
         )
     
     def add_reference(self, media_id: str, reference_id: str) -> None:
@@ -619,3 +626,28 @@ class MediaManager:
             print("new MediaManager")
             cls._instance = super(MediaManager, cls).__new__(cls)
         return cls._instance
+
+    def setup_cleanup_task(self, container: DependencyContainer):
+        """设置清理任务"""
+        config = container.resolve(GlobalConfig)
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            self._cleanup_task = None
+        if config.media.auto_remove_unreferenced and config.media.cleanup_duration > 0:
+            duration = config.media.cleanup_duration
+            async def schedule_cleanup():
+                while True:
+                    last_cleanup_time = config.media.last_cleanup_time
+                    next_cleanup_time = last_cleanup_time + duration * 24 * 60 * 60
+                    await asyncio.sleep(max(0, next_cleanup_time - time.time()))
+                    count = self.cleanup_unreferenced()
+                    self.logger.info(f"Cleanup {count} unreferenced media files")
+                    config.media.last_cleanup_time = int(time.time())
+                    ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
+            try:
+                # 优先使用当前正在运行的事件循环（例如 Web 请求上下文中调用）
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # 启动阶段事件循环尚未运行，改用容器中注册的事件循环
+                loop = container.resolve(asyncio.AbstractEventLoop)
+            self._cleanup_task = loop.create_task(schedule_cleanup())
