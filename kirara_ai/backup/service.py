@@ -7,7 +7,7 @@ import tempfile
 import threading
 import zipfile
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -96,7 +96,7 @@ class BackupService:
         manifest_files = [self._build_file_record(file_path) for file_path in files]
         manifest = {
             "format_version": BACKUP_FORMAT_VERSION,
-            "created_at": datetime.now(UTC).isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "application_version": self._application_version(),
             "components": sorted(components),
             "files": [file.__dict__ for file in manifest_files],
@@ -400,7 +400,7 @@ class BackupService:
 
     @staticmethod
     def _build_backup_filename(backup_kind: str) -> str:
-        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         return f"kirara-{backup_kind}-{timestamp}{BACKUP_SUFFIX}"
 
     @staticmethod

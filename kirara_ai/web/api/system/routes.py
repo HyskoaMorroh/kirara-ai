@@ -22,8 +22,9 @@ from kirara_ai.internal import set_restart_flag, shutdown_event
 from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.logger import WebSocketLogHandler, get_logger
 from kirara_ai.plugin_manager.plugin_loader import PluginLoader
-from kirara_ai.web.api.system.utils import (download_file, get_cpu_info, get_cpu_usage, get_installed_version,
-                                            get_latest_npm_version, get_latest_pypi_version, get_memory_usage)
+from kirara_ai.web.api.system.utils import (WEBUI_DIST_TAG, download_file, get_cpu_info, get_cpu_usage,
+                                            get_installed_version, get_latest_npm_version, get_latest_pypi_version,
+                                            get_memory_usage)
 from kirara_ai.web.auth.services import AuthService
 from kirara_ai.workflow.core.workflow import WorkflowRegistry
 
@@ -394,7 +395,11 @@ async def check_update():
     latest_backend_version, backend_download_url = await get_latest_pypi_version("kirara-ai")
     
     # 获取前端最新版本信息，但不判断是否需要更新
-    latest_webui_version, webui_download_url = await get_latest_npm_version("kirara-ai-webui", npm_registry)
+    # 与自动安装保持一致，取 beta 标签：npm 的 latest (0.1.0) 不兼容 3.3 的
+    # ModelConfig 对象格式，会导致模型列表空白
+    latest_webui_version, webui_download_url = await get_latest_npm_version(
+        "kirara-ai-webui", npm_registry, dist_tag=WEBUI_DIST_TAG
+    )
     
     # 只判断后端是否需要更新
     backend_update_available = version.parse(latest_backend_version) > version.parse(current_backend_version)

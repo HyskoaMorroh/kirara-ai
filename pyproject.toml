@@ -73,6 +73,11 @@ where = ["."]
 include = ["kirara_ai*"]
 namespaces = true
 
+# 后端自带页面（如 /backup 备份恢复页）需随 wheel 一起分发，
+# 否则 pip 安装或 Docker 镜像里会缺失该目录，访问 /backup 得到 404
+[tool.setuptools.package-data]
+"kirara_ai.web" = ["static/*"]
+
 [[tool.uv.index]]
 url = "https://mirrors.ustc.edu.cn/pypi/simple"
 default = true

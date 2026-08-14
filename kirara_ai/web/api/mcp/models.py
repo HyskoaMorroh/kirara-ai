@@ -19,6 +19,39 @@ class MCPToolInfo(BaseModel):
     description: Optional[str] = None
     input_schema: Dict[str, Any] = Field(default_factory=dict)
 
+
+class MCPPromptInfo(BaseModel):
+    """MCP提示词信息
+
+    WebUI 的提示词卡片按 `id` 显示标题、按 `description` 显示说明，并把 `id`
+    回传给采样接口，因此这里在 MCP 原始字段之外额外暴露 `id`（取 name）。
+    """
+    id: str
+    name: str
+    description: Optional[str] = None
+    arguments: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class MCPResourceInfo(BaseModel):
+    """MCP资源信息
+
+    WebUI 的资源卡片按 `id` 显示标题，并把 `id` 拼进资源读取接口的路径，
+    因此这里在 MCP 原始字段之外额外暴露 `id`（取 name，缺失时回退到 uri）。
+    """
+    id: str
+    name: str
+    uri: str
+    description: Optional[str] = None
+    mime_type: Optional[str] = None
+    size: Optional[int] = None
+
+
+class MCPPromptSampleRequest(BaseModel):
+    """提示词采样请求"""
+    promptId: str
+    text: str = Field(default="")
+    temperature: Optional[float] = None
+
 class MCPServerList(BaseModel):
     """MCP服务器列表"""
     items: List[MCPServerInfo]

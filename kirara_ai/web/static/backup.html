@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kirara AI - 备份与恢复</title>
+<style>
+:root{--bg:#f5f7fa;--card:#fff;--border:#e0e4ea;--text:#1f2328;--muted:#6b7280;
+--primary:#2080f0;--primary-h:#4098fc;--danger:#d03050;--ok:#18a058;--warn:#f0883a;}
+@media (prefers-color-scheme:dark){:root{--bg:#101014;--card:#18181c;--border:#2d2d32;
+--text:#e6e6e6;--muted:#9ca3af;}}
+*{box-sizing:border-box}
+body{margin:0;padding:24px;background:var(--bg);color:var(--text);
+font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;font-size:14px;line-height:1.6}
+.wrap{max-width:920px;margin:0 auto}
+h1{font-size:20px;margin:0 0 4px}
+h2{font-size:16px;margin:0 0 12px}
+.sub{color:var(--muted);margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:20px;margin-bottom:16px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+button{font:inherit;padding:7px 16px;border-radius:5px;border:1px solid var(--primary);
+background:var(--primary);color:#fff;cursor:pointer}
+button:hover:not(:disabled){background:var(--primary-h)}
+button:disabled{opacity:.5;cursor:not-allowed}
+button.ghost{background:transparent;color:var(--primary)}
+button.danger{background:var(--danger);border-color:var(--danger)}
+input[type=file]{font:inherit;color:var(--text);max-width:100%}
+input[type=password]{font:inherit;padding:7px 10px;border-radius:5px;
+border:1px solid var(--border);background:var(--card);color:var(--text);min-width:220px}
+.tip{color:var(--muted);font-size:13px;margin:8px 0 0}
+.warn{border-left:3px solid var(--warn);padding-left:12px;margin:12px 0 0}
+pre{background:var(--bg);border:1px solid var(--border);border-radius:6px;
+padding:12px;overflow-x:auto;font-size:12.5px;margin:12px 0 0;white-space:pre-wrap;word-break:break-word}
+table{border-collapse:collapse;width:100%;margin-top:12px;font-size:13px}
+th,td{border-bottom:1px solid var(--border);padding:8px 6px;text-align:left}
+.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px}
+.badge.ok{background:rgba(24,160,88,.15);color:var(--ok)}
+.badge.no{background:rgba(208,48,80,.15);color:var(--danger)}
+a{color:var(--primary)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>备份与恢复</h1>
+<p class="sub">导出或恢复完整实例数据。此页面由后端直接提供，不依赖 WebUI 版本。</p>
+<div class="card">
+  <h2>1. 登录</h2>
+  <p class="tip">备份接口需要管理员身份。若你已在 WebUI 登录过，令牌会自动复用，无需重复输入。</p>
+  <div class="row">
+    <input type="password" id="pwd" placeholder="WebUI 登录密码" autocomplete="current-password">
+    <button id="loginBtn">登录</button>
+    <span id="authState" class="badge no">未登录</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>2. 导出完整备份</h2>
+  <p class="tip">导出内容：系统与 Web 设置、模型与机器人配置、工作流、触发规则、数据库、记忆、媒体、插件、字体及自动探测状态。</p>
+  <div class="warn">
+    <strong>备份包含明文凭据</strong>：模型 API Key、机器人 Token、Web 密钥与密码哈希都在里面。
+    请只保存到你信任的本地位置，切勿提交到 GitHub、推进 Docker 镜像或发给他人。
+  </div>
+  <div class="row" style="margin-top:14px">
+    <button id="exportBtn" disabled>下载备份 (.kirara-backup.zip)</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>3. 导入并恢复</h2>
+  <p class="tip">先「检查」确认备份包结构与内容，再「恢复」写入。恢复前会自动在 <code>data/backups/</code> 生成回滚包；校验或写入失败时原数据保持不变。</p>
+  <div class="row">
+    <input type="file" id="file" accept=".zip,.kirara-backup.zip">
+    <button id="inspectBtn" class="ghost" disabled>检查</button>
+    <button id="importBtn" class="danger" disabled>恢复</button>
+  </div>
+  <p class="tip">恢复成功后<strong>必须重启服务</strong>，配置、工作流与 MCP 连接才会重新加载。</p>
+</div>
+
+<div class="card">
+  <h2>4. 回滚包</h2>
+  <div class="row">
+    <button id="rollbackBtn" class="ghost" disabled>刷新列表</button>
+  </div>
+  <div id="rollbacks"></div>
+</div>
+
+<div class="card">
+  <h2>操作结果</h2>
+  <pre id="out">等待操作…</pre>
+</div>
+
+<script>
+const API = '/backend-api/api';
+const $ = id => document.getElementById(id);
+const out = msg => { $('out').textContent = typeof msg === 'string' ? msg : JSON.stringify(msg, null, 2); };
+
+// 与 WebUI 共用 localStorage 中的 token，已登录过就不必再输密码
+let token = localStorage.getItem('token') || '';
+
+function setAuth(ok) {
+  const el = $('authState');
+  el.textContent = ok ? '已登录' : '未登录';
+  el.className = 'badge ' + (ok ? 'ok' : 'no');
+  ['exportBtn', 'inspectBtn', 'importBtn', 'rollbackBtn'].forEach(id => { $(id).disabled = !ok; });
+}
+
+function authHeaders() {
+  return { 'Authorization': 'Bearer ' + token };
+}
+
+async function readError(resp) {
+  // 后端错误统一放在 error 或 message 字段
+  try {
+    const data = await resp.json();
+    return data.error || data.message || JSON.stringify(data);
+  } catch {
+    return 'HTTP ' + resp.status;
+  }
+}
+
+// 用一个最轻的鉴权接口验证令牌是否仍然有效
+async function verifyToken() {
+  if (!token) { setAuth(false); return false; }
+  try {
+    const resp = await fetch(API + '/system/backups/rollbacks', { headers: authHeaders() });
+    const ok = resp.ok;
+    setAuth(ok);
+    if (!ok) out('已保存的登录令牌无效或已过期，请重新登录。');
+    return ok;
+  } catch (e) {
+    setAuth(false);
+    out('无法连接后端：' + e.message);
+    return false;
+  }
+}
+
+$('loginBtn').onclick = async () => {
+  const password = $('pwd').value;
+  if (!password) { out('请输入密码。'); return; }
+  try {
+    const resp = await fetch(API + '/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+    if (!resp.ok) { out('登录失败：' + await readError(resp)); setAuth(false); return; }
+    const data = await resp.json();
+    token = data.access_token;
+    localStorage.setItem('token', token);
+    $('pwd').value = '';
+    setAuth(true);
+    out('登录成功。');
+    loadRollbacks();
+  } catch (e) {
+    out('登录请求失败：' + e.message);
+  }
+};
+
+$('exportBtn').onclick = async () => {
+  out('正在打包，数据量大时可能需要一些时间…');
+  try {
+    const resp = await fetch(API + '/system/backups/export', { headers: authHeaders() });
+    if (!resp.ok) { out('导出失败：' + await readError(resp)); return; }
+    const blob = await resp.blob();
+    // 优先使用后端 Content-Disposition 里的文件名
+    const disp = resp.headers.get('Content-Disposition') || '';
+    const matched = disp.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+    const name = matched ? decodeURIComponent(matched[1]) : 'kirara-backup.zip';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    out('导出完成：' + name + '（' + (blob.size / 1048576).toFixed(2) + ' MB）\n请妥善保存，勿上传到公开仓库或镜像。');
+  } catch (e) {
+    out('导出请求失败：' + e.message);
+  }
+};
+
+async function postBackup(path, label) {
+  const f = $('file').files[0];
+  if (!f) { out('请先选择备份文件。'); return; }
+  const form = new FormData();
+  form.append('backup', f);
+  out(label + '中…');
+  try {
+    const resp = await fetch(API + path, { method: 'POST', headers: authHeaders(), body: form });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) { out(label + '失败：' + (data ? (data.error || data.message) : 'HTTP ' + resp.status)); return; }
+    out(data);
+    loadRollbacks();
+  } catch (e) {
+    out(label + '请求失败：' + e.message);
+  }
+}
+
+$('inspectBtn').onclick = () => postBackup('/system/backups/inspect', '检查');
+
+$('importBtn').onclick = () => {
+  if (!confirm('恢复会用备份包覆盖当前实例数据。系统会先创建回滚包，但仍建议你先手动导出一份。确定继续？')) return;
+  postBackup('/system/backups/import', '恢复');
+};
+
+async function loadRollbacks() {
+  if (!token) return;
+  try {
+    const resp = await fetch(API + '/system/backups/rollbacks', { headers: authHeaders() });
+    if (!resp.ok) { $('rollbacks').innerHTML = '<p class="tip">无法读取回滚包列表。</p>'; return; }
+    const data = await resp.json();
+    const list = data.rollbacks || [];
+    if (!list.length) { $('rollbacks').innerHTML = '<p class="tip">暂无回滚包。</p>'; return; }
+    const rows = list.map(r => {
+      const size = (r.size / 1048576).toFixed(2) + ' MB';
+      const time = new Date(r.modified_at * 1000).toLocaleString();
+      const href = API + '/system/backups/rollbacks/' + encodeURIComponent(r.name)
+        + '?auth_token=' + encodeURIComponent(token);
+      return '<tr><td>' + r.name + '</td><td>' + size + '</td><td>' + time
+        + '</td><td><a href="' + href + '">下载</a></td></tr>';
+    }).join('');
+    $('rollbacks').innerHTML =
+      '<table><thead><tr><th>文件名</th><th>大小</th><th>创建时间</th><th></th></tr></thead><tbody>'
+      + rows + '</tbody></table>';
+  } catch (e) {
+    $('rollbacks').innerHTML = '<p class="tip">读取回滚包失败：' + e.message + '</p>';
+  }
+}
+
+$('rollbackBtn').onclick = loadRollbacks;
+
+verifyToken().then(ok => { if (ok) { out('已复用 WebUI 登录令牌，可直接操作。'); loadRollbacks(); } });
+</script>
+
+</div>
+</body>
+</html>

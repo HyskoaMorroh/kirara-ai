@@ -39,7 +39,7 @@ data/memory/*.json
 data/media/metadata
 data/media/files
 
-# WebUI 构建产物由 Dockerfile 从 npm 下载，无需带入
+# WebUI 构建产物由 Dockerfile 从受版本控制的 webui 源码生成，无需带入
 web/assets
 web/index.html
 

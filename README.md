@@ -76,16 +76,27 @@
 
 ## 💾 完整备份与恢复
 
-已登录的管理员可通过系统 API 导出或恢复完整实例数据。备份包包含系统配置、机器人与模型配置、工作流、触发规则、记忆、媒体、数据库、外部插件、字体和 Web 登录密码文件；导入成功后必须重启服务。
+已登录的管理员可导出或恢复完整实例数据。备份包包含系统配置、机器人与模型配置、工作流、触发规则、记忆、媒体、数据库、外部插件、字体和 Web 登录密码文件；导入成功后必须重启服务。
+
+### 图形界面
+
+部署后，在 WebUI 的 **系统设置 → 备份与恢复** 标签页即可看到「导出完整备份」「检查备份包」「恢复数据」「自动回滚包下载」四组操作。导入必须先通过检查，恢复会再次要求确认，成功后会明确提示重启服务。
+
+为兼容旧书签，也保留后端直连页 **`http://<你的地址>:8759/backup`**（端口按你的部署调整）。两处均复用 WebUI 登录令牌，所有请求仍经过原有 Bearer 鉴权。
+
+### HTTP 接口
+
+也可以直接调用接口（例如写进备份脚本）：
 
 - 导出：`GET /backend-api/api/system/backups/export`
 - 导入前检查：`POST /backend-api/api/system/backups/inspect`，使用 multipart 字段 `backup`
 - 导入：`POST /backend-api/api/system/backups/import`，使用 multipart 字段 `backup`
-- 自动回滚包：`GET /backend-api/api/system/backups/rollbacks`
+- 自动回滚包列表：`GET /backend-api/api/system/backups/rollbacks`
+- 下载回滚包：`GET /backend-api/api/system/backups/rollbacks/<文件名>`
+
+所有接口都需要 `Authorization: Bearer <token>` 头，token 由 `POST /backend-api/api/auth/login` 获取。
 
 每次导入都会先在 `data/backups/` 创建回滚包；导入包验证失败或写入失败时，原有数据保持不变。备份包包含 API Key、机器人 Token、Web 密钥和密码哈希，必须只保存到可信本地位置，严禁提交到 GitHub、Docker Hub 或发送给他人。
-
-当前仓库仅提供后端 API，WebUI 的导入、导出按钮需由 `kirara-webui` 前端项目调用上述接口后重新构建发布。
 
 ## ⚡ 核心特性
 * [x] 图片发送
@@ -139,7 +150,7 @@
 
 服务器部署时，将 `.env.example` 复制为仅保存在服务器的 `.env`，填写 `DOCKERHUB_IMAGE=your-dockerhub-username/kirara-agent-framework:latest`，然后执行 `docker compose pull` 和 `docker compose up -d --force-recreate`。Compose 不再回退到第三方镜像；未配置镜像名会直接报错，避免误部署旧版本。
 
-已有 `data` 目录会保留旧工作流和规则。若要验证新镜像的默认工作流，请使用新的空数据目录或通过完整备份导入，不要直接删除现有数据。
+已有 `data` 目录会保留旧工作流和规则。若要验证新镜像的默认工作流，请使用新的空数据目录或通过完整备份导入，不要直接删除现有数据。镜像会从仓库内受版本控制的 `webui/` 源码构建前端，不再依赖 npm 上的可变 `beta` 标签；更新 WebUI 时请随项目 A 一起发布新镜像。
 
 ## 🕸 HTTP API
 

@@ -12,8 +12,8 @@ from kirara_ai.logger import get_logger
 from kirara_ai.mcp_module import MCPConnectionState, MCPServer, MCPServerManager
 
 from ...auth.middleware import require_auth
-from .models import (MCPServerCreateRequest, MCPServerInfo, MCPServerList, MCPServerUpdateRequest, MCPStatistics,
-                     MCPToolInfo)
+from .models import (MCPPromptInfo, MCPPromptSampleRequest, MCPResourceInfo, MCPServerCreateRequest, MCPServerInfo,
+                     MCPServerList, MCPServerUpdateRequest, MCPStatistics, MCPToolInfo)
 
 # 创建蓝图
 mcp_bp = Blueprint("mcp", __name__)
@@ -31,6 +31,43 @@ def _convert_to_server_info(server: MCPServer) -> MCPServerInfo:
             server.server_config.args, list) else server.server_config.args,
         url=getattr(server.server_config, 'url', None),
         connection_state=server.state.name.lower()
+    )
+
+
+def _convert_to_prompt_info(prompt) -> MCPPromptInfo:
+    """将 MCP 原始 Prompt 转换为 WebUI 需要的响应对象
+
+    MCP 协议里提示词的唯一标识是 name，WebUI 用 id 字段显示并回传，
+    因此这里同时给出 id 与 name。
+    """
+    arguments = []
+    for argument in getattr(prompt, "arguments", None) or []:
+        arguments.append(
+            argument.model_dump() if hasattr(argument, "model_dump") else dict(argument)
+        )
+    return MCPPromptInfo(
+        id=prompt.name,
+        name=prompt.name,
+        description=getattr(prompt, "description", None),
+        arguments=arguments,
+    )
+
+
+def _convert_to_resource_info(resource) -> MCPResourceInfo:
+    """将 MCP 原始 Resource 转换为 WebUI 需要的响应对象
+
+    资源的读取键是 uri（AnyUrl，需转成字符串才能 JSON 序列化）；
+    WebUI 用 id 显示标题并拼进读取路径，这里取 name，缺失时回退到 uri。
+    """
+    uri = str(resource.uri)
+    name = getattr(resource, "name", None) or uri
+    return MCPResourceInfo(
+        id=name,
+        name=name,
+        uri=uri,
+        description=getattr(resource, "description", None),
+        mime_type=getattr(resource, "mimeType", None),
+        size=getattr(resource, "size", None),
     )
 
 
@@ -475,8 +512,9 @@ async def get_server_prompts(server_id: str):
         prompts = await manager.get_prompt_list(server_id)
         if prompts is None:
             return jsonify({"message": f"服务器 {server_id} 未连接"}), 404
-        
-        return jsonify(prompts)
+
+        # MCP 原始对象含 AnyUrl 等非 JSON 原生类型，统一转换后再返回
+        return jsonify([_convert_to_prompt_info(prompt).model_dump() for prompt in prompts])
     except Exception as e:
         logger.opt(exception=e).error(f"获取MCP服务器 {server_id} 提示词列表失败")
         return jsonify({"message": str(e)}), 500
@@ -498,7 +536,94 @@ async def get_server_resources(server_id: str):
         if resources is None:
             return jsonify({"message": f"服务器 {server_id} 未连接"}), 404
         
-        return jsonify(resources)
+        return jsonify([_convert_to_resource_info(resource).model_dump() for resource in resources])
     except Exception as e:
         logger.opt(exception=e).error(f"获取MCP服务器 {server_id} 资源列表失败")
+        return jsonify({"message": str(e)}), 500
+
+
+@mcp_bp.route("/servers/<server_id>/resources/<path:resource_id>", methods=["GET"])
+@require_auth
+async def read_server_resource(server_id: str, resource_id: str):
+    """读取MCP服务器上指定资源的内容
+
+    resource_id 为资源列表里返回的 id（即 name，缺失时为 uri）。这里先在资源
+    列表中按 name / uri 反查真实 uri，再交给 MCP 会话读取，避免直接把前端
+    传入的字符串当作 uri 使用。
+    """
+    try:
+        manager: MCPServerManager = g.container.resolve(MCPServerManager)
+
+        server = manager.get_server(server_id)
+        if not server:
+            return jsonify({"message": f"服务器 {server_id} 不存在"}), 404
+
+        resources = await manager.get_resource_list(server_id)
+        if resources is None:
+            return jsonify({"message": f"服务器 {server_id} 未连接"}), 404
+
+        target_uri: Optional[str] = None
+        for resource in resources:
+            uri = str(resource.uri)
+            name = getattr(resource, "name", None) or uri
+            if resource_id in (name, uri):
+                target_uri = uri
+                break
+
+        if target_uri is None:
+            return jsonify({"message": f"资源 {resource_id} 不存在"}), 404
+
+        result = await manager.get_resource(server_id, target_uri)
+        if result is None:
+            return jsonify({"message": f"服务器 {server_id} 未连接"}), 404
+
+        return jsonify(result.model_dump(mode="json"))
+    except Exception as e:
+        logger.opt(exception=e).error(f"读取MCP服务器 {server_id} 资源 {resource_id} 失败")
+        return jsonify({"message": str(e)}), 500
+
+
+@mcp_bp.route("/servers/<server_id>/prompts/sample", methods=["POST"])
+@require_auth
+async def sample_server_prompt(server_id: str):
+    """按给定参数取回MCP服务器上的提示词内容
+
+    WebUI 传入 promptId（即提示词 name）、text 和 temperature。MCP 的
+    prompts/get 只接受字符串参数字典，因此这里只透传非空参数，并把结果里的
+    文本片段拼成 text 字段，同时保留原始 messages 供前端展示。
+    """
+    try:
+        data = await request.get_json()
+        request_data = MCPPromptSampleRequest(**data)
+
+        manager: MCPServerManager = g.container.resolve(MCPServerManager)
+
+        server = manager.get_server(server_id)
+        if not server:
+            return jsonify({"message": f"服务器 {server_id} 不存在"}), 404
+
+        prompt_args: Dict[str, str] = {}
+        if request_data.text:
+            prompt_args["text"] = request_data.text
+        if request_data.temperature is not None:
+            prompt_args["temperature"] = str(request_data.temperature)
+
+        result = await manager.get_prompt(
+            server_id, request_data.promptId, prompt_args or None
+        )
+        if result is None:
+            return jsonify({"message": f"服务器 {server_id} 未连接"}), 404
+
+        payload = result.model_dump(mode="json")
+        # 前端优先读 text 字段，没有 text 时才回退到展示整个 JSON
+        texts = [
+            message.content.text
+            for message in result.messages
+            if getattr(message.content, "type", None) == "text"
+        ]
+        if texts:
+            payload["text"] = "\n".join(texts)
+        return jsonify(payload)
+    except Exception as e:
+        logger.opt(exception=e).error(f"采样MCP服务器 {server_id} 提示词失败")
         return jsonify({"message": str(e)}), 500

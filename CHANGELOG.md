@@ -15,17 +15,30 @@
 - **备份管理 API**：在系统 API 中提供备份创建、列表、下载、导入、删除和恢复状态接口；恢复成功后明确要求重启服务以重新加载配置与运行对象。
 - **备份测试与设计文档**：新增备份服务/API 测试，以及完整备份恢复的设计和实施文档，便于后续维护与审计。
 - **可配置镜像示例**：新增 `.env.example`，使用 `DOCKERHUB_IMAGE` 显式指定部署镜像，避免新部署默认依赖第三方固定镜像名。
+- **MCP 资源读取与提示词采样 API**：新增 `GET /mcp/servers/<id>/resources/<resource_id>` 与 `POST /mcp/servers/<id>/prompts/sample`，补齐 WebUI MCP 详情页「查看资源」「采样提示」两个按钮所需的后端接口。
+- **备份与恢复图形界面**：新增后端自带页面 `GET /backup`（源文件 `kirara_ai/web/static/backup.html`），提供导出、导入前检查、恢复和回滚包下载四组操作。该页面不属于 `kirara-ai-webui` 前端项目，因此不受 WebUI 版本影响，部署后立即可用；会自动复用浏览器中 WebUI 的登录令牌，也支持在页面内单独登录。页面本身不含任何凭据，所有接口调用仍需 Bearer 令牌。
+- **WebUI 内置备份入口**：将 `kirara-ai-webui` 0.1.1-beta.3 源码受版本控制地纳入 `webui/`，在「系统设置」增加与原有界面协调的「备份与恢复」标签页。页面直接使用既有备份 API，支持导出、导入前检查、二次确认恢复和不含令牌 URL 的回滚包下载；`/backup` 旧入口继续保留。
+- **打包声明**：`MANIFEST.in` 与 `pyproject.toml` 增加 `kirara_ai/web/static` 的分发声明，确保 wheel 与 Docker 镜像内包含后端自带页面。
+
+### Fixed
+
+- **模型列表在 WebUI 中空白**：Docker 不再从 npm 的 `latest` 或可变 `beta` 标签拉取前端，而是构建仓库内固定的 `kirara-ai-webui` 0.1.1-beta.3 源码。该版本按 `model.id` / `model.type` / `model.ability` 渲染，与 3.3 后端的 `ModelConfig` 对象数组兼容，因此模型卡片会正常显示名称和能力。
+- **MCP 提示词与资源列表接口返回 500**：`/mcp/servers/<id>/prompts` 与 `/mcp/servers/<id>/resources` 此前直接 `jsonify` MCP 原始对象，`Resource.uri` 是 `AnyUrl` 类型无法被 JSON 序列化。现统一转换为 `MCPPromptInfo` / `MCPResourceInfo`，并补上 WebUI 需要的 `id` 字段。
 
 ### Changed
 
+- **默认聊天工作流与实际使用配置对齐**：`data/workflows/chat/` 下 5 个工作流按当前线上配置更新，部署后无需在 WebUI 里手动调整。`normal.yaml` 换为「刘思思（全能专家版）」人设并配置 `grok-4.5` 主模型加 4 个备用模型；`dsr_thinking.yaml` 精简为专家视角提示词并配置 `claude-opus-4-8` 主模型加 4 个备用模型；`normal_multimodal.yaml` 精简提示词并指定 `gemini-3-pro-preview`；三个文件同时清理了重复的 `connected_to` 连线（同一对端口被声明两次）。`memory_store.yaml` 与 `talk_break.yaml` 内容与线上一致，未改动。所有文件区块数量保持不变，无功能块增减。
+
 - **Docker Hub 自动发布流程**：`.github/workflows/docker-latest.yml` 改为在正式 GitHub Release 发布后校验其是否为当前 Latest，只有通过校验才执行一次多架构构建，并同时推送 `<Release 标签>` 与 `latest` 镜像；普通提交、草稿、预发布和非 Latest Release 不会推送，同时保留手动触发。`.github/workflows/docker-tag.yml` 不再监听 Tag 推送，仅作为需要单独重建版本标签时的手动应急入口。工作流增加并发控制及 Docker Hub 账号、令牌、镜像名的前置校验。
 - **Compose 部署来源**：`docker-compose.yml` 和示例文件改用环境变量解析镜像；示例 Compose 移除源码热挂载，生产部署以镜像内容为准，降低“仓库已更新、容器仍运行旧代码”的风险。
+- **前端构建来源**：Docker 新增固定 WebUI 构建阶段，使用项目内 `webui/` 源码和锁文件生成静态资源。锁文件统一改为 npm 官方源，避免把本机不可用的镜像地址带进 Docker 构建。
 - **部署说明**：README 增加 Docker Hub、环境变量、默认工作流初始化和完整备份恢复说明，强调已有 `data/` 卷不会被新镜像自动覆盖。
 - **忽略规则**：`.gitignore` 忽略本机 `.env`，防止部署参数和敏感配置被误提交。
 
 ### Security
 
 - 备份包可能包含模型密钥、机器人令牌和 Web 凭据相关设置；README 与备份说明明确要求仅保存到可信位置，禁止提交到 GitHub、Docker Hub 或分享给他人。
+- `/backup` 页面所有接口调用均带 Bearer 令牌，页面文件本身不含密码或密钥；回滚包下载沿用后端已有的 `auth_token` 查询参数鉴权，未新增任何免鉴权入口。
 - 恢复流程只接受通过结构与清单校验的备份包，并拒绝越界路径、异常压缩包和不受支持的内容。
 
 ## [3.3.0a2] - 相对 3.2.0 的产品升级

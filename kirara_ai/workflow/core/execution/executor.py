@@ -88,8 +88,10 @@ class WorkflowExecutor:
             entry_blocks = [block for block in self.workflow.blocks if not block.inputs]
             # self.logger.debug(f"Identified entry blocks: {[b.name for b in entry_blocks]}")
             try:
-                async with asyncio.timeout(max_timeout): # type: ignore
-                    await self._execute_nodes(entry_blocks, executor, loop)
+                await asyncio.wait_for(
+                    self._execute_nodes(entry_blocks, executor, loop),
+                    timeout=max_timeout,
+                )
             except asyncio.TimeoutError as e:
                 self.event_bus.post(WorkflowExecutionEnd(self.workflow, self, self.results))
                 raise WorkflowExecutionTimeoutException(f"Workflow execution timed out after {max_timeout} seconds") from e

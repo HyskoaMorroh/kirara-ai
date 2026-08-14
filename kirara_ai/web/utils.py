@@ -10,7 +10,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import FileResponse, Response
 
 from kirara_ai.logger import get_logger
-from kirara_ai.web.api.system.utils import download_file, get_latest_npm_version
+from kirara_ai.web.api.system.utils import WEBUI_DIST_TAG, download_file, get_latest_npm_version
 
 logger = get_logger("WebUtils")
 
@@ -100,12 +100,14 @@ async def install_webui(install_path: Path) -> tuple[bool, str]:
         ]
         
         npm_registry = await test_npm_registry_speed(registries)
-        
+
         temp_dir = tempfile.mkdtemp()
         logger.info(f"开始从 {npm_registry} 获取最新WebUI版本信息")
-        
-        latest_webui_version, webui_download_url = await get_latest_npm_version("kirara-ai-webui", npm_registry)
-        
+
+        latest_webui_version, webui_download_url = await get_latest_npm_version(
+            "kirara-ai-webui", npm_registry, dist_tag=WEBUI_DIST_TAG
+        )
+
         if not webui_download_url:
             return False, "无法获取WebUI下载地址"
             

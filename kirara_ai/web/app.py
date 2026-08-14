@@ -63,6 +63,11 @@ ERROR_MESSAGE = """
 cwd = os.getcwd()
 STATIC_FOLDER = f"{cwd}/web"
 
+# 后端自带的页面目录。WebUI（kirara-ai-webui）目前没有备份导入导出界面，
+# 而备份 API 只存在于本仓库，前端不可能提供入口。这里把一个不依赖 WebUI 版本
+# 的独立页面挂到 /backup，保证部署后就能在浏览器里完成导出与恢复。
+BUILTIN_STATIC_FOLDER = Path(__file__).parent / "static"
+
 logger = get_logger("WebServer")
 
 custom_static_assets: dict[str, str] = {}
@@ -156,6 +161,24 @@ def create_app(container: DependencyContainer) -> FastAPI:
         except Exception as e:
             logger.error(f"Error serving index: {e}")
             return HTMLResponse(content=ERROR_MESSAGE.replace("TARGET_DIR", STATIC_FOLDER))
+
+    @app.get("/backup")
+    async def backup_page(request: Request):
+        """后端自带的备份与恢复页面
+
+        WebUI 未提供备份界面，且备份 API 仅存在于本仓库，因此这里直接由后端
+        提供页面。页面本身不含任何凭据，所有接口调用仍需登录后的 Bearer 令牌。
+        """
+        try:
+            page_path = BUILTIN_STATIC_FOLDER / "backup.html"
+            if not page_path.exists():
+                raise HTTPException(status_code=404, detail="Backup page not found")
+            return await create_no_cache_response(page_path, request)
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            logger.error(f"Error serving backup page: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     @app.middleware("http")
     async def spa_middleware(request: Request, call_next):

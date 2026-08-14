@@ -7,6 +7,13 @@ from functools import lru_cache
 import aiohttp
 import psutil
 
+# kirara-ai-webui 在 npm 上的 latest 标签仍指向 0.1.0，该版本把 backend.models
+# 当作字符串数组渲染（对每一项调用 charAt/charCodeAt 取首字母和配色）。3.3 起
+# 后端返回的是 ModelConfig 对象数组，旧前端渲染出的模型卡片会全部空白。
+# beta 标签（0.1.1-beta.3 起）才按 model.id / model.type / model.ability 渲染，
+# 因此 WebUI 的安装与更新检查统一走 beta 标签。
+WEBUI_DIST_TAG = "beta"
+
 
 def get_installed_version() -> str:
     """获取当前安装的版本号"""
@@ -40,15 +47,40 @@ async def get_latest_pypi_version(package_name: str) -> tuple[str, str]:
         return "0.0.0", ""
     
 
-async def get_latest_npm_version(package_name: str, registry: str = "https://registry.npmjs.org") -> tuple[str, str]:
-    """获取NPM包的最新版本和下载URL"""
+async def get_latest_npm_version(
+    package_name: str,
+    registry: str = "https://registry.npmjs.org",
+    dist_tag: str = "latest",
+) -> tuple[str, str]:
+    """获取NPM包指定 dist-tag 的版本和下载URL
+
+    Args:
+        package_name: npm 包名
+        registry: npm registry 地址
+        dist_tag: 要解析的 dist-tag，默认 "latest"。
+            WebUI 需要传 "beta"：npm 上 kirara-ai-webui 的 latest 仍是 0.1.0，
+            该版本把 backend.models 当作字符串数组渲染，而 3.3 起后端返回的是
+            ModelConfig 对象数组，会导致「模型列表」整片空白。
+            指定的 dist-tag 不存在时自动回退到 latest，避免上游撤销标签后无法安装。
+
+    Returns:
+        (版本号, tarball 下载地址)，失败时返回 ("0.0.0", "")
+    """
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{registry}/{package_name}") as response:
                 response.raise_for_status()
                 data = await response.json()
-                latest_version = data["dist-tags"]["latest"]
-                tarball_url = data["versions"][latest_version]["dist"]["tarball"]
+                dist_tags = data.get("dist-tags", {})
+                versions = data.get("versions", {})
+                # 依次尝试：请求的 dist-tag -> latest，两者都要求对应版本真实存在
+                candidates = [dist_tags.get(dist_tag), dist_tags.get("latest")]
+                latest_version = next(
+                    (v for v in candidates if v and v in versions), None
+                )
+                if not latest_version:
+                    return "0.0.0", ""
+                tarball_url = versions[latest_version]["dist"]["tarball"]
         return latest_version, tarball_url
     except Exception:
         return "0.0.0", ""

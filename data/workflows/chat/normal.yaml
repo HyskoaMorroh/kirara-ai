@@ -104,7 +104,13 @@ blocks:
           to: system_prompt_format
   - type: internal:chat_completion
     name: llm_chat
-    params: {}
+    params:
+      model_name: grok-4.5
+      fallback_model_1: deepseek-v4-pro
+      fallback_model_2: gemini-3.1-pro-preview
+      fallback_model_3: gpt-5.5
+      fallback_model_4: claude-opus-4-8
+      max_retries: 3
     position:
       x: 1280
       y: 138
