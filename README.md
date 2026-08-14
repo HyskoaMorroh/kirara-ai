@@ -131,7 +131,7 @@
 
 ### GitHub 自动发布 Docker Hub 镜像
 
-推送到 `main` 会触发 `Docker build latest` 工作流并发布 `latest` 标签。仓库需在 GitHub Settings → Secrets and variables → Actions 中配置：
+发布正式 GitHub Release 后，工作流会先确认该 Release 是仓库当前的 **Latest**，再构建并发布 `latest` 标签；普通提交、草稿、预发布和非 Latest Release 均不会推送 Docker Hub。仍可在 GitHub Actions 页面手动运行 `Docker build latest`。仓库需在 GitHub Settings → Secrets and variables → Actions 中配置：
 
 - Secret `DOCKERHUB_USERNAME`：Docker Hub 用户名。
 - Secret `DOCKERHUB_TOKEN`：Docker Hub Access Token。

@@ -18,7 +18,7 @@
 
 ### Changed
 
-- **Docker Hub 自动发布流程**：`.github/workflows/docker-latest.yml` 改为在推送 `main` 分支时构建并推送 `latest` 镜像，同时保留手动触发；增加并发控制及 Docker Hub 账号、令牌、镜像名的前置校验。
+- **Docker Hub 自动发布流程**：`.github/workflows/docker-latest.yml` 改为在正式 GitHub Release 发布后校验其是否为当前 Latest，只有通过校验才构建并推送 `latest` 镜像；普通提交、草稿、预发布和非 Latest Release 不会推送，同时保留手动触发。工作流增加并发控制及 Docker Hub 账号、令牌、镜像名的前置校验。
 - **Compose 部署来源**：`docker-compose.yml` 和示例文件改用环境变量解析镜像；示例 Compose 移除源码热挂载，生产部署以镜像内容为准，降低“仓库已更新、容器仍运行旧代码”的风险。
 - **部署说明**：README 增加 Docker Hub、环境变量、默认工作流初始化和完整备份恢复说明，强调已有 `data/` 卷不会被新镜像自动覆盖。
 - **忽略规则**：`.gitignore` 忽略本机 `.env`，防止部署参数和敏感配置被误提交。

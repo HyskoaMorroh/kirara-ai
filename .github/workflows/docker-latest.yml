@@ -2,9 +2,9 @@ name: Docker build latest
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
+  release:
+    types:
+      - published
 
 concurrency:
   group: docker-latest-${{ github.ref }}
@@ -13,13 +13,49 @@ concurrency:
 jobs:
   docker:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
+      -
+        name: Verify publish eligibility
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}
+          RELEASE_IS_DRAFT: ${{ github.event.release.draft }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "publish=true" >> $GITHUB_OUTPUT
+            echo "Manual publish requested." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          if [ "$RELEASE_IS_PRERELEASE" = "true" ] || [ "$RELEASE_IS_DRAFT" = "true" ]; then
+            echo "publish=false" >> $GITHUB_OUTPUT
+            echo "Published release $RELEASE_TAG is a draft or prerelease; Docker Hub publish skipped." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
+          if [ "$RELEASE_TAG" != "$latest_tag" ]; then
+            echo "publish=false" >> $GITHUB_OUTPUT
+            echo "Published release $RELEASE_TAG is not the current Latest release ($latest_tag); Docker Hub publish skipped." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          echo "publish=true" >> $GITHUB_OUTPUT
+          echo "Published release $RELEASE_TAG is the current Latest release; Docker Hub publish approved." >> $GITHUB_STEP_SUMMARY
       -
         name: Checkout
         uses: actions/checkout@v4
+        if: steps.release.outputs.publish == 'true'
+        with:
+          ref: ${{ github.event.release.tag_name || github.sha }}
       -
         name: Resolve image name
         id: image
+        if: steps.release.outputs.publish == 'true'
         run: |
           IMAGE_NAME="${{ vars.DOCKERHUB_IMAGE }}"
           if [ -z "$IMAGE_NAME" ]; then
@@ -34,21 +70,26 @@ jobs:
       -
         name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+        if: steps.release.outputs.publish == 'true'
       -
         name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        if: steps.release.outputs.publish == 'true'
       -
         name: qemu workaround
+        if: steps.release.outputs.publish == 'true'
         run: docker run --rm --privileged multiarch/qemu-user-static --reset -p yes -c yes
       -
         name: Login to Docker Hub
         uses: docker/login-action@v3
+        if: steps.release.outputs.publish == 'true'
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       -
         name: Build and push
         uses: docker/build-push-action@v4
+        if: steps.release.outputs.publish == 'true'
         with:
           context: .
           push: true
