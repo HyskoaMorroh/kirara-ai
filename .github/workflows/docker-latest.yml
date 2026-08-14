@@ -47,8 +47,9 @@ jobs:
 
           latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')"
           if [ "$RELEASE_TAG" != "$latest_tag" ]; then
-            echo "publish=false" >> $GITHUB_OUTPUT
-            echo "Published release $RELEASE_TAG is not the current Latest release ($latest_tag); Docker Hub publish skipped." >> $GITHUB_STEP_SUMMARY
+            echo "publish=true" >> $GITHUB_OUTPUT
+            echo "publish_latest=false" >> $GITHUB_OUTPUT
+            echo "Published release $RELEASE_TAG will publish only its versioned Docker image." >> $GITHUB_STEP_SUMMARY
             exit 0
           fi
 

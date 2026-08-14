@@ -31,7 +31,7 @@
 
 - **默认聊天工作流与实际使用配置对齐**：`data/workflows/chat/` 下 5 个工作流按当前线上配置更新，部署后无需在 WebUI 里手动调整。`normal.yaml` 换为「刘思思（全能专家版）」人设并配置 `grok-4.5` 主模型加 4 个备用模型；`dsr_thinking.yaml` 精简为专家视角提示词并配置 `claude-opus-4-8` 主模型加 4 个备用模型；`normal_multimodal.yaml` 精简提示词并指定 `gemini-3-pro-preview`；三个文件同时清理了重复的 `connected_to` 连线（同一对端口被声明两次）。`memory_store.yaml` 与 `talk_break.yaml` 内容与线上一致，未改动。所有文件区块数量保持不变，无功能块增减。
 
-- **Docker Hub 自动发布流程**：`.github/workflows/docker-latest.yml` 改为在正式 GitHub Release 发布后校验其是否为当前 Latest，只有通过校验才执行一次多架构构建，并同时推送 `<Release 标签>` 与 `latest` 镜像；普通提交、草稿、预发布和非 Latest Release 不会推送，同时保留手动触发。`.github/workflows/docker-tag.yml` 不再监听 Tag 推送，仅作为需要单独重建版本标签时的手动应急入口。工作流增加并发控制及 Docker Hub 账号、令牌、镜像名的前置校验。
+- **Docker Hub 自动发布流程**：`.github/workflows/docker-latest.yml` 会为每个非草稿 GitHub Release 构建并推送 `<Release 标签>` 镜像；只有 GitHub 标记为当前 Latest 的正式 Release 才额外更新 `latest`。预发布和非 Latest Release 仍可获得自己的版本镜像，不会覆盖稳定版。`.github/workflows/docker-tag.yml` 不再监听 Tag 推送，仅作为需要单独重建版本标签时的手动应急入口。工作流增加并发控制及 Docker Hub 账号、令牌、镜像名的前置校验。
 - **Compose 部署来源**：`docker-compose.yml` 和示例文件改用环境变量解析镜像；示例 Compose 移除源码热挂载，生产部署以镜像内容为准，降低“仓库已更新、容器仍运行旧代码”的风险。
 - **前端构建来源**：Docker 新增固定 WebUI 构建阶段，使用项目内 `webui/` 源码和锁文件生成静态资源。锁文件统一改为 npm 官方源，避免把本机不可用的镜像地址带进 Docker 构建。
 - **部署说明**：README 增加 Docker Hub、环境变量、默认工作流初始化和完整备份恢复说明，强调已有 `data/` 卷不会被新镜像自动覆盖。

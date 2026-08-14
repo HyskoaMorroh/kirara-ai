@@ -47,6 +47,15 @@ def test_prereleases_publish_a_versioned_image_without_replacing_latest():
     assert 'if [ "${{ steps.release.outputs.publish_latest }}" = "true" ]; then' in workflow
 
 
+def test_non_latest_releases_still_publish_their_versioned_image():
+    """Release authors choose latest independently from availability of versioned images."""
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "docker-latest.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Published release $RELEASE_TAG will publish only its versioned Docker image." in workflow
+
+
 def test_docker_image_name_accepts_repository_secret_or_variable():
     """Existing repositories may keep the non-sensitive image name in either setting."""
     workflow = (PROJECT_ROOT / ".github" / "workflows" / "docker-latest.yml").read_text(

@@ -142,7 +142,7 @@
 
 ### GitHub 自动发布 Docker Hub 镜像
 
-发布正式 GitHub Release 后，工作流会先确认该 Release 是仓库当前的 **Latest**，然后只构建一次，同时发布 `<Release 标签>` 与 `latest` 两个 Docker 标签；普通提交、草稿、预发布和非 Latest Release 均不会推送 Docker Hub。`Docker build with tags` 不再监听 Tag 推送，仅保留为手动应急发布入口，运行时必须填写 `image_tag`。仍可在 GitHub Actions 页面手动运行 `Docker build latest`。仓库需在 GitHub Settings → Secrets and variables → Actions 中配置：
+发布 GitHub Release 后，工作流会为每个非草稿版本构建并发布 `<Release 标签>` Docker 镜像；只有 GitHub 标记为仓库当前 **Latest** 的正式 Release 才额外更新 `latest` 标签。预发布和非 Latest Release 仍会发布其版本镜像，但不会覆盖 `latest`。`Docker build with tags` 不再监听 Tag 推送，仅保留为手动应急发布入口，运行时必须填写 `image_tag`。仍可在 GitHub Actions 页面手动运行 `Docker build latest`。仓库需在 GitHub Settings → Secrets and variables → Actions 中配置：
 
 - Secret `DOCKERHUB_USERNAME`：Docker Hub 用户名。
 - Secret `DOCKERHUB_TOKEN`：Docker Hub Access Token。
