@@ -24,6 +24,7 @@ botpy.log*
 data/frpc/
 data/db
 .venv/
+.env
 uv.lock
 .mypy_cache/
 **/mypy_cache/

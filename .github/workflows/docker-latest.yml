@@ -2,6 +2,13 @@ name: Docker build latest
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: docker-latest-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   docker:
@@ -17,6 +24,10 @@ jobs:
           IMAGE_NAME="${{ vars.DOCKERHUB_IMAGE }}"
           if [ -z "$IMAGE_NAME" ]; then
             IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/kirara-agent-framework"
+          fi
+          if [ -z "$IMAGE_NAME" ]; then
+            echo "Set repository variable DOCKERHUB_IMAGE or secret DOCKERHUB_USERNAME before publishing."
+            exit 1
           fi
           echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
           echo "Resolved image name: $IMAGE_NAME"

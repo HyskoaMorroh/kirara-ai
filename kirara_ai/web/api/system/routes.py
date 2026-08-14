@@ -7,10 +7,14 @@ import sys
 import tarfile
 import tempfile
 import time
+from pathlib import Path
 
 from packaging import version
-from quart import Blueprint, current_app, g, request, websocket
+from quart import Blueprint, current_app, g, request, send_file, websocket
 
+from kirara_ai.backup import BackupService, BackupValidationError
+from kirara_ai.backup.service import MAX_ARCHIVE_SIZE_BYTES
+from kirara_ai.config import DATA_PATH
 from kirara_ai.config.config_loader import CONFIG_FILE, ConfigLoader
 from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.im.manager import IMManager
@@ -33,6 +37,37 @@ start_time = time.time()
 
 # 获取系统日志记录器
 logger = get_logger("System-API")
+
+
+def get_backup_service() -> BackupService:
+    """Create a backup service rooted in the application's configured data directory."""
+    return BackupService(DATA_PATH)
+
+
+async def save_uploaded_backup():
+    """Persist one uploaded backup archive to a temporary file for validation."""
+    if request.content_length and request.content_length > MAX_BACKUP_UPLOAD_SIZE:
+        return None, ({"error": "backup archive exceeds the maximum size"}, 413)
+
+    files = await request.files
+    uploaded_file = files.get("backup")
+    if not uploaded_file or not uploaded_file.filename:
+        return None, ({"error": "backup file is required"}, 400)
+
+    temporary_file = tempfile.NamedTemporaryFile(
+        prefix="kirara-upload-", suffix=".kirara-backup.zip", delete=False
+    )
+    temporary_file.close()
+    archive_path = Path(temporary_file.name)
+    try:
+        await uploaded_file.save(archive_path)
+    except Exception:
+        archive_path.unlink(missing_ok=True)
+        raise
+    return archive_path, None
+
+
+MAX_BACKUP_UPLOAD_SIZE = MAX_ARCHIVE_SIZE_BYTES
 
 @system_bp.websocket('/logs')
 async def logs_websocket():
@@ -183,6 +218,108 @@ async def update_tracing_config():
         return {"status": "success"}
     except Exception as e:
         return {"error": str(e)}, 500
+
+
+@system_bp.route("/backups/export", methods=["GET"])
+@require_auth
+async def export_backup():
+    """Export all portable application data as a complete backup archive."""
+    try:
+        archive_path = get_backup_service().create_backup("export")
+        return await send_file(
+            archive_path,
+            as_attachment=True,
+            attachment_filename=archive_path.name,
+            mimetype="application/zip",
+        )
+    except Exception:
+        logger.opt(exception=True).error("Failed to export backup")
+        return {"error": "backup export failed"}, 500
+
+
+@system_bp.route("/backups/inspect", methods=["POST"])
+@require_auth
+async def inspect_backup():
+    """Validate an uploaded backup archive without applying any changes."""
+    archive_path, error_response = await save_uploaded_backup()
+    if error_response:
+        return error_response
+
+    try:
+        manifest = get_backup_service().inspect_backup(archive_path)
+        return {
+            "format_version": manifest.format_version,
+            "created_at": manifest.created_at,
+            "application_version": manifest.application_version,
+            "components": sorted(manifest.components),
+            "file_count": len(manifest.files),
+            "uncompressed_size": manifest.uncompressed_size,
+        }
+    except BackupValidationError as error:
+        return {"error": str(error)}, 400
+    except Exception:
+        logger.opt(exception=True).error("Failed to inspect backup")
+        return {"error": "backup inspection failed"}, 500
+    finally:
+        archive_path.unlink(missing_ok=True)
+
+
+@system_bp.route("/backups/import", methods=["POST"])
+@require_auth
+async def import_backup():
+    """Restore an uploaded backup and create a rollback archive before any replacement."""
+    archive_path, error_response = await save_uploaded_backup()
+    if error_response:
+        return error_response
+
+    try:
+        result = get_backup_service().restore_backup(archive_path)
+        return {
+            "status": "success",
+            "restored_components": result.restored_components,
+            "rollback_backup": result.rollback_path.name,
+            "restart_required": True,
+        }
+    except BackupValidationError as error:
+        return {"error": str(error)}, 400
+    except Exception:
+        logger.opt(exception=True).error("Failed to import backup")
+        return {"error": "backup import failed; existing data was preserved"}, 500
+    finally:
+        archive_path.unlink(missing_ok=True)
+
+
+@system_bp.route("/backups/rollbacks", methods=["GET"])
+@require_auth
+async def list_rollback_backups():
+    """List locally created rollback archives without exposing their contents."""
+    rollbacks = []
+    for archive_path in get_backup_service().list_rollbacks():
+        stat_result = archive_path.stat()
+        rollbacks.append(
+            {
+                "name": archive_path.name,
+                "size": stat_result.st_size,
+                "modified_at": stat_result.st_mtime,
+            }
+        )
+    return {"rollbacks": rollbacks}
+
+
+@system_bp.route("/backups/rollbacks/<backup_name>", methods=["GET"])
+@require_auth
+async def download_rollback_backup(backup_name: str):
+    """Download one locally generated rollback archive by its safe file name."""
+    try:
+        archive_path = get_backup_service().get_rollback(backup_name)
+    except BackupValidationError:
+        return {"error": "rollback backup not found"}, 404
+    return await send_file(
+        archive_path,
+        as_attachment=True,
+        attachment_filename=archive_path.name,
+        mimetype="application/zip",
+    )
 
 
 @system_bp.route("/status", methods=["GET"])

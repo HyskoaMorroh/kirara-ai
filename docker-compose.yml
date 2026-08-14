@@ -1,6 +1,6 @@
 services:
   kirara-agent:
-    image: swhesong/kirara-agent-framework:latest
+    image: ${DOCKERHUB_IMAGE:?Set DOCKERHUB_IMAGE in the server .env file}
     container_name: kirara-agent
     restart: always
     environment:
