@@ -3,6 +3,10 @@
 </template>
 
 <script setup lang="ts">
+defineOptions({
+  name: 'WorkflowCodeEditor'
+})
+
 import { ref, onMounted, onBeforeUnmount, defineProps, defineEmits, watch } from 'vue'
 import '@codingame/monaco-vscode-language-pack-zh-hans'
 import 'vscode/localExtensionHost'

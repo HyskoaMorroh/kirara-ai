@@ -76,13 +76,14 @@
 
 ## 📚 文档导航
 
-仓库内的 `docs/` 下有三份面向不同阶段的说明文档：
+仓库内的 `docs/` 下有四份面向不同阶段的说明文档：
 
 | 文档 | 用途 |
 |---|---|
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | 首次部署走一遍：首次登录设定密码、内置模板与规则的释放、配置 LLM 后端与手动选模型、确认调度规则、发出第一条可验证的回复 |
 | [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | 怎么看清系统在干什么：日志去向、LLM 请求追踪、工作流结构预检与全部 issue code、调度规则试运行与静态可达性分析，以及明确不存在的观测能力 |
 | [`docs/EXTENDING.md`](docs/EXTENDING.md) | 扩展开发：自定义 Block、插件、MCP 接入、预设 YAML、调度规则、事件总线、定时任务，并逐条写明当前**没有**的扩展点 |
+| [`docs/WORKFLOW_OPERATIONS_GUIDE.md`](docs/WORKFLOW_OPERATIONS_GUIDE.md) | 从部署到首条回复：模板选型、手动选模型、自动探测边界、默认规则、画布操作、排错顺序与扩展边界 |
 
 ## 🎨 主题与外观
 
@@ -254,13 +255,13 @@ WebUI 内置 6 套配色方案，每套都有独立的浅色与深色取值：
 
 ### 运行测试
 
-后端（必须用虚拟环境里的解释器，系统 `python` 未安装 pytest），当前 **413 个用例全部通过**：
+后端（必须用虚拟环境里的解释器，系统 `python` 未安装 pytest），当前 **425 个用例全部通过**：
 
 ```bash
 .venv/Scripts/python.exe -m pytest ./tests -q
 ```
 
-前端，当前 **9 个文件 / 34 个用例全部通过**：
+前端，当前 **10 个文件 / 40 个用例全部通过**：
 
 ```bash
 cd webui
@@ -275,7 +276,7 @@ cd webui
 npx vue-tsc --noEmit
 ```
 
-发布契约检查（当前 **23 个用例全部通过**）：
+发布契约检查（当前 **29 个用例全部通过**）：
 
 ```bash
 .venv/Scripts/python.exe -m pytest tests/test_release_workflow_contract.py tests/test_webui_build_contract.py -q

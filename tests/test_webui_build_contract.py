@@ -33,9 +33,27 @@ def test_wheel_builder_copies_only_package_build_inputs():
     """Unrelated workflow and runtime data changes must not invalidate the wheel layer."""
     dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
-    assert "COPY pyproject.toml README.md LICENSE MANIFEST.in ./" in dockerfile
+    assert "COPY pyproject.toml README.md LICENSE MANIFEST.in uv.lock ./" in dockerfile
     assert "COPY kirara_ai ./kirara_ai" in dockerfile
     assert "COPY . ." not in dockerfile
+
+
+def test_docker_runtime_dependencies_are_exported_from_the_committed_uv_lock():
+    """镜像安装依赖必须复用开发与 CI 都校验过的锁文件。"""
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "COPY pyproject.toml README.md LICENSE MANIFEST.in uv.lock ./" in dockerfile
+    assert "uv export --frozen --no-dev --no-emit-project" in dockerfile
+    assert "pip install --no-cache-dir --require-hashes -r requirements.txt" in dockerfile
+    assert "pip install --no-cache-dir --no-deps *.whl" in dockerfile
+
+
+def test_webui_declares_its_yarn_runtime_and_a_non_mutating_lint_check():
+    """开发者与 CI 应使用同一个 Yarn 版本，检查命令不应改写源码。"""
+    package = (WEBUI_ROOT / "package.json").read_text(encoding="utf-8")
+
+    assert '"packageManager": "yarn@1.22.22"' in package
+    assert '"lint:check": "eslint src/' in package
 
 
 def test_bundled_webui_lockfile_uses_an_available_registry():

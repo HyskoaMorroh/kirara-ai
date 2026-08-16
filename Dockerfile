@@ -1,6 +1,8 @@
 # 第一阶段：构建固定版本的 WebUI
 FROM node:20-bookworm-slim AS frontend-builder
 
+ENV NODE_OPTIONS=--max-old-space-size=3072
+
 WORKDIR /webui
 COPY webui/package.json webui/yarn.lock ./
 RUN corepack enable && yarn install --frozen-lockfile
@@ -13,9 +15,10 @@ RUN yarn build
 FROM python:3.11-slim AS builder
 
 WORKDIR /build
-COPY pyproject.toml README.md LICENSE MANIFEST.in ./
+COPY pyproject.toml README.md LICENSE MANIFEST.in uv.lock ./
 COPY kirara_ai ./kirara_ai
-RUN python -m pip install build && \
+RUN python -m pip install --no-cache-dir uv build && \
+    uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file requirements.txt && \
     python -m build
 
 # 第三阶段：运行环境
@@ -40,11 +43,13 @@ WORKDIR /app
 
 # 复制第一阶段构建的wheel包并安装
 COPY --from=builder /build/dist/*.whl /app/
+COPY --from=builder /build/requirements.txt /app/
 
 # 安装后端并复制由固定前端源码构建的 WebUI
-RUN pip install --no-cache-dir *.whl && \
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt && \
+    pip install --no-cache-dir --no-deps *.whl && \
     pip cache purge && \
-    rm *.whl
+    rm *.whl requirements.txt
 COPY --from=frontend-builder /webui/dist /app/web
 
 # 复制应用代码

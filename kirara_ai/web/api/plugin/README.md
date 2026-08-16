@@ -306,6 +306,6 @@ response = requests.get(
 
 ## 相关文档
 
-- [系统架构](../../README.md#系统架构-)
-- [API 认证](../../README.md#api认证-)
-- [插件开发](../../../plugin_manager/README.md#插件开发-) 
+- [Web API 概览](../../../../README.md)
+- [API 认证](../../auth/routes.py)
+- [插件开发](../../../../docs/EXTENDING.md#二编写插件)

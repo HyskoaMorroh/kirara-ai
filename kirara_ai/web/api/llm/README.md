@@ -198,7 +198,7 @@ GET/backend-api/api/llm/types/{adapter_type}/config-schema
 
 ## 适配器类型
 
-适配器由插件提供，见[适配器实现](../../../llm/adapters)。
+适配器由插件提供，见[预置 LLM 插件](../../../plugins/llm_preset_adapters)。
 
 目前自带支持的适配器类型包括：
 
@@ -237,7 +237,7 @@ GET/backend-api/api/llm/types/{adapter_type}/config-schema
 
 - [LLM 管理器](../../../llm/llm_manager.py)
 - [LLM 注册表](../../../llm/llm_registry.py)
-- [适配器实现](../../../llm/adapters)
+- [预置 LLM 插件](../../../plugins/llm_preset_adapters)
 
 ## 错误处理
 
@@ -313,6 +313,6 @@ response = requests.put(
 
 ## 相关文档
 
-- [系统架构](../../README.md#系统架构-)
-- [API 认证](../../README.md#api认证-)
-- [LLM 适配器开发](../../../llm/README.md#适配器开发-)
+- [Web API 概览](../../../../README.md)
+- [API 认证](../../auth/routes.py)
+- [LLM 适配器开发](../../../../docs/EXTENDING.md#二编写插件)

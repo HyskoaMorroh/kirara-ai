@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, defineProps, defineEmits, watch } from 'vue'
+import { ref, defineProps, defineEmits } from 'vue'
 import {
   NForm,
   NFormItem,
@@ -20,6 +20,7 @@ import type { LLMBackend, ConfigSchema } from '@/api/llm'
 import ModelListForm from '@/components/form/ModelListForm.vue'
 import DynamicConfigForm from '@/components/form/DynamicConfigForm.vue'
 import type { ModelInfo } from '@/components/form/types'
+import { deepClone } from '@/utils/deep-clone'
 
 const props = defineProps<{
   adapter: LLMBackend | null
@@ -37,6 +38,7 @@ const emit = defineEmits<{
   (e: 'add-model'): void
   (e: 'edit-model', index: number, model: ModelInfo): void
   (e: 'auto-detect-models'): void
+  (e: 'update:adapter', adapter: LLMBackend): void
 }>()
 
 const formRef = ref<FormInst | null>(null)
@@ -95,6 +97,14 @@ const handleEditModel = (index: number, model: ModelInfo) => {
 const handleAutoDetectModels = () => {
   emit('auto-detect-models')
 }
+
+const updateAdapter = (update: (adapter: LLMBackend) => void) => {
+  if (!props.adapter) return
+
+  const adapter = deepClone(props.adapter)
+  update(adapter)
+  emit('update:adapter', adapter)
+}
 </script>
 
 <template>
@@ -124,7 +134,11 @@ const handleAutoDetectModels = () => {
               feedback="用于区分不同的配置，必须保持唯一"
               required
             >
-              <n-input v-model:value="adapter.name" placeholder="请输入配置名称" />
+              <n-input
+                :value="adapter.name"
+                placeholder="请输入配置名称"
+                @update:value="(value) => updateAdapter((nextAdapter) => (nextAdapter.name = value))"
+              />
             </n-form-item>
 
             <n-form-item
@@ -134,22 +148,31 @@ const handleAutoDetectModels = () => {
               required
             >
               <n-select
-                v-model:value="adapter.adapter"
+                :value="adapter.adapter"
                 :options="adapterTypes.map((type) => ({ label: type, value: type }))"
                 placeholder="请选择接口类型"
+                @update:value="
+                  (value) => updateAdapter((nextAdapter) => (nextAdapter.adapter = value))
+                "
               />
             </n-form-item>
 
             <n-form-item label="启用" path="enable">
-              <n-switch v-model:value="adapter.enable" />
+              <n-switch
+                :value="adapter.enable"
+                @update:value="(value) => updateAdapter((nextAdapter) => (nextAdapter.enable = value))"
+              />
             </n-form-item>
 
             <n-spin :show="loading">
               <dynamic-config-form
                 :schema="configSchema"
-                v-model="adapter.config"
+                :model-value="adapter.config"
                 v-if="configSchema && adapter?.adapter"
                 ref="dynamicConfigForm"
+                @update:model-value="
+                  (value) => updateAdapter((nextAdapter) => (nextAdapter.config = value))
+                "
               />
             </n-spin>
           </n-form>
@@ -190,9 +213,10 @@ const handleAutoDetectModels = () => {
           </template>
 
           <ModelListForm
-            v-model:value="adapter.models"
+            :value="adapter.models"
             @edit="handleEditModel"
             :model-abilities="modelAbilities"
+            @update:value="(value) => updateAdapter((nextAdapter) => (nextAdapter.models = value))"
           />
         </n-card>
       </div>

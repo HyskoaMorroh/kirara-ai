@@ -64,7 +64,7 @@ import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
 import '@vue-flow/minimap/dist/style.css'
-import type { Connection, Edge, EdgeUpdateEvent, Node } from '@vue-flow/core'
+import type { Connection, Edge, EdgeChange, EdgeUpdateEvent, Node, NodeChange } from '@vue-flow/core'
 import { MarkerType } from '@vue-flow/core'
 import { useLayout, findFreeNodePosition, findOverlappingNodes, snapToGrid } from './useLayout'
 import {
@@ -506,8 +506,6 @@ const updateWires = debounce(() => {
   graphHistoryPending = false
 }, 500)
 
-let lastNodeSignature = ''
-let lastEdgeSignature = ''
 /**
  * 记录最近一次向父组件发出的数组引用。
  *
@@ -518,75 +516,27 @@ let lastEdgeSignature = ''
 let lastEmittedBlocks: BlockInstance[] | null = null
 let lastEmittedWires: Wire[] | null = null
 
-const getNodeHistorySignature = () =>
-  JSON.stringify(
-    nodes.value.map((node) => ({
-      id: node.id,
-      position: node.position,
-      config: node.data?.config,
-      inputs: node.data?.inputs,
-      outputs: node.data?.outputs
-    }))
-  )
+// 直接消费 Vue Flow 的变更事件：选择和尺寸变化只影响界面，不必写回工作流。
+// 这样打开节点配置、拖拽或编辑代码时都不会再序列化整张图作变更比对。
+const hasPersistentGraphChange = (changes: Array<NodeChange | EdgeChange>) =>
+  changes.some((change) => change.type !== 'select' && change.type !== 'dimensions')
 
-const getEdgeHistorySignature = () =>
-  JSON.stringify(
-    edges.value.map((edge) => ({
-      id: edge.id,
-      source: edge.source,
-      sourceHandle: edge.sourceHandle,
-      target: edge.target,
-      targetHandle: edge.targetHandle
-    }))
-  )
-
-/**
- * 图形变更的合并检查窗口（毫秒）。
- *
- * 必须明显小于 updateBlocks / updateWires 的 500ms debounce：历史快照取自
- * store 中「尚未写回」的旧状态，只要在数据回写之前完成入栈就仍然正确。
- */
-const GRAPH_SIGNATURE_DEBOUNCE = 120
-let nodeSignatureTimer: number | null = null
-let edgeSignatureTimer: number | null = null
-
-// Vue Flow 的节点配置面板会直接更新节点数据，不一定经过画布的显式按钮。
-// 只比较会持久化的字段，忽略 selection/dimensions 等纯 UI 变化。
-//
-// 原实现用 { deep: true, flush: 'sync' } 直接在回调里 JSON.stringify 全部节点，
-// 于是拖拽时每一次 mousemove、代码编辑器里每一次按键都要序列化整张图。
-// 现在回调只负责排一个定时器，真正的签名比较在合并窗口结束后做一次。
-const scheduleNodeSignatureCheck = () => {
-  if (!graphHistoryReady || restoringGraph) return
-  if (nodeSignatureTimer !== null) return
-  nodeSignatureTimer = window.setTimeout(() => {
-    nodeSignatureTimer = null
-    if (!graphHistoryReady || restoringGraph) return
-    const signature = getNodeHistorySignature()
-    if (signature === lastNodeSignature) return
-    lastNodeSignature = signature
-    recordHistoryBeforeCanvasMutation()
-    updateBlocks()
-  }, GRAPH_SIGNATURE_DEBOUNCE)
+const handleNodesChange = (changes: NodeChange[]) => {
+  if (restoringGraph || !hasPersistentGraphChange(changes)) return
+  recordHistoryBeforeCanvasMutation()
+  updateBlocks()
 }
 
-const scheduleEdgeSignatureCheck = () => {
-  if (!graphHistoryReady || restoringGraph) return
-  if (edgeSignatureTimer !== null) return
-  edgeSignatureTimer = window.setTimeout(() => {
-    edgeSignatureTimer = null
-    if (!graphHistoryReady || restoringGraph) return
-    const signature = getEdgeHistorySignature()
-    if (signature === lastEdgeSignature) return
-    lastEdgeSignature = signature
-    recordHistoryBeforeCanvasMutation()
-    updateWires()
-  }, GRAPH_SIGNATURE_DEBOUNCE)
+const handleEdgesChange = (changes: EdgeChange[]) => {
+  if (restoringGraph || !hasPersistentGraphChange(changes)) return
+  recordHistoryBeforeCanvasMutation()
+  updateWires()
 }
 
-watch(nodes, scheduleNodeSignatureCheck, { deep: true })
-
-watch(edges, scheduleEdgeSignatureCheck, { deep: true })
+const handleNodeConfigMutation = () => {
+  recordHistoryBeforeCanvasMutation()
+  updateBlocks()
+}
 
 /**
  * 立即同步一次图形数据，不经过 debounce。
@@ -637,8 +587,6 @@ const restoreGraph = () => {
     }
   } finally {
     restoringGraph = false
-    lastNodeSignature = getNodeHistorySignature()
-    lastEdgeSignature = getEdgeHistorySignature()
   }
   nextTick(() => {
     fitView()
@@ -1437,8 +1385,6 @@ onMounted(() => {
   initGraphData()
   initPropertiesData()
   graphHistoryReady = true
-  lastNodeSignature = getNodeHistorySignature()
-  lastEdgeSignature = getEdgeHistorySignature()
 
   // 添加键盘快捷键
   document.addEventListener('keydown', handleKeydown)
@@ -1454,15 +1400,6 @@ onBeforeUnmount(() => {
   if (compatibilityRetryTimer) {
     clearTimeout(compatibilityRetryTimer)
     compatibilityRetryTimer = null
-  }
-  // 图形签名检查的合并定时器也要清掉，否则卸载后仍会访问已销毁的画布状态
-  if (nodeSignatureTimer !== null) {
-    clearTimeout(nodeSignatureTimer)
-    nodeSignatureTimer = null
-  }
-  if (edgeSignatureTimer !== null) {
-    clearTimeout(edgeSignatureTimer)
-    edgeSignatureTimer = null
   }
 })
 
@@ -1532,8 +1469,8 @@ const onDrop = (event: DragEvent) => {
       :nodes="nodes"
       :edges="edges"
       fit-view-on-init
-      @nodes-change="updateBlocks"
-      @edges-change="updateWires"
+      @nodes-change="handleNodesChange"
+      @edges-change="handleEdgesChange"
       @edge-update="handleEdgeUpdate"
       @connect="handleConnect"
       :default-zoom="1"
@@ -1819,7 +1756,7 @@ const onDrop = (event: DragEvent) => {
           v-if="selectedNode"
           :selected-node="selectedNode"
           @close="closeNodeConfig"
-          @before-node-mutation="recordHistoryBeforeCanvasMutation"
+          @before-node-mutation="handleNodeConfigMutation"
           :block-types="props.blockTypes"
           :type-compatibility="typeCompatibility"
         />

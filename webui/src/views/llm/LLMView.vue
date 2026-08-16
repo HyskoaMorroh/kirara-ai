@@ -326,6 +326,7 @@ onMounted(() => {
         :isCreating="isCreating"
         :isAutoDetectModelsSupported="isAutoDetectModelsSupported"
         :modelAbilities="modelAbilities"
+        @update:adapter="currentAdapter = $event"
         @save="handleSave"
         @delete="handleDelete"
         @add-model="handleAddModel"

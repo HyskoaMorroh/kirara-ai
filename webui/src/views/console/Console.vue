@@ -1,4 +1,8 @@
 <script setup lang="ts">
+defineOptions({
+  name: 'SystemConsole'
+})
+
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import {
   NCard,

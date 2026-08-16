@@ -1,3 +1,6 @@
+import asyncio
+from functools import wraps
+
 from quart import Blueprint, g, jsonify, request
 
 from kirara_ai.im.message import IMMessage, MentionElement, TextMessage
@@ -23,6 +26,17 @@ from .models import (
 )
 
 dispatch_bp = Blueprint("dispatch", __name__)
+RULE_WRITE_LOCK = asyncio.Lock()
+
+
+def serialize_rule_write(func):
+    """串行化规则修改和回滚，保证内存调度器与规则文件保持同一版本。"""
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        async with RULE_WRITE_LOCK:
+            return await func(*args, **kwargs)
+
+    return wrapper
 
 
 def _rules_with_draft(rules, draft_rule):
@@ -178,6 +192,7 @@ async def get_rule(rule_id: str):
 
 @dispatch_bp.route("/rules", methods=["POST"])
 @require_auth
+@serialize_rule_write
 async def create_rule():
     """创建新的调度规则"""
     data = await request.get_json()
@@ -221,6 +236,7 @@ async def create_rule():
 
 @dispatch_bp.route("/rules/<rule_id>", methods=["PUT"])
 @require_auth
+@serialize_rule_write
 async def update_rule(rule_id: str):
     """更新调度规则"""
     data = await request.get_json()
@@ -260,6 +276,7 @@ async def update_rule(rule_id: str):
 
 @dispatch_bp.route("/rules/<rule_id>", methods=["DELETE"])
 @require_auth
+@serialize_rule_write
 async def delete_rule(rule_id: str):
     """删除调度规则"""
     registry: DispatchRuleRegistry = g.container.resolve(DispatchRuleRegistry)
@@ -286,6 +303,7 @@ async def delete_rule(rule_id: str):
 
 @dispatch_bp.route("/rules/<rule_id>/enable", methods=["POST"])
 @require_auth
+@serialize_rule_write
 async def enable_rule(rule_id: str):
     """启用调度规则"""
     registry: DispatchRuleRegistry = g.container.resolve(DispatchRuleRegistry)
@@ -308,6 +326,7 @@ async def enable_rule(rule_id: str):
 
 @dispatch_bp.route("/rules/<rule_id>/disable", methods=["POST"])
 @require_auth
+@serialize_rule_write
 async def disable_rule(rule_id: str):
     """禁用调度规则"""
     registry: DispatchRuleRegistry = g.container.resolve(DispatchRuleRegistry)

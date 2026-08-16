@@ -1039,7 +1039,7 @@ class CombinedDispatchRule(BaseModel):
 
 **方式一：WebUI**。「工作流 → 调度规则」页新建。走 `POST /dispatch/rules`，服务端会校验两件事：`workflow_id` 必须存在，且**至少要有一个真实条件**——所有组都为空会返回 400 `Rule must contain at least one condition; use an explicit fallback condition for a catch-all rule`。想要兜底规则就显式加一个 `fallback` 条件。
 
-**方式二：直接写 `data/dispatch_rules/rules.yaml`**。文件是一个规则列表，格式就是上面那段。启动时 `load_rules()` 遍历目录下所有 `*.yaml`；带 `rule_groups` 键的按新格式解析，不带的走 `_convert_old_rule()` 兼容旧的单条件格式。
+**方式二：直接写 `data/dispatch_rules/rules.yaml`**。文件是一个规则列表，格式就是上面那段。启动时 `load_rules()` 遍历目录下所有 `*.yaml`；带 `rule_groups` 键的按新格式解析，不带的走 `_convert_old_rule()` 兼容旧的单条件格式。它是已有实例的持久化来源；全新实例没有任何规则文件时，代码中的 `build_default_rules()` 才会注册默认规则。WebUI 保存规则会写回该 YAML，所以不要把它当成永远会被代码覆盖的只读样例。
 
 有个关键副作用要知道：`load_rules()` 只要成功读到任何一个合法的规则列表（**包括空列表**）就把 `has_persisted_rules` 置为 `True`，而 `register_system_dispatch_rules()` 一看到这个标志就直接 `return`。也就是说**一旦你有了规则文件，内置默认规则就完全不再注入**。这是刻意的：已有文件代表用户的完整配置，也保护了在 tombstone 机制之前做的删除。
 
@@ -1387,7 +1387,7 @@ cd webui && npx vue-tsc --noEmit
 
 - 首次部署、配置 LLM 后端、选模型、外观设置：`docs/QUICKSTART.md`
 - 日志、LLM 追踪、预检 issue code、规则试运行、画布角标：`docs/OBSERVABILITY.md`
-
+- 部署到首条回复、模板选型、默认规则与画布排错：`docs/WORKFLOW_OPERATIONS_GUIDE.md`
 
 
 

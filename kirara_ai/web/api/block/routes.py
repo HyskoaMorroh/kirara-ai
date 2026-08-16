@@ -24,7 +24,7 @@ async def list_block_types() -> Any:
     types = []
     for block_type in registry.get_all_types():
         try:
-            inputs, outputs, configs = registry.extract_block_info(block_type)
+            inputs, outputs, configs = registry.extract_block_info_cached(block_type)
             type_name = registry.get_block_type_name(block_type)
 
             for config in configs.values():
@@ -59,7 +59,7 @@ async def get_block_type(type_name: str) -> Any:
         return jsonify({"error": "Block type not found"}), 404
 
     # 获取Block类的输入输出定义
-    inputs, outputs, configs = registry.extract_block_info(block_type)
+    inputs, outputs, configs = registry.extract_block_info_cached(block_type)
 
     for config in configs.values():
         if config.has_options:

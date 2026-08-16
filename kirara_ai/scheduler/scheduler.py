@@ -30,6 +30,7 @@ STARTUP_JITTER_SECONDS = 300
 # 全局的配置写锁。TaskScheduler 会在后台任务里改写 config.llms.api_backends，
 # 而 Web 路由同时在读同一份对象；共用一把锁让两侧的读写不会交错。
 CONFIG_WRITE_LOCK = threading.RLock()
+CONFIG_UPDATE_LOCK = asyncio.Lock()
 
 
 class TaskScheduler:
@@ -114,36 +115,47 @@ class TaskScheduler:
             self.logger.warning(f"Auto-detect returned empty model list for {backend_name}, skip update")
             return False
 
-        backend_config = next(
-            (b for b in config.llms.api_backends if b.name == backend_name), None
-        )
-        if not backend_config:
-            self.logger.warning(f"Backend {backend_name} not found in config, skip update")
-            return False
-
         # 自动检测只刷新当前后端的模型目录；它不会修改任何工作流内的
         # model_name / fallback_model_1..4。若某个旧配置已不在目录中，编辑器
         # 将把对应槽位显示为空，直到用户主动选择当前可用模型。
-        old_model_count = len(backend_config.models)
         new_models = normalize_detected_models(models)
 
-        # 写配置对象时上锁：Web 路由此刻可能正在读取同一份 api_backends
-        with CONFIG_WRITE_LOCK:
+        async with CONFIG_UPDATE_LOCK:
+            backend_config = next(
+                (b for b in config.llms.api_backends if b.name == backend_name), None
+            )
+            if not backend_config:
+                self.logger.warning(f"Backend {backend_name} not found in config, skip update")
+                return False
+
+            old_model_count = len(backend_config.models)
             if model_catalogs_equal(backend_config.models, new_models):
                 self.logger.info(f"Backend {backend_name} model list unchanged ({len(new_models)} models)")
                 return True
 
+            old_models = list(backend_config.models)
             backend_config.models = new_models
-        self.logger.info(
-            f"Backend {backend_name} model list updated: "
-            f"{old_model_count} -> {len(new_models)} models"
-        )
+            # 重新加载后端，让新模型列表进入 active_backends
+            try:
+                await llm_manager.reload_backend(backend_name)
+            except Exception as e:
+                backend_config.models = old_models
+                self.logger.error(
+                    f"Failed to reload backend {backend_name} after auto-detect: {e}"
+                )
+                try:
+                    await llm_manager.reload_backend(backend_name)
+                except Exception as rollback_error:
+                    self.logger.error(
+                        f"Failed to restore backend {backend_name} after auto-detect: "
+                        f"{rollback_error}"
+                    )
+                return False
 
-        # 重新加载后端，让新模型列表进入 active_backends
-        try:
-            await llm_manager.reload_backend(backend_name)
-        except Exception as e:
-            self.logger.error(f"Failed to reload backend {backend_name} after auto-detect: {e}")
+            self.logger.info(
+                f"Backend {backend_name} model list updated: "
+                f"{old_model_count} -> {len(new_models)} models"
+            )
 
         return True
 

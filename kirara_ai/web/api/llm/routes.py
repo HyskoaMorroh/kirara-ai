@@ -1,3 +1,5 @@
+from functools import wraps
+
 from quart import Blueprint, g, jsonify, request
 
 from kirara_ai.config.config_loader import CONFIG_FILE, ConfigLoader
@@ -8,6 +10,7 @@ from kirara_ai.llm.llm_registry import LLMBackendRegistry
 from kirara_ai.logger import get_logger
 from kirara_ai.scheduler import TaskScheduler
 from kirara_ai.scheduler.model_catalog import normalize_detected_models
+from kirara_ai.scheduler.scheduler import CONFIG_UPDATE_LOCK
 from kirara_ai.web.api.llm.models import (LLMAdapterConfigSchema, LLMAdapterTypes, LLMBackendCreateRequest,
                                           LLMBackendInfo, LLMBackendList, LLMBackendListResponse, LLMBackendResponse,
                                           LLMBackendUpdateRequest, ModelConfigListResponse)
@@ -16,6 +19,16 @@ from ...auth.middleware import require_auth
 
 llm_bp = Blueprint("llm", __name__)
 logger = get_logger("WebServer.LLM")
+
+
+def serialize_config_update(func):
+    """串行化会修改 LLM 配置的请求，避免与后台模型刷新交错写入。"""
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        async with CONFIG_UPDATE_LOCK:
+            return await func(*args, **kwargs)
+
+    return wrapper
 
 
 @llm_bp.route("/types", methods=["GET"])
@@ -79,6 +92,7 @@ async def get_backend(backend_name: str):
 
 @llm_bp.route("/backends", methods=["POST"])
 @require_auth
+@serialize_config_update
 async def create_backend():
     """创建新的后端"""
     try:
@@ -120,6 +134,7 @@ async def create_backend():
 
 @llm_bp.route("/backends/<backend_name>", methods=["PUT"])
 @require_auth
+@serialize_config_update
 async def update_backend(backend_name: str):
     """更新指定后端"""
     try:
@@ -169,6 +184,7 @@ async def update_backend(backend_name: str):
 
 @llm_bp.route("/backends/<backend_name>", methods=["DELETE"])
 @require_auth
+@serialize_config_update
 async def delete_backend(backend_name: str):
     """删除指定后端"""
     try:
@@ -294,6 +310,7 @@ async def get_auto_detect_schedule():
 
 @llm_bp.route("/backends/<backend_name>/auto-detect-schedule", methods=["PUT"])
 @require_auth
+@serialize_config_update
 async def update_auto_detect_schedule(backend_name: str):
     """设置指定后端的自动检测间隔天数，0 表示关闭"""
     try:

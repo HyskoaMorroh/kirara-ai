@@ -21,7 +21,7 @@
   </div>
   <n-scrollbar style="max-height: 90vh">
     <div style="max-width: 66%; margin: 0 auto; padding-top: 16px" class="configuration-container">
-      <n-form ref="formRef" label-placement="left" v-model:value="props.configurationValue">
+      <n-form ref="formRef" label-placement="left" v-model:value="editableConfigurationValue">
         <div v-for="(group, i) in configurationGroups" :key="i">
           <h2 style="text-align: left; padding: 16px 0">{{ group.title }}</h2>
           <Markdown :source="group.description" v-if="group.description"></Markdown>
@@ -29,7 +29,7 @@
 
           <div style="margin-bottom: 20px" v-for="(config, j) in group.properties" :key="j">
             <n-form-item :label="config.title" v-if="config.type == 'boolean'">
-              <n-switch v-model:value="props.configurationValue[j]">
+              <n-switch v-model:value="editableConfigurationValue[j]">
                 <template #checked-icon> 😁 </template>
                 <template #unchecked-icon> 🤔 </template>
               </n-switch>
@@ -38,7 +38,7 @@
             <template v-else-if="config.type == 'object'">
               <p style="padding: 10px 0">{{ config.title }}</p>
 
-              <template v-for="(_, keyName) in props.configurationValue[j]" :key="keyName">
+              <template v-for="(_, keyName) in editableConfigurationValue[j]" :key="keyName">
                 <p style="padding: 10px 0">
                   <span
                     contenteditable="true"
@@ -54,12 +54,12 @@
                 </p>
 
                 <n-form-item
-                  v-for="(__, childIndex) in props.configurationValue[j][keyName]"
+                  v-for="(__, childIndex) in editableConfigurationValue[j][keyName]"
                   :key="childIndex"
                   :label="`${childIndex}`"
                 >
                   <n-input
-                    v-model:value="props.configurationValue[j][keyName][childIndex]"
+                    v-model:value="editableConfigurationValue[j][keyName][childIndex]"
                     clearable
                     style="min-width: 25%"
                   />
@@ -84,12 +84,12 @@
             <template v-else-if="config.type == 'array'">
               <p style="padding: 10px 0">{{ config.title }}</p>
               <n-form-item
-                v-for="(item, index) in props.configurationValue[j]"
+                v-for="(item, index) in editableConfigurationValue[j]"
                 :key="index"
                 :label="`第${index + 1}项`"
               >
                 <n-input
-                  v-model:value="props.configurationValue[j][index]"
+                  v-model:value="editableConfigurationValue[j][index]"
                   clearable
                   style="min-width: 25%"
                 />
@@ -111,7 +111,7 @@
               v-else-if="config.type == 'integer'"
             >
               <n-input-number
-                v-model:value="props.configurationValue[j]"
+                v-model:value="editableConfigurationValue[j]"
                 :placeholder="'' + (config.default || '请输入……')"
                 style="min-width: 25%"
               />
@@ -122,7 +122,7 @@
               v-else-if="config.form_type == 'password'"
             >
               <n-input
-                v-model:value="props.configurationValue[j]"
+                v-model:value="editableConfigurationValue[j]"
                 type="password"
                 :placeholder="'' + (config.default || '请输入……')"
                 style="min-width: 25%"
@@ -130,7 +130,7 @@
             </n-form-item>
             <n-form-item :label="config.title" path="inputValue" v-else>
               <n-input
-                v-model:value="props.configurationValue[j]"
+                v-model:value="editableConfigurationValue[j]"
                 type="text"
                 :placeholder="'' + (config.default || '请输入……')"
                 style="min-width: 25%"
@@ -163,6 +163,8 @@ import {
 import Markdown from 'vue3-markdown-it'
 
 import CryptoJS from 'crypto-js'
+import { ref, watch } from 'vue'
+import { deepClone } from '@/utils/deep-clone'
 
 export type Configuration = {
   title: string
@@ -199,6 +201,16 @@ const emit = defineEmits<{
   (e: 'save', configurationValue: any): void
 }>()
 
+const editableConfigurationValue = ref<Record<string, any>>({})
+
+watch(
+  () => props.configurationValue,
+  (value) => {
+    editableConfigurationValue.value = deepClone(value)
+  },
+  { immediate: true, deep: true }
+)
+
 function generateSalt() {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
   let salt = ''
@@ -231,10 +243,10 @@ const resetForm = () => {
 
 const saveToServer = () => {
   try {
-    for (let property: string in props.configurationValue) {
+    for (let property: string in editableConfigurationValue.value) {
       if (props.configurationGroups[0].properties[property].form_type == 'password') {
-        props.configurationValue[property] = createHash(
-          props.configurationValue[property],
+        editableConfigurationValue.value[property] = createHash(
+          editableConfigurationValue.value[property],
           props.configurationGroups[0].properties[property].password
         )
       }
@@ -243,33 +255,33 @@ const saveToServer = () => {
     console.error(e)
   }
 
-  emit('save', props.configurationValue)
+  emit('save', editableConfigurationValue.value)
 }
 
 const removeArrayItem = (arr: number, index: number) => {
-  props.configurationValue[arr].splice(index, 1)
+  editableConfigurationValue.value[arr].splice(index, 1)
 }
 const addArrayItem = (arr: number) => {
-  props.configurationValue[arr].push('')
+  editableConfigurationValue.value[arr].push('')
 }
 
 const addObjectArrayItem = (arr: number, keyName: string) => {
-  props.configurationValue[arr][keyName].push('')
+  editableConfigurationValue.value[arr][keyName].push('')
 }
 const removeObjectArrayItem = (arr: number, keyName: string, index: number) => {
-  props.configurationValue[arr][keyName].splice(index, 1)
+  editableConfigurationValue.value[arr][keyName].splice(index, 1)
 }
 const removeObjectKey = (arr: number, keyName: string) => {
-  delete props.configurationValue[arr][keyName]
+  delete editableConfigurationValue.value[arr][keyName]
 }
 
 const addObjectKey = (arr: number, keyName: string) => {
-  props.configurationValue[arr][keyName] = []
+  editableConfigurationValue.value[arr][keyName] = []
 }
 
 const changeObjectKey = (arr: number, keyName: string, newKeyName: string) => {
-  props.configurationValue[arr][newKeyName] = props.configurationValue[arr][keyName]
-  delete props.configurationValue[arr][keyName]
+  editableConfigurationValue.value[arr][newKeyName] = editableConfigurationValue.value[arr][keyName]
+  delete editableConfigurationValue.value[arr][keyName]
 }
 </script>
 

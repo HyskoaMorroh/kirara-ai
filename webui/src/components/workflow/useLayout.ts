@@ -407,18 +407,25 @@ export function findOverlappingNodes(
   boxes: { id: string; x: number; y: number; width: number; height: number }[]
 ): Set<string> {
   const overlapping = new Set<string>()
-  for (let i = 0; i < boxes.length; i += 1) {
-    for (let j = i + 1; j < boxes.length; j += 1) {
-      const a = boxes[i]
-      const b = boxes[j]
-      if (
-        overlapsOnAxis(a.x, a.width, b.x, b.width, 0) &&
-        overlapsOnAxis(a.y, a.height, b.y, b.height, 0)
-      ) {
-        overlapping.add(a.id)
-        overlapping.add(b.id)
+  const active: typeof boxes = []
+  const sortedBoxes = [...boxes].sort((a, b) => a.x - b.x || a.id.localeCompare(b.id))
+
+  for (const box of sortedBoxes) {
+    // 只保留右边界仍可能与当前节点相交的候选，避免每次画布变更都做全量两两比较。
+    for (let index = active.length - 1; index >= 0; index -= 1) {
+      const candidate = active[index]
+      if (candidate.x + candidate.width <= box.x) {
+        active.splice(index, 1)
       }
     }
+
+    for (const candidate of active) {
+      if (overlapsOnAxis(box.y, box.height, candidate.y, candidate.height, 0)) {
+        overlapping.add(box.id)
+        overlapping.add(candidate.id)
+      }
+    }
+    active.push(box)
   }
   return overlapping
 }
