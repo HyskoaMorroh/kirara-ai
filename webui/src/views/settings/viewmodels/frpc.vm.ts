@@ -177,7 +177,7 @@ export function useFrpcViewModel() {
         let buffer = ''
 
         try {
-          while (true) {
+          for (;;) {
             const { done, value } = await reader.read()
 
             if (done) {

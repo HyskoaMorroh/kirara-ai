@@ -1,6 +1,7 @@
 import os
 import shutil
 from functools import wraps
+from threading import RLock
 from typing import Optional, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -20,6 +21,7 @@ class ConfigLoader:
     """
 
     yaml = YAML()
+    _write_lock = RLock()
 
     @staticmethod
     def load_config(config_path: str, config_class: Type[T]) -> T:
@@ -45,8 +47,9 @@ class ConfigLoader:
         :param config_path: 配置文件路径。
         :param config_object: 配置对象。
         """
-        with open(config_path, "w", encoding="utf-8") as f:
-            ConfigLoader.yaml.dump(config_object.model_dump(), f)
+        with ConfigLoader._write_lock:
+            with open(config_path, "w", encoding="utf-8") as f:
+                ConfigLoader.yaml.dump(config_object.model_dump(), f)
 
     @staticmethod
     def save_config_with_backup(config_path: str, config_object: BaseModel):
@@ -56,10 +59,11 @@ class ConfigLoader:
         :param config_object: 配置对象。
         """
 
-        if os.path.exists(config_path):
-            backup_path = f"{config_path}.bak"
-            shutil.copy2(config_path, backup_path)
-        ConfigLoader.save_config(config_path, config_object)
+        with ConfigLoader._write_lock:
+            if os.path.exists(config_path):
+                backup_path = f"{config_path}.bak"
+                shutil.copy2(config_path, backup_path)
+            ConfigLoader.save_config(config_path, config_object)
 
 
 def pydantic_validation_wrapper(func):

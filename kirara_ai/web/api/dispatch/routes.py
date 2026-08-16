@@ -1,3 +1,6 @@
+import asyncio
+from functools import wraps
+
 from quart import Blueprint, g, jsonify, request
 
 from kirara_ai.im.message import IMMessage, MentionElement, TextMessage
@@ -23,6 +26,17 @@ from .models import (
 )
 
 dispatch_bp = Blueprint("dispatch", __name__)
+RULE_WRITE_LOCK = asyncio.Lock()
+
+
+def serialize_rule_write(func):
+    """串行化规则修改和回滚，保证内存调度器与规则文件保持同一版本。"""
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        async with RULE_WRITE_LOCK:
+            return await func(*args, **kwargs)
+
+    return wrapper
 
 
 def _rules_with_draft(rules, draft_rule):
@@ -178,6 +192,7 @@ async def get_rule(rule_id: str):
 
 @dispatch_bp.route("/rules", methods=["POST"])
 @require_auth
+@serialize_rule_write
 async def create_rule():
     """创建新的调度规则"""
     data = await request.get_json()
@@ -215,12 +230,13 @@ async def create_rule():
         # 仅当这个 id 本来不存在时才删除：否则会连带把用户原有的同 id 规则
         # 一起从内存里抹掉（虽然上面的重复检查通常会先返回 400）。
         if not rule_existed_before:
-            registry.rules.pop(rule_data.rule_id, None)
+            registry.discard_rule(rule_data.rule_id)
         return jsonify({"error": str(e)}), 400
 
 
 @dispatch_bp.route("/rules/<rule_id>", methods=["PUT"])
 @require_auth
+@serialize_rule_write
 async def update_rule(rule_id: str):
     """更新调度规则"""
     data = await request.get_json()
@@ -254,12 +270,13 @@ async def update_rule(rule_id: str):
         await registry.save_rules_async()
         return DispatchRuleResponse(rule=rule).model_dump()
     except Exception as e:
-        registry.rules[rule_id] = previous_rule
+        registry.restore_rule(previous_rule)
         return jsonify({"error": str(e)}), 400
 
 
 @dispatch_bp.route("/rules/<rule_id>", methods=["DELETE"])
 @require_auth
+@serialize_rule_write
 async def delete_rule(rule_id: str):
     """删除调度规则"""
     registry: DispatchRuleRegistry = g.container.resolve(DispatchRuleRegistry)
@@ -276,16 +293,13 @@ async def delete_rule(rule_id: str):
         await registry.save_rules_async()
         return jsonify({"message": "Rule deleted successfully"})
     except Exception as e:
-        registry.rules[rule_id] = deleted_rule
-        if had_tombstone:
-            registry.deleted_preset_rule_ids.add(rule_id)
-        else:
-            registry.deleted_preset_rule_ids.discard(rule_id)
+        registry.restore_rule(deleted_rule, had_tombstone)
         return jsonify({"error": str(e)}), 400
 
 
 @dispatch_bp.route("/rules/<rule_id>/enable", methods=["POST"])
 @require_auth
+@serialize_rule_write
 async def enable_rule(rule_id: str):
     """启用调度规则"""
     registry: DispatchRuleRegistry = g.container.resolve(DispatchRuleRegistry)
@@ -308,6 +322,7 @@ async def enable_rule(rule_id: str):
 
 @dispatch_bp.route("/rules/<rule_id>/disable", methods=["POST"])
 @require_auth
+@serialize_rule_write
 async def disable_rule(rule_id: str):
     """禁用调度规则"""
     registry: DispatchRuleRegistry = g.container.resolve(DispatchRuleRegistry)

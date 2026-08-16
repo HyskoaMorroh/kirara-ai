@@ -8,8 +8,19 @@
 
 ## [Unreleased] - 本地增强
 
+### Fixed
+
+- 修复工作流画布卸载或切换时遗留的防抖写入，避免旧工作流状态回写到新工作流。
+- 修复模型目录刷新和后端配置更新失败后的运行时回滚路径。
+- 修复规则持久化失败时未受锁保护的内存回滚，以及 MCP 超时测试产生的未等待协程警告。
+- 修复窄屏节点配置面板和画布弹窗的横向溢出，并为关闭、输入端口删除、输出端口删除按钮补充可访问名称。
+- 修正文档中默认调度规则数量与优先级表格。
+
 ### Added
 
+- **工作流操作与部署指南**：新增 `docs/WORKFLOW_OPERATIONS_GUIDE.md`，把首次部署、模板选型、模型手动选择、自动探测边界、默认规则、画布操作、排错顺序和扩展边界串成可执行流程；README 文档导航同步更新。
+- **精湛部署与扩展指南**：新增 `docs/EXCELLENCE_DEPLOYMENT_GUIDE.md`，明确现有能力的部署验收顺序，并把 Agents、Skills、Hooks、MCP 与可观测性拆为可回滚、可验证的后续阶段，避免把规划误当成交付。
+- **缓存与发布回归契约**：补充 Block 静态元数据缓存、Docker 锁文件依赖导出、Yarn 版本声明和非改写式 lint 命令的回归检查；新增画布重叠检测的前端单元测试。
 - **触发规则试运行**：规则页可用示例消息按真实的“优先级降序 + 规则 ID 升序”预演命中顺序，逐条显示将执行、被前序规则截断、未命中、已禁用或无法确定；试运行不执行工作流、不发送消息、不保存草稿。随机概率和需要真实 IM 实例的条件会明确标为无法确定，避免把演示结果误当成实际运行结果。
 - **工作流结构预检**：工作流画布的“检查”现在会调用无副作用的服务端预检，统一检查重复节点、未知区块或端口、重复输入连线、类型不兼容、必需输入、入口、不可达节点与非受控环；预检只报告问题，不保存、执行或自动改图，搭建中的草稿仍可按原方式保存。
 - **完整备份与恢复服务**：新增 `kirara_ai.backup.BackupService`，可导出便携式 `.kirara-backup.zip`，覆盖系统与 Web 设置、模型与机器人配置、工作流、触发规则、数据库、记忆、媒体、插件、字体及自动探测状态。
@@ -61,6 +72,10 @@
 
 ### Fixed
 
+- **打开工作流节点的重复反射**：Block 类型接口现在缓存输入、输出和配置的静态反射结果，并向每次请求返回独立副本；模型候选等 `options_provider` 仍按请求实时执行，因此手动下拉选模型、定期探测后刷新候选的既有行为不变。
+- **画布热路径与小屏遮挡**：节点与边的持久化改由 Vue Flow 的变更事件驱动，不再在每次交互中全量序列化图数据；重叠角标检测改为按 x 轴扫描候选节点，节点列表面板在窄屏限制宽度，避免覆盖画布。
+- **配置、模型目录与规则并发写入**：配置保存、LLM 后端更新和调度规则变更分别进行串行化；定时模型探测在重新加载成功后才提交新模型目录，重载失败会恢复旧目录，避免出现保存成功但运行对象未刷新的一致性裂缝。
+- **内部文档死链**：修复 WebUI、Web API 与各 API 模块说明中的过期 `framework/`、适配器、监控和开发指南链接，移除不存在的截图占位资源。
 - **自动检测与五档模型链兼容性**：定时自动检测现在仅刷新后端当前可发现的模型目录，并识别同 ID 的能力元数据更新；它不会改写任何工作流的主模型或 4 个备用模型。若已配置模型不再被检测到，工作流编辑器对应下拉槽位显示为空，原始配置会保留到用户主动选择替代模型，避免无关保存操作静默删除降级链。
 - **手动检测与定时检测一致性**：模型页的“自动检测”接口现在复用相同的目录规范化逻辑，兼容仍返回字符串 ID 的旧适配器、去除重复项并保留提供商返回顺序；它同样只更新当前后端模型目录，不会触及工作流的五档模型配置。
 - **模型页无关请求**：编辑模型名称、能力或密钥时不再重复请求“是否支持自动检测”；只有切换适配器类型才会检查，并忽略较慢旧请求的返回，避免状态被覆盖。
@@ -77,7 +92,7 @@
 - **登录页对比度**：`LoginView.vue` 原先只有一层 0.7→0.45 的主色半透明遮罩，白字对比度仅约 2.5:1（松林色板低至 1.8:1）；改为「主色实底渐变 + 固定深色蒙版」两层后，明暗两态下白字对比度均 ≥8:1，稳过 AA。
 - **硬编码颜色收敛**：12 个此前遗漏的组件改用设计令牌——`Console.vue`、`nodes/CodeNode.vue`、`MCPDetail.vue`、`ModelListForm.vue`、`ConfigurationList.vue`、`MediaList.vue`、`LLMAdapterConfig.vue`、`FrpServiceCard.vue`、`StatusBar.vue`、`LoginView.vue`、`LLMStatistics.vue`、`TopBar.vue`；图表与节点的分类色补上深色模式取值（`utils/node-colors.ts` 按 `<html>` 上的 `dark` 类选取深色适配值并按明暗分别缓存）；8 个文件补上 `:focus-visible` 键盘焦点样式。
 - **必需端口角标被截断**：`CustomNode.vue` 把必填标记 `*` 移出会被 ellipsis 截断的 `.port-label`，改为其兄弟节点并禁止收缩，端口名过长时不会先把 `*` 吃掉。
-- **画布性能**：移除 `{ deep: true, flush: 'sync' }` 里直接 `JSON.stringify` 全部节点的监听（改为节流的签名比对）；Monaco 配置写回改为防抖后统一 flush；`isValidConnection` 结果记忆化，避免 vue-flow 对每个端口反复调用时重复计算；打断 props → emit → `initGraphData` 的回环；`NodeListPanel` 的分组结果记忆化。
+- **画布性能**：移除 `{ deep: true, flush: 'sync' }` 里直接 `JSON.stringify` 全部节点的监听，改为按 Vue Flow 节点/边变更事件分类保存；选择态和尺寸变更不再触发持久化，节点配置通过显式的变更前快照保存。Monaco 配置写回改为防抖后统一 flush；`isValidConnection` 结果记忆化，避免 vue-flow 对每个端口反复调用时重复计算；打断 props → emit → `initGraphData` 的回环；`NodeListPanel` 的分组结果记忆化。
 - **撤销/重做与画布健壮性**：切换工作流时清空撤销/重做栈（原先会把上一张图的区块恢复到当前工作流），并以 `MAX_HISTORY_DEPTH = 50` 限制栈深；`handleRedo` 与 `handleUndo` 行为对称；`/block/types/compatibility` 请求失败时进入降级模式（只提示一次并安排重试），不再锁死画布；导出时延后 `URL.revokeObjectURL`，保证下载完成；导入补上不派发 `cancel` 事件浏览器的兜底，并对端口对不上的连线逐条容错、用结果弹窗列出被丢弃的连线明细。
 - **首次部署即可用**：`data/dispatch_rules/rules.yaml` 的私聊规则 `chat_creative` 由 DeepSeek 专用的 `chat:dsr_thinking` 改为通用的 `chat:normal`，全新部署换普通模型时不再输出奇怪内容；`talk_break.yaml` 提示词里写死的 `2025-02-23` 改由 `internal:current_time_block` 提供实时时间；抽卡规则改为整条消息匹配的正则 `^\s*(?:[/.。])?(?:抽卡|十连|单抽)\s*$`，并在说明里写明指令必须单独发送；`normal.yaml`、`dsr_thinking.yaml`、`normal_multimodal.yaml` 里写死的模型 ID（多数用户并未配置）清空为 `''`，改由下拉框手动选择。
 - **预设节点坐标重叠**：随包预设与 `data/workflows/chat/` 副本里写死的坐标全部重算并对齐到规则网格，节点框不再互相压叠（自动排版只对没有保存过位置的节点生效，所以 YAML 里的坐标会原样进入画布）；`data/workflows/chat/` 下的副本按设计保留，并由 `tests/test_workflow_presets.py` 校验两处文件内容逐字一致、且任意两个节点框不重叠。
@@ -91,6 +106,7 @@
 
 ### Changed
 
+- **Docker 运行依赖可复现性**：镜像构建读取已提交的 `uv.lock`，导出无开发依赖的带哈希 requirements，再以无依赖模式安装项目 wheel；前端声明 Yarn `1.22.22`，并新增不会自动修改源码的 `yarn lint:check`。
 - **发布构建一致性**：Windows 快速启动包改为构建仓库内与 Docker 镜像相同的固定 WebUI 源码，不再下载独立仓库的最新前端产物；发布附件工作流明确申请 `contents: write`，并将前端 TypeScript 编译器升级至与 Vue 3.5 类型声明兼容的 5.2 系列。
 
 - **默认聊天工作流与实际使用配置对齐**：`data/workflows/chat/` 下 5 个工作流按当前线上配置更新，部署后无需在 WebUI 里手动调整。`normal.yaml` 换为「刘思思（全能专家版）」人设并配置 `grok-4.5` 主模型加 4 个备用模型；`dsr_thinking.yaml` 精简为专家视角提示词并配置 `claude-opus-4-8` 主模型加 4 个备用模型；`normal_multimodal.yaml` 精简提示词并指定 `gemini-3-pro-preview`；三个文件同时清理了重复的 `connected_to` 连线（同一对端口被声明两次）。`memory_store.yaml` 与 `talk_break.yaml` 内容与线上一致，未改动。所有文件区块数量保持不变，无功能块增减。
@@ -123,17 +139,18 @@
 
 ### Tests
 
-- 后端测试现为 413 个，`.venv/Scripts/python.exe -m pytest ./tests -q` 全部通过（系统 `python` 未安装 pytest，必须使用虚拟环境解释器）。`tests/` 顶层测试文件由 12 个增至 16 个。
+- 新增 `tests/utils/test_block_registry.py` 的静态元数据缓存与副本隔离回归、`webui/tests/workflow-layout.test.ts` 的画布重叠识别回归，并扩充 `tests/test_webui_build_contract.py` 的 Docker/Yarn 发布契约。
+- 后端测试现为 425 个，`.venv/Scripts/python.exe -m pytest ./tests -q` 全部通过（系统 `python` 未安装 pytest，必须使用虚拟环境解释器）。`tests/` 顶层测试文件由 12 个增至 16 个。
 - 新增 `tests/test_workflow_presets.py`（预设可发现、名称/说明/节点齐全、区块类型与端口可解析、坐标不重叠、随包预设与 `data/workflows` 副本一致、不写死模型 ID、不写死日期）、`tests/test_default_dispatch_rules.py`、`tests/test_model_catalog.py`、`tests/test_workflow_preset_deletions.py`、`tests/web/api/dispatch/test_dispatch.py`。
 - 扩充 `tests/system_blocks/llm/test_chat.py`（采样温度解析与模型回退开关）、`tests/test_webui_build_contract.py`（锁文件白名单、wheel 预设声明、Docker 默认数据不含测试夹具）、`tests/web/api/workflow/test_workflow.py`。
-- 新增前端单元测试：`webui/tests/` 下 9 个文件共 34 个用例全部通过（`theme-boot-table.test.ts` 校验 `index.html` 启动色板表与 `palettes.ts` 不漂移，另有 `safe-storage`、`workflow-data`、`workflow-editor`、`workflow-model-options`、`workflow-node-utils`、`dispatch-preview-utils`、`dispatch-rule-utils`、`deep-clone`）。
+- 新增前端单元测试：`webui/tests/` 下 10 个文件共 40 个用例全部通过（`theme-boot-table.test.ts` 校验 `index.html` 启动色板表与 `palettes.ts` 不漂移，另有 `safe-storage`、`workflow-data`、`workflow-editor`、`workflow-model-options`、`workflow-node-utils`、`dispatch-preview-utils`、`dispatch-rule-utils`、`deep-clone`、`workflow-layout`）。
 
 **当前实测数字**：
 
-- 后端 `.venv/Scripts/python.exe -m pytest ./tests -q` → **413 passed**；`tests/` 顶层测试文件 16 个。
-- 前端 `cd webui && npx vitest run --config vitest.config.ts` → **9 个文件 / 34 个用例全部通过**（新增 `deep-clone.test.ts`）。
+- 后端 `.venv/Scripts/python.exe -m pytest ./tests -q` → **425 passed**；`tests/` 顶层测试文件 16 个。
+- 前端 `cd webui && npx vitest run --config vitest.config.ts` → **10 个文件 / 40 个用例全部通过**（新增 `workflow-layout.test.ts`）。
 - 前端类型检查 `cd webui && npx vue-tsc --noEmit` → 退出码 0。
-- 发布契约 `pytest tests/test_release_workflow_contract.py tests/test_webui_build_contract.py -q` → **23 passed**。
+- 发布契约 `pytest tests/test_release_workflow_contract.py tests/test_webui_build_contract.py -q` → **29 passed**。
 - 新增 `tests/test_dispatch_reachability.py`：覆盖调度排序键、`or` / `and` 组的无条件判定、已禁用的无条件规则不遮蔽后续规则，以及「`and` 组混合 `fallback` 与其他条件时不得被判为兜底」这条前端旧实现的回归。
 - 新增 `webui/tests/deep-clone.test.ts`：嵌套结构、`Date` / `RegExp` / `Map` / `Set`、原始值与 `undefined`、循环引用，以及「逐层解包 Vue 响应式代理」这条关键回归（`structuredClone` 只在顶层 `toRaw` 时嵌套层仍是 Proxy）。
 - `webui/tests/dispatch-preview-utils.test.ts` 改为直接解析 `kirara_ai/web/api/dispatch/models.py` 里 `decision: Literal[...]` 的取值集合，断言前端标签映射与后端枚举完全一致且没有缺项——写死字符串相等的断言发现不了「后端新增判定、前端渲染出 undefined」。

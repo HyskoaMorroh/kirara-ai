@@ -24,13 +24,6 @@
 🚧 **当前正在施工中，欢迎有兴趣的同学与开发！** 🚧
 
 
-## 截图展示
-
-<!-- 这里可以添加一些项目截图 -->
-<!-- 例如: -->
-![Screenshot 1](docs/screenshots/1.png)
-![Screenshot 2](docs/screenshots/2.png)
-
 ## 如何参与开发
 
 我们非常欢迎您参与到 Kirara Agent Framework WebUI 的开发中！在参与开发之前，请务必先进行讨论，以确保您的贡献能够更好地融入到项目中。
@@ -41,7 +34,7 @@
 
 ## License
 
-本项目采用 [MIT License](LICENSE) 开源协议。
+本项目采用 [MIT License](../LICENSE) 开源协议。
 
 ## Credits
 

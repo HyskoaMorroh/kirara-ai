@@ -133,7 +133,13 @@ async def test_connect_timeout(stdio_config):
         server = MCPServer(stdio_config)
         
         # 修改超时时间以加快测试
-        with patch.object(asyncio, "wait_for", side_effect=asyncio.TimeoutError):
+        async def timeout_wait_for(awaitable, timeout):
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                close()
+            raise asyncio.TimeoutError
+
+        with patch.object(asyncio, "wait_for", side_effect=timeout_wait_for):
             connect_result = await server.connect()
             assert connect_result is False
 

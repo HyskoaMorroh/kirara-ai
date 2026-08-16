@@ -163,7 +163,7 @@ DELETE/backend-api/api/system/users/{username}
 
 - [系统路由](routes.py)
 - [数据模型](models.py)
-- [系统监控](../../../monitor)
+- [系统观测与排错](../../../../docs/OBSERVABILITY.md)
 
 ## 错误处理
 
@@ -235,6 +235,6 @@ response = requests.post(
 
 ## 相关文档
 
-- [系统架构](../../README.md#系统架构-)
-- [监控指南](../../README.md#系统监控-)
-- [API 认证](../../README.md#api认证-) 
+- [Web API 概览](../../../../README.md)
+- [监控指南](../../../../docs/OBSERVABILITY.md)
+- [API 认证](../../auth/routes.py)

@@ -339,7 +339,8 @@ const getShortId = (typeName: string) => {
 
 <style scoped>
 .node-list-panel {
-  width: 340px;
+  width: min(340px, calc(100vw - 16px));
+  max-width: 100%;
   background-color: var(--panel-bg-color, rgba(255, 255, 255, 0.8));
   backdrop-filter: blur(10px);
   /* 例外：该面板贴着画布左缘满高铺满，任何圆角都会露出画布底色，故保持直角 */
@@ -377,7 +378,8 @@ const getShortId = (typeName: string) => {
 
 .node-list-collapse {
   margin: 0 auto;
-  width: 300px;
+  width: min(300px, calc(100% - 24px));
+  max-width: 100%;
 }
 
 .empty-state {

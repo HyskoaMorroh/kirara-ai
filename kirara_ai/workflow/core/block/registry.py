@@ -1,4 +1,5 @@
 import warnings
+from copy import deepcopy
 from inspect import Parameter, signature
 from typing import Annotated, Any, Dict, List, Optional, Tuple, Type, get_args, get_origin
 
@@ -81,6 +82,10 @@ class BlockRegistry:
         self._localized_names = {}
         self._colors: Dict[str, str] = {}
         self._type_system = TypeSystem()
+        self._block_info_cache: Dict[
+            Type[Block],
+            Tuple[Dict[str, BlockInput], Dict[str, BlockOutput], Dict[str, BlockConfig]],
+        ] = {}
 
     def register(
         self,
@@ -102,6 +107,7 @@ class BlockRegistry:
         full_name = f"{group_id}:{block_id}"
         if full_name in self._blocks:
             raise ValueError(f"Block {full_name} already registered")
+        self._block_info_cache.pop(block_class, None)
         self._blocks[full_name] = block_class
         block_class.id = block_id
         if localized_name:
@@ -160,6 +166,7 @@ class BlockRegistry:
         self._localized_names.clear()
         self._colors.clear()
         self._type_system = TypeSystem()
+        self._block_info_cache.clear()
 
     def get_block_type_name(self, block_class: Type[Block]) -> str:
         """获取 block 的类型名称，优先使用注册名称"""
@@ -233,6 +240,20 @@ class BlockRegistry:
 
         return inputs, outputs, configs
 
+    def extract_block_info_cached(
+        self, block_type: Type[Block]
+    ) -> Tuple[Dict[str, BlockInput], Dict[str, BlockOutput], Dict[str, BlockConfig]]:
+        """
+        提取可复用的 Block 静态元数据，并为调用方返回独立副本。
+
+        选项提供器会在 Web 路由中继续按请求执行，因此模型列表等动态内容不会被缓存。
+        """
+        block_info = self._block_info_cache.get(block_type)
+        if block_info is None:
+            block_info = self.extract_block_info(block_type)
+            self._block_info_cache[block_type] = block_info
+        return deepcopy(block_info)
+
     def get_builtin_params(self) -> List[str]:
         """获取内置参数"""
         sig = signature(Block.__init__)
@@ -253,4 +274,3 @@ class BlockRegistry:
         不得不越过封装去访问它。这里补一个公开入口，语义与内部实现完全一致。
         """
         return self._type_system.get_type_name(data_type)
-

@@ -387,6 +387,6 @@ response = requests.delete(
 
 ## 相关文档
 
-- [系统架构](../../README.md#系统架构-)
-- [API 认证](../../README.md#api认证-)
-- [工作流开发](../../../workflow/README.md#工作流开发-) 
+- [Web API 概览](../../../../README.md)
+- [API 认证](../../auth/routes.py)
+- [工作流开发](../../../../docs/EXTENDING.md#四手写工作流预设-yaml)

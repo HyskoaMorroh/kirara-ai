@@ -567,7 +567,15 @@ const getTypeOptions = () => {
 
     <template #header-extra>
       <div class="header-actions">
-        <NButton quaternary circle size="small" @click="closeNodeConfig" class="close-button">
+        <NButton
+          quaternary
+          circle
+          size="small"
+          title="关闭节点配置"
+          aria-label="关闭节点配置"
+          @click="closeNodeConfig"
+          class="close-button"
+        >
           <template #icon>
             <NIcon>
               <CloseOutline />
@@ -617,6 +625,8 @@ const getTypeOptions = () => {
                     quaternary
                     circle
                     size="small"
+                    title="删除输入端口"
+                    aria-label="删除输入端口"
                     @click="removeInputPort(input.name)"
                     class="remove-port-button"
                   >
@@ -772,6 +782,8 @@ const getTypeOptions = () => {
                     quaternary
                     circle
                     size="small"
+                    title="删除输出端口"
+                    aria-label="删除输出端口"
                     @click="removeOutputPort(output.name)"
                     class="remove-port-button"
                   >
@@ -1093,7 +1105,8 @@ const getTypeOptions = () => {
 
 <style scoped>
 .node-config-panel {
-  width: 500px;
+  width: min(500px, 100vw);
+  max-width: 100%;
   background-color: var(--panel-bg-color);
   backdrop-filter: blur(10px);
   /* 例外：该面板贴着画布右缘满高铺满，任何圆角都会露出画布底色，故保持直角 */
@@ -1118,6 +1131,19 @@ const getTypeOptions = () => {
   font-weight: 600;
   font-size: 16px;
   color: var(--text-color);
+}
+
+@media (max-width: 640px) {
+  .node-config-panel {
+    width: 100vw;
+  }
+
+  .header-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
 .header-actions {

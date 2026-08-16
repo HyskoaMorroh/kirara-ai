@@ -188,13 +188,13 @@ GET/backend-api/api/im/types/{adapter_type}/config-schema
 
 ## 适配器类型
 
-适配器由插件提供，见[适配器实现](../../../im/adapters)。
+适配器由插件提供，见[内置插件目录](../../../plugins)。
 
 ## 相关代码
 
 - [IM 管理器](../../../im/manager.py)
 - [IM 注册表](../../../im/im_registry.py)
-- [适配器实现](../../../im/adapters)
+- [内置插件目录](../../../plugins)
 
 ## 错误处理
 
@@ -255,6 +255,6 @@ response = requests.post(
 
 ## 相关文档
 
-- [系统架构](../../README.md#系统架构-)
-- [API 认证](../../README.md#api认证-)
-- [IM 适配器开发](../../../im/README.md#适配器开发-) 
+- [Web API 概览](../../../../README.md)
+- [API 认证](../../auth/routes.py)
+- [IM 适配器开发](../../../../docs/EXTENDING.md#二编写插件)

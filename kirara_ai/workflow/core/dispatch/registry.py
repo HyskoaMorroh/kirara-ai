@@ -118,6 +118,23 @@ class DispatchRuleRegistry:
                 self.deleted_preset_rule_ids.add(rule_id)
             del self.rules[rule_id]
 
+    def restore_rule(
+        self, rule: CombinedDispatchRule, had_tombstone: Optional[bool] = None
+    ) -> None:
+        """在持久化失败后恢复内存中的规则。"""
+        with self._lock:
+            self.rules[rule.rule_id] = rule
+            if had_tombstone is not None:
+                if had_tombstone:
+                    self.deleted_preset_rule_ids.add(rule.rule_id)
+                else:
+                    self.deleted_preset_rule_ids.discard(rule.rule_id)
+
+    def discard_rule(self, rule_id: str) -> None:
+        """在持久化失败后丢弃未成功创建的内存规则。"""
+        with self._lock:
+            self.rules.pop(rule_id, None)
+
     def _preset_tombstones_path(self, rules_dir: str) -> str:
         """获取内置规则删除标记的持久化位置。"""
         return os.path.join(rules_dir, ".preset_tombstones.json")
