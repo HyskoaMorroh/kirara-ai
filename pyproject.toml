@@ -90,8 +90,14 @@ namespaces = true
 [tool.setuptools.exclude-package-data]
 "*" = ["__pycache__/*", "*.py[cod]"]
 
+# 默认索引使用官方 PyPI。uv.lock 会记录解析出的下载地址，锁文件要随仓库分发
+# 并在 GitHub Actions（境外 runner）上通过 `uv sync --frozen` 校验，因此这里
+# 不能指向国内镜像——镜像地址在境外访问不稳定，会让 CI 与镜像构建失败。
+# 国内开发者如需加速，在本机设置环境变量覆盖即可，不必修改本文件：
+#   UV_DEFAULT_INDEX=https://mirrors.ustc.edu.cn/pypi/simple
+# `--frozen` 下 uv 仍按 lock 里记录的 sha256 校验每个包，换源不影响可复现性。
 [[tool.uv.index]]
-url = "https://mirrors.ustc.edu.cn/pypi/simple"
+url = "https://pypi.org/simple"
 default = true
 
 [options]

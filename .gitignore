@@ -25,7 +25,8 @@ data/frpc/
 data/db
 .venv/
 .env
-uv.lock
+# uv.lock 必须随仓库分发：CI 与镜像构建都用 `uv sync --frozen` 按锁文件里记录的
+# sha256 校验安装，缺少它会直接失败（error: Unable to find lockfile at `uv.lock`）。
 .mypy_cache/
 **/mypy_cache/
 **/test-workflow-new.yaml
