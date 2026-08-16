@@ -668,7 +668,7 @@ mcp:
 三处刻意留空/接线值得注意：
 
 1. **`enabled_tools: []`**。`MCPToolProvider.__init__` 的这个参数带 `options_provider=get_enabled_mcp_tools`，候选项是 `mcp_manager.get_tools().keys()`——也就是**当前已连接**服务器提供的工具。服务器没连上时下拉框是空的，所以顺序必须是「先连服务器，再来勾工具」。留空表示不开放任何工具，模型会退化成普通对话。
-2. **`model_name: ''`**。必须手动选一个**支持函数调用**的模型。`ChatCompletionWithTools.execute()` 开头就检查 `if not self.model_name: raise ValueError("need a model name which support function calling")`。下拉框的候选来自 `model_name_options_provider`（筛 `TextChat` 能力），它**不会**帮你筛掉不支持函数调用的模型——这一步得你自己判断。
+2. **`model_name: ''`**。必须手动选一个**支持函数调用**的模型。`ChatCompletionWithTools.execute()` 开头就检查 `if not self.model_name:` 并抛出中文报错，其中带上节点名与要点开的下拉框名（英文原文 `need a model name which support function calling` 保留在括号里便于检索日志）。下拉框的候选来自 `model_name_options_provider`（筛 `TextChat` 能力），它**不会**帮你筛掉不支持函数调用的模型——这一步得你自己判断。
 3. **`iteration_msgs → middle_steps`**。工具调用过程中产生的 assistant/tool 消息通过这条线存进记忆。不接的话，下一轮对话看不到「上次调了什么工具、结果是什么」。
 
 用它的正确顺序：

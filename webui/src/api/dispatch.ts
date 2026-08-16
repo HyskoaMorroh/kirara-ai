@@ -46,8 +46,8 @@ export interface DispatchRuleReachability {
   workflow_id: string
   priority: number
   enabled: boolean
-  /** 从 1 开始的匹配次序 */
-  order: number
+  /** 从 1 开始的匹配次序；只统计已启用的规则，已禁用规则为 null */
+  order: number | null
   /** 该规则本身是否为无条件规则（会拦下所有消息） */
   catch_all: boolean
   /** 排在某条已启用的无条件规则之后，对任何消息都不会被判断到 */
@@ -78,8 +78,8 @@ export interface DispatchPreviewRuleResult {
   matched: boolean | null
   decision: DispatchPreviewDecision
   explanation: Record<string, any>
-  /** 从 1 开始的匹配次序，与 /dispatch/reachability 一致 */
-  order: number
+  /** 从 1 开始的匹配次序，与 /dispatch/reachability 一致；已禁用规则为 null */
+  order: number | null
   catch_all: boolean
   unreachable: boolean
   shadowed_by_rule_id: string | null

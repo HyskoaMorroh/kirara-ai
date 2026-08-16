@@ -131,6 +131,29 @@ def test_a_disabled_rule_after_a_catch_all_is_not_reported_as_unreachable():
     assert by_id["low"].shadowed_by_rule_id is None
 
 
+def test_order_counts_only_enabled_rules():
+    """调度器的 get_active_rules() 先过滤 enabled 再排序，序号不能把禁用规则算进去。"""
+    rules = [
+        make_rule("aaa", 100),
+        make_rule("bbb", 90, enabled=False),
+        make_rule("ccc", 80),
+        make_rule("ddd", 70, enabled=False),
+        make_rule("eee", 60),
+    ]
+
+    results = analyze_dispatch_reachability(rules)
+    by_id = {item.rule_id: item for item in results}
+
+    # 禁用规则仍然返回一行，界面上必须可见，只是没有匹配次序
+    assert [item.rule_id for item in results] == ["aaa", "bbb", "ccc", "ddd", "eee"]
+    assert by_id["bbb"].order is None
+    assert by_id["ddd"].order is None
+    # 序号只在已启用的规则之间递增，界面上的「匹配顺序第 N 位」不再虚高
+    assert by_id["aaa"].order == 1
+    assert by_id["ccc"].order == 2
+    assert by_id["eee"].order == 3
+
+
 def test_same_priority_catch_all_shadows_only_the_rules_ordered_after_it():
     """同优先级按 rule_id 升序：排在兜底之前的规则仍然可达。"""
     rules = [

@@ -8,6 +8,10 @@ from ruamel.yaml import YAML
 from kirara_ai.workflow.core.dispatch.registry import DispatchRuleRegistry
 from kirara_ai.workflow.core.workflow.registry import WorkflowRegistry
 from kirara_ai.workflow.implementations.rules.default_rules import (
+    PRIORITY_CHAT,
+    PRIORITY_COMMAND,
+    PRIORITY_FALLBACK,
+    PRIORITY_SOFT_COMMAND,
     build_default_rules,
     register_system_dispatch_rules,
     validate_rule_workflows,
@@ -195,6 +199,105 @@ def test_gacha_rule_only_matches_a_complete_command():
     assert re.fullmatch(pattern, "。单抽")
     assert not re.fullmatch(pattern, "抽卡概率是多少？")
     assert not re.fullmatch(pattern, "我想了解十连机制")
+
+
+def test_gacha_mention_rule_restores_loose_keyword_matching():
+    """句子里夹带的「抽卡」必须仍能触发抽卡模拟器：这是宽松规则存在的唯一理由。"""
+    mention_rule = next(
+        rule for rule in build_default_rules() if rule.rule_id == "game_gacha_mention"
+    )
+    simple_rule = mention_rule.rule_groups[0].rules[0]
+
+    assert simple_rule.type == "keyword"
+    keywords = simple_rule.config["keywords"]
+    assert keywords == ["抽卡", "十连", "单抽"]
+    # KeywordMatchRule.match 是子串匹配，等价于下面的判断
+    assert any(keyword in "今天抽卡吗" for keyword in keywords)
+    assert any(keyword in "我想了解十连机制" for keyword in keywords)
+    assert not any(keyword in "今天天气不错" for keyword in keywords)
+
+
+def test_gacha_mention_rule_sits_between_chat_and_fallback():
+    """宽松规则必须低于对话、高于兜底，否则会劫持私聊对话或永远被兜底遮蔽。"""
+    rules = {rule.rule_id: rule for rule in build_default_rules()}
+
+    assert PRIORITY_FALLBACK < PRIORITY_SOFT_COMMAND < PRIORITY_CHAT
+    assert rules["game_gacha_mention"].priority == PRIORITY_SOFT_COMMAND
+    assert rules["chat_normal"].priority == PRIORITY_CHAT
+    assert rules["chat_creative"].priority == PRIORITY_CHAT
+    assert rules["fallback"].priority == PRIORITY_FALLBACK
+    # 精确指令仍然排在对话之上，整条消息只有指令时优先走精确规则
+    assert rules["game_gacha"].priority == PRIORITY_COMMAND
+
+
+def test_both_gacha_rules_point_at_the_same_workflow():
+    """精确与宽松两条规则必须指向同一个抽卡工作流。"""
+    rules = {rule.rule_id: rule for rule in build_default_rules()}
+
+    assert rules["game_gacha"].workflow_id == "game:gacha"
+    assert rules["game_gacha_mention"].workflow_id == "game:gacha"
+
+
+def test_code_built_rules_match_the_shipped_yaml():
+    """代码内置规则集必须与随包的 rules.yaml 逐字段一致，两份是手工同步的。"""
+    project_root = Path(__file__).resolve().parents[1]
+    yaml = YAML(typ="safe")
+    with (project_root / "data" / "dispatch_rules" / "rules.yaml").open(
+        encoding="utf-8"
+    ) as file:
+        shipped_rules = yaml.load(file)
+
+    def normalize(rule_id, name, description, workflow_id, priority, enabled, rule_groups):
+        return (
+            rule_id,
+            name,
+            description,
+            workflow_id,
+            priority,
+            enabled,
+            [
+                (
+                    group["operator"] if isinstance(group, dict) else group.operator,
+                    [
+                        (
+                            simple["type"] if isinstance(simple, dict) else simple.type,
+                            dict(simple["config"] if isinstance(simple, dict) else simple.config),
+                        )
+                        for simple in (
+                            group["rules"] if isinstance(group, dict) else group.rules
+                        )
+                    ],
+                )
+                for group in rule_groups
+            ],
+        )
+
+    built = [
+        normalize(
+            rule.rule_id,
+            rule.name,
+            rule.description,
+            rule.workflow_id,
+            rule.priority,
+            rule.enabled,
+            rule.rule_groups,
+        )
+        for rule in build_default_rules()
+    ]
+    shipped = [
+        normalize(
+            rule["rule_id"],
+            rule["name"],
+            rule["description"],
+            rule["workflow_id"],
+            rule["priority"],
+            rule["enabled"],
+            rule["rule_groups"],
+        )
+        for rule in shipped_rules
+    ]
+
+    assert built == shipped
 
 
 def test_save_rules_keeps_the_previous_yaml_when_atomic_replace_fails(tmp_path, monkeypatch):

@@ -68,7 +68,10 @@ class DispatchRuleReachability(BaseModel):
     priority: int
     enabled: bool
     #: 从 1 开始的匹配次序，与调度器实际判断顺序一致。
-    order: int
+    #: 只统计已启用的规则：`registry.get_active_rules()` 会先过滤 enabled 再排序，
+    #: 把禁用规则也算进序号会让界面上的「匹配顺序第 N 位」虚高。
+    #: 已禁用的规则不参与匹配，因此没有次序，取 None（行本身仍会返回，保证表格里可见）。
+    order: Optional[int] = None
     #: 该规则本身是否为无条件规则。
     catch_all: bool
     #: 该规则是否因为排在某条已启用的无条件规则之后而永远不会被判断到。
@@ -85,14 +88,24 @@ def analyze_dispatch_reachability(
     只做静态分析：不需要示例消息，也不会创建条件实例、取样随机概率或访问
     IM 实例，因此没有任何副作用。已禁用的规则不会遮蔽后续规则，也不会被标记
     为不可达（它本来就不参与匹配）。
+
+    序号只在已启用的规则之间递增：调度器的 `get_active_rules()` 先过滤 enabled
+    再排序，禁用规则根本不会被判断，若把它也算进去，界面上的「匹配顺序第 N 位」
+    就会比真实次序偏大。禁用规则仍会返回一行（表格里必须可见），只是 order 为 None。
     """
     ordered = sort_rules_in_dispatch_order(rules)
     shadowing_rule_id: Optional[str] = None
     results: List[DispatchRuleReachability] = []
+    enabled_order = 0
 
-    for index, rule in enumerate(ordered):
+    for rule in ordered:
         catch_all = is_catch_all_rule(rule)
         unreachable = bool(rule.enabled) and shadowing_rule_id is not None
+        if rule.enabled:
+            enabled_order += 1
+            order: Optional[int] = enabled_order
+        else:
+            order = None
         results.append(
             DispatchRuleReachability(
                 rule_id=rule.rule_id,
@@ -100,7 +113,7 @@ def analyze_dispatch_reachability(
                 workflow_id=rule.workflow_id,
                 priority=rule.priority,
                 enabled=rule.enabled,
-                order=index + 1,
+                order=order,
                 catch_all=catch_all,
                 unreachable=unreachable,
                 shadowed_by_rule_id=shadowing_rule_id if unreachable else None,

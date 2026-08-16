@@ -57,7 +57,8 @@ class DispatchPreviewRuleResult(BaseModel):
     decision: Literal["selected", "shadowed", "not_matched", "indeterminate", "disabled"]
     explanation: Dict[str, Any]
     #: 从 1 开始的匹配次序，与调度器判断顺序一致。
-    order: int = 0
+    #: 只统计已启用的规则；已禁用规则不参与匹配，因此为 None。
+    order: Optional[int] = None
     #: 该规则本身是否为无条件规则（会拦下所有消息）。
     catch_all: bool = False
     #: 与 decision 无关的静态结论：该规则排在某条已启用的无条件规则之后，

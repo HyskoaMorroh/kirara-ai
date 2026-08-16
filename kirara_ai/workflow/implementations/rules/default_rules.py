@@ -22,9 +22,15 @@ from kirara_ai.workflow.core.dispatch.registry import DispatchRuleRegistry
 #    60 精确指令  —— 有明确前缀或正则的功能（骰子、抽卡）
 #    30 对话      —— 群聊 @/前缀触发、私聊直接触发
 #     0 兜底      —— 前面都没命中时记录聊天内容
+#    15 宽松指令  —— 夹在句子里的关键词提及（如「今天抽卡吗」）。刻意排在对话
+#                   之下、兜底之上：群聊里用户既没打 /chat 也没 @机器人时
+#                   chat_normal 不命中，这类提及才落到功能工作流；私聊里
+#                   chat_creative（30）先命中，仅提到关键词的句子仍按正常对话回复，
+#                   不会被功能规则劫持。
 PRIORITY_SYSTEM = 100
 PRIORITY_COMMAND = 60
 PRIORITY_CHAT = 30
+PRIORITY_SOFT_COMMAND = 15
 PRIORITY_FALLBACK = 0
 
 
@@ -148,6 +154,23 @@ def build_default_rules() -> List[CombinedDispatchRule]:
                 _group(SimpleDispatchRule(type="chat_type", config={"chat_type": "私聊"}))
             ],
             metadata={"category": "chat", "permission": "user"},
+        ),
+        # ---- 宽松指令：排在对话之下，接住群聊里没有显式召唤机器人的关键词提及 ----
+        _rule(
+            rule_id="game_gacha_mention",
+            name="抽卡（宽松提及）",
+            description="群聊中没有 /chat 也没 @机器人时，句子里提到「抽卡」「十连」「单抽」也会触发抽卡模拟器。优先级 15 低于对话规则：私聊场景由「私聊 AI 对话」先命中，只是聊到抽卡不会被本规则劫持。",
+            workflow_id="game:gacha",
+            priority=PRIORITY_SOFT_COMMAND,
+            rule_groups=[
+                _group(
+                    SimpleDispatchRule(
+                        type="keyword",
+                        config={"keywords": ["抽卡", "十连", "单抽"]},
+                    )
+                )
+            ],
+            metadata={"category": "game", "permission": "user"},
         ),
         # ---- 兜底：没有命中任何规则时，静默记录聊天内容供后续查询记忆使用 ----
         _rule(

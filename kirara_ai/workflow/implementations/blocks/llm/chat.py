@@ -293,7 +293,13 @@ class ChatCompletion(Block):
                     self.logger.info(f"Model id unspecified, using default model: {default_model}")
 
         if not model_priority_list:
-            raise ValueError("No available LLM models found")
+            # 报错里带上节点身份：预设工作流的 model_name 故意留空，用户需要知道
+            # 该去画布上的哪个节点点开配置。英文原文保留在括号里，便于检索既有日志。
+            raise ValueError(
+                f"节点「{self.name}」没有可用的模型：请在工作流编辑器中打开该节点，"
+                f"从「模型 ID1」下拉框里选择一个已配置的模型"
+                f"（No available LLM models found）"
+            )
 
         # 记录模型优先级列表
         self.logger.info(f"Model priority list: {model_priority_list}")
@@ -468,7 +474,13 @@ class FunctionCalling(Block):
 
     def execute(self, request_body: LLMChatRequest) -> Dict[str, Any]:
         if not self.model_name:
-            raise ValueError("need a model name which support function calling")
+            # 预设 function_calling.yaml 的 model_name 故意留空，等用户从下拉框里选；
+            # 报错必须说清是哪个节点，否则用户只知道"报错了"，不知道去哪里点。
+            raise ValueError(
+                f"节点「{self.name}」尚未选择模型：请在工作流编辑器中打开该节点，"
+                f"从「模型 ID1」下拉框里选择一个支持函数调用（Function Calling）的模型"
+                f"（need a model name which support function calling）"
+            )
 
         llm_manager = self.container.resolve(LLMManager)
 
@@ -592,8 +604,12 @@ class ChatCompletionWithTools(Block):
 
     def execute(self, msg: List[LLMChatMessage], tools: List[Tool]) -> Dict[str, Any]:
         if not self.model_name:
+            # 预设 mcp_tools.yaml 的 model_name 故意留空，等用户从下拉框里选；
+            # 报错必须说清是哪个节点，否则用户只知道"报错了"，不知道去哪里点。
             raise ValueError(
-                "need a model name which support function calling")
+                f"节点「{self.name}」尚未选择模型：请在工作流编辑器中打开该节点，"
+                f"从「模型 ID, 需要支持函数调用」下拉框里选择一个支持函数调用（Function Calling）的模型"
+                f"（need a model name which support function calling）")
         else:
             self.logger.info(
                 f"Using  model: {self.model_name} to execute function calling")

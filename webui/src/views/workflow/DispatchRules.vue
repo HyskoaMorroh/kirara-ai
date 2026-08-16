@@ -111,12 +111,15 @@ const columns = [
                 bordered: false,
                 type: row._shadowed ? 'warning' : 'default'
               },
-              { default: () => String(row._order) }
+              // 已禁用的规则不参与匹配，因此没有次序，用「—」占位而不是给个假序号
+              { default: () => (row._order === null ? '—' : String(row._order)) }
             ),
           default: () =>
-            row._shadowed
-              ? '此规则排在一条无条件规则之后，永远不会被判断到。请提高它的优先级。'
-              : `匹配顺序第 ${row._order} 位，命中后不再判断后续规则。`        }
+            row._order === null
+              ? '此规则已禁用，不参与匹配，因此没有匹配顺序。'
+              : row._shadowed
+                ? '此规则排在一条无条件规则之后，永远不会被判断到。请提高它的优先级。'
+                : `匹配顺序第 ${row._order} 位，命中后不再判断后续规则。`        }
       )
   },
   { title: '名称', key: 'name' },
@@ -429,7 +432,9 @@ const orderedRules = computed(() => {
       const reachability = reachabilityByRuleId.get(ruleId)
       return {
         ...rule,
-        _order: reachability?.order ?? index + 1,
+        // 后端已给出结论时以它为准：order 为 null 表示该规则已禁用、不参与匹配，
+        // 此时不能用下标补一个假序号，否则又会回到「序号虚高」的老问题。
+        _order: reachability ? reachability.order : index + 1,
         _catchAll: reachability?.catch_all ?? false,
         // 被前面的无条件规则完全遮蔽
         _shadowed: reachability?.unreachable ?? false,
@@ -614,8 +619,10 @@ onMounted(async () => {
           class="draft-reachability-alert"
         >
           这条规则排在无条件规则
-          {{ draftReachability.shadowed_by_rule_id }} 之后（匹配顺序第
-          {{ draftReachability.order }} 位），保存后永远不会被触发。请提高它的优先级。
+          {{ draftReachability.shadowed_by_rule_id }} 之后（<template
+            v-if="draftReachability.order !== null"
+            >匹配顺序第 {{ draftReachability.order }} 位</template
+          ><template v-else>已禁用，不参与匹配</template>），保存后永远不会被触发。请提高它的优先级。
         </n-alert>
         <n-alert
           v-else-if="draftShadowedRuleNames.length > 0"
@@ -837,7 +844,9 @@ onMounted(async () => {
             </n-tag>
             <div class="preview-rule-main">
               <strong>{{ result.name }}</strong>
-              <span>第 {{ result.order }} 位 · {{ result.rule_id }} · {{ result.workflow_id }}</span>
+              <!-- 已禁用规则没有匹配次序，写成「未参与匹配」而不是「第 null 位」 -->
+              <span v-if="result.order === null">未参与匹配 · {{ result.rule_id }} · {{ result.workflow_id }}</span>
+              <span v-else>第 {{ result.order }} 位 · {{ result.rule_id }} · {{ result.workflow_id }}</span>
               <small v-if="result.unreachable">
                 排在无条件规则 {{ result.shadowed_by_rule_id }} 之后，对任何消息都不会被判断到。
               </small>

@@ -121,12 +121,19 @@ const baseTheme = computed(() => (themeStore.isDark ? darkTheme : null))
 </template>
 
 <style>
+/*
+ * 语义色取值以 assets/main.css 为唯一基准（等同 palettes.ts 的 classic 色板）。
+ * 此前这里是另一套 iOS 系统色，同一个选择器上两份不同取值，JS 未执行时到底
+ * 生效哪一份取决于样式注入顺序，深浅两套都可能与运行时主题不一致。现在改为与
+ * main.css 逐值对齐，只保留下面这几个 main.css 未定义的键（背景与文本）。
+ * --secondary-color 目前没有任何消费方，仍保留声明，方便后续需要时直接可用。
+ */
 :root {
   --primary-color: #007aff;
   --secondary-color: #5856d6;
-  --success-color: #34c759;
-  --warning-color: #ff9500;
-  --error-color: #ff3b30;
+  --success-color: #18a058;
+  --warning-color: #f0a020;
+  --error-color: #d03050;
   --background-color: #f2f2f7;
   --text-primary: #000000;
   --text-secondary: #8e8e93;
@@ -136,13 +143,14 @@ const baseTheme = computed(() => (themeStore.isDark ? darkTheme : null))
  * 深色对应值。上面这组是 iOS 系统色，被 html/body 直接消费；此前没有 .dark
  * 版本，JS 未执行或 store 初始化失败时深色用户会看到浅底深字。
  * --secondary-color 目前没有消费方，仍两套都保留，方便后续需要时直接可用。
+ * 语义色同样与 main.css 的 .dark 区块（classic.dark）逐值对齐。
  */
 .dark {
-  --primary-color: #0a84ff;
+  --primary-color: #5b8dff;
   --secondary-color: #5e5ce6;
-  --success-color: #30d158;
-  --warning-color: #ff9f0a;
-  --error-color: #ff453a;
+  --success-color: #63e2b7;
+  --warning-color: #f3a769;
+  --error-color: #e88080;
   --background-color: #161719;
   --text-primary: #ffffff;
   --text-secondary: #98989d;
@@ -151,11 +159,11 @@ const baseTheme = computed(() => (themeStore.isDark ? darkTheme : null))
 /* 无 JS 兜底：data-theme 缺失说明明暗尚未被任何一方决定，此时才跟随系统 */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
-    --primary-color: #0a84ff;
+    --primary-color: #5b8dff;
     --secondary-color: #5e5ce6;
-    --success-color: #30d158;
-    --warning-color: #ff9f0a;
-    --error-color: #ff453a;
+    --success-color: #63e2b7;
+    --warning-color: #f3a769;
+    --error-color: #e88080;
     --background-color: #161719;
     --text-primary: #ffffff;
     --text-secondary: #98989d;

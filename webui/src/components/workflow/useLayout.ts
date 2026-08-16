@@ -54,7 +54,7 @@ export const LAYOUT_GRID_SIZE = 20
 const FULL_WIDTH_PATTERN =
   /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/
 /** 明显比平均值窄的西文字符 */
-const NARROW_PATTERN = /[iIl1.,:;'`|!\[\]()\- ]/
+const NARROW_PATTERN = /[iIl1.,:;'`|![\]()\- ]/
 /** 明显比平均值宽的西文字符 */
 const WIDE_PATTERN = /[A-Z@%&WM]/
 

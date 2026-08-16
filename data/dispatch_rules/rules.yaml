@@ -104,6 +104,24 @@
     permission: user
     # 同上，已生效：LLM 节点未显式配置采样温度时读取这里的值。
     temperature: 0.9
+- rule_id: game_gacha_mention
+  name: 抽卡（宽松提及）
+  description: 群聊中没有 /chat 也没 @机器人时，句子里提到「抽卡」「十连」「单抽」也会触发抽卡模拟器。优先级 15 低于对话规则：私聊场景由「私聊 AI 对话」先命中，只是聊到抽卡不会被本规则劫持。
+  workflow_id: game:gacha
+  priority: 15
+  enabled: true
+  rule_groups:
+  - operator: or
+    rules:
+    - type: keyword
+      config:
+        keywords:
+        - 抽卡
+        - 十连
+        - 单抽
+  metadata:
+    category: game
+    permission: user
 - rule_id: fallback
   name: 默认规则
   description: 以上规则都没有匹配时执行，默默记录聊天内容，不会回复消息。
