@@ -1,10 +1,28 @@
 """Regression checks for release workflows that publish project deliverables."""
 
 import json
+import re
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# `uv sync --frozen` 只允许从这些主机取包：pypi.org 是索引本身，
+# files.pythonhosted.org 是它派发的实际下载域。国内镜像域名在境外
+# runner 上不稳定，一旦进锁文件就是全线 CI 红。
+UV_ALLOWED_LOCK_HOSTS = frozenset({"pypi.org", "files.pythonhosted.org"})
+
+
+def _gitignore_entries() -> list[str]:
+    """Return the non-comment, non-empty patterns declared in .gitignore."""
+    raw = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
+    entries = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        entries.append(stripped)
+    return entries
 
 
 def test_windows_release_upload_has_contents_write_permission():
@@ -171,3 +189,83 @@ def test_publishing_a_docker_image_requires_a_green_test_run():
         assert "python -m pytest ./tests -q" in workflow, filename
         # 构建/推送作业必须依赖验证作业，否则测试红了镜像照样发出去
         assert "needs: verify" in workflow, filename
+
+
+def test_the_uv_lockfile_is_committed_instead_of_being_gitignored():
+    """`uv sync --frozen` 在 CI 上没有锁文件就直接退出 2，本地有文件不算数。"""
+    # 真实故障：uv.lock 存在于本机，却被 .gitignore 挡住从未推到 GitHub，
+    # 三个跑 `uv sync --frozen` 的工作流全部失败：
+    #   error: Unable to find lockfile at `uv.lock`, but `--frozen` was provided.
+    # 因此这条契约同时守两件事：文件在磁盘上，且没有任何一条 .gitignore
+    # 规则会把它排除掉。不调 git（CI 的 checkout 里 git 行为未必一致）。
+    assert (PROJECT_ROOT / "uv.lock").is_file(), "uv.lock 缺失：`uv sync --frozen` 会直接失败"
+
+    ignored_by = [entry for entry in _gitignore_entries() if entry.lstrip("/") in {"uv.lock", "*.lock"}]
+    assert not ignored_by, (
+        "uv.lock 被 .gitignore 排除（命中规则："
+        + ", ".join(ignored_by)
+        + "），锁文件不会随仓库分发，CI 上 `uv sync --frozen` 必然失败"
+    )
+
+
+def test_the_uv_lockfile_only_downloads_from_reachable_hosts():
+    """境外 runner 拉不到国内镜像；锁文件里的每个下载地址都要在白名单内。"""
+    # 与 tests/test_webui_build_contract.py 里的 yarn.lock 白名单同构：
+    # 黑名单只能挡住已知镜像，所以逐条解析 url = "..." 并校验主机名。
+    lockfile = (PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8")
+
+    lock_hosts: dict[str, list[str]] = {}
+    for raw_url in re.findall(r'url\s*=\s*"([^"]+)"', lockfile):
+        without_scheme = re.sub(r"^[A-Za-z0-9+.\-]+://", "", raw_url)
+        host = without_scheme.split("/")[0].split("@")[-1].split(":")[0].lower()
+        lock_hosts.setdefault(host, []).append(raw_url)
+
+    assert lock_hosts, "uv.lock 未解析出任何下载地址，解析规则可能已失效"
+
+    unexpected = {
+        host: urls[:3] for host, urls in lock_hosts.items() if host not in UV_ALLOWED_LOCK_HOSTS
+    }
+    assert not unexpected, (
+        "uv.lock 含不可移植的下载源（仅允许 "
+        + ", ".join(sorted(UV_ALLOWED_LOCK_HOSTS))
+        + "）："
+        + repr(unexpected)
+    )
+
+
+def test_the_default_uv_index_is_official_pypi_rather_than_a_mirror():
+    """锁文件按 pyproject 的默认索引解析地址，索引指向镜像等于把 CI 钉死在国内网络。"""
+    pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    index_block = pyproject.split("[[tool.uv.index]]", maxsplit=1)
+    assert len(index_block) == 2, "pyproject.toml 缺少 [[tool.uv.index]]，默认索引不再受控"
+
+    declared_url = re.search(r'^url\s*=\s*"([^"]+)"', index_block[1], re.MULTILINE)
+    assert declared_url is not None, "[[tool.uv.index]] 未声明 url"
+    assert declared_url.group(1) == "https://pypi.org/simple", declared_url.group(1)
+
+    # 国内开发者用 UV_DEFAULT_INDEX 环境变量覆盖，不改这个文件；
+    # 因此镜像地址只应作为注释出现，不能是生效的 url 值。
+    assert 'url = "https://mirrors.ustc.edu.cn/pypi/simple"' not in pyproject
+
+
+def test_every_frozen_uv_sync_workflow_pins_the_default_index():
+    """即便未来某次锁文件带回镜像地址，CI 也要靠环境变量换回可达索引。"""
+    workflows_dir = PROJECT_ROOT / ".github" / "workflows"
+    frozen_workflows = {}
+    for workflow_path in sorted(workflows_dir.glob("*.yml")):
+        contents = workflow_path.read_text(encoding="utf-8")
+        if "uv sync --frozen" in contents:
+            frozen_workflows[workflow_path.name] = contents
+
+    # 现状：run-tests.yml（workflow 级 env）、docker-latest.yml 与
+    # docker-tag.yml（verify job 级 env）三个工作流跑 `uv sync --frozen`。
+    assert set(frozen_workflows) == {
+        "docker-latest.yml",
+        "docker-tag.yml",
+        "run-tests.yml",
+    }, sorted(frozen_workflows)
+
+    for filename, contents in frozen_workflows.items():
+        assert "UV_DEFAULT_INDEX: https://pypi.org/simple" in contents, filename
+
