@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kirara-ai"
-version = "3.3.0a5"
+version = "3.3.0a7"
 authors = [
     { name="Lss233", email="i@lss233.com" },
 ]
