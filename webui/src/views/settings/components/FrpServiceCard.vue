@@ -242,8 +242,9 @@ const saveConfig = () => {
 .frp-status {
   margin-bottom: 16px;
   padding: 12px;
-  background-color: rgba(0, 0, 0, 0.02);
-  border-radius: 4px;
+  background-color: var(--panel-bg-color, rgba(0, 0, 0, 0.02));
+  /* 位于设置卡片（md 档）内部的信息块，按嵌套原则降一档到 sm */
+  border-radius: var(--radius-sm);
 }
 
 .frp-not-installed {
@@ -253,8 +254,8 @@ const saveConfig = () => {
 .download-progress-container {
   margin-top: 16px;
   padding: 16px;
-  background-color: rgba(0, 0, 0, 0.02);
-  border-radius: 4px;
+  background-color: var(--panel-bg-color, rgba(0, 0, 0, 0.02));
+  border-radius: var(--radius-sm);
 }
 
 .download-status {

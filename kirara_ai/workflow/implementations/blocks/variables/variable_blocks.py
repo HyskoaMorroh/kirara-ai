@@ -9,6 +9,14 @@ T = TypeVar("T")
 
 
 class SetVariableBlock(Block):
+    """把值写入工作流变量
+
+    注意：本块尚未注册到 BlockRegistry，构造函数需要注入 DependencyContainer，
+    无法表达为 WebUI 的配置项，因此不会出现在节点列表中。
+    """
+
+    description = "把输入值写入工作流变量，供后续节点通过 {变量名} 占位符引用。"
+
     def __init__(self, container: DependencyContainer):
         inputs: Dict[str, Input] = {
             "name": Input("name", "变量名", str, "变量名"),
@@ -25,6 +33,14 @@ class SetVariableBlock(Block):
 
 
 class GetVariableBlock(Block):
+    """读取工作流变量
+
+    注意：本块尚未注册到 BlockRegistry，构造函数需要注入 DependencyContainer
+    与目标类型，无法表达为 WebUI 的配置项，因此不会出现在节点列表中。
+    """
+
+    description = "按变量名读取工作流变量，变量不存在时使用默认值。"
+
     def __init__(self, container: DependencyContainer, var_type: Type[T]):
         inputs = {
             "name": Input("name", "变量名", str, "变量名"),

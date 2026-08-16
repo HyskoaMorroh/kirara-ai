@@ -33,6 +33,7 @@ from kirara_ai.workflow.core.block import BlockRegistry
 from kirara_ai.workflow.core.dispatch import DispatchRuleRegistry, WorkflowDispatcher
 from kirara_ai.workflow.core.workflow import WorkflowRegistry
 from kirara_ai.workflow.implementations.blocks import register_system_blocks
+from kirara_ai.workflow.implementations.rules import register_system_dispatch_rules, validate_rule_workflows
 from kirara_ai.workflow.implementations.workflows import register_system_workflows
 
 logger = get_logger("Entrypoint")
@@ -231,6 +232,12 @@ def init_application() -> DependencyContainer:
     register_system_workflows(workflow_registry)
     dispatch_registry = container.resolve(DispatchRuleRegistry)
     dispatch_registry.load_rules()
+    # 内置默认规则放在 load_rules 之后：用户已有的同 id 规则优先保留，
+    # 空目录（如全新的 pip 安装）则由内置默认值兜底，保证开箱即可对话
+    register_system_dispatch_rules(dispatch_registry)
+    # 规则引用的工作流可能已被用户删除（tombstone）。这里在启动阶段就把失效引用
+    # 降级为 chat:normal 或禁用，否则每条消息都会抛 WorkflowNotFoundException。
+    validate_rule_workflows(dispatch_registry, logger)
 
     # 加载模型
     llm_manager = container.resolve(LLMManager)

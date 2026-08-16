@@ -27,6 +27,18 @@ const getOutputColor = (type: string) => {
   return getTypeColor(type).color_on
 }
 
+/** 端口标签被截断时靠原生 tooltip 补全信息：标签 + 类型 + 描述 */
+const portTitle = (port: { label?: string; name: string; type?: string; description?: string }) => {
+  const parts = [port.label || port.name]
+  if (port.type) {
+    parts.push(`(${port.type})`)
+  }
+  if (port.description && port.description !== port.label) {
+    parts.push(`\n${port.description}`)
+  }
+  return parts.join(' ')
+}
+
 // 连接验证
 const isValidConnection = (connection: Connection) => {
   // 一个输入只能有一个连接
@@ -79,14 +91,14 @@ const codePreview = computed(() => {
             }"
             :isValidConnection="(connection: Connection) => isValidConnection(connection)"
           />
-          <div class="port-label">{{ input.label || input.name }}</div>
+          <div class="port-label" :title="portTitle(input)">{{ input.label || input.name }}</div>
         </div>
       </div>
 
       <!-- 右侧输出端口 -->
       <div class="port-column output-ports">
         <div v-for="output in data.outputs" :key="output.name" class="port-container output-port">
-          <div class="port-label">{{ output.label || output.name }}</div>
+          <div class="port-label" :title="portTitle(output)">{{ output.label || output.name }}</div>
           <Handle
             :id="output.name"
             type="source"
@@ -114,23 +126,31 @@ const codePreview = computed(() => {
 </template>
 
 <style scoped>
+/* 代码节点固定使用深色，与代码编辑器的视觉语言一致，两种主题下都保持该外观 */
+/* 上述约定现改为由 token 驱动：底色走 --node-bg-*，代码区走 --code-*，
+   深色主题下仍是深色终端观感，浅色/松林等色板下不再突兀地黑一块 */
 .code-node {
-  background: linear-gradient(to bottom, #111827, #1f2937);
-  border-radius: 6px;
-  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.15);
+  background: linear-gradient(
+    to bottom,
+    var(--node-bg-start, #f8f9fa),
+    var(--node-bg-end, #ffffff)
+  );
+  border-radius: var(--radius-sm);
+  box-shadow: var(--box-shadow-sm, var(--box-shadow, 0 3px 10px rgba(0, 0, 0, 0.15)));
   min-width: 200px;
   max-width: 300px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #f9fafb;
+  border: 1px solid var(--node-border-color, rgba(0, 0, 0, 0.06));
+  color: var(--text-color, #333);
 }
 
 .code-node-header {
   padding: 10px 14px;
   font-weight: 500;
+  /* 标题栏底色由 blockType.color 内联指定，始终为饱和色，故文字保持浅色 */
   color: #f9fafb;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  font-size: 14px;
+  border-bottom: 1px solid var(--node-border-color, rgba(0, 0, 0, 0.04));
+  font-size: var(--font-size-base, 14px);
 }
 
 .header-content {
@@ -147,11 +167,12 @@ const codePreview = computed(() => {
 }
 
 .node-id {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.6);
-  background-color: rgba(255, 255, 255, 0.1);
+  font-size: var(--font-size-xs, 11px);
+  /* 该角标位于饱和色标题栏上，两种主题下都保持浅字 + 深底才可读 */
+  color: rgba(255, 255, 255, 0.75);
+  background-color: rgba(0, 0, 0, 0.2);
   padding: 2px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   margin-left: 6px;
   font-family: monospace;
   cursor: default;
@@ -159,7 +180,7 @@ const codePreview = computed(() => {
 }
 
 .code-node-body {
-  padding: 12px;
+  padding: var(--space-3, 12px);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -169,32 +190,33 @@ const codePreview = computed(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 8px;
+  margin-bottom: var(--space-2, 8px);
 }
 
 .code-icon {
-  color: #60a5fa;
+  color: var(--primary-color, #4080ff);
 }
 
 .code-label {
-  font-size: 12px;
-  color: #d1d5db;
+  font-size: var(--font-size-sm, 12px);
+  color: var(--text-color-secondary, #555);
   font-weight: 500;
 }
 
 .code-preview {
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 4px;
-  padding: 8px;
+  background: var(--code-bg-color, #f3f4f6);
+  /* 嵌在节点（sm 档）内部的代码块，按嵌套原则降到 xs */
+  border-radius: var(--radius-xs);
+  padding: var(--space-2, 8px);
   overflow: hidden;
 }
 
 .code-preview-content {
   margin: 0;
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-  font-size: 12px;
+  font-size: var(--font-size-sm, 12px);
   white-space: pre-wrap;
-  color: #9ca3af;
+  color: var(--code-text-color, #1f2937);
   line-height: 1.4;
 }
 
@@ -202,14 +224,22 @@ const codePreview = computed(() => {
   display: flex;
   flex-direction: row;
   justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-2, 8px);
   padding: 6px 0;
-  background-color: rgba(0, 0, 0, 0.1);
+  background-color: var(--node-muted-bg, rgba(0, 0, 0, 0.01));
 }
 
 .port-column {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 0;
+  min-width: 0;
+  flex: 1 1 0;
+}
+
+.output-ports {
+  align-items: flex-end;
 }
 
 .port-container {
@@ -217,6 +247,7 @@ const codePreview = computed(() => {
   align-items: center;
   position: relative;
   height: 28px;
+  max-width: 100%;
 }
 
 .output-port {
@@ -224,8 +255,14 @@ const codePreview = computed(() => {
 }
 
 .port-label {
-  font-size: 12px;
-  color: #d1d5db;
+  font-size: var(--font-size-sm, 12px);
+  color: var(--text-color-secondary, #555);
   margin: 0 10px;
+  /* 与 CustomNode 一致：固定行高下必须单行截断，避免长标签压到相邻端口 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  line-height: 1.3;
 }
 </style>

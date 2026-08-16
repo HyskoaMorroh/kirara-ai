@@ -1,15 +1,32 @@
 name: Release Preflight
 
+# ---------------------------------------------------------------------------
+# 这里是「发布产物」的门禁，负责在昂贵的发布流程启动前就拦住回归：
+#   * contracts：断言发布类工作流与打包配置本身没有退化（权限、镜像缓存、
+#     VITE_APP_VERSION 注入、wheel package-data、CI 触发条件等）。它们只读
+#     文件、秒级完成，因此排在最前面。
+#   * webui：前端门禁。vue-tsc 类型检查 → vitest 单元测试 → 生产构建，
+#     顺序即「便宜的先失败」：类型错误不必等到打包才发现。
+#   * webui-lint：ESLint 报告。仓库现存 25 errors / 136 warnings，直接 gate
+#     会让每个 PR 变红，等于逼人绕过门禁；因此这里以 continue-on-error 输出
+#     报告 + artifact，作为存量清理的度量，不阻塞合并。这是新增的可见性，
+#     不是对既有检查的降级——此前没有任何前端 lint 在 CI 里跑过。
+#   * 后端测试（全量用例）在 run-tests.yml，覆盖同样的 PR / push / merge_group
+#     触发，这里不重复执行。
+# ---------------------------------------------------------------------------
+
 on:
   push:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  merge_group:
+    branches: [main, master]
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -18,12 +35,13 @@ jobs:
   contracts:
     name: Release contracts
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -33,25 +51,98 @@ jobs:
           python -m pytest tests/test_release_workflow_contract.py tests/test_webui_build_contract.py -q
 
   webui:
-    name: WebUI type check and production build
+    name: WebUI type check, unit tests and production build
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: yarn
           cache-dependency-path: webui/yarn.lock
 
+      - name: Install WebUI dependencies
+        working-directory: webui
+        run: |
+          corepack enable
+          yarn install --frozen-lockfile
+
+      # 三步拆成独立 step：日志里能直接看出是类型、测试还是打包炸了，
+      # 不必翻一大段合并输出。顺序保持「最便宜的先跑」。
+      - name: Type-check WebUI
+        working-directory: webui
+        run: yarn type-check
+
+      - name: Run WebUI unit tests
+        working-directory: webui
+        run: yarn test:unit
+
       - name: Build production WebUI
         working-directory: webui
         env:
           VITE_APP_VERSION: v0.0.0-ci
+        # 这里刻意跑 `yarn build`（= run-p type-check build-only）而不是
+        # `build-only`：Dockerfile 与 Windows 快速启动包用的就是 `yarn build`，
+        # 门禁必须验证那条真实命令能跑通。代价是 type-check 跑了两遍（约 30s），
+        # 换来的是「发布用的命令」被真正覆盖，值得。
+        run: yarn build
+
+      - name: Upload WebUI build output
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: webui-dist
+          path: webui/dist
+          if-no-files-found: warn
+          retention-days: 7
+
+  webui-lint:
+    name: WebUI lint report (non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: yarn
+          cache-dependency-path: webui/yarn.lock
+
+      - name: Install WebUI dependencies
+        working-directory: webui
         run: |
           corepack enable
           yarn install --frozen-lockfile
-          yarn type-check
-          yarn build
+
+      - name: Report ESLint findings
+        working-directory: webui
+        # 不用 `yarn lint`：那个脚本带 --fix，在 CI 里改文件毫无意义。
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npx eslint src/ \
+            --ext .vue,.js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts \
+            --ignore-path .gitignore 2>&1 | tee eslint-report.txt || true
+          {
+            echo "### ESLint report"
+            echo
+            echo '```'
+            tail -n 40 eslint-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload ESLint report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: webui-eslint-report
+          path: webui/eslint-report.txt
+          if-no-files-found: warn
+          retention-days: 7

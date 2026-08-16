@@ -5,11 +5,17 @@ import { createPinia } from 'pinia'
 
 import App from './App.vue'
 import router from './router'
+import { useThemeStore } from './stores/theme'
 
 const app = createApp(App)
 
-app.use(createPinia())
+const pinia = createPinia()
+app.use(pinia)
 app.use(router)
+
+// 在挂载前建立主题 store，让 CSS 变量在首帧之前就写入 <html>，
+// 避免深色偏好下先闪一帧浅色界面。
+useThemeStore(pinia)
 
 app.mount('#app')
 

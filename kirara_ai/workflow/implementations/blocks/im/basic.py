@@ -11,8 +11,9 @@ class ExtractChatSender(Block):
     """提取消息发送者"""
 
     name = "extract_chat_sender"
+    description = "取出当前消息的发送者。若上游已使用「IM: 获取最新消息」，可直接用它的发送者输出，无需本节点。"
     container: DependencyContainer
-    inputs = {"msg": Input("msg", "IM 消息", IMMessage, "IM 消息")}
+    inputs = {"msg": Input("msg", "IM 消息", IMMessage, "IM 消息（本节点始终读取当前触发消息）")}
     outputs = {"sender": Output("sender", "消息发送者", ChatSender, "消息发送者")}
 
     def execute(self, **kwargs) -> Dict[str, Any]:

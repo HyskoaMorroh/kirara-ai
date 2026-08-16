@@ -504,7 +504,7 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   transition: all 0.3s;
-  border-radius: var(--border-radius);
+  border-radius: var(--radius-md);
   background-color: var(--card-bg-color);
   border: 1px solid var(--border-color);
 }
@@ -596,7 +596,7 @@ onMounted(() => {
   overflow-y: auto;
   padding: 16px;
   background-color: var(--bg-color);
-  border-radius: var(--border-radius-small);
+  border-radius: var(--radius-sm);
   margin-bottom: 16px;
   color: var(--error-color);
 }

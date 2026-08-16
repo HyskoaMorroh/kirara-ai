@@ -183,7 +183,8 @@ onUnmounted(() => {
 
 .trace-card {
   min-height: calc(100vh - 28px);
-  border-radius: 20px;
+  /* 页面级主卡片，用大型表面档 */
+  border-radius: var(--radius-lg);
   background-color: var(--card-bg-color);
   box-shadow: var(--box-shadow);
 }
@@ -191,14 +192,15 @@ onUnmounted(() => {
 /* 连接状态样式 */
 .connection-status {
   padding: 6px 12px;
-  border-radius: 12px;
+  /* 状态指示是胶囊形状态徽标 */
+  border-radius: var(--radius-pill);
   background-color: var(--bg-color);
 }
 
 /* 刷新按钮样式 */
 .refresh-button {
   height: 40px;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -221,7 +223,8 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   text-align: center;
-  border-radius: 16px;
+  /* 统计卡位于 .trace-card（lg 档）内部，按嵌套原则降一档到 md */
+  border-radius: var(--radius-md);
   transition: all 0.3s ease;
   background: linear-gradient(
     135deg,
@@ -333,7 +336,8 @@ onUnmounted(() => {
 }
 
 .filter-card {
-  border-radius: 16px;
+  /* 位于 .trace-card（lg 档）内部，按嵌套原则降一档到 md */
+  border-radius: var(--radius-md);
   background-color: var(--bg-color);
   padding: 20px;
 }
@@ -357,7 +361,7 @@ onUnmounted(() => {
 
 .filter-button {
   height: 36px;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   min-width: 80px;
   font-weight: 600;
 }
@@ -368,7 +372,8 @@ onUnmounted(() => {
 }
 
 .trace-list-card {
-  border-radius: 16px;
+  /* 与 .filter-card 同层，取同一档 md */
+  border-radius: var(--radius-md);
   background-color: var(--bg-color);
 }
 
@@ -390,7 +395,8 @@ onUnmounted(() => {
 }
 
 .trace-table {
-  border-radius: 12px;
+  /* 表格嵌在 .trace-list-card（md 档）内部，按嵌套原则降一档到 sm */
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 

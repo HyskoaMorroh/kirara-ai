@@ -224,23 +224,33 @@ onUnmounted(() => {
 }
 
 .console-title {
-  font-size: 18px;
+  font-size: var(--font-size-xl, 18px);
   font-weight: 500;
-  margin-right: 8px;
+  margin-right: var(--space-2, 8px);
 }
 
 .console-toolbar {
-  margin-bottom: 8px;
+  margin-bottom: var(--space-2, 8px);
 }
 
+/* 终端/日志面板：底色与文字走代码块 token，
+   深色主题下仍是深色终端，浅色主题下退化为浅灰代码底，不再永久写死 #1e1e1e */
 .console-container {
   height: calc(100vh - 130px);
   overflow-y: auto;
-  background-color: #1e1e1e;
-  border-radius: 4px;
-  padding: 8px;
+  background-color: var(--code-bg-color, #f3f4f6);
+  border: 1px solid var(--border-color, #e5e7eb);
+  /* 整页级的日志面板属于常规面板档，与其他页面主卡片一致 */
+  border-radius: var(--radius-md);
+  padding: var(--space-2, 8px);
   font-family: 'Courier New', Courier, monospace;
   position: relative;
+}
+
+/* 日志区可用键盘滚动，需要可见的聚焦环 */
+.console-container:focus-visible {
+  outline: 2px solid var(--primary-color, #4080ff);
+  outline-offset: 2px;
 }
 
 .console-logs {
@@ -249,42 +259,42 @@ onUnmounted(() => {
 }
 
 .log-line {
-  padding: 4px 8px;
-  color: #d4d4d4;
-  font-size: 14px;
+  padding: var(--space-1, 4px) var(--space-2, 8px);
+  color: var(--code-text-color, #1f2937);
+  font-size: var(--font-size-base, 14px);
   line-height: 1.5;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid var(--divider-color, rgba(128, 128, 128, 0.16));
   display: flex;
 }
 
 .log-line:hover {
-  background-color: rgba(255, 255, 255, 0.05);
+  background-color: rgba(var(--primary-color-rgb, 64, 128, 255), 0.08);
 }
 
 .log-index {
   min-width: 40px;
-  color: #666;
-  margin-right: 8px;
+  color: var(--text-color-tertiary, #909399);
+  margin-right: var(--space-2, 8px);
   user-select: none;
 }
 
 .log-timestamp {
   min-width: 160px;
-  margin-right: 16px;
-  color: #909399;
+  margin-right: var(--space-4, 16px);
+  color: var(--text-color-tertiary, #909399);
 }
 
 .log-level {
   min-width: 60px;
-  margin-right: 16px;
+  margin-right: var(--space-4, 16px);
   display: inline-block;
 }
 
 .log-tag {
   min-width: 100px;
-  margin-right: 16px;
+  margin-right: var(--space-4, 16px);
   display: inline-block;
-  color: #67c23a;
+  color: var(--success-color-text, var(--success-color, #18a058));
 }
 
 .log-content {
@@ -292,26 +302,26 @@ onUnmounted(() => {
 }
 
 .log-error {
-  color: #f56c6c;
-  background-color: rgba(245, 108, 108, 0.1);
+  color: var(--error-color-text, var(--error-color, #d03050));
+  background-color: rgba(var(--error-color-rgb, 208, 48, 80), 0.1);
 }
 
 .log-warning {
-  color: #e6a23c;
-  background-color: rgba(230, 162, 60, 0.1);
+  color: var(--warning-color-text, var(--warning-color, #f0a020));
+  background-color: rgba(var(--warning-color-rgb, 240, 160, 32), 0.1);
 }
 
 .log-debug {
-  color: #909399;
+  color: var(--text-color-tertiary, #909399);
 }
 
 .log-info {
-  color: #d3d3d3;
+  color: var(--code-text-color, #1f2937);
   /* 浅灰色 */
 }
 
 .log-success {
-  color: #67c23a;
+  color: var(--success-color-text, var(--success-color, #18a058));
 }
 
 /* 滚动条样式 */
@@ -320,16 +330,17 @@ onUnmounted(() => {
 }
 
 .console-container::-webkit-scrollbar-track {
-  background: #2c2c2c;
-  border-radius: 4px;
+  background: var(--divider-color, #e5e7eb);
+  /* 滚动条只有 8px 宽，属于内联小件档 */
+  border-radius: var(--radius-xs);
 }
 
 .console-container::-webkit-scrollbar-thumb {
-  background: #555;
-  border-radius: 4px;
+  background: var(--border-color, #c0c4cc);
+  border-radius: var(--radius-xs);
 }
 
 .console-container::-webkit-scrollbar-thumb:hover {
-  background: #777;
+  background: var(--text-color-tertiary, #909399);
 }
 </style>

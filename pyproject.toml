@@ -71,12 +71,24 @@ kirara_ai = "kirara_ai.__main__:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["kirara_ai*"]
+# Bytecode directories can appear after tests or a local start.  They are
+# namespace-package candidates unless excluded explicitly, which makes wheel
+# builds emit a misleading package-discovery warning.
+exclude = ["*.__pycache__", "*.__pycache__.*"]
 namespaces = true
 
 # 后端自带页面（如 /backup 备份恢复页）需随 wheel 一起分发，
-# 否则 pip 安装或 Docker 镜像里会缺失该目录，访问 /backup 得到 404
+# 否则 pip 安装或 Docker 镜像里会缺失该目录，访问 /backup 得到 404。
+# 预设工作流（presets/*/*.yaml）同理：缺失时 pip 安装的用户拿不到
+# 多模态、分段回复等进阶模板。
 [tool.setuptools.package-data]
 "kirara_ai.web" = ["static/*"]
+"kirara_ai.workflow.presets" = ["*/*.yaml"]
+
+# 不把本机运行或构建时生成的字节码带进 wheel。源码会由 Python 在目标环境
+# 按实际解释器版本重新生成缓存；将其打包既无运行收益，也会降低构建可复现性。
+[tool.setuptools.exclude-package-data]
+"*" = ["__pycache__/*", "*.py[cod]"]
 
 [[tool.uv.index]]
 url = "https://mirrors.ustc.edu.cn/pypi/simple"

@@ -12,16 +12,17 @@ class ClearMemory(Block):
     """Block for clearing conversation memory"""
 
     name = "clear_memory"
+    description = "清空指定聊天对象在该级别下的全部记忆，并返回一条提示消息。"
     inputs = {
-        "chat_sender": Input("chat_sender", "消息发送者", ChatSender, "消息发送者")
+        "chat_sender": Input("chat_sender", "消息发送者", ChatSender, "要清空记忆的聊天对象")
     }
-    outputs = {"response": Output("response", "响应", IMMessage, "响应")}
+    outputs = {"response": Output("response", "响应", IMMessage, "清空完成的提示消息")}
     container: DependencyContainer
 
     def __init__(
         self,
         scope_type: Annotated[
-            str, ParamMeta(label="级别", description="要清空记忆的级别")
+            str, ParamMeta(label="级别", description="要清空记忆的级别，需与写入记忆时使用的级别一致")
         ] = "member",
     ):
         self.scope_type = scope_type

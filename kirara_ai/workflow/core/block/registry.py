@@ -1,6 +1,6 @@
 import warnings
 from inspect import Parameter, signature
-from typing import Annotated, Dict, List, Optional, Tuple, Type, get_args, get_origin
+from typing import Annotated, Any, Dict, List, Optional, Tuple, Type, get_args, get_origin
 
 from kirara_ai.workflow.core.block import Block
 from kirara_ai.workflow.core.block.param import ParamMeta
@@ -66,9 +66,20 @@ def extract_block_param(param: Parameter, type_system: TypeSystem) -> BlockConfi
 class BlockRegistry:
     """Block 注册表，用于管理所有已注册的 block"""
 
+    # 按 group 约定的默认节点配色。注册时未显式给出 color，且 block 类自身
+    # 也没有定义 color 时，用所属分组的颜色兜底，让画布上不同类别的节点
+    # 一眼可辨（此前所有节点标题栏都是同一种near-white，无法区分）。
+    DEFAULT_GROUP_COLORS: Dict[str, str] = {
+        "internal": "#5b8dff",
+        "system": "#8b7cd8",
+        "game": "#e0954a",
+        "mcp": "#3fa89a",
+    }
+
     def __init__(self):
         self._blocks = {}
         self._localized_names = {}
+        self._colors: Dict[str, str] = {}
         self._type_system = TypeSystem()
 
     def register(
@@ -77,6 +88,7 @@ class BlockRegistry:
         group_id: str,
         block_class: Type[Block],
         localized_name: Optional[str] = None,
+        color: Optional[str] = None,
     ):
         """注册一个 block
 
@@ -85,6 +97,7 @@ class BlockRegistry:
             group_id: 组标识（internal 为框架内置）
             block_class: block 类
             localized_name: 本地化名称
+            color: 画布上节点标题栏颜色，留空时按 block 类的 color 或分组默认色
         """
         full_name = f"{group_id}:{block_id}"
         if full_name in self._blocks:
@@ -93,6 +106,9 @@ class BlockRegistry:
         block_class.id = block_id
         if localized_name:
             self._localized_names[full_name] = localized_name
+        resolved_color = color or getattr(block_class, "color", "") or self.DEFAULT_GROUP_COLORS.get(group_id, "")
+        if resolved_color:
+            self._colors[full_name] = resolved_color
         # 注册 Input 和 Output 类型
         for _, input_info in getattr(block_class, "inputs", {}).items():
             type_name = self._type_system.get_type_name(input_info.data_type)
@@ -106,12 +122,43 @@ class BlockRegistry:
         return self._blocks.get(full_name)
 
     def get_localized_name(self, block_id: str) -> Optional[str]:
-        """获取本地化名称"""
-        return self._localized_names.get(block_id, block_id)
+        """获取本地化名称
+
+        未注册本地化名时返回 None，让调用方能回退到 block 类自身的 name
+        （原先返回 block_id 本身，使得上层的 `or block_type.name` 分支永远
+        不会生效，插件 block 在 UI 上会显示成 "group:id" 这样的原始字符串）。
+        """
+        return self._localized_names.get(block_id)
+
+    def get_color(self, block_id: str, block_class: Optional[Type[Block]] = None) -> str:
+        """获取节点在画布上的标题栏颜色，未配置时返回空字符串交由前端决定"""
+        color = self._colors.get(block_id, "")
+        if color:
+            return color
+        if block_class is not None:
+            return getattr(block_class, "color", "") or ""
+        return ""
+
+    def get_description(self, block_class: Type[Block]) -> str:
+        """获取 block 的说明文字
+
+        优先使用类属性 `description`；未定义时回退到类的 docstring，
+        避免 WebUI 上大量节点的说明为空。
+        """
+        description = getattr(block_class, "description", "") or ""
+        if description:
+            return description
+        doc = (block_class.__doc__ or "").strip()
+        if not doc:
+            return ""
+        # docstring 可能是多行说明，取首个非空段落作为简介
+        return doc.split("\n\n")[0].strip()
 
     def clear(self):
         """清空注册表"""
         self._blocks.clear()
+        self._localized_names.clear()
+        self._colors.clear()
         self._type_system = TypeSystem()
 
     def get_block_type_name(self, block_class: Type[Block]) -> str:
@@ -198,3 +245,12 @@ class BlockRegistry:
     def is_type_compatible(self, source_type: str, target_type: str) -> bool:
         """检查源类型是否可以赋值给目标类型"""
         return self._type_system.is_compatible(source_type, target_type)
+
+    def get_type_name(self, data_type: Any) -> str:
+        """获取某个数据类型在类型系统中的名称
+
+        原先只有 `_type_system` 这个私有属性能做这件事，调用方（如工作流预检）
+        不得不越过封装去访问它。这里补一个公开入口，语义与内部实现完全一致。
+        """
+        return self._type_system.get_type_name(data_type)
+

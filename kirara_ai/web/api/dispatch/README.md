@@ -216,7 +216,7 @@ POST/backend-api/api/dispatch/rules/{rule_id}/disable
 
 ## 相关代码
 
-- [调度规则定义](../../../workflow/core/dispatch/rule.py)
+- [调度规则定义](../../../workflow/core/dispatch/models/dispatch_rules.py)
 - [调度规则注册表](../../../workflow/core/dispatch/registry.py)
 - [调度器实现](../../../workflow/core/dispatch/dispatcher.py)
 - [系统预设规则](../../../../data/dispatch_rules)
@@ -292,5 +292,5 @@ response = requests.put(
 ## 相关文档
 
 - [工作流系统概述](../../README.md#工作流系统-)
-- [调度规则配置指南](../../../workflow/README.md#调度规则配置)
-- [API 认证](../../README.md#api认证-) 
+- [项目使用说明](../../../../README.md)
+- [API 认证](../../README.md#api认证-)

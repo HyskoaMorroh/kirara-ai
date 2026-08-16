@@ -2,14 +2,22 @@ name: Project Check
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "master", "main" ]
   merge_group:
-    branches: [ "master" ]
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # 这个 job 会开 issue，取消半途的运行可能留下半截报告；默认分支的每个
+  # commit 都各自出结论，因此不取消。
+  cancel-in-progress: false
 
 jobs:
   analyze:
     name: Analyze
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: read
@@ -22,12 +30,13 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: '3.10'
+          cache: 'pip'
 
       - name: Install project dependencies
         run: |
@@ -170,7 +179,7 @@ jobs:
 
       - name: Create GitHub Issue
         if: always()
-        uses: peter-evans/create-issue-from-file@v4
+        uses: peter-evans/create-issue-from-file@v5
         with:
           title: ${{ env.ISSUE_TITLE }}
           content-filepath: ./issue_body.md

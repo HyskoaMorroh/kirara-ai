@@ -51,9 +51,9 @@ const handleCheckUpdate = () => {
 
 <style scoped>
 .version-card {
-  background: rgba(255, 255, 255, 0.8);
+  background: var(--panel-bg-color, rgba(255, 255, 255, 0.8));
   backdrop-filter: blur(10px);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
 }
 
 .version-row {
@@ -64,6 +64,6 @@ const handleCheckUpdate = () => {
 
 .version-label {
   width: 100px;
-  color: #666;
+  color: var(--text-color-secondary, #666);
 }
 </style>

@@ -439,7 +439,7 @@ defineExpose({
 }
 
 .adapter-card {
-  border-radius: var(--border-radius);
+  border-radius: var(--radius-md);
   background-color: var(--card-bg-color);
   border: 1px solid var(--border-color);
   box-shadow: var(--box-shadow);
@@ -475,7 +475,8 @@ defineExpose({
 
 .adapter-info {
   margin-bottom: 1.5rem;
-  border-radius: var(--border-radius);
+  /* 该说明块位于 .adapter-card（md 档）内部，按嵌套原则降一档到 sm */
+  border-radius: var(--radius-sm);
   border: 1px solid rgba(var(--info-color), 0.2);
   background-color: rgba(var(--info-color), 0.05);
 }
@@ -557,7 +558,7 @@ defineExpose({
 }
 
 .status-tag {
-  border-radius: 12px;
+  border-radius: var(--radius-pill);
   font-size: 0.8rem;
   padding: 0 0.8rem;
   transition: all 0.3s ease;
@@ -590,7 +591,8 @@ defineExpose({
 .config-form {
   padding: 1.5rem;
   background-color: var(--card-bg-color);
-  border-radius: var(--border-radius);
+  /* 表单容器嵌在 .adapter-card（md 档）内部，按嵌套原则降一档到 sm */
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
   transition: all 0.3s ease;
   animation: slide-up 0.5s ease forwards;
@@ -633,7 +635,8 @@ defineExpose({
   justify-content: center;
   align-items: center;
   min-height: 300px;
-  border-radius: var(--border-radius);
+  /* 空状态占位与 .config-form 同层，故取同一档 sm */
+  border-radius: var(--radius-sm);
   border: 1px dashed var(--border-color);
   background-color: rgba(0, 0, 0, 0.02);
 }

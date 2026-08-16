@@ -10,6 +10,14 @@ from kirara_ai.workflow.core.block.input_output import Input, Output
 
 
 class QueryUserProfileBlock(Block):
+    """查询聊天对象的用户资料（昵称、头像等）
+
+    注意：本块尚未注册到 BlockRegistry，因此不会出现在 WebUI 的节点列表中。
+    其构造函数需要注入 DependencyContainer，无法表达为 WebUI 的配置项。
+    """
+
+    description = "查询聊天对象在平台上的用户资料，需要该平台适配器支持 UserProfileAdapter。"
+
     def __init__(self, container: DependencyContainer):
         inputs = {
             "chat_sender": Input(

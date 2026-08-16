@@ -1,8 +1,68 @@
+- rule_id: system_help
+  name: 帮助命令
+  description: 发送 /help 查看当前可用的全部功能与触发方式。
+  workflow_id: system:help
+  priority: 100
+  enabled: true
+  rule_groups:
+  - operator: or
+    rules:
+    - type: prefix
+      config:
+        prefix: /help
+  metadata:
+    category: system
+    permission: user
+- rule_id: system_clear_memory
+  name: 清空记忆
+  description: 发送 /清空记忆 清除当前会话的聊天记忆，让机器人重新开始。
+  workflow_id: system:clear_memory
+  priority: 100
+  enabled: true
+  rule_groups:
+  - operator: or
+    rules:
+    - type: prefix
+      config:
+        prefix: /清空记忆
+  metadata:
+    category: system
+    permission: user
+- rule_id: game_dice
+  name: 骰子
+  description: 发送 .roll 1d100 之类的指令掷骰，支持 XdY 格式。
+  workflow_id: game:dice
+  priority: 60
+  enabled: true
+  rule_groups:
+  - operator: or
+    rules:
+    - type: regex
+      config:
+        pattern: ^[.。]roll\s*(\d+)?d(\d+)
+  metadata:
+    category: game
+    permission: user
+- rule_id: game_gacha
+  name: 抽卡
+  description: 单独发送「抽卡」「十连」或「单抽」体验抽卡模拟器。注意必须整条消息只有该指令才会触发，「今天抽卡吗」这类夹在句子里的写法不算。
+  workflow_id: game:gacha
+  priority: 60
+  enabled: true
+  rule_groups:
+  - operator: or
+    rules:
+    - type: regex
+      config:
+        pattern: ^\s*(?:[/.。])?(?:抽卡|十连|单抽)\s*$
+  metadata:
+    category: game
+    permission: user
 - rule_id: chat_normal
-  name: 群聊AI对话
-  description: 群聊中使用 /chat 开头对话或者 被@ 时触发聊天
+  name: 群聊 AI 对话
+  description: 群聊中以 /chat 开头或直接 @机器人 即可对话。
   workflow_id: chat:normal
-  priority: 5
+  priority: 30
   enabled: true
   rule_groups:
   - operator: or
@@ -20,12 +80,18 @@
   metadata:
     category: chat
     permission: user
+    # 采样温度，已生效：工作流里的「LLM: 执行对话」/「LLM: 执行对话并调用工具」
+    # 节点在自身「采样温度」配置留空时，会读取本条规则命中后的
+    # metadata.temperature 并写入请求。取值范围 0.0~2.0，超出范围或非数字会被
+    # 忽略并落回模型自身的默认温度。若在节点上显式填了温度，则以节点配置为准。
     temperature: 0.7
 - rule_id: chat_creative
-  name: 私聊AI对话
-  description: 私聊时直接发送内容触发对话
-  workflow_id: chat:dsr_thinking
-  priority: 5
+  name: 私聊 AI 对话
+  description: 私聊时直接发送内容即可对话，无需任何前缀。
+  # 指向通用的 chat:normal。dsr_thinking 是 DeepSeek 推理模型专用模板，
+  # 全新部署换普通模型时输出会很奇怪，改为可选模板。
+  workflow_id: chat:normal
+  priority: 30
   enabled: true
   rule_groups:
   - operator: or
@@ -36,25 +102,13 @@
   metadata:
     category: chat
     permission: user
+    # 同上，已生效：LLM 节点未显式配置采样温度时读取这里的值。
     temperature: 0.9
-- rule_id: game_dice
-  name: 骰子
-  description: 骰子游戏，支持 XdY 格式
-  workflow_id: game:dice
-  priority: 5
-  enabled: true
-  rule_groups:
-  - operator: or
-    rules:
-    - type: regex
-      config:
-        pattern: ^[.。]roll\s*(\d+)?d(\d+)
-  metadata: {}
-- rule_id: game_gacha
-  name: 抽卡
-  description: 抽卡模拟器
+- rule_id: game_gacha_mention
+  name: 抽卡（宽松提及）
+  description: 群聊中没有 /chat 也没 @机器人时，句子里提到「抽卡」「十连」「单抽」也会触发抽卡模拟器。优先级 15 低于对话规则：私聊场景由「私聊 AI 对话」先命中，只是聊到抽卡不会被本规则劫持。
   workflow_id: game:gacha
-  priority: 5
+  priority: 15
   enabled: true
   rule_groups:
   - operator: or
@@ -65,40 +119,12 @@
         - 抽卡
         - 十连
         - 单抽
-  metadata: {}
-- rule_id: system_help
-  name: 帮助命令
-  description: 显示帮助信息
-  workflow_id: system:help
-  priority: 10
-  enabled: true
-  rule_groups:
-  - operator: or
-    rules:
-    - type: prefix
-      config:
-        prefix: /help
   metadata:
-    category: system
-    permission: user
-- rule_id: system_clear_memory
-  name: 清空记忆
-  description: 清空当前对话的记忆
-  workflow_id: system:clear_memory
-  priority: 10
-  enabled: true
-  rule_groups:
-  - operator: or
-    rules:
-    - type: prefix
-      config:
-        prefix: /清空记忆
-  metadata:
-    category: system
+    category: game
     permission: user
 - rule_id: fallback
   name: 默认规则
-  description: 当上述规则均没有匹配成功时，执行此工作流。
+  description: 以上规则都没有匹配时执行，默默记录聊天内容，不会回复消息。
   workflow_id: chat:memory_store
   priority: 0
   enabled: true
@@ -107,4 +133,6 @@
     rules:
     - type: fallback
       config: {}
-  metadata: {}
+  metadata:
+    category: system
+    permission: user

@@ -1,6 +1,6 @@
 import os
 import tempfile
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -39,25 +39,34 @@ async def test_media_element_from_path():
 
 @pytest.mark.asyncio
 async def test_media_element_from_url():
-    # 测试从URL初始化
-    media = ImageMessage(url=TEST_URL)
-    
-    # 测试获取数据
-    data = await media.get_data()
-    assert data is not None
-    assert isinstance(data, bytes)
-    
-    # 测试获取原始URL
-    url = await media.get_url()
-    assert url == TEST_URL
+    # 测试从URL初始化。网络下载由 MediaManager 单独负责；这里模拟响应，
+    # 使消息元素的契约测试不依赖外部站点的可用性或本机 TLS 配置。
+    with patch.object(
+        MediaManager,
+        "_download_file_async",
+        new=AsyncMock(return_value=b"test image data"),
+    ) as download_file:
+        media = ImageMessage(url=TEST_URL)
 
-    # 测试获取临时文件路径
-    path = await media.get_path()
-    try:
-        assert os.path.exists(path)
-        assert os.path.isfile(path)
-    finally:
-        os.remove(path)
+        # 测试获取数据
+        data = await media.get_data()
+        assert data is not None
+        assert isinstance(data, bytes)
+        assert data == b"test image data"
+
+        # 测试获取原始URL
+        url = await media.get_url()
+        assert url == TEST_URL
+
+        # 测试获取临时文件路径
+        path = await media.get_path()
+        try:
+            assert os.path.exists(path)
+            assert os.path.isfile(path)
+        finally:
+            os.remove(path)
+
+    download_file.assert_awaited()
 
 @pytest.mark.asyncio
 async def test_media_element_from_data():

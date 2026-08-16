@@ -1,0 +1,168 @@
+name: 聊天 - 长回复分条
+description: 把模型的长回复按 `<break>` 拆成多条消息发送，并在末尾追加一条固定的提示语，避免大段文字在群里刷屏。
+blocks:
+  - type: internal:get_message
+    name: get_message
+    params: {}
+    position:
+      x: 120
+      y: 120
+    connected_to:
+      - target: toggle_edit_state
+        mapping:
+          from: sender
+          to: sender
+      - target: query_memory
+        mapping:
+          from: sender
+          to: chat_sender
+      - target: chat_message_constructor
+        mapping:
+          from: msg
+          to: user_msg
+      - target: chat_memory_store
+        mapping:
+          from: msg
+          to: user_msg
+  - type: internal:toggle_edit_state
+    name: toggle_edit_state
+    params:
+      is_editing: true
+    position:
+      x: 520
+      y: 120
+  - type: internal:chat_memory_query
+    name: query_memory
+    params:
+      scope_type: group
+    position:
+      x: 520
+      y: 540
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: memory_content
+          to: memory_content
+  - type: internal:text_block
+    name: user_prompt
+    params:
+      text: '{user_name}说：{user_msg}'
+    position:
+      x: 120
+      y: 540
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: text
+          to: user_prompt_format
+  - type: internal:text_block
+    name: system_prompt
+    params:
+      text: "# Information\n以下是当前的系统信息：\n当前日期时间：{current_date_time}\n\n# Memories\n以下是之前发生过的对话记录。\n-- 对话记录开始 --\n{memory_content}\n-- 对话记录结束 --\n\n# Rules\n1. 回答较长时，请把内容拆成若干自然段，每段之间插入 `<break>` 标记。\n2. `<break>` 只是分条标记，不要把它当作可见文本输出，也不要解释它。\n\n接下来，请基于以上信息回答用户的问题。"
+    position:
+      x: 120
+      y: 960
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: text
+          to: system_prompt_format
+  - type: internal:chat_message_constructor
+    name: chat_message_constructor
+    params: {}
+    position:
+      x: 920
+      y: 120
+    connected_to:
+      - target: llm_chat
+        mapping:
+          from: llm_msg
+          to: prompt
+  # model_name 留空：请在编辑器的下拉框里选择本机已配置的模型。
+  - type: internal:chat_completion
+    name: llm_chat
+    params:
+      model_name: ''
+    position:
+      x: 1320
+      y: 120
+    connected_to:
+      - target: llm_response_to_text
+        mapping:
+          from: resp
+          to: response
+      - target: chat_memory_store
+        mapping:
+          from: resp
+          to: llm_resp
+  - type: internal:llm_response_to_text
+    name: llm_response_to_text
+    params: {}
+    position:
+      x: 1720
+      y: 120
+    connected_to:
+      - target: split_reply
+        mapping:
+          from: text
+          to: text
+  # split_by 决定按什么符号分条；想改成按空行分条就填 "\n\n"。
+  - type: internal:text_to_im_message
+    name: split_reply
+    params:
+      split_by: <break>
+    position:
+      x: 2120
+      y: 120
+    connected_to:
+      - target: append_footer
+        mapping:
+          from: msg
+          to: base_msg
+  # 追加到末尾的那一条消息。代码节点的输出类型为任意值，
+  # 这里返回一个 TextMessage，正好符合「IM: 补充消息」要求的消息片段。
+  - type: internal:code
+    name: build_footer
+    params:
+      inputs: []
+      outputs:
+        - name: element
+          label: 消息片段
+      code: |
+        from kirara_ai.im.message import TextMessage
+
+
+        def execute():
+            return {"element": TextMessage("（以上为完整回复，如需继续请直接追问）")}
+    position:
+      x: 2120
+      y: 540
+    connected_to:
+      - target: append_footer
+        mapping:
+          from: element
+          to: append_msg
+  - type: internal:append_im_message
+    name: append_footer
+    params: {}
+    position:
+      x: 2520
+      y: 120
+    connected_to:
+      - target: send_message
+        mapping:
+          from: msg
+          to: msg
+  - type: internal:send_message
+    name: send_message
+    params: {}
+    position:
+      x: 2920
+      y: 120
+  - type: internal:chat_memory_store
+    name: chat_memory_store
+    params:
+      scope_type: group
+    position:
+      x: 1720
+      y: 540

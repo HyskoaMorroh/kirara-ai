@@ -8,9 +8,12 @@ from kirara_ai.im.message import IMMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.llm.format.message import LLMChatMessage, LLMChatTextContent, LLMToolResultContent
+from kirara_ai.llm.format.request import LLMChatRequest
 from kirara_ai.llm.format.response import LLMChatResponse, Message, Usage
 from kirara_ai.llm.format.tool import CallableWrapper, Function, TextContent, Tool, ToolCall, ToolInputSchema
 from kirara_ai.llm.llm_manager import LLMManager
+from kirara_ai.workflow.core.dispatch.models.dispatch_rules import CombinedDispatchRule, RuleGroup, SimpleDispatchRule
+from kirara_ai.workflow.core.dispatch.rules.base import DispatchRule
 from kirara_ai.workflow.core.execution.executor import WorkflowExecutor
 from kirara_ai.workflow.implementations.blocks.llm.chat import (ChatCompletion, ChatCompletionWithTools,
                                                                 ChatMessageConstructor, ChatResponseConverter)
@@ -235,6 +238,89 @@ def test_chat_completion(container):
     assert result["resp"].message.content[0].text == "这是 AI 的回复"
 
 
+def test_chat_completion_uses_deployment_default_after_configured_chain_is_unavailable():
+    """Bundled model choices stay ordered, with a local model as the last resort."""
+    manager = MagicMock(spec=LLMManager)
+    manager.get_llm_id_by_ability.return_value = "local-text-model"
+    requested_models = []
+
+    def get_llm(model_id):
+        requested_models.append(model_id)
+        return MockLLM() if model_id == "local-text-model" else None
+
+    manager.get_llm.side_effect = get_llm
+    container = DependencyContainer()
+    container.register(LLMManager, manager)
+    block = ChatCompletion(
+        model_name="unavailable-primary",
+        fallback_model_1="unavailable-secondary",
+        max_retries=1,
+        # 该兜底现在是显式开关，默认关闭，需要时才打开
+        use_deployment_default_model=True,
+    )
+    block.container = container
+    messages = [Message(role="user", content=[LLMChatTextContent(text="测试")])]
+
+    result = block.execute(prompt=messages)
+
+    assert result["resp"].message.content[0].text == "这是 AI 的回复"
+    assert requested_models == [
+        "unavailable-primary",
+        "unavailable-secondary",
+        "local-text-model",
+    ]
+
+
+def test_chat_completion_does_not_silently_substitute_the_deployment_default_model():
+    """未开启开关时，绝不能偷偷换成本机默认模型作答。"""
+    manager = MagicMock(spec=LLMManager)
+    manager.get_llm_id_by_ability.return_value = "local-text-model"
+    requested_models = []
+
+    def get_llm(model_id):
+        requested_models.append(model_id)
+        return MockLLM() if model_id == "local-text-model" else None
+
+    manager.get_llm.side_effect = get_llm
+    container = DependencyContainer()
+    container.register(LLMManager, manager)
+    block = ChatCompletion(
+        model_name="unavailable-primary",
+        fallback_model_1="unavailable-secondary",
+        max_retries=1,
+    )
+    block.container = container
+    messages = [Message(role="user", content=[LLMChatTextContent(text="测试")])]
+
+    with pytest.raises(Exception):
+        block.execute(prompt=messages)
+
+    assert requested_models == ["unavailable-primary", "unavailable-secondary"]
+
+
+def test_chat_completion_still_uses_the_default_model_when_nothing_is_configured():
+    """一个模型都没选时仍然使用本机默认模型，否则工作流根本跑不起来。"""
+    manager = MagicMock(spec=LLMManager)
+    manager.get_llm_id_by_ability.return_value = "local-text-model"
+    requested_models = []
+
+    def get_llm(model_id):
+        requested_models.append(model_id)
+        return MockLLM()
+
+    manager.get_llm.side_effect = get_llm
+    container = DependencyContainer()
+    container.register(LLMManager, manager)
+    block = ChatCompletion(max_retries=1)
+    block.container = container
+    messages = [Message(role="user", content=[LLMChatTextContent(text="测试")])]
+
+    result = block.execute(prompt=messages)
+
+    assert result["resp"].message.content[0].text == "这是 AI 的回复"
+    assert requested_models == ["local-text-model"]
+
+
 def test_chat_response_converter():
     """测试聊天响应转换器"""
     # 创建聊天响应
@@ -332,3 +418,153 @@ def test_chat_completion_with_tools_no_tool_calls(container):
     assert isinstance(result["resp"], LLMChatResponse)
     assert isinstance(result["iteration_msgs"], list)
     assert len(result["iteration_msgs"]) == 0  # 无消息，因为没有工具调用
+
+
+# ---- 采样温度：类型放宽 + 调度规则 metadata 生效 ----
+
+class RecordingLLM:
+    """记录收到的请求，用于断言温度确实传到了消费方。"""
+
+    def __init__(self):
+        self.requests = []
+
+    def chat(self, request):
+        self.requests.append(request)
+        return LLMChatResponse(
+            message=Message(role="assistant", content=[LLMChatTextContent(text="这是 AI 的回复")]),
+            model="gpt-3.5-turbo",
+            usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+
+def _recording_container(llm: RecordingLLM) -> DependencyContainer:
+    manager = MagicMock(spec=LLMManager)
+    manager.get_llm_id_by_ability.return_value = "local-text-model"
+    manager.get_llm.return_value = llm
+    container = DependencyContainer()
+    container.register(LLMManager, manager)
+    return container
+
+
+def _rule_with_metadata(metadata) -> CombinedDispatchRule:
+    return CombinedDispatchRule(
+        rule_id="chat_normal",
+        name="群聊 AI 对话",
+        workflow_id="chat:normal",
+        rule_groups=[RuleGroup(operator="or", rules=[SimpleDispatchRule(type="fallback", config={})])],
+        metadata=metadata,
+    )
+
+
+def test_llm_chat_request_keeps_float_temperature():
+    """0.7 这类小数必须能原样保留，不能被截断成整数。"""
+    req = LLMChatRequest(temperature=0.7, top_p=0.95)
+
+    assert req.temperature == 0.7
+    assert req.top_p == 0.95
+    assert req.model_dump()["temperature"] == 0.7
+
+
+def test_llm_chat_request_still_accepts_int_temperature():
+    """向后兼容：旧配置里写整数 1 仍然可以校验通过。"""
+    req = LLMChatRequest(temperature=1, top_p=1, frequency_penalty=0, presence_penalty=0, max_tokens=512)
+
+    assert req.temperature == 1.0
+    assert isinstance(req.temperature, float)
+    assert req.top_p == 1.0
+    assert req.frequency_penalty == 0.0
+    assert req.presence_penalty == 0.0
+    # max_tokens 是 token 数量，仍然保持整数
+    assert req.max_tokens == 512
+    assert isinstance(req.max_tokens, int)
+
+
+def test_chat_completion_uses_dispatch_rule_metadata_temperature():
+    """节点没配温度时，命中的调度规则 metadata.temperature 应当生效。"""
+    llm = RecordingLLM()
+    container = _recording_container(llm)
+    container.register(DispatchRule, _rule_with_metadata({"category": "chat", "temperature": 0.7}))
+    block = ChatCompletion(model_name="gpt-3.5-turbo", max_retries=1)
+    block.container = container
+
+    block.execute(prompt=[Message(role="user", content=[LLMChatTextContent(text="测试")])])
+
+    assert llm.requests[0].temperature == 0.7
+
+
+def test_chat_completion_block_config_overrides_rule_metadata():
+    """节点上显式配置的温度优先于规则 metadata。"""
+    llm = RecordingLLM()
+    container = _recording_container(llm)
+    container.register(DispatchRule, _rule_with_metadata({"temperature": 0.9}))
+    block = ChatCompletion(model_name="gpt-3.5-turbo", max_retries=1, temperature=0.1)
+    block.container = container
+
+    block.execute(prompt=[Message(role="user", content=[LLMChatTextContent(text="测试")])])
+
+    assert llm.requests[0].temperature == 0.1
+
+
+def test_chat_completion_ignores_invalid_rule_metadata_temperature():
+    """非法温度一律忽略，落回模型自身默认值，不能把坏值发给服务端。"""
+    llm = RecordingLLM()
+    container = _recording_container(llm)
+    container.register(DispatchRule, _rule_with_metadata({"temperature": "很高"}))
+    block = ChatCompletion(model_name="gpt-3.5-turbo", max_retries=1)
+    block.container = container
+
+    block.execute(prompt=[Message(role="user", content=[LLMChatTextContent(text="测试")])])
+
+    assert llm.requests[0].temperature is None
+
+    llm_out_of_range = RecordingLLM()
+    container_out_of_range = _recording_container(llm_out_of_range)
+    container_out_of_range.register(DispatchRule, _rule_with_metadata({"temperature": 9}))
+    block_out_of_range = ChatCompletion(model_name="gpt-3.5-turbo", max_retries=1)
+    block_out_of_range.container = container_out_of_range
+
+    block_out_of_range.execute(prompt=[Message(role="user", content=[LLMChatTextContent(text="测试")])])
+
+    assert llm_out_of_range.requests[0].temperature is None
+
+
+def test_chat_completion_without_dispatch_rule_sends_no_temperature():
+    """没有命中规则、也没有节点配置时，请求里不应出现 temperature。"""
+    llm = RecordingLLM()
+    container = _recording_container(llm)
+    block = ChatCompletion(model_name="gpt-3.5-turbo", max_retries=1)
+    block.container = container
+
+    block.execute(prompt=[Message(role="user", content=[LLMChatTextContent(text="测试")])])
+
+    assert llm.requests[0].temperature is None
+
+
+def test_chat_completion_with_tools_honors_rule_metadata_temperature(container):
+    """带工具调用的对话块同样读取规则 metadata 的温度。"""
+    llm = RecordingLLM()
+    manager = MagicMock(spec=LLMManager)
+    manager.get_llm.return_value = llm
+    container.register(LLMManager, manager)
+    container.register(DispatchRule, _rule_with_metadata({"temperature": 0.9}))
+    block = ChatCompletionWithTools(model_name="gpt-3.5-turbo", max_iterations=2)
+    block.container = container
+
+    block.execute(msg=[LLMChatMessage(role="user", content=[LLMChatTextContent(text="你好")])], tools=[])
+
+    assert llm.requests[0].temperature == 0.9
+
+
+def test_chat_completion_declares_temperature_config_for_webui():
+    """WebUI 节点配置面板由 block 声明的 schema 驱动，这里断言字段被正确暴露。"""
+    from kirara_ai.workflow.core.block.registry import BlockRegistry
+
+    registry = BlockRegistry()
+    registry.register("chat_completion", "internal", ChatCompletion)
+    _, _, configs = registry.extract_block_info(ChatCompletion)
+
+    assert "temperature" in configs
+    assert configs["temperature"].type == "float"
+    assert configs["temperature"].required is False
+    assert configs["temperature"].label == "采样温度"
+    assert "0.0~2.0" in (configs["temperature"].description or "")

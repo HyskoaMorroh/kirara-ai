@@ -1,10 +1,11 @@
 @import './base.css';
 
 :root {
-  /* 主色调 */
-  --primary-color: #4080ff;
-  --primary-color-hover: #6699ff;
-  --primary-color-rgb: 64, 128, 255;
+  /* 主色调（与 palettes.ts 的 classic.light 保持一致，#007AFF 为项目原始主色） */
+  --primary-color: #007aff;
+  --primary-color-hover: #3395ff;
+  --primary-color-pressed: #0062cc;
+  --primary-color-rgb: 0, 122, 255;
 
   /* 文本颜色 */
   --text-color: #333639;
@@ -14,29 +15,170 @@
   /* 背景颜色 */
   --bg-color: #f5f7fa;
   --card-bg-color: #ffffff;
+  --card-bg-color-rgb: 255, 255, 255;
   --sidebar-bg-color: #ffffff;
+  --panel-bg-color: rgba(255, 255, 255, 0.8);
+  --elevated-bg-color: #ffffff;
+  --input-bg-color: #ffffff;
 
   /* 边框颜色 */
   --border-color: #e5e7eb;
+  --divider-color: #f3f4f6;
+
+  /* 工作流画布 */
+  --canvas-bg-color: #f5f7fa;
+  --canvas-dot-color: #aaaaaa;
+
+  /* 工作流节点 */
+  --node-bg-start: #f8f9fa;
+  --node-bg-end: #ffffff;
+  --node-header-bg: #f0f0f0;
+  --node-border-color: rgba(0, 0, 0, 0.06);
+  --node-muted-bg: #f9fafb;
+
+  /* 代码块 */
+  --code-bg-color: #f3f4f6;
+  --code-text-color: #1f2937;
 
   /* 状态颜色 */
   --success-color: #18a058;
+  --success-color-rgb: 24, 160, 88;
   --warning-color: #f0a020;
+  --warning-color-rgb: 240, 160, 32;
   --error-color: #d03050;
+  --error-color-rgb: 208, 48, 80;
   --info-color: #5c6ac4;
+  --info-color-rgb: 92, 106, 196;
+
+  /*
+   * 文本专用变体：上面的 --*-color 是为填充、描边、图标底设计的，作为文字色时
+   * 浅色下普遍不足 4.5:1（原始值中 warning 仅 2.15、success 3.38、primary 3.65、
+   * textTertiary 3.08）。需要“把语义色用在文字上”时请改用下面这组，它们按各
+   * 色板自身底色调到了 WCAG AA。规则：background / border 用原键，color 用 -text 键。
+   */
+  --primary-color-text: #006ce2;
+  --success-color-text: #138046;
+  --warning-color-text: #9b640a;
+  --error-color-text: #d03050;
+  --info-color-text: #5b69c3;
+  --text-color-tertiary-text: #6d7077;
 
   /* 圆角 */
-  --border-radius: 8px;
-  --border-radius-small: 4px;
+  /*
+   * 取值与 palettes.ts 中 classic 色板的 shape 一致（原为 8px / 4px，与
+   * naive-ui 侧的 10px / 8px 长期不符，同一个按钮在两套样式下圆角不同）。
+   * 现在 CSS 与 naive-ui 读的是同一套数值：JS 执行后由 theme store 按当前色板
+   * 覆盖，未执行时这里的默认值即默认色板的取值。
+   */
+  /*
+   * ── 圆角阶梯（唯一权威定义）────────────────────────────────────────
+   * 全站曾散落 11 种字面量圆角（12px×31、8px×20、6px×14、16px×13、4px×12、
+   * 10px×12、20px、2px、3px、24px、999px），同类元素圆角互不相同。现在收敛成
+   * 下面 6 档，取值刻意落在出现频次最高的 12px / 8px / 16px / 4px 上，
+   * 因此绝大多数消费点换成令牌后视觉不变。
+   *
+   * 语义分工（写新样式时按“这个元素是什么”选档，不要按“它现在是几 px”选）：
+   *   --radius-xs   4px   内联小件：代码片段、node-id、监控条、滚动条滑块、
+   *                       以及嵌在已有圆角容器里、必须比父级更小的内层元素
+   *   --radius-sm   8px   交互控件与紧凑表面：按钮、输入框、下拉、菜单项、
+   *                       小工具条，以及画布节点这类密集的小块容器
+   *   --radius-md  12px   常规面板：卡片、列表项、统计块、表格容器（默认档）
+   *   --radius-lg  16px   大型表面：模态、抽屉、页面级主卡片、图表卡
+   *   --radius-xl  24px   主视觉容器：登录页外框这类整屏级的大面积容器
+   *   --radius-pill 999px 完全圆化：胶囊标签、状态徽标、计数角标、头像
+   *
+   * 嵌套原则：内层圆角必须 ≤ 外层，一般降一档（lg 容器里放 md，md 里放 sm）。
+   * 例外只允许两种：正圆（50% / pill）与“1~2px 发丝级装饰”，且必须就地写注释。
+   *
+   * 每个色板通过 shape.radiusScale 整体缩放这套阶梯（石墨 0.5 最方正、
+   * 森林 1.25 最圆润），运行时由 theme store 覆盖下面所有档位；这里的字面量
+   * 是 JS 未执行时的兜底，等于经典色板（scale = 1）的取值。
+   */
+  --radius-xs: 4px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-pill: 999px;
+
+  /*
+   * 历史别名：这四个名字已有 20 余处消费点，保留不改名，只把它们映射到阶梯上。
+   * --border-radius = md、--border-radius-small = sm、--border-radius-large = lg、
+   * --border-radius-pill = pill。新代码请直接写 --radius-*。
+   */
+  --border-radius: var(--radius-md);
+  --border-radius-small: var(--radius-sm);
+  --border-radius-large: var(--radius-lg);
+  --border-radius-pill: var(--radius-pill);
+
+  /*
+   * 字号梯度：1.125（Major Second）模数，基准 14px。
+   * 密集型后台界面刻意选用小步长，保证 7 档全部落在可用区间内。
+   */
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-base: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 18px;
+  --font-size-2xl: 22px;
+  --font-size-3xl: 28px;
+
+  /* 行高：紧凑用于标题与单行控件，normal 为正文，relaxed 用于长段落 */
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.75;
+
+  /* 字距：大字号收紧，正文保持 0 */
+  --letter-spacing-tight: -0.01em;
+  --letter-spacing-normal: 0;
+
+  /* 间距节奏：4px 基准的 8 档，替代随手写的 6px / 10px / 14px 等杂值 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
 
   /* 阴影 */
   --box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
   --box-shadow-hover: 0 6px 16px rgba(0, 0, 0, 0.12);
+  /*
+   * 高度（elevation）梯度。sm=贴合表面的细微抬起，默认=卡片，
+   * lg=悬浮卡片/抽屉，overlay=模态与下拉这类完全脱离页面的层。
+   * 浅色与深色各有一套（深色需要更大扩散与更高不透明度才能被看见）。
+   */
+  --box-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --box-shadow-lg: 0 10px 24px rgba(0, 0, 0, 0.12);
+  --box-shadow-overlay: 0 16px 48px rgba(0, 0, 0, 0.18);
 
   /* 过渡 */
   --transition-duration: 0.2s;
+  /* fast 用于 hover/focus 这类需要立即响应的反馈，slow 用于面板展开、主题切换 */
+  --transition-duration-fast: 0.12s;
+  --transition-duration-slow: 0.36s;
   --transition-timing-function: ease;
-  --n-border-color: rgba(0, 0, 0, 0.1);
+  /*
+   * naive-ui 内部变量命名空间（--n-*）本应只由 NConfigProvider 注入。
+   * 这里手动补齐的原因：项目里已有 20 余处组件样式直接读 --n-* 且从未被定义，
+   * 深色下会退化成写死的浅色。这属于对 naive-ui 版本敏感的兼容层——升级
+   * naive-ui 时若这些名字含义变化，需要同步复查。新代码请使用上面的
+   * --border-color / --text-color-* 等项目自有变量，不要再新增 --n-* 消费点。
+   */
+  --n-border-color: #e5e7eb;
+  --n-body-color: #f5f7fa;
+  --n-card-color: #ffffff;
+  --n-color: #ffffff;
+  --n-color-modal: #ffffff;
+  --n-primary-color: #007aff;
+  --n-text-color: #333639;
+  --n-text-color-2: #606266;
+  --n-text-color-3: #909399;
+  --n-text-color-rgb: 51, 54, 57;
+  /* 拼写错误的历史变量（末尾多一个连字符），保留定义以免消费点回退到无值 */
+  --n-text-color-: #333639;
 
   --n-padding-md: 20px;
 
@@ -46,33 +188,167 @@
   --sidebar-title-height: 56px;
 }
 
+/*
+ * 深色兜底值。运行时 theme store 会把选中色板的具体色值写到
+ * document.documentElement 的行内样式上，优先级高于此处；这里的取值用于
+ * 首帧渲染（JS 尚未执行完）以及色板未提供某个变量时的降级。
+ */
 .dark {
   /* 主色调 */
-  --primary-color: #4080ff;
-  --primary-color-hover: #6699ff;
-  --primary-color-rgb: 64, 128, 255;
+  --primary-color: #5b8dff;
+  --primary-color-hover: #7ba4ff;
+  --primary-color-pressed: #4275e0;
+  --primary-color-rgb: 91, 141, 255;
   /* 文本颜色 */
-  --text-color: #e5e7eb;
-  --text-color-secondary: #c9cdd4;
-  --text-color-tertiary: #8b949e;
+  --text-color: #dfe2e6;
+  --text-color-secondary: #a8adb5;
+  --text-color-tertiary: #7c828b;
 
   /* 背景颜色 */
-  --bg-color: #121212;
-  --card-bg-color: #1e1e1e;
-  --sidebar-bg-color: #1e1e1e;
+  --bg-color: #161719;
+  --card-bg-color: #1e2023;
+  --card-bg-color-rgb: 30, 32, 35;
+  --sidebar-bg-color: #1a1c1f;
+  --panel-bg-color: rgba(30, 32, 35, 0.86);
+  --elevated-bg-color: #26282c;
+  --input-bg-color: #22252a;
 
   /* 边框颜色 */
-  --border-color: #333639;
+  --border-color: #31343a;
+  --divider-color: #282b30;
+  --n-border-color: #31343a;
+  /* naive-ui 兼容层的深色兜底，来由见 :root 中的说明 */
+  --n-body-color: #161719;
+  --n-card-color: #1e2023;
+  --n-color: #1e2023;
+  --n-color-modal: #1e2023;
+  --n-primary-color: #5b8dff;
+  --n-text-color: #dfe2e6;
+  --n-text-color-2: #a8adb5;
+  --n-text-color-3: #7c828b;
+  --n-text-color-rgb: 223, 226, 230;
+  --n-text-color-: #dfe2e6;
+
+  /* 工作流画布 */
+  --canvas-bg-color: #131416;
+  --canvas-dot-color: #3a3d43;
+
+  /* 工作流节点 */
+  --node-bg-start: #24262a;
+  --node-bg-end: #1d1f22;
+  --node-header-bg: #2b2e33;
+  --node-border-color: rgba(255, 255, 255, 0.08);
+  --node-muted-bg: #222427;
+
+  /* 代码块 */
+  --code-bg-color: #1a1c1f;
+  --code-text-color: #d4d7dc;
 
   /* 状态颜色 */
   --success-color: #63e2b7;
+  --success-color-rgb: 99, 226, 183;
   --warning-color: #f3a769;
+  --warning-color-rgb: 243, 167, 105;
   --error-color: #e88080;
-  --info-color: #7a89d0;
+  --error-color-rgb: 232, 128, 128;
+  --info-color: #8b95e0;
+  --info-color-rgb: 139, 149, 224;
+
+  /* 文本专用变体：深色下原键本身已达 AA，仅三级文本需要提亮一档 */
+  --primary-color-text: #5b8dff;
+  --success-color-text: #63e2b7;
+  --warning-color-text: #f3a769;
+  --error-color-text: #e88080;
+  --info-color-text: #8b95e0;
+  --text-color-tertiary-text: #8c9199;
 
   /* 阴影 */
-  --box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-  --box-shadow-hover: 0 6px 16px rgba(0, 0, 0, 0.3);
+  --box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --box-shadow-hover: 0 6px 18px rgba(0, 0, 0, 0.6);
+  --box-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --box-shadow-lg: 0 10px 28px rgba(0, 0, 0, 0.62);
+  --box-shadow-overlay: 0 18px 56px rgba(0, 0, 0, 0.72);
+}
+
+/*
+ * 无 JS / store 失效时的系统深色兜底。
+ *
+ * 上面的 .dark 依赖 JS（首屏脚本或 theme store）加类；脚本被拦截时深色系统用户
+ * 会永久停留在浅色。这里按系统偏好补一份取值，并用 :root:not([data-theme]) 守卫：
+ * 首屏脚本与 store 都会写 data-theme，一旦明暗被显式决定本块即失效，因此不会
+ * 覆盖用户主动选择的浅色。
+ *
+ * ⚠ 取值必须与上面的 .dark 区块保持一致（等同于 palettes.ts 的 classic.dark）。
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --primary-color: #5b8dff;
+    --primary-color-hover: #7ba4ff;
+    --primary-color-pressed: #4275e0;
+    --primary-color-rgb: 91, 141, 255;
+
+    --text-color: #dfe2e6;
+    --text-color-secondary: #a8adb5;
+    --text-color-tertiary: #7c828b;
+
+    --bg-color: #161719;
+    --card-bg-color: #1e2023;
+    --card-bg-color-rgb: 30, 32, 35;
+    --sidebar-bg-color: #1a1c1f;
+    --panel-bg-color: rgba(30, 32, 35, 0.86);
+    --elevated-bg-color: #26282c;
+    --input-bg-color: #22252a;
+
+    --border-color: #31343a;
+    --divider-color: #282b30;
+    --n-border-color: #31343a;
+    --n-body-color: #161719;
+    --n-card-color: #1e2023;
+    --n-color: #1e2023;
+    --n-color-modal: #1e2023;
+    --n-primary-color: #5b8dff;
+    --n-text-color: #dfe2e6;
+    --n-text-color-2: #a8adb5;
+    --n-text-color-3: #7c828b;
+    --n-text-color-rgb: 223, 226, 230;
+    --n-text-color-: #dfe2e6;
+
+    --canvas-bg-color: #131416;
+    --canvas-dot-color: #3a3d43;
+
+    --node-bg-start: #24262a;
+    --node-bg-end: #1d1f22;
+    --node-header-bg: #2b2e33;
+    --node-border-color: rgba(255, 255, 255, 0.08);
+    --node-muted-bg: #222427;
+
+    --code-bg-color: #1a1c1f;
+    --code-text-color: #d4d7dc;
+
+    --success-color: #63e2b7;
+    --success-color-rgb: 99, 226, 183;
+    --warning-color: #f3a769;
+    --warning-color-rgb: 243, 167, 105;
+    --error-color: #e88080;
+    --error-color-rgb: 232, 128, 128;
+    --info-color: #8b95e0;
+    --info-color-rgb: 139, 149, 224;
+
+    --primary-color-text: #5b8dff;
+    --success-color-text: #63e2b7;
+    --warning-color-text: #f3a769;
+    --error-color-text: #e88080;
+    --info-color-text: #8b95e0;
+    --text-color-tertiary-text: #8c9199;
+
+    --box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+    --box-shadow-hover: 0 6px 18px rgba(0, 0, 0, 0.6);
+    --box-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --box-shadow-lg: 0 10px 28px rgba(0, 0, 0, 0.62);
+    --box-shadow-overlay: 0 18px 56px rgba(0, 0, 0, 0.72);
+
+    color-scheme: dark;
+  }
 }
 
 body {
@@ -83,6 +359,42 @@ body {
   transition: background-color var(--transition-duration) var(--transition-timing-function);
   margin: 0;
   padding: 0;
+}
+
+/*
+ * 主题切换的平滑过渡。
+ *
+ * 色板/明暗切换会一次性改写几十个 CSS 变量，不加过渡时整个界面是“闪”过去的。
+ * 只过渡颜色相关属性（不含 transform / opacity），避免影响布局动画与滚动性能。
+ * 交互态自身的过渡仍由各组件声明，slow 档只服务于换肤这一个动作。
+ */
+:root,
+body,
+#app {
+  transition: background-color var(--transition-duration-slow) var(--transition-timing-function),
+    color var(--transition-duration-slow) var(--transition-timing-function),
+    border-color var(--transition-duration-slow) var(--transition-timing-function);
+}
+
+/*
+ * 尊重系统的“减少动态效果”偏好：把动画与过渡压到近乎瞬时，
+ * 而不是留给个别组件各自处理（原先只有首屏 spinner 做了这件事）。
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --transition-duration: 0.01ms;
+    --transition-duration-fast: 0.01ms;
+    --transition-duration-slow: 0.01ms;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 #app {
@@ -113,7 +425,7 @@ a {
 
 /* 卡片样式 */
 .n-card {
-  border-radius: var(--border-radius);
+  border-radius: var(--radius-md);
   transition: box-shadow var(--transition-duration) var(--transition-timing-function),
     transform var(--transition-duration) var(--transition-timing-function);
   background-color: var(--card-bg-color);
@@ -122,7 +434,7 @@ a {
 
 /* 按钮样式 */
 .n-button {
-  border-radius: var(--border-radius-small);
+  border-radius: var(--radius-sm);
   transition: background-color var(--transition-duration) var(--transition-timing-function),
     color var(--transition-duration) var(--transition-timing-function),
     border-color var(--transition-duration) var(--transition-timing-function),
@@ -131,14 +443,15 @@ a {
 
 /* 标签样式 */
 .n-tag {
-  border-radius: 16px;
+  /* 标签本就是胶囊形，改用圆角令牌后与按钮/卡片同属一套词汇 */
+  border-radius: var(--radius-pill);
   padding: 0 10px;
   transition: background-color var(--transition-duration) var(--transition-timing-function);
 }
 
 /* 输入框样式 */
 .n-input {
-  border-radius: var(--border-radius-small);
+  border-radius: var(--radius-sm);
   transition: all 0.3s ease;
 }
 
@@ -151,7 +464,7 @@ a {
 
 /* 选择器样式 */
 .n-select {
-  border-radius: var(--border-radius-small);
+  border-radius: var(--radius-sm);
   transition: all 0.3s ease;
 }
 
@@ -163,7 +476,7 @@ a {
 
 /* 日期选择器样式 */
 .n-date-picker {
-  border-radius: var(--border-radius-small);
+  border-radius: var(--radius-sm);
   transition: all 0.3s ease;
 }
 
@@ -175,11 +488,12 @@ a {
 
 /* 模态框样式 */
 .n-modal {
-  border-radius: var(--border-radius);
+  border-radius: var(--radius-lg);
   background-color: var(--card-bg-color);
   border: 1px solid var(--border-color);
   overflow: hidden;
-  box-shadow: var(--box-shadow);
+  /* 模态完全脱离页面层，用 overlay 档而不是卡片档阴影 */
+  box-shadow: var(--box-shadow-overlay);
 }
 
 /* 通用容器卡片样式 */
@@ -188,7 +502,7 @@ a {
 .adapter-card,
 .media-card,
 .search-card {
-  border-radius: var(--border-radius);
+  border-radius: var(--radius-md);
   background-color: var(--card-bg-color);
   box-shadow: var(--box-shadow);
   transition: all var(--transition-duration) var(--transition-timing-function);
@@ -205,7 +519,7 @@ a {
 
 /* 表格样式 */
 .n-data-table {
-  border-radius: var(--border-radius);
+  border-radius: var(--radius-md);
 }
 
 .n-data-table-th {
@@ -233,7 +547,8 @@ a {
 .primary-button {
   margin-top: 1rem;
   height: 40px;
-  border-radius: 12px;
+  /* 与 .n-button 同属控件档，原来的 12px 让它比旁边的普通按钮更圆 */
+  border-radius: var(--radius-sm);
   background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-color-hover) 100%);
   border: none;
   font-weight: 600;
@@ -261,6 +576,14 @@ a {
   background-size: 10px 10px;
 }
 
+/* 深色下点阵改用主题的网格点色，否则近黑色的点在深色底上完全不可见 */
+.dark .bg {
+  background-image: radial-gradient(
+    color-mix(in oklab, var(--canvas-dot-color, #3a3d43) 55%, transparent) 1px,
+    transparent 0
+  );
+}
+
 /* 渐变文本 */
 .gradient-text {
   background: linear-gradient(to right, var(--primary-color), var(--primary-color-hover));
@@ -271,7 +594,20 @@ a {
 .vue-flow__handle {
   height: 24px;
   width: 8px;
-  border-radius: 4px !important;
+  /* 端口只有 8px 宽，用 xs 档；!important 是 vue-flow 内联样式所需，沿用 */
+  border-radius: var(--radius-xs) !important;
+}
+
+/* vue-flow 主题变量跟随应用主题，连线与画布底色在深色下同样正确 */
+.vue-flow {
+  --vf-node-bg: var(--node-bg-end);
+  --vf-node-text: var(--text-color);
+  --vf-connection-path: var(--primary-color);
+  --vf-handle: var(--primary-color);
+}
+
+.vue-flow__background {
+  background-color: var(--canvas-bg-color);
 }
 
 /* 全局动画 */

@@ -36,10 +36,10 @@ export interface BlockInstance {
   type_name: string
   name: string
   config: Record<string, any>
-  position: {
+  position?: {
     x: number
     y: number
-  }
+  } | null
 }
 
 export interface Wire {
@@ -52,6 +52,19 @@ export interface Wire {
 export interface WorkflowDefinition extends WorkflowInfo {
   blocks: BlockInstance[]
   wires: Wire[]
+}
+
+export interface WorkflowValidationIssue {
+  severity: 'error' | 'warning'
+  code: string
+  message: string
+  node_name?: string | null
+  port_name?: string | null
+}
+
+export interface WorkflowValidationResponse {
+  errors: WorkflowValidationIssue[]
+  warnings: WorkflowValidationIssue[]
 }
 
 export async function listWorkflows() {
@@ -72,4 +85,9 @@ export async function updateWorkflow(groupId: string, workflowId: string, data: 
 
 export async function deleteWorkflow(groupId: string, workflowId: string) {
   return http.delete(`/workflow/${groupId}/${workflowId}`)
+}
+
+/** 仅预检草稿结构，不保存、执行或修改当前工作流。 */
+export async function validateWorkflow(data: Workflow) {
+  return http.post<WorkflowValidationResponse>('/workflow/validate', data)
 }

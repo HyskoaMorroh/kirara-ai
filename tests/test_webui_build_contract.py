@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -39,10 +40,39 @@ def test_wheel_builder_copies_only_package_build_inputs():
 
 def test_bundled_webui_lockfile_uses_an_available_registry():
     """The vendored build must not inherit the unavailable local mirror URL."""
+    # 黑名单只能挡住已知镜像，npmmirror.com 就是这样漏进锁文件的；
+    # 因此改为白名单：解析每一条 resolved 地址，逐个校验主机名。
     lockfile = (WEBUI_ROOT / "yarn.lock").read_text(encoding="utf-8")
 
     assert "https://registry.npmjs.org/" in lockfile
-    assert "mirrors.cloud.tencent.com" not in lockfile
+
+    # yarn install --frozen-lockfile 会直接按 resolved 地址取包，
+    # 只有下列主机在任意 CI / 用户网络下都可达。
+    allowed_hosts = {
+        "registry.npmjs.org",
+        # 少数依赖以 git / GitHub tarball 形式安装时的合法主机
+        "codeload.github.com",
+        "github.com",
+    }
+
+    resolved_hosts: dict[str, list[str]] = {}
+    for raw_url in re.findall(r'^\s*resolved\s+"?([^"\s]+)"?\s*$', lockfile, re.MULTILINE):
+        # 去掉 git+ssh:// 等前缀与 #commit / ?query 后缀，只留主机名
+        without_scheme = re.sub(r"^[A-Za-z0-9+.\-]+://", "", raw_url)
+        host = without_scheme.split("/")[0].split("@")[-1].split(":")[0].lower()
+        resolved_hosts.setdefault(host, []).append(raw_url)
+
+    assert resolved_hosts, "yarn.lock 未解析出任何 resolved 地址，解析规则可能已失效"
+
+    unexpected = {
+        host: urls[:3] for host, urls in resolved_hosts.items() if host not in allowed_hosts
+    }
+    assert not unexpected, (
+        "yarn.lock 含不可移植的下载源（仅允许 "
+        + ", ".join(sorted(allowed_hosts))
+        + "）："
+        + repr(unexpected)
+    )
 
 
 def test_websocket_client_uses_a_secure_scheme_when_the_page_uses_https():
@@ -93,3 +123,46 @@ def test_configuration_save_does_not_log_password_hash_settings():
     )
 
     assert "console.log(props.configurationGroups[0].properties[property].password)" not in configuration_list
+
+
+def test_wheel_declares_bundled_workflow_presets():
+    """pip 安装包必须带上首次部署所需的进阶工作流 YAML。"""
+    manifest = (PROJECT_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+    pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    presets_root = PROJECT_ROOT / "kirara_ai" / "workflow" / "presets" / "chat"
+
+    assert "recursive-include kirara_ai/workflow/presets *" in manifest
+    assert '"kirara_ai.workflow.presets" = ["*/*.yaml"]' in pyproject
+    assert '"*" = ["__pycache__/*", "*.py[cod]"]' in pyproject
+    assert {
+        "dsr_thinking.yaml",
+        "normal_multimodal.yaml",
+        "talk_break.yaml",
+        # MCP、函数调用、时间感知等新增模板同样必须随 wheel 分发
+        "mcp_tools.yaml",
+        "function_calling.yaml",
+        "time_aware.yaml",
+        "plain_text.yaml",
+        "sensitive_word_filter.yaml",
+        "long_reply_split.yaml",
+        "custom_script.yaml",
+        "group_mention.yaml",
+    }.issubset({path.name for path in presets_root.glob("*.yaml")})
+    # package-data 的 `*/*.yaml` 只覆盖 presets 下一层子目录。新增预设分组时
+    # 必须放在这一层，否则 pip 安装的用户拿不到这些文件。
+    presets_parent = presets_root.parent
+    for yaml_path in presets_parent.rglob("*.yaml"):
+        assert yaml_path.parent.parent == presets_parent, (
+            f"{yaml_path} 的层级不被 package-data 的 */*.yaml 覆盖"
+        )
+
+
+def test_docker_default_data_starts_without_runtime_test_fixture():
+    """新容器须初始化受版本控制的默认数据，不能携带测试工作流。"""
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    start_script = (PROJECT_ROOT / "docker" / "start.sh").read_text(encoding="utf-8")
+    dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
+
+    assert "COPY ./data /tmp/data" in dockerfile
+    assert 'cp -r /tmp/data/. /app/data' in start_script
+    assert "data/workflows/**/test-workflow-new.yaml" in dockerignore

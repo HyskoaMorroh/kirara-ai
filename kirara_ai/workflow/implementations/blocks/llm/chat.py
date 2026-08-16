@@ -25,21 +25,83 @@ def model_name_options_provider(container: DependencyContainer, block: Block) ->
     llm_manager: LLMManager = container.resolve(LLMManager)
     return sorted(llm_manager.get_supported_models(ModelType.LLM, LLMAbility.TextChat))
 
+
+# 采样温度的合法区间。各家 API 的上限不完全一致（OpenAI 为 2.0，Claude 为 1.0），
+# 这里取并集的上限，超出范围的值一律忽略并落回模型自身的默认温度，
+# 避免把一个必然被服务端拒绝的请求发出去。
+TEMPERATURE_MIN = 0.0
+TEMPERATURE_MAX = 2.0
+
+
+def resolve_temperature(
+    container: DependencyContainer,
+    configured_temperature: Optional[float],
+    logger=None,
+) -> Optional[float]:
+    """确定本次请求实际使用的采样温度。
+
+    优先级：节点上显式配置的 temperature > 命中的调度规则 metadata.temperature >
+    不传（由模型/后端自己的默认值决定）。这样既能在 WebUI 的节点配置里按工作流
+    调温，也让 `data/dispatch_rules/rules.yaml` 里的 metadata.temperature 真正生效。
+
+    :param container: 当前作用域容器，调度器会在其中注册命中的规则
+    :param configured_temperature: 节点配置里填写的温度，未填写时为 None
+    :param logger: 可选的日志器，用于提示非法取值
+    :return: 合法的温度值，或 None 表示不在请求里携带该字段
+    """
+
+    def _validate(value: Any, source: str) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            if logger:
+                logger.warning(f"Ignoring non-numeric temperature from {source}: {value!r}")
+            return None
+        if not TEMPERATURE_MIN <= number <= TEMPERATURE_MAX:
+            if logger:
+                logger.warning(
+                    f"Ignoring out-of-range temperature from {source}: {number} "
+                    f"(expected {TEMPERATURE_MIN}~{TEMPERATURE_MAX})"
+                )
+            return None
+        return number
+
+    resolved = _validate(configured_temperature, "block config")
+    if resolved is not None:
+        return resolved
+
+    # 延迟导入：dispatch 包会反向引用工作流执行器，模块级导入会形成循环依赖。
+    try:
+        from kirara_ai.workflow.core.dispatch.rules.base import DispatchRule
+    except Exception:  # pragma: no cover - 仅在包结构异常时触发
+        return None
+
+    if not container.has(DispatchRule):
+        return None
+    rule = container.resolve(DispatchRule)
+    metadata = getattr(rule, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    return _validate(metadata.get("temperature"), "dispatch rule metadata")
+
 class ChatMessageConstructor(Block):
     name = "chat_message_constructor"
+    description = "把系统提示词、历史记忆与本轮消息组装成模型可接受的对话记录。提示词中可使用 {user_msg}、{user_name}、{memory_content}、{current_date_time} 等占位符。"
     inputs = {
-        "user_msg": Input("user_msg", "本轮消息", IMMessage, "用户消息"),
+        "user_msg": Input("user_msg", "本轮消息", IMMessage, "用户本轮发送的消息"),
         "user_prompt_format": Input(
-            "user_prompt_format", "本轮消息格式", str, "本轮消息格式", default=""
+            "user_prompt_format", "本轮消息格式", str, "本轮消息的模板，支持占位符", default=""
         ),
-        "memory_content": Input("memory_content", "历史消息对话", List[ComposableMessageType], "历史消息对话"),
+        "memory_content": Input("memory_content", "历史消息对话", List[ComposableMessageType], "历史对话记录，通常来自「查询记忆」"),
         "system_prompt_format": Input(
-            "system_prompt_format", "系统提示词", str, "系统提示词", default=""
+            "system_prompt_format", "系统提示词", str, "系统提示词模板，支持占位符", default=""
         ),
     }
     outputs = {
         "llm_msg": Output(
-            "llm_msg", "LLM 对话记录", List[LLMChatMessage], "LLM 对话记录"
+            "llm_msg", "LLM 对话记录", List[LLMChatMessage], "组装完成的对话记录"
         )
     }
     container: DependencyContainer
@@ -127,10 +189,11 @@ class ChatMessageConstructor(Block):
 
 class ChatCompletion(Block):
     name = "chat_completion"
+    description = "调用大语言模型生成回复。可配置最多 5 个模型，前一个失败时自动降级到下一个。"
     inputs = {
-        "prompt": Input("prompt", "LLM 对话记录", List[LLMChatMessage], "LLM 对话记录")
+        "prompt": Input("prompt", "LLM 对话记录", List[LLMChatMessage], "要发送给模型的对话记录")
     }
-    outputs = {"resp": Output("resp", "LLM 对话响应", LLMChatResponse, "LLM 对话响应")}
+    outputs = {"resp": Output("resp", "LLM 对话响应", LLMChatResponse, "模型返回的回复")}
     container: DependencyContainer
 
     def __init__(
@@ -163,6 +226,20 @@ class ChatCompletion(Block):
             float,
             ParamMeta(label="重试延迟(秒)", description="每次重试之间的等待时间"),
         ] = 3.0,
+        use_deployment_default_model: Annotated[
+            bool,
+            ParamMeta(
+                label="允许回退到部署默认模型",
+                description="开启后，上面配置的模型全部不可用时，会再尝试本机默认的文本对话模型。关闭时只使用上面配置的模型，避免用意料之外的模型回答",
+            ),
+        ] = False,
+        temperature: Annotated[
+            Optional[float],
+            ParamMeta(
+                label="采样温度",
+                description="取值 0.0~2.0，越大回答越随机、越小越稳定。留空则使用命中的调度规则 metadata.temperature，两者都没有时交由模型自身默认值决定",
+            ),
+        ] = None,
     ):
         self.model_name = model_name
         # 将4个备用模型参数组合成列表，过滤掉空值
@@ -170,10 +247,19 @@ class ChatCompletion(Block):
         self.fallback_models = [m for m in fallback_list if m] or None
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        # 是否允许在配置的模型链之后追加本机默认模型。默认关闭：
+        # 静默换成另一个模型会让用户得到与预期不符的回答，且难以察觉。
+        # 一个模型都没配置时仍然会使用默认模型（否则工作流根本跑不起来）。
+        self.use_deployment_default_model = use_deployment_default_model
+        # 采样温度：节点上没填时会回落到调度规则的 metadata.temperature。
+        self.temperature = temperature
         self.logger = get_logger("ChatCompletionBlock")
 
     def execute(self, prompt: List[LLMChatMessage]) -> Dict[str, Any]:
         llm_manager = self.container.resolve(LLMManager)
+
+        # 解析本次实际生效的采样温度（节点配置 > 调度规则 metadata > 不携带）
+        temperature = resolve_temperature(self.container, self.temperature, self.logger)
 
         # 构建模型优先级列表
         model_priority_list = []
@@ -186,13 +272,34 @@ class ChatCompletion(Block):
                 if fallback_model and fallback_model not in model_priority_list:
                     model_priority_list.append(fallback_model)
 
-        # 如果没有指定任何模型，使用默认模型
-        if not model_priority_list:
+        # Keep an explicitly configured model chain authoritative, but add the
+        # deployment's compatible default as its final safety net.  Bundled
+        # workflows can therefore keep their intended primary/fallback order
+        # while a fresh installation still works when those sample IDs are not
+        # configured locally.
+        # 该兜底现在是显式开关：只有「一个模型都没配置」或用户打开
+        # use_deployment_default_model 时才追加默认模型，避免在用户明确指定了
+        # 模型链的情况下静默换用另一个模型作答。
+        has_configured_model = bool(self.model_name or self.fallback_models)
+        if not has_configured_model or self.use_deployment_default_model:
             default_model = llm_manager.get_llm_id_by_ability(LLMAbility.TextChat)
-            if not default_model:
-                raise ValueError("No available LLM models found")
-            model_priority_list.append(default_model)
-            self.logger.info(f"Model id unspecified, using default model: {default_model}")
+            if default_model and default_model not in model_priority_list:
+                model_priority_list.append(default_model)
+                if has_configured_model:
+                    self.logger.info(
+                        f"Adding deployment default model after configured fallbacks: {default_model}"
+                    )
+                else:
+                    self.logger.info(f"Model id unspecified, using default model: {default_model}")
+
+        if not model_priority_list:
+            # 报错里带上节点身份：预设工作流的 model_name 故意留空，用户需要知道
+            # 该去画布上的哪个节点点开配置。英文原文保留在括号里，便于检索既有日志。
+            raise ValueError(
+                f"节点「{self.name}」没有可用的模型：请在工作流编辑器中打开该节点，"
+                f"从「模型 ID1」下拉框里选择一个已配置的模型"
+                f"（No available LLM models found）"
+            )
 
         # 记录模型优先级列表
         self.logger.info(f"Model priority list: {model_priority_list}")
@@ -211,6 +318,8 @@ class ChatCompletion(Block):
                         break  # 跳到下一个模型
 
                     req = LLMChatRequest(messages=prompt, model=model_id)
+                    if temperature is not None:
+                        req.temperature = temperature
 
                     # 尝试调用模型
                     response = llm.chat(req)
@@ -259,8 +368,9 @@ class ChatCompletion(Block):
 
 class ChatResponseConverter(Block):
     name = "chat_response_converter"
-    inputs = {"resp": Input("resp", "LLM 响应", LLMChatResponse, "LLM 响应")}
-    outputs = {"msg": Output("msg", "IM 消息", IMMessage, "IM 消息")}
+    description = "把模型回复转成可发送的聊天消息，并按 <break> 拆分为多条，模拟真人分段发送。"
+    inputs = {"resp": Input("resp", "LLM 响应", LLMChatResponse, "模型返回的回复")}
+    outputs = {"msg": Output("msg", "IM 消息", IMMessage, "转换后的聊天消息")}
     container: DependencyContainer
 
     def execute(self, resp: LLMChatResponse) -> Dict[str, Any]:
@@ -282,6 +392,7 @@ class ExampleFunction(Block, ABC):
     这个块是抽象function block，没有实际功能，你可以继承这个类，也可以参考这个类自己实现（遵从inputs, outputs格式约定）。
     """
     name = "tool"
+    description = "抽象示例块，本身不可用，供开发者继承实现自定义的工具执行节点。"
     inputs = {
         "im_msg": Input("im_msg", "im 消息", IMMessage, "im 消息", True),
         "tool_call": Input("call_tools", "llm 回应", LLMChatResponse, "接收llm 的函数调用请求，你应该执行函数调用", True),
@@ -311,6 +422,7 @@ class FunctionCalling(Block):
     具体block信息流转流程图将放置于后续教程中。详情请参见kirara wiki function calling部分。
     """
     name = "function_calling"
+    description = "仅负责把函数调用请求发给模型并返回结果，工具的实际执行需由你自己的节点完成。多数场景更推荐使用「LLM: 执行对话并调用工具」。"
     inputs = {
         "request_body": Input("request_body", "llm 函数调用请求体", LLMChatRequest, "传递一个规范的函数调用请求体"),
     }
@@ -362,7 +474,13 @@ class FunctionCalling(Block):
 
     def execute(self, request_body: LLMChatRequest) -> Dict[str, Any]:
         if not self.model_name:
-            raise ValueError("need a model name which support function calling")
+            # 预设 function_calling.yaml 的 model_name 故意留空，等用户从下拉框里选；
+            # 报错必须说清是哪个节点，否则用户只知道"报错了"，不知道去哪里点。
+            raise ValueError(
+                f"节点「{self.name}」尚未选择模型：请在工作流编辑器中打开该节点，"
+                f"从「模型 ID1」下拉框里选择一个支持函数调用（Function Calling）的模型"
+                f"（need a model name which support function calling）"
+            )
 
         llm_manager = self.container.resolve(LLMManager)
 
@@ -447,9 +565,10 @@ class ChatCompletionWithTools(Block):
     支持工具调用的LLM对话块
     """
     name = "chat_completion_with_tools"
+    description = "带工具调用的模型对话：内部自动完成「模型请求工具 → 执行 → 回传结果」的循环，通常配合「MCP: 提供工具」使用。"
     inputs = {
         "msg": Input("msg", "LLM 对话记录", List[LLMChatMessage], "LLM 的 prompt，即由 system、user、assistant和工具调用及结果的完整对话记录"),
-        "tools": Input("tools", "工具列表", List[Tool], "工具列表")
+        "tools": Input("tools", "工具列表", List[Tool], "可供模型调用的工具列表")
     }
     outputs = {
         "resp": Output("resp", "LLM 消息回应", LLMChatResponse, "模型返回给用户的消息"),
@@ -470,15 +589,27 @@ class ChatCompletionWithTools(Block):
         ParamMeta(
             label="最大迭代次数",
             description="允许调用模型请求的最大次数，在进行最后一次请求时，模型将不允许调用工具")
-    ] = 4):
+    ] = 4,
+        temperature: Annotated[
+        Optional[float],
+        ParamMeta(
+            label="采样温度",
+            description="取值 0.0~2.0，越大回答越随机、越小越稳定。留空则使用命中的调度规则 metadata.temperature，两者都没有时交由模型自身默认值决定")
+    ] = None):
         self.model_name = model_name
         self.max_iterations = max_iterations
+        # 采样温度：节点上没填时会回落到调度规则的 metadata.temperature。
+        self.temperature = temperature
         self.logger = get_logger("Block.ChatCompletionWithTools")
 
     def execute(self, msg: List[LLMChatMessage], tools: List[Tool]) -> Dict[str, Any]:
         if not self.model_name:
+            # 预设 mcp_tools.yaml 的 model_name 故意留空，等用户从下拉框里选；
+            # 报错必须说清是哪个节点，否则用户只知道"报错了"，不知道去哪里点。
             raise ValueError(
-                "need a model name which support function calling")
+                f"节点「{self.name}」尚未选择模型：请在工作流编辑器中打开该节点，"
+                f"从「模型 ID, 需要支持函数调用」下拉框里选择一个支持函数调用（Function Calling）的模型"
+                f"（need a model name which support function calling）")
         else:
             self.logger.info(
                 f"Using  model: {self.model_name} to execute function calling")
@@ -491,12 +622,16 @@ class ChatCompletionWithTools(Block):
 
         iteration_msgs: List[LLMChatMessage] = []
         iter_count = 0
+        # 解析本次实际生效的采样温度（节点配置 > 调度规则 metadata > 不携带）
+        temperature = resolve_temperature(self.container, self.temperature, self.logger)
         while iter_count < self.max_iterations:
             # 在这里指定llm的model
             self.logger.debug(
                 f"Iteration {iter_count+1} of {self.max_iterations}")
             request_body = LLMChatRequest(
                 messages=msg + iteration_msgs, model=self.model_name)
+            if temperature is not None:
+                request_body.temperature = temperature
             if tools is not None and len(tools) > 0:
                 request_body.tools = tools
 

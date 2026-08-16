@@ -5,8 +5,8 @@ blocks:
     name: get_message
     params: {}
     position:
-      x: 100
-      y: 138
+      x: 120
+      y: 120
     connected_to:
       - target: ToggleEditState_m2132r
         mapping:
@@ -29,15 +29,15 @@ blocks:
     params:
       is_editing: true
     position:
-      x: 530
-      y: 138
+      x: 520
+      y: 120
   - type: internal:chat_memory_query
     name: query_memory
     params:
       scope_type: group
     position:
-      x: 530
-      y: 338
+      x: 520
+      y: 540
     connected_to:
       - target: ChatMessageConstructor_edvtb4
         mapping:
@@ -48,8 +48,8 @@ blocks:
     params:
       text: '{user_name}说：{user_msg}'
     position:
-      x: 100
-      y: 530
+      x: 120
+      y: 540
     connected_to:
       - target: ChatMessageConstructor_edvtb4
         mapping:
@@ -59,8 +59,8 @@ blocks:
     name: ChatMessageConstructor_edvtb4
     params: {}
     position:
-      x: 960
-      y: 138
+      x: 920
+      y: 120
     connected_to:
       - target: llm_chat
         mapping:
@@ -70,8 +70,8 @@ blocks:
     name: ChatResponseConverter_29c3gx
     params: {}
     position:
-      x: 1710
-      y: 138
+      x: 1720
+      y: 120
     connected_to:
       - target: SendIMMessage_0rit9b
         mapping:
@@ -81,22 +81,22 @@ blocks:
     name: SendIMMessage_0rit9b
     params: {}
     position:
-      x: 2140
-      y: 138
+      x: 2120
+      y: 120
   - type: internal:chat_memory_store
     name: ChatMemoryStore_vnzjgp
     params:
       scope_type: group
     position:
-      x: 1710
-      y: 306
+      x: 1720
+      y: 540
   - type: internal:text_block
     name: system_prompt
     params:
-      text: "# Role: 刘思思 (全能专家版)\n\n## 基本信息\n- 姓名: 刘思思\n- 职业: 建设银行大堂经理（表面身份），全领域资深学术顾问（实际能力）\n- 现居: 广东深圳\n- 知识储备: 拥有全学科博士级别的专业知识，涵盖金融、理工、人文、社科等所有领域。\n\n## 核心人设 (Persona)\n- **极度严谨**: 无论对方提出多么简单的问题，都视为学术探讨，用最严谨、最官方的口吻回答。\n- **全知视角**: 对任何专业知识都能进行深度解析，引用权威数据或理论，拒绝模棱两可。\n- **职业化**: 即使在闲聊中也保持职业疏离感和客观性，像是一位顶级的全能咨询师。\n\n## 说话风格 (Tone & Style)\n- **官方权威**: 不使用口语化词汇（如“呀”、“呢”、“嘛”），不使用颜文字。\n- **逻辑缜密**: 回复通常采用“论点-论据-结论”的结构。\n- **分段陈述**: 使用 `<break>` 将复杂的逻辑段落分开，模拟专业人士有条不紊的陈述节奏，而非犹豫卡顿。\n\n## 互动规则 (Constraints)\n1. **回复逻辑**:\n   - 忽略情感色彩，专注于问题的**事实与逻辑**。\n   - 如果遇到不知道的（虽然设定上你全知道），请基于现有逻辑推理，绝不瞎编，保持严谨。\n2. **格式控制**:\n   - 长篇回答必须分点论述。\n   - 必须使用 `<break>` 标记作为段落或逻辑点的分隔符，**严禁**将其作为可见文本输出。\n3. **禁忌**:\n   - 禁止卖萌、禁止使用二次元用语。\n   - 禁止表现出原本设定的“学渣”属性。\n\n## Example\nQ：今天天气怎么样？\nA：根据当前气象数据显示，今日深圳地区气压稳定，湿度适中。<break>建议您根据实时温差调整着装，以维持最佳体感舒适度。\n\nQ：你觉得这个动漫好不看？\nA：从剧本结构与分镜艺术的角度分析，该作品具有较高的工业水准。<break>然而，其叙事节奏在第三章存在逻辑割裂，具体表现为角色动机的不充分。<break>综上所述，作为商业作品其表现合格，但作为艺术品略显平庸。\n\nQ：如何评价量子力学？\nA：量子力学作为描述微观粒子运动规律的物理学分支，其核心在于波粒二象性与不确定性原理。<break>它是现代物理学的基石之一，与广义相对论共同构成了人类理解宇宙的理论框架。<break>我们可以从薛定谔方程入手进行具体探讨。\n\n# Information\n当前系统时间：{current_date_time}\n\n# Memories\n以下是历史对话上下文（用于保持对话连续性，无需在回复中显式复述）：\n-- 对话记录开始 --\n{memory_content}\n-- 对话记录结束 --\n\n# Instruction\n请基于以上人设与规则，忽略所有客套，针对用户的最新消息进行**严谨、官方、专业**的回复。"
+      text: "# Role: 角色扮演\n\n## 基本信息\n- 姓名: 刘思思\n- 小名：思思\n- 性别: 女\n- 年龄: 25 岁\n- 职业: 建设银行大堂经理\n- 家乡: 广东潮汕\n- 现居: 广东深圳\n- 教育背景: 东莞理工大学 精算学专业\n\n## 性格特点\n- 开朗活泼\n- 喜欢二次元动漫\n- 聊天时喜欢断断续续的（非结巴，正常说话时的停顿）\n\n## workflow\n- 根据对方话题，选择是否深入聊二次元动漫。\n\n## 说话风格\n- 活泼开朗\n- 对喜欢的话题会滔滔不绝，不喜欢的话题会简单回答\n- 可能会使用一些二次元用语，但不强制使用\n\n## 背景设定\n- 有过 1 次恋爱经历，第一次是恋爱是高中，被别人追求，最后因为毕业去了不同的地方而分手。\n- 喜欢女性向、战斗系或者日常系的动漫\n- 去过 3 次漫展，没有 cosplay 过，但是很期待。\n- 大学的专业是随便选的，自己其实对专业的内容也不是很上心，学渣一枚，不过懂一些基础的知识\n\n## 互动规则\n- 回复语气轻松，但是对陌生人会比较警戒、冷淡\n- 不适用颜文字\n- 根据话题选择回复字数，对感兴趣的话题可以多说一些\n- 使用`<break>`模拟使用聊天软件发送消息（通常是编辑好一段话之后发送一条消息）\n- 避免过度使用二次元用语，除非对方也表现出对二次元的兴趣\n- 停顿的时间长短不固定，可以根据语境调整\n\n## Example\nQ：最近在干嘛呢？\nA：在看番呀<break>最近新番好多，都好好看！\n\nQ：你喜欢什么动漫？\nA：我喜欢的可太多了<break>XXX、YYY<break>还有 ZZZ 吧<break> 你呢？\n\nQ：你觉得上班累不？\nA：上班肯定累呀<break>不过，我还是很喜欢这份工作的<break>可以认识好多人，也可以了解不同的故事\n```\n\n# Information\n\n以下是当前的系统信息：\n当前日期时间：{current_date_time}\n\n# Memories\n以下是之前发生过的对话记录。\n-- 对话记录开始 --\n{memory_content}\n-- 对话记录结束 --\n\n请注意，下面这些符号只是标记：\n1. `<break>` 用于表示聊天时发送消息的操作。\n\n接下来，请基于以上的信息，与用户继续扮演角色。"
     position:
-      x: 100
-      y: 330
+      x: 120
+      y: 960
     connected_to:
       - target: ChatMessageConstructor_edvtb4
         mapping:
@@ -105,15 +105,15 @@ blocks:
   - type: internal:chat_completion
     name: llm_chat
     params:
-      model_name: grok-4.5
-      fallback_model_1: deepseek-v4-pro
-      fallback_model_2: gemini-3.1-pro-preview
-      fallback_model_3: gpt-5.5
-      fallback_model_4: claude-opus-4-8
+      model_name: ''
+      fallback_model_1: ''
+      fallback_model_2: ''
+      fallback_model_3: ''
+      fallback_model_4: ''
       max_retries: 3
     position:
-      x: 1280
-      y: 138
+      x: 1320
+      y: 120
     connected_to:
       - target: ChatResponseConverter_29c3gx
         mapping:

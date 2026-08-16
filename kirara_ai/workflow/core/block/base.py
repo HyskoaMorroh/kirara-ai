@@ -11,11 +11,15 @@ class Block:
     id: str
     # block 的名称
     name: str
+    # block 的用途说明，展示在 WebUI 的节点列表与配置面板中
+    description: str = ""
+    # block 在画布上的标题栏颜色，留空时前端按主题使用默认色
+    color: str = ""
     # block 的输入
     inputs: Dict[str, Input] = {}
     # block 的输出
     outputs: Dict[str, Output] = {}
-    
+
     container: DependencyContainer
 
     def __init__(
@@ -41,6 +45,7 @@ class ConditionBlock(Block):
     """条件判断块"""
 
     name: str = "condition"
+    description: str = "根据条件函数的返回值决定后续分支走向。"
     outputs: Dict[str, Output] = {
         "condition_result": Output("condition_result", "条件结果", bool, "条件结果")
     }
@@ -63,6 +68,7 @@ class LoopBlock(Block):
     """循环控制块"""
 
     name: str = "loop"
+    description: str = "循环入口：条件为真时继续下一轮迭代，并输出当前迭代数据。"
     outputs: Dict[str, Output] = {
         "should_continue": Output("should_continue", "是否继续", bool, "是否继续"),
         "iteration": Output("iteration", "当前迭代数据", dict, "当前迭代数据"),
@@ -93,6 +99,7 @@ class LoopEndBlock(Block):
     """循环结束块，收集循环结果"""
 
     name: str = "loop_end"
+    description: str = "循环出口：收集每轮迭代的结果并汇总输出。"
     outputs: Dict[str, Output] = {
         "loop_results": Output("loop_results", "收集的循环结果", list, "收集的循环结果")
     }

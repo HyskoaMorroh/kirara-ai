@@ -16,6 +16,7 @@ class GetIMMessage(Block):
     """获取 IM 消息"""
 
     name = "msg_input"
+    description = "工作流的起点：取出触发本次执行的聊天消息，并同时给出发送者。"
     container: DependencyContainer
     outputs = {
         "msg": Output("msg", "IM 消息", IMMessage, "获取 IM 发送的最新一条的消息"),
@@ -31,6 +32,7 @@ class SendIMMessage(Block):
     """发送 IM 消息"""
 
     name = "msg_sender"
+    description = "把消息发回聊天平台。发送对象留空时默认回复给触发消息的人。"
     inputs = {
         "msg": Input("msg", "IM 消息", IMMessage, "要从 IM 发送的消息"),
         "target": Input(
@@ -45,7 +47,7 @@ class SendIMMessage(Block):
     container: DependencyContainer
 
     def __init__(
-        self, im_name: Annotated[Optional[str], ParamMeta(label="聊天平台适配器名称", options_provider=im_adapter_options_provider)] = None
+        self, im_name: Annotated[Optional[str], ParamMeta(label="聊天平台适配器名称", description="指定用哪个聊天平台实例发送，留空则使用触发本次消息的平台", options_provider=im_adapter_options_provider)] = None
     ):
         self.im_name = im_name
 
@@ -71,9 +73,10 @@ class IMMessageToText(Block):
     """IMMessage 转纯文本"""
 
     name = "im_message_to_text"
+    description = "把聊天消息中的文字内容提取成纯文本字符串。"
     container: DependencyContainer
-    inputs = {"msg": Input("msg", "IM 消息", IMMessage, "IM 消息")}
-    outputs = {"text": Output("text", "纯文本", str, "纯文本")}
+    inputs = {"msg": Input("msg", "IM 消息", IMMessage, "待提取文字的聊天消息")}
+    outputs = {"text": Output("text", "纯文本", str, "消息中的文字内容")}
 
     def execute(self, msg: IMMessage) -> Dict[str, Any]:
         return {"text": msg.content}
@@ -84,11 +87,12 @@ class TextToIMMessage(Block):
     """纯文本转 IMMessage"""
 
     name = "text_to_im_message"
+    description = "把一段文本包装成可发送的聊天消息，可按分段符拆成多条发送。"
     container: DependencyContainer
-    inputs = {"text": Input("text", "纯文本", str, "纯文本")}
-    outputs = {"msg": Output("msg", "IM 消息", IMMessage, "IM 消息")}
+    inputs = {"text": Input("text", "纯文本", str, "要发送的文字内容")}
+    outputs = {"msg": Output("msg", "IM 消息", IMMessage, "包装好的聊天消息")}
 
-    def __init__(self, split_by: Annotated[Optional[str], ParamMeta(label="分段符")] = None):
+    def __init__(self, split_by: Annotated[Optional[str], ParamMeta(label="分段符", description="填写后按该符号把文本拆成多条消息发送，留空则作为一条发送")] = None):
         self.split_by = split_by
 
     def execute(self, text: str) -> Dict[str, Any]:
@@ -102,12 +106,13 @@ class AppendIMMessage(Block):
     """补充 IMMessage 消息"""
 
     name = "concat_im_message"
+    description = "在已有聊天消息末尾追加一个消息片段（如图片、文字）。"
     container: DependencyContainer
     inputs = {
-        "base_msg": Input("base_msg", "IM 消息", IMMessage, "IM 消息"),
-        "append_msg": Input("append_msg", "新消息片段", MessageElement, "新消息片段"),
+        "base_msg": Input("base_msg", "IM 消息", IMMessage, "作为基础的聊天消息"),
+        "append_msg": Input("append_msg", "新消息片段", MessageElement, "要追加到末尾的消息片段"),
     }
-    outputs = {"msg": Output("msg", "IM 消息", IMMessage, "IM 消息")}
+    outputs = {"msg": Output("msg", "IM 消息", IMMessage, "追加后的完整消息")}
 
     def execute(self, base_msg: IMMessage, append_msg: MessageElement) -> Dict[str, Any]:
         return {"msg": IMMessage(sender=base_msg.sender, message_elements=base_msg.message_elements + [append_msg])}

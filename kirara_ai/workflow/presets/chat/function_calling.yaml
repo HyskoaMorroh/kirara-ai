@@ -1,0 +1,209 @@
+name: 聊天 - 函数调用
+description: '手工搭建函数调用流程的模板：用「基础：代码」节点把对话记录与工具列表打包成一次函数调用请求，再由「LLM: 函数调用」返回结果。模型请求调用工具时会走 tool_call 分支，工具的实际执行需要你自己接节点；只想开箱可用请改用「聊天 - 工具调用 (MCP)」。'
+blocks:
+  - type: internal:get_message
+    name: get_message
+    params: {}
+    position:
+      x: 120
+      y: 120
+    connected_to:
+      - target: toggle_edit_state
+        mapping:
+          from: sender
+          to: sender
+      - target: query_memory
+        mapping:
+          from: sender
+          to: chat_sender
+      - target: chat_message_constructor
+        mapping:
+          from: msg
+          to: user_msg
+  - type: internal:toggle_edit_state
+    name: toggle_edit_state
+    params:
+      is_editing: true
+    position:
+      x: 520
+      y: 120
+  - type: internal:chat_memory_query
+    name: query_memory
+    params:
+      scope_type: group
+    position:
+      x: 520
+      y: 540
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: memory_content
+          to: memory_content
+  - type: internal:text_block
+    name: user_prompt
+    params:
+      text: '{user_name}说：{user_msg}'
+    position:
+      x: 120
+      y: 540
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: text
+          to: user_prompt_format
+  - type: internal:text_block
+    name: system_prompt
+    params:
+      text: "# Information\n以下是当前的系统信息：\n当前日期时间：{current_date_time}\n\n# Memories\n以下是之前发生过的对话记录。\n-- 对话记录开始 --\n{memory_content}\n-- 对话记录结束 --\n\n# Tools\n需要外部信息时请调用可用工具，不要凭印象编造。\n\n接下来，请基于以上信息回答用户的问题。"
+    position:
+      x: 120
+      y: 960
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: text
+          to: system_prompt_format
+  - type: internal:chat_message_constructor
+    name: chat_message_constructor
+    params: {}
+    position:
+      x: 920
+      y: 120
+    connected_to:
+      - target: build_request
+        mapping:
+          from: llm_msg
+          to: messages
+  # 在此勾选允许模型调用的 MCP 工具；不填则请求里不带工具，模型不会触发函数调用。
+  - type: mcp:mcp_tool_provider
+    name: mcp_tools
+    params:
+      enabled_tools: []
+    position:
+      x: 920
+      y: 540
+    connected_to:
+      - target: build_request
+        mapping:
+          from: tools
+          to: tools
+  # 「LLM: 函数调用」要求输入一个完整的 LLMChatRequest，目前没有内置节点能直接产出它，
+  # 因此用代码节点组装。model 留空，由函数调用节点按其模型列表填入。
+  - type: internal:code
+    name: build_request
+    params:
+      inputs:
+        - name: messages
+          label: 对话记录
+        - name: tools
+          label: 工具列表
+      outputs:
+        - name: request_body
+          label: 函数调用请求
+      code: |
+        from kirara_ai.llm.format.request import LLMChatRequest
+
+
+        def execute(messages, tools):
+            request = LLMChatRequest(messages=messages)
+            if tools:
+                request.tools = tools
+            return {"request_body": request}
+    position:
+      x: 1320
+      y: 120
+    connected_to:
+      - target: llm_function_calling
+        mapping:
+          from: request_body
+          to: request_body
+  # model_name 留空：请在下拉框里选择一个支持函数调用的模型。
+  - type: internal:chat_function_calling
+    name: llm_function_calling
+    params:
+      model_name: ''
+      max_retries: 3
+    position:
+      x: 1720
+      y: 120
+    connected_to:
+      - target: llm_response_to_text
+        mapping:
+          from: resp
+          to: response
+      - target: describe_tool_calls
+        mapping:
+          from: tool_call
+          to: resp
+  # 普通回答分支：模型没有请求调用工具，直接把文本发出去。
+  - type: internal:llm_response_to_text
+    name: llm_response_to_text
+    params: {}
+    position:
+      x: 2120
+      y: 120
+    connected_to:
+      - target: text_to_im_message
+        mapping:
+          from: text
+          to: text
+  - type: internal:text_to_im_message
+    name: text_to_im_message
+    params: {}
+    position:
+      x: 2520
+      y: 120
+    connected_to:
+      - target: send_message
+        mapping:
+          from: msg
+          to: msg
+  - type: internal:send_message
+    name: send_message
+    params: {}
+    position:
+      x: 2920
+      y: 120
+  # 工具调用分支：这里只把模型想调用的工具名回报给用户，
+  # 真正执行工具、把 tool_result 拼回对话记录的部分请按需自行扩展。
+  - type: internal:code
+    name: describe_tool_calls
+    params:
+      inputs:
+        - name: resp
+          label: 模型回应
+      outputs:
+        - name: text
+          label: 说明文本
+      code: |
+        def execute(resp):
+            tool_calls = resp.message.tool_calls or []
+            names = [call.function.name for call in tool_calls if call.function]
+            if not names:
+                return {"text": "模型请求调用工具，但没有给出工具名。"}
+            return {"text": "模型请求调用以下工具：" + "、".join(names)}
+    position:
+      x: 2120
+      y: 540
+    connected_to:
+      - target: tool_call_to_im_message
+        mapping:
+          from: text
+          to: text
+  - type: internal:text_to_im_message
+    name: tool_call_to_im_message
+    params: {}
+    position:
+      x: 2520
+      y: 540
+    connected_to:
+      - target: send_tool_call_notice
+        mapping:
+          from: msg
+          to: msg
+  - type: internal:send_message
+    name: send_tool_call_notice
+    params: {}
+    position:
+      x: 2920
+      y: 540

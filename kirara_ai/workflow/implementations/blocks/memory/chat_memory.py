@@ -21,13 +21,14 @@ def decomposer_name_options_provider(container: DependencyContainer, block: Bloc
 
 class ChatMemoryQuery(Block):
     name = "chat_memory_query"
+    description = "读取指定聊天对象的历史记忆，作为上下文提供给模型。"
     inputs = {
         "chat_sender": Input(
             "chat_sender", "聊天对象", ChatSender, "要查询记忆的聊天对象"
         )
     }
     outputs = {"memory_content": Output(
-        "memory_content", "记忆内容", List[ComposableMessageType], "记忆内容")}
+        "memory_content", "记忆内容", List[ComposableMessageType], "查询到的历史对话记录")}
     container: DependencyContainer
 
     def __init__(
@@ -83,14 +84,15 @@ class ChatMemoryQuery(Block):
 
 class ChatMemoryStore(Block):
     name = "chat_memory_store"
+    description = "把本轮的用户消息与模型回复写入记忆，供后续对话读取。"
 
     inputs = {
-        "user_msg": Input("user_msg", "用户消息", IMMessage, "用户消息", nullable=True),
+        "user_msg": Input("user_msg", "用户消息", IMMessage, "本轮用户发送的消息", nullable=True),
         "llm_resp": Input(
-            "llm_resp", "LLM 回复", LLMChatResponse, "LLM 回复", nullable=True
+            "llm_resp", "LLM 回复", LLMChatResponse, "本轮模型返回的回复", nullable=True
         ),
         "middle_steps": Input(
-            "middle_steps", "中间步骤消息", List[ComposableMessageType], "中间步骤消息", nullable=True
+            "middle_steps", "中间步骤消息", List[ComposableMessageType], "工具调用等中间过程消息", nullable=True
         )
     }
     outputs = {}
@@ -102,7 +104,7 @@ class ChatMemoryStore(Block):
             Optional[str],
             ParamMeta(
                 label="级别",
-                description="要查询记忆的级别，代表记忆可以被共享的粒度。（例如：member 级别下，同一群聊下不同用户的记忆互相隔离； group 级别下，同一群组内所有成员记忆共享，但不同群组之间记忆互相隔离）",
+                description="要存储记忆的级别，代表记忆可以被共享的粒度。（例如：member 级别下，同一群聊下不同用户的记忆互相隔离； group 级别下，同一群组内所有成员记忆共享，但不同群组之间记忆互相隔离）",
                 options_provider=scope_type_options_provider,
             ),
         ],

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import {
   NCard,
   NGrid,
@@ -28,6 +28,7 @@ import {
 import VChart from 'vue-echarts'
 import { TrendingUpOutline, TimeOutline, PieChartOutline, ServerOutline } from '@vicons/ionicons5'
 import type { LLMStatistics } from '@/views/tracing/llm/llm-tracing.vm'
+import { useThemeStore } from '@/stores/theme'
 // 注册 ECharts 组件
 use([
   CanvasRenderer,
@@ -40,6 +41,19 @@ use([
   TitleComponent,
   DataZoomComponent
 ])
+
+// ECharts 的 Canvas 渲染器不解析 CSS 变量，配置项里必须给具体色值，
+// 因此这里从主题取色，图表文字与浮层随主题一起变化。
+const themeStore = useThemeStore()
+const chartText = computed(() => themeStore.seed.text)
+const chartTextSecondary = computed(() => themeStore.seed.textSecondary)
+const chartSurface = computed(() => themeStore.seed.elevated)
+const chartBorder = computed(() => themeStore.seed.border)
+// 饼图扇区之间的描边需要与所在卡片同色，才能读作“留白”而不是一圈白边
+const chartCard = computed(() => themeStore.seed.card)
+// 缩略轴轨道原先按 isDark 手写两段 rgba，现改为直接取色板的分割线色，
+// 明暗与色板切换都自动跟随，不再有硬编码分支
+const chartZoomBg = computed(() => themeStore.seed.divider)
 
 // LLM 统计数据
 const llmStats = ref<LLMStatistics>({
@@ -66,8 +80,11 @@ const fetchLLMStats = async () => {
   }
 }
 
+// 保留自动刷新，同时避免用户离开引导页后旧组件继续发起请求。
+let refreshTimer: ReturnType<typeof setInterval> | null = null
+
 // 图表主题色
-const themeColors = [
+const themeColorsLight = [
   '#3b82f6', // 蓝色
   '#10b981', // 绿色
   '#6366f1', // 靛蓝色
@@ -78,6 +95,20 @@ const themeColors = [
   '#0ea5e9' // 浅蓝色
 ]
 
+// 深色底上同一组分类色需要整体提亮，色相保持不变，保证系列之间仍然可区分
+const themeColorsDark = [
+  '#60a5fa', // 蓝色
+  '#34d399', // 绿色
+  '#818cf8', // 靛蓝色
+  '#a78bfa', // 紫色
+  '#fbbf24', // 橙色
+  '#f87171', // 红色
+  '#94a3b8', // 灰色
+  '#38bdf8' // 浅蓝色
+]
+
+const themeColors = computed(() => (themeStore.isDark ? themeColorsDark : themeColorsLight))
+
 // 更新图表配置
 const dailyTokensOption = computed(() => ({
   title: {
@@ -87,11 +118,12 @@ const dailyTokensOption = computed(() => ({
     top: 10,
     textStyle: {
       fontSize: 15,
-      fontWeight: 'normal'
+      fontWeight: 'normal',
+      color: chartText.value
     },
     subtextStyle: {
       fontSize: 12,
-      color: 'var(--text-color-secondary)'
+      color: chartTextSecondary.value
     }
   },
   tooltip: {
@@ -99,7 +131,7 @@ const dailyTokensOption = computed(() => ({
     axisPointer: {
       type: 'shadow'
     },
-    backgroundColor: 'rgba(var(--card-bg-color-rgb), 0.9)'
+    backgroundColor: chartSurface.value
   },
   grid: {
     left: '3%',
@@ -114,7 +146,7 @@ const dailyTokensOption = computed(() => ({
     axisLabel: {
       rotate: 45,
       formatter: (value: string) => value.slice(5), // 只显示月-日
-      color: 'var(--text-color-secondary)'
+      color: chartTextSecondary.value
     }
   },
   yAxis: {
@@ -123,11 +155,11 @@ const dailyTokensOption = computed(() => ({
     nameLocation: 'middle',
     nameGap: 50,
     nameTextStyle: {
-      color: 'var(--text-color-secondary)',
+      color: chartTextSecondary.value,
       fontWeight: 'normal'
     },
     axisLabel: {
-      color: 'var(--text-color-secondary)'
+      color: chartTextSecondary.value
     }
   },
   dataZoom: [
@@ -138,9 +170,9 @@ const dailyTokensOption = computed(() => ({
       end: 100,
       height: 20,
       borderColor: 'transparent',
-      backgroundColor: 'rgba(var(--primary-color-rgb), 0.05)',
+      backgroundColor: chartZoomBg.value,
       handleStyle: {
-        color: themeColors[0]
+        color: themeColors.value[0]
       }
     }
   ],
@@ -152,7 +184,7 @@ const dailyTokensOption = computed(() => ({
       smooth: true,
       symbolSize: 6,
       itemStyle: {
-        color: themeColors[0]
+        color: themeColors.value[0]
       },
       areaStyle: {
         color: {
@@ -164,11 +196,11 @@ const dailyTokensOption = computed(() => ({
           colorStops: [
             {
               offset: 0,
-              color: themeColors[0] + '20'
+              color: themeColors.value[0] + '20'
             },
             {
               offset: 1,
-              color: themeColors[0] + '05'
+              color: themeColors.value[0] + '05'
             }
           ]
         }
@@ -185,24 +217,25 @@ const requestStatusOption = computed(() => ({
     top: 10,
     textStyle: {
       fontSize: 15,
-      fontWeight: 'normal'
+      fontWeight: 'normal',
+      color: chartText.value
     },
     subtextStyle: {
       fontSize: 12,
-      color: 'var(--text-color-secondary)'
+      color: chartTextSecondary.value
     }
   },
   tooltip: {
     trigger: 'item',
     formatter: '{b}: {c} ({d}%)',
-    backgroundColor: 'rgba(var(--card-bg-color-rgb), 0.9)'
+    backgroundColor: chartSurface.value
   },
   legend: {
     orient: 'horizontal',
     bottom: 10,
     icon: 'circle',
     textStyle: {
-      color: 'var(--text-color-secondary)'
+      color: chartTextSecondary.value
     }
   },
   series: [
@@ -211,8 +244,10 @@ const requestStatusOption = computed(() => ({
       radius: ['45%', '70%'],
       avoidLabelOverlap: true,
       itemStyle: {
+        /* 例外：ECharts 在 canvas 里绘制，只接受数字，无法读 CSS 变量；
+           这是环形图扇区的几何参数，不属于界面表面的圆角体系 */
         borderRadius: 10,
-        borderColor: '#fff',
+        borderColor: chartCard.value,
         borderWidth: 2
       },
       label: {
@@ -230,17 +265,17 @@ const requestStatusOption = computed(() => ({
         {
           value: llmStats.value.overview.success_requests,
           name: '成功',
-          itemStyle: { color: themeColors[1] }
+          itemStyle: { color: themeColors.value[1] }
         },
         {
           value: llmStats.value.overview.failed_requests,
           name: '失败',
-          itemStyle: { color: themeColors[5] }
+          itemStyle: { color: themeColors.value[5] }
         },
         {
           value: llmStats.value.overview.pending_requests,
           name: '处理中',
-          itemStyle: { color: themeColors[4] }
+          itemStyle: { color: themeColors.value[4] }
         }
       ]
     }
@@ -255,11 +290,12 @@ const modelUsageOption = computed(() => ({
     top: 10,
     textStyle: {
       fontSize: 15,
-      fontWeight: 'normal'
+      fontWeight: 'normal',
+      color: chartText.value
     },
     subtextStyle: {
       fontSize: 12,
-      color: 'var(--text-color-secondary)'
+      color: chartTextSecondary.value
     }
   },
   tooltip: {
@@ -270,7 +306,10 @@ const modelUsageOption = computed(() => ({
   },
   legend: {
     data: ['请求次数', '平均响应时间'],
-    bottom: 10
+    bottom: 10,
+    textStyle: {
+      color: chartTextSecondary.value
+    }
   },
   grid: {
     left: '3%',
@@ -285,7 +324,7 @@ const modelUsageOption = computed(() => ({
     axisLabel: {
       rotate: 45,
       interval: 0,
-      color: 'var(--text-color-secondary)'
+      color: chartTextSecondary.value
     },
     axisLine: {}
   },
@@ -295,10 +334,10 @@ const modelUsageOption = computed(() => ({
       name: '请求次数',
       position: 'left',
       axisLabel: {
-        color: 'var(--text-color-secondary)'
+        color: chartTextSecondary.value
       },
       nameTextStyle: {
-        color: 'var(--text-color-secondary)'
+        color: chartTextSecondary.value
       }
     },
     {
@@ -306,10 +345,10 @@ const modelUsageOption = computed(() => ({
       name: '响应时间(ms)',
       position: 'right',
       axisLabel: {
-        color: 'var(--text-color-secondary)'
+        color: chartTextSecondary.value
       },
       nameTextStyle: {
-        color: 'var(--text-color-secondary)'
+        color: chartTextSecondary.value
       },
       splitLine: {
         show: false
@@ -331,14 +370,15 @@ const modelUsageOption = computed(() => ({
           colorStops: [
             {
               offset: 0,
-              color: themeColors[1]
+              color: themeColors.value[1]
             },
             {
               offset: 1,
-              color: themeColors[1] + '80'
+              color: themeColors.value[1] + '80'
             }
           ]
         },
+        /* 例外：同上，ECharts canvas 绘制的柱顶圆角，只接受数字 */
         borderRadius: [4, 4, 0, 0]
       }
     },
@@ -350,7 +390,7 @@ const modelUsageOption = computed(() => ({
         Math.round(item.avg_duration)
       ),
       itemStyle: {
-        color: themeColors[2]
+        color: themeColors.value[2]
       },
       symbolSize: 6,
       smooth: true
@@ -366,11 +406,12 @@ const hourlyRequestsOption = computed(() => ({
     top: 10,
     textStyle: {
       fontSize: 15,
-      fontWeight: 'normal'
+      fontWeight: 'normal',
+      color: chartText.value
     },
     subtextStyle: {
       fontSize: 12,
-      color: 'var(--text-color-secondary)'
+      color: chartTextSecondary.value
     }
   },
   tooltip: {
@@ -378,15 +419,18 @@ const hourlyRequestsOption = computed(() => ({
     axisPointer: {
       type: 'cross'
     },
-    backgroundColor: 'rgba(var(--card-bg-color-rgb), 0.9)',
-    borderColor: 'rgba(var(--primary-color-rgb), 0.1)',
+    backgroundColor: chartSurface.value,
+    borderColor: chartBorder.value,
     textStyle: {
-      color: 'var(--text-color)'
+      color: chartText.value
     }
   },
   legend: {
     data: ['请求次数', 'Token消耗'],
-    bottom: 10
+    bottom: 10,
+    textStyle: {
+      color: chartTextSecondary.value
+    }
   },
   grid: {
     left: '3%',
@@ -401,7 +445,7 @@ const hourlyRequestsOption = computed(() => ({
     data: llmStats.value.hourly_stats.map((item: { hour: string }) => item.hour.split(' ')[1]),
     axisLabel: {
       rotate: 45,
-      color: 'var(--text-color-secondary)'
+      color: chartTextSecondary.value
     }
   },
   yAxis: [
@@ -410,10 +454,10 @@ const hourlyRequestsOption = computed(() => ({
       name: '请求次数',
       position: 'left',
       axisLabel: {
-        color: 'var(--text-color-secondary)'
+        color: chartTextSecondary.value
       },
       nameTextStyle: {
-        color: 'var(--text-color-secondary)'
+        color: chartTextSecondary.value
       }
     },
     {
@@ -421,10 +465,10 @@ const hourlyRequestsOption = computed(() => ({
       name: 'Token数',
       position: 'right',
       axisLabel: {
-        color: 'var(--text-color-secondary)'
+        color: chartTextSecondary.value
       },
       nameTextStyle: {
-        color: 'var(--text-color-secondary)'
+        color: chartTextSecondary.value
       },
       splitLine: {
         show: false
@@ -439,7 +483,7 @@ const hourlyRequestsOption = computed(() => ({
       symbolSize: 6,
       data: llmStats.value.hourly_stats.map((item: { requests: number }) => item.requests),
       itemStyle: {
-        color: themeColors[0]
+        color: themeColors.value[0]
       },
       areaStyle: {
         color: {
@@ -451,11 +495,11 @@ const hourlyRequestsOption = computed(() => ({
           colorStops: [
             {
               offset: 0,
-              color: themeColors[0] + '20'
+              color: themeColors.value[0] + '20'
             },
             {
               offset: 1,
-              color: themeColors[0] + '05'
+              color: themeColors.value[0] + '05'
             }
           ]
         }
@@ -469,7 +513,7 @@ const hourlyRequestsOption = computed(() => ({
       yAxisIndex: 1,
       data: llmStats.value.hourly_stats.map((item: { tokens: number }) => item.tokens),
       itemStyle: {
-        color: themeColors[1]
+        color: themeColors.value[1]
       },
       areaStyle: {
         color: {
@@ -481,11 +525,11 @@ const hourlyRequestsOption = computed(() => ({
           colorStops: [
             {
               offset: 0,
-              color: themeColors[1] + '20'
+              color: themeColors.value[1] + '20'
             },
             {
               offset: 1,
-              color: themeColors[1] + '05'
+              color: themeColors.value[1] + '05'
             }
           ]
         }
@@ -514,7 +558,14 @@ const formatDuration = (ms: number): string => {
 onMounted(() => {
   fetchLLMStats()
   // 每5分钟刷新一次数据
-  setInterval(fetchLLMStats, 5 * 60 * 1000)
+  refreshTimer = setInterval(fetchLLMStats, 5 * 60 * 1000)
+})
+
+onUnmounted(() => {
+  if (refreshTimer) {
+    clearInterval(refreshTimer)
+    refreshTimer = null
+  }
 })
 </script>
 
@@ -660,8 +711,8 @@ onMounted(() => {
 .overview-card {
   background: rgba(var(--card-bg-color-rgb), 0.8);
   backdrop-filter: blur(20px);
-  border-radius: 16px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--box-shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.08));
   border: 1px solid rgba(var(--primary-color-rgb), 0.1);
   overflow: hidden;
   transition: all 0.3s ease;
@@ -669,14 +720,14 @@ onMounted(() => {
 
 .overview-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--box-shadow-overlay, var(--box-shadow-hover, 0 12px 32px rgba(0, 0, 0, 0.12)));
 }
 
 .chart-card {
   background: rgba(var(--card-bg-color-rgb), 0.8);
   backdrop-filter: blur(20px);
-  border-radius: 16px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--box-shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.08));
   border: 1px solid rgba(var(--primary-color-rgb), 0.1);
   transition: all 0.3s ease;
   height: 100%;
@@ -687,7 +738,7 @@ onMounted(() => {
   align-items: flex-start;
   gap: 16px;
   padding: 4px;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: rgba(var(--card-bg-color-rgb), 0.8);
   transition: all 0.3s ease;
   height: 100%;
@@ -696,7 +747,7 @@ onMounted(() => {
 
 .statistic-item:hover {
   transform: translateY(-2px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--box-shadow, 0 8px 24px rgba(0, 0, 0, 0.08));
 }
 
 .statistic-icon {
@@ -705,7 +756,8 @@ onMounted(() => {
   justify-content: center;
   min-width: 44px;
   height: 44px;
-  border-radius: 12px;
+  /* 图标底板嵌在 .statistic-item（md 档）内部，按嵌套原则降一档到 sm */
+  border-radius: var(--radius-sm);
   background: linear-gradient(
     135deg,
     rgba(var(--primary-color-rgb), 0.1) 0%,
@@ -749,13 +801,13 @@ onMounted(() => {
 }
 
 .statistic-label {
-  font-size: 0.9rem;
+  font-size: var(--font-size-sm, 0.9rem);
   color: var(--text-color-secondary);
   white-space: nowrap;
 }
 
 .statistic-value {
-  font-size: 1.35rem;
+  font-size: var(--font-size-2xl, 1.35rem);
   font-weight: 600;
   color: var(--text-color);
   line-height: 1.2;
@@ -801,7 +853,7 @@ onMounted(() => {
   }
 
   .statistic-value {
-    font-size: 1.25rem;
+    font-size: var(--font-size-xl, 1.25rem);
   }
 
   :deep(.n-card-header) {

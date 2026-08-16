@@ -53,15 +53,19 @@ class LLMChatRequest(BaseModel):
 
     messages: List[LLMChatMessage] = []
     model: Optional[str] = None
-    frequency_penalty: Optional[int] = None
+    # 采样类参数在各家 API（OpenAI / Anthropic / Gemini）里都是浮点数，
+    # 原先标注为 int 会让 0.7 这类取值无法表达。pydantic 会把 int 自动
+    # 转成 float，因此旧配置里写 1 仍然可以正常校验。
+    frequency_penalty: Optional[float] = None
+    # max_tokens 是 token 个数，本来就应该是整数，保持 int 不变。
     max_tokens: Optional[int] = None
-    presence_penalty: Optional[int] = None
+    presence_penalty: Optional[float] = None
     response_format: Optional[ResponseFormat] = None
     stop: Optional[Any] = None
     stream: Optional[bool] = None
     stream_options: Optional[Any] = None
-    temperature: Optional[int] = None
-    top_p: Optional[int] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
     # 规范tool传递
     tools: Optional[list[Union[Tool, ExecutableTool]]] = None
     # tool_choice各家目前标准不尽相同，暂不向用户提供更改这个值的选项

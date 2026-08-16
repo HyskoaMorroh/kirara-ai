@@ -1,52 +1,266 @@
 name: Run Tests
 
+# ---------------------------------------------------------------------------
+# CI 分工（既保证 PR 有完整门禁，又不做重复劳动）
+#
+#   * static：秒级静态检查。字节码编译（语法错误）是阻塞门禁；pyflakes 与
+#     isort 以报告形式输出（仓库有存量问题，直接 gate 会让每个 PR 变红，等于
+#     逼人绕过门禁）。放在最前面，让最便宜的失败最先出现。
+#   * backend：**后端测试的权威门禁**。原生（非 Docker）运行最快：394 个用例
+#     约 50s，因此每个 PR、每次推送默认分支、每次进入合并队列都跑全量。
+#     不跑测试才是贵的选择。
+#   * docker-image：Docker 里再跑一遍不是重复。它校验的是「真正发布出去的
+#     产物」——wheel 的 package-data（presets/*.yaml、web/static）、多阶段构建
+#     出的 WebUI、以及镜像内的 Python 3.11 + libmagic1 运行时。这一步成本高，
+#     因此 needs: backend——原生测试已经红了就绝不浪费构建分钟数；且只在推送
+#     默认分支 / 合并队列 / 手动触发时运行。
+#   * backend-matrix：跨版本与跨平台的扩展覆盖。3.10 是 pyproject 声明的最低
+#     版本，3.13 是 Windows 快速启动包内置的 WinPython 版本。
+#     Windows 覆盖是必须保留的：项目发布 Windows 快速启动包，且存在路径处理、
+#     data/ 目录、平台专属依赖（python-magic-bin）等 Windows 专属风险。但它会
+#     把 PR 的等待时间翻倍，故放在推送默认分支 / 合并队列 / 手动触发上。
+#     需要在 PR 阶段提前验证时，给 PR 打 `ci:full` 标签即可拉起全部重活。
+#   * 前端门禁（vue-tsc + vitest + 生产构建）与发布契约测试在
+#     release-preflight.yml，同样覆盖 PR / push / merge_group，这里不重复执行。
+# ---------------------------------------------------------------------------
+
 on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+  merge_group:
+    branches: [main, master]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # PR 上被后续 push 取代的运行直接取消；默认分支与合并队列的每个 commit
+  # 都要留下独立结论，因此不取消。
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # uv.lock 的下载地址指向 USTC 镜像（对国内开发者友好），GitHub 托管 runner
+  # 在境外访问它不稳定。--frozen 下 uv 仍按 lock 里记录的 sha256 校验每个包，
+  # 因此换索引不影响可复现性，只影响下载速度。
+  UV_DEFAULT_INDEX: https://pypi.org/simple
+
 jobs:
-  test:
+  static:
+    name: Static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Byte-compile the package and tests
+        # 阻塞门禁：语法错误、缩进错误在这里 1 秒内暴露，不必等 50 秒的测试。
+        run: python -m compileall -q kirara_ai tests
+
+      - name: Report pyflakes and isort findings
+        # 非阻塞：仓库当前有 25 处 pyflakes 提示与一批 isort 顺序差异，
+        # 这里先把它们变成可见的度量（此前 CI 完全没有这层可见性），
+        # 清零后可以把 continue-on-error 去掉、升级为硬门禁。
+        continue-on-error: true
+        run: |
+          python -m pip install --upgrade pip pyflakes isort
+          {
+            echo "### pyflakes"
+            echo '```'
+            python -m pyflakes kirara_ai tests || true
+            echo '```'
+            echo "### isort --check-only"
+            echo '```'
+            python -m isort --check-only kirara_ai tests || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  backend:
+    name: Backend suite (ubuntu, py3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # 步骤级 if 读不到 step 自己的 env，必须放在 job 级才能用
+      # `env.CODECOV_TOKEN != ''` 判断 fork PR 上拿不到 secret 的情况。
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          # 与 Dockerfile 的运行时一致：PR 门禁跑的就是发布用的解释器版本
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --python 3.11
+
+      - name: Run backend test suite
+        run: >-
+          uv run --frozen --with pytest-cov python -m pytest ./tests -q
+          --cov=kirara_ai --cov-report=xml:coverage.xml --cov-report=term-missing
+          --junitxml=junit.xml -o junit_family=legacy
+
+      - name: Upload test results to Codecov
+        if: always() && env.CODECOV_TOKEN != ''
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload coverage reports to Codecov
+        if: env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload test report artifact
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: backend-junit-ubuntu-py311
+          path: junit.xml
+          if-no-files-found: warn
+          retention-days: 7
+
+  backend-matrix:
+    name: Backend suite (${{ matrix.os }}, py${{ matrix.python-version }})
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'ci:full')
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-    
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: windows-latest
+            python-version: "3.13"
+    env:
+      # 取代旧工作流里的 `chcp 65001`：让 Windows 上的 Python 始终以 UTF-8
+      # 读写，避免中文日志与断言消息在 GBK 控制台上炸掉。
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
     steps:
-    - uses: actions/checkout@v3
-    - name: Set up Docker
-      if: matrix.os == 'ubuntu-latest'
-      uses: docker/setup-docker-action@v4
-    - name: Build Docker image
-      if: matrix.os == 'ubuntu-latest'
-      run: |
-        docker build -t test-image .
-    - name: Run tests in Docker
-      if: matrix.os == 'ubuntu-latest'
-      run: |
-        docker run -v $(pwd):/app test-image sh -c "python -m pip install pytest coverage pytest-cov && python -m pytest /app/tests -v --cov=kirara_ai --cov-report=xml:/app/coverage.xml --cov-report=term-missing --junitxml=/app/junit.xml -o junit_family=legacy"
-    - name: Upload test results to Codecov
-      if: matrix.os == 'ubuntu-latest' && env.CODECOV_TOKEN != ''
-      env:
-        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-      uses: codecov/test-results-action@v1
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-    - name: Upload coverage reports to Codecov
-      uses: codecov/codecov-action@v5
-      if: matrix.os == 'ubuntu-latest' && env.CODECOV_TOKEN != ''
-      env:
-        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-    - name: Set up Python 3.13
-      if: matrix.os == 'windows-latest'
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.13"
-    - name: Run tests on Windows
-      if: matrix.os == 'windows-latest'
-      run: |
-        python -m pip install -e .
-        python -m pip install pytest
-        chcp 65001
-        python -m pytest ./tests -vs
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --python ${{ matrix.python-version }}
+
+      - name: Run backend test suite
+        run: uv run --frozen python -m pytest ./tests -q
+
+  docker-image:
+    name: Docker image validation
+    # 便宜的原生测试先过，才值得花时间做多阶段镜像构建。
+    needs: backend
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'ci:full')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: kirara-ai:ci
+          build-args: |
+            VITE_APP_VERSION=v0.0.0-ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify the shipped wheel carries its package data
+        # 用 `-i` 让 docker 接管 stdin：`python -` 从 stdin 读脚本，缺 -i 时会
+        # 读到空输入并「静默通过」，检查形同虚设。
+        # 用 find_spec 定位安装位置而不是 import kirara_ai：包的 __init__ 会拉起
+        # pydantic 等整条依赖链，缺依赖时报错会指向依赖而不是打包问题。
+        run: |
+          docker run --rm -i kirara-ai:ci python - <<'PY'
+          import importlib.util
+          import pathlib
+
+          spec = importlib.util.find_spec("kirara_ai")
+          root = pathlib.Path(next(iter(spec.submodule_search_locations)))
+
+          # pip / 镜像安装的用户必须拿到后端自带页面与预设工作流，
+          # 否则 /backup 是 404、进阶模板整批缺失。
+          static = root / "web" / "static"
+          presets = root / "workflow" / "presets" / "chat"
+          missing = [str(p) for p in (static, presets) if not p.is_dir()]
+          assert not missing, f"missing package data: {missing}"
+          assert (static / "backup.html").is_file(), "backup.html missing from the wheel"
+          names = sorted(p.name for p in presets.glob("*.yaml"))
+          assert "normal_multimodal.yaml" in names, names
+          print(f"package data OK: backup.html + {len(names)} chat presets")
+          PY
+
+      - name: Verify the installed wheel imports with only image dependencies
+        # 在 / 下执行，确保导入的是镜像里安装的 wheel 而不是任何仓库源码。
+        # 这是唯一完全只碰「发布产物」的检查。
+        run: |
+          docker run --rm -w / kirara-ai:ci \
+            python -c "import kirara_ai; print('wheel import OK:', kirara_ai.__file__)"
+
+      - name: Verify the bundled WebUI landed in the image
+        run: |
+          docker run --rm kirara-ai:ci sh -c '
+            test -f /app/web/index.html &&
+            ls /app/web/assets/*.js >/dev/null &&
+            echo "bundled WebUI OK"
+          '
+
+      - name: Run backend test suite inside the image
+        # 仓库挂到 /src 而不是 /app：/app 下有镜像自带的 web/ 与 docker/，
+        # 盖上去会把待验证的产物藏起来。必须挂完整仓库——契约测试用
+        # `Path(__file__).parents[1]` 定位仓库根，只挂 tests/ 会让它们找不到
+        # Dockerfile、webui/、.github/。
+        #
+        # 这一步导入的是 /src 下的源码（pytest 把 rootdir 放在 sys.path 最前），
+        # 所以它校验的是「镜像的运行环境」：Python 3.11、libmagic1、ffmpeg、
+        # 字体等系统依赖齐不齐。wheel 自身的内容与可导入性由上面两步独立断言，
+        # 两者互补，不重复。
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            kirara-ai:ci \
+            python -m pytest ./tests -q -p no:cacheprovider

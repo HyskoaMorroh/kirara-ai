@@ -17,6 +17,7 @@ import { SearchOutline, AppsOutline, FilterOutline } from '@vicons/ionicons5'
 import { useVueFlow } from '@vue-flow/core'
 import type { BlockType } from '@/api/block'
 import { getTypeColor } from '@/utils/node-colors'
+import { createUniqueNodeName } from './workflow-node-utils'
 
 const props = defineProps<{
   blockTypes: BlockType[]
@@ -57,6 +58,47 @@ const groupedBlockTypes = computed(() => {
   return groups
 })
 
+/**
+ * 二级分组：把 internal 组按 label 前缀（基础/IM/记忆/LLM/画图）再拆一层。
+ *
+ * internal 组下有 23 个节点，全部平铺在一个折叠面板里，用户需要肉眼扫过
+ * 整列才能找到目标。按功能域细分后，每个小节只有 2~7 项，配合上面已有的
+ * 搜索框可以快速定位。
+ */
+const INTERNAL_SUBGROUPS: { key: string; label: string; match: (label: string) => boolean }[] = [
+  { key: 'basic', label: '基础处理', match: (label) => label.startsWith('基础') },
+  { key: 'im', label: 'IM 消息', match: (label) => label.startsWith('IM') },
+  { key: 'memory', label: '记忆读写', match: (label) => label.startsWith('记忆') },
+  { key: 'llm', label: 'LLM 调用', match: (label) => label.startsWith('LLM') },
+  { key: 'image', label: '图片生成', match: (label) => label.startsWith('画图') }
+]
+
+const getSubgroups = (groupId: string, blockTypes: BlockType[]) => {
+  // 只有节点数量较多的 internal 组需要细分，其余分组保持原样
+  if (groupId !== 'internal' || blockTypes.length <= 8) {
+    return [{ key: '', label: '', items: blockTypes }]
+  }
+
+  const assigned = new Set<string>()
+  const result: { key: string; label: string; items: BlockType[] }[] = []
+
+  for (const subgroup of INTERNAL_SUBGROUPS) {
+    const items = blockTypes.filter((blockType) => subgroup.match(blockType.label || ''))
+    items.forEach((item) => assigned.add(item.type_name))
+    if (items.length > 0) {
+      result.push({ key: subgroup.key, label: subgroup.label, items })
+    }
+  }
+
+  // 前缀未覆盖到的节点归入「其他」，保证不会漏掉任何节点
+  const rest = blockTypes.filter((blockType) => !assigned.has(blockType.type_name))
+  if (rest.length > 0) {
+    result.push({ key: 'other', label: '其他', items: rest })
+  }
+
+  return result
+}
+
 // 获取分组的排序
 const sortedGroupKeys = computed(() => {
   const keys = Object.keys(groupedBlockTypes.value)
@@ -73,6 +115,22 @@ const sortedGroupKeys = computed(() => {
     if (indexB !== -1) return 1
     return a.localeCompare(b)
   })
+})
+
+/**
+ * 预先算好每个分组的二级分组。
+ *
+ * getSubgroups() 原先直接写在模板的 v-for 里，于是每次重渲染（哪怕只是
+ * 搜索框输入或者折叠面板展开）都要为每个分组重跑一遍 5 次 filter。
+ * 改为 computed 后只在 blockTypes / 搜索词变化时才重算一次。
+ * 保留 getSubgroups 本身不变，方便单独复用与测试。
+ */
+const subgroupsByGroup = computed(() => {
+  const result: Record<string, { key: string; label: string; items: BlockType[] }[]> = {}
+  for (const [groupId, blockTypes] of Object.entries(groupedBlockTypes.value)) {
+    result[groupId] = getSubgroups(groupId, blockTypes)
+  }
+  return result
 })
 
 // 获取分组的显示名称
@@ -95,52 +153,50 @@ const onDragStart = (event: DragEvent, blockType: BlockType) => {
   }
 }
 
-// 处理拖放到画布上
-const onDrop = (event: DragEvent) => {
-  if (!event.dataTransfer) return
+/**
+ * 从一个统一入口创建节点，供拖放和键盘操作复用。
+ *
+ * 画布侧的 drop handler 也应复用 workflow-node-utils 中的命名规则；这里不再
+ * 保留另一套 `split(':')` 的重复实现，避免两种添加方式生成不同的节点名称。
+ */
+const addBlockNode = (blockType: BlockType, clientPosition: { x: number; y: number }) => {
+  const position = project(clientPosition)
+  const name = createUniqueNodeName(
+    blockType.type_name,
+    getNodes.value.map((node) => node.id)
+  )
 
-  const data = event.dataTransfer.getData('application/vueflow')
-  if (!data) return
-
-  try {
-    const blockType = JSON.parse(data) as BlockType
-
-    // 获取画布上的位置
-    const { x, y } = project({ x: event.clientX, y: event.clientY })
-
-    // 生成唯一ID
-    const existingNodes = getNodes.value
-    const baseName = blockType.type_name.split(':').pop() || 'node'
-    let newId = baseName
-    let counter = 1
-
-    while (existingNodes.some((node) => node.id === newId)) {
-      newId = `${baseName}_${counter}`
-      counter++
-    }
-
-    // 创建新节点
-    const newNode = {
-      id: newId,
-      type: 'custom',
-      position: { x, y },
+  addNodes([
+    {
+      id: name,
+      type: blockType.type_name === 'internal:code' ? 'code' : 'custom',
+      position,
       data: {
         label: blockType.label,
-        blockType: blockType,
+        blockType,
         config: {},
         inputs: blockType.inputs,
         outputs: blockType.outputs
       }
     }
+  ])
+}
 
-    addNodes([newNode])
-  } catch (error) {
-    console.error('添加节点失败:', error)
-  }
+/**
+ * 键盘用户可在当前视口中心添加节点；鼠标拖放仍保持原有交互。
+ */
+const handleNodeKeydown = (event: KeyboardEvent, blockType: BlockType) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return
+  event.preventDefault()
+  addBlockNode(blockType, { x: window.innerWidth / 2, y: window.innerHeight / 2 })
 }
 
 // 根据类型获取颜色样式
 const getBlockTypeColor = (blockType: BlockType) => {
+  // 优先使用后端下发的分组配色，与画布上节点的左侧色条保持一致
+  if (blockType.color) {
+    return blockType.color
+  }
   // 如果有输出，使用第一个输出的类型颜色
   if (blockType.outputs && blockType.outputs.length > 0) {
     return getTypeColor(blockType.outputs[0].type).color_on
@@ -192,36 +248,61 @@ const getShortId = (typeName: string) => {
         <NCollapseItem
           v-for="groupId in sortedGroupKeys"
           :key="groupId"
-          :title="getGroupDisplayName(groupId)"
+          :title="`${getGroupDisplayName(groupId)} (${groupedBlockTypes[groupId].length})`"
           :name="groupId"
         >
-          <div class="node-list">
-            <div
-              v-for="blockType in groupedBlockTypes[groupId]"
-              :key="blockType.type_name"
-              class="node-item"
-              draggable="true"
-              @dragstart="onDragStart($event, blockType)"
-            >
+          <div
+            v-for="subgroup in subgroupsByGroup[groupId] || []"
+            :key="subgroup.key || groupId"
+            class="node-subgroup"
+          >
+            <div v-if="subgroup.label" class="subgroup-title">
+              {{ subgroup.label }}
+              <span class="subgroup-count">{{ subgroup.items.length }}</span>
+            </div>
+            <div class="node-list">
               <div
-                class="custom-node"
-                :style="{ borderLeft: `3px solid ${getBlockTypeColor(blockType)}` }"
+                v-for="blockType in subgroup.items"
+                :key="blockType.type_name"
+                class="node-item"
+                draggable="true"
+                role="button"
+                tabindex="0"
+                :aria-label="`添加节点：${blockType.label}。按 Enter 或空格添加到画布中心。`"
+                aria-keyshortcuts="Enter Space"
+                @dragstart="onDragStart($event, blockType)"
+                @keydown="handleNodeKeydown($event, blockType)"
               >
-                <div class="custom-node-header">
-                  <div class="header-content">
-                    <span class="node-label">{{ blockType.label }}</span>
-                    <span class="node-id" :title="blockType.type_name"
-                      >#{{ getShortId(blockType.type_name) }}</span
-                    >
+                <div
+                  class="custom-node"
+                  :style="{ borderLeft: `3px solid ${getBlockTypeColor(blockType)}` }"
+                >
+                  <div class="custom-node-header">
+                    <div class="header-content">
+                      <span class="node-label">{{ blockType.label }}</span>
+                      <span class="node-id" :title="blockType.type_name"
+                        >#{{ getShortId(blockType.type_name) }}</span
+                      >
+                    </div>
                   </div>
-                </div>
 
-                <div class="custom-node-body">
-                  <div v-if="blockType.description" class="node-description">
-                    {{ blockType.description }}
+                  <div class="custom-node-body">
+                    <div v-if="blockType.description" class="node-description">
+                      {{ blockType.description }}
+                    </div>
+
+                    <div class="node-meta">
+                      <span v-if="blockType.inputs.length > 0" class="node-port-count">
+                        入 {{ blockType.inputs.length }}
+                      </span>
+                      <span v-if="blockType.outputs.length > 0" class="node-port-count">
+                        出 {{ blockType.outputs.length }}
+                      </span>
+                      <span v-if="blockType.configs.length > 0" class="node-port-count">
+                        配置 {{ blockType.configs.length }}
+                      </span>
+                    </div>
                   </div>
-
-                  <div class="node-meta"></div>
                 </div>
               </div>
             </div>
@@ -259,8 +340,9 @@ const getShortId = (typeName: string) => {
 <style scoped>
 .node-list-panel {
   width: 340px;
-  background-color: rgba(255, 255, 255, 0.8);
+  background-color: var(--panel-bg-color, rgba(255, 255, 255, 0.8));
   backdrop-filter: blur(10px);
+  /* 例外：该面板贴着画布左缘满高铺满，任何圆角都会露出画布底色，故保持直角 */
   border-radius: 0;
   transition: all 0.3s ease;
   height: 100%;
@@ -276,13 +358,13 @@ const getShortId = (typeName: string) => {
 }
 
 .header-icon {
-  color: #1890ff;
+  color: var(--primary-color, #1890ff);
 }
 
 .header-title {
   font-weight: 600;
   font-size: 16px;
-  color: #1f2937;
+  color: var(--text-color, #1f2937);
 }
 
 .search-container {
@@ -290,7 +372,7 @@ const getShortId = (typeName: string) => {
 }
 
 .search-input {
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 .node-list-collapse {
@@ -322,11 +404,11 @@ const getShortId = (typeName: string) => {
 
 /* 自定义节点样式 - 参考 CustomNode.vue */
 .custom-node {
-  background: linear-gradient(to bottom, #f8f9fa, #ffffff);
-  border-radius: 6px;
+  background: linear-gradient(to bottom, var(--node-bg-start, #f8f9fa), var(--node-bg-end, #ffffff));
+  border-radius: var(--radius-sm);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  border: 1px solid rgba(0, 0, 0, 0.06);
+  border: 1px solid var(--node-border-color, rgba(0, 0, 0, 0.06));
   transition: all 0.2s ease;
 }
 
@@ -335,11 +417,20 @@ const getShortId = (typeName: string) => {
   transform: translateY(-2px);
 }
 
+.node-item:focus-visible {
+  outline: none;
+}
+
+.node-item:focus-visible .custom-node {
+  outline: 2px solid var(--primary-color, #4080ff);
+  outline-offset: 2px;
+}
+
 .custom-node-header {
   padding: 10px 14px;
   font-weight: 500;
-  color: #333;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+  color: var(--text-color, #333);
+  border-bottom: 1px solid var(--node-border-color, rgba(0, 0, 0, 0.04));
   font-size: 14px;
 }
 
@@ -358,10 +449,10 @@ const getShortId = (typeName: string) => {
 
 .node-id {
   font-size: 11px;
-  color: rgba(0, 0, 0, 0.45);
-  background-color: rgba(0, 0, 0, 0.04);
+  color: var(--text-color-tertiary, rgba(0, 0, 0, 0.45));
+  background-color: var(--node-muted-bg, rgba(0, 0, 0, 0.04));
   padding: 2px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   margin-left: 6px;
   font-family: monospace;
   cursor: default;
@@ -376,7 +467,7 @@ const getShortId = (typeName: string) => {
 .node-description {
   padding: 10px;
   font-size: 12px;
-  color: #6b7280;
+  color: var(--text-color-secondary, #6b7280);
   line-height: 1.4;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -387,8 +478,47 @@ const getShortId = (typeName: string) => {
 
 .node-meta {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   align-items: center;
+  gap: 6px;
+  padding: 0 10px 10px;
+}
+
+/* 节点的端口/配置数量角标，帮助判断节点复杂度 */
+.node-port-count {
+  font-size: 11px;
+  color: var(--text-color-tertiary, #9ca3af);
+  background-color: var(--node-muted-bg, rgba(0, 0, 0, 0.04));
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+}
+
+/* internal 组内的二级分组标题 */
+.node-subgroup {
+  margin-bottom: 10px;
+}
+
+.node-subgroup:last-child {
+  margin-bottom: 0;
+}
+
+.subgroup-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-color-secondary, #6b7280);
+  padding: 4px 2px 6px;
+}
+
+.subgroup-count {
+  font-size: 11px;
+  font-weight: normal;
+  color: var(--text-color-tertiary, #9ca3af);
+  background-color: var(--node-muted-bg, rgba(0, 0, 0, 0.04));
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
 }
 
 .drag-hint {
@@ -397,14 +527,14 @@ const getShortId = (typeName: string) => {
   justify-content: center;
   gap: 6px;
   padding: 8px;
-  background-color: #f9fafb;
-  border-radius: 6px;
+  background-color: var(--node-muted-bg, #f9fafb);
+  border-radius: var(--radius-sm);
   margin-top: 12px;
   font-size: 12px;
-  color: #6b7280;
+  color: var(--text-color-secondary, #6b7280);
 }
 
 .hint-icon {
-  color: #9ca3af;
+  color: var(--text-color-tertiary, #9ca3af);
 }
 </style>

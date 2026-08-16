@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
-import { NSpace, NText, NBadge, NTooltip } from 'naive-ui'
+import { NSpace, NText, NBadge, NTooltip, NButton, NIcon } from 'naive-ui'
+import { SunnyOutline, MoonOutline } from '@vicons/ionicons5'
 import { useAppStore } from '@/stores/app'
+import { useThemeStore } from '@/stores/theme'
 import { useUpdateViewModel } from '@/views/system/update.vm'
 import UpdateChecker from '@/components/UpdateChecker.vue'
 import { http } from '@/utils/http'
 import type { SystemStatus } from '@/stores/app'
 const updateCheckerRef = ref<InstanceType<typeof UpdateChecker> | null>(null)
 const appStore = useAppStore()
+const themeStore = useThemeStore()
 // 连接状态
 const connecting = ref(false)
 
@@ -148,6 +151,27 @@ onUnmounted(() => {
       </n-space>
     </n-space>
 
+    <!-- 主题快速切换，工作流画布等全屏页面也能直接切换明暗 -->
+    <n-tooltip placement="top" trigger="hover">
+      <template #trigger>
+        <n-button
+          quaternary
+          size="tiny"
+          class="theme-toggle"
+          :aria-label="themeStore.isDark ? '切换到浅色主题' : '切换到深色主题'"
+          @click="themeStore.toggleScheme"
+        >
+          <template #icon>
+            <n-icon>
+              <MoonOutline v-if="themeStore.isDark" />
+              <SunnyOutline v-else />
+            </n-icon>
+          </template>
+        </n-button>
+      </template>
+      <span>{{ themeStore.isDark ? '切换到浅色主题' : '切换到深色主题' }}</span>
+    </n-tooltip>
+
     <!-- 移动版布局 - 只显示关键信息 -->
     <div class="mobile-view">
       <n-space align="center" :size="8">
@@ -182,9 +206,29 @@ onUnmounted(() => {
   align-items: center;
 }
 
+.theme-toggle {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 .version-text {
   cursor: pointer;
   animation: blink 3s infinite;
+}
+
+/* 可点击的「有更新」文字需要可见的键盘聚焦环 */
+.version-text:focus-visible {
+  outline: 2px solid var(--primary-color, #4080ff);
+  outline-offset: 2px;
+  /* 行内文字的聚焦环属于内联小件，用 xs 档 */
+  border-radius: var(--radius-xs);
+}
+
+/* 尊重系统的「减少动态效果」偏好，闪烁对前庭敏感用户不友好 */
+@media (prefers-reduced-motion: reduce) {
+  .version-text {
+    animation: none;
+  }
 }
 
 @keyframes blink {
@@ -212,8 +256,18 @@ onUnmounted(() => {
     display: none !important;
   }
 
+  /* 桌面区隐藏后主题按钮会变成第一个可见子元素，margin-left:auto 反而把它顶到
+     移动版状态左侧。这里用 order 把移动版信息排在前、按钮排在最右 */
   .mobile-view {
     display: flex;
+    order: 1;
+    margin-right: auto;
+    min-width: 0;
+  }
+
+  .theme-toggle {
+    order: 2;
+    margin-left: var(--space-2, 8px);
   }
 }
 </style>

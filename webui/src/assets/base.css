@@ -38,8 +38,33 @@
   --section-gap: 160px;
 }
 
+/*
+ * 明暗取值由 <html> 上的 .dark 类驱动，而不是直接读 prefers-color-scheme。
+ * 主题 store 会在“跟随系统”时把系统偏好翻译成该类，因此用户显式选择浅色时，
+ * 即使操作系统处于深色也不会被这里覆盖。
+ */
+.dark {
+  --color-background: var(--vt-c-black);
+  --color-background-soft: var(--vt-c-black-soft);
+  --color-background-mute: var(--vt-c-black-mute);
+
+  --color-border: var(--vt-c-divider-dark-2);
+  --color-border-hover: var(--vt-c-divider-dark-1);
+
+  --color-heading: var(--vt-c-text-dark-1);
+  --color-text: var(--vt-c-text-dark-2);
+}
+
+/*
+ * 无 JS 兜底：脚本被拦截、首屏脚本抛错或 store 初始化失败时，.dark 类永远不会
+ * 被加上，深色系统的用户会永久停留在浅色。这里按系统偏好补一份同样的取值。
+ *
+ * 守卫用的是首屏脚本与 theme store 都会写的 data-theme（值为 light / dark）：
+ * 只要明暗已被显式决定，:root 就带有该属性，本块自动失效，因此不会覆盖用户
+ * 选择的浅色。属性缺失才意味着“没有任何一方表过态”，此时才交给系统偏好。
+ */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme]) {
     --color-background: var(--vt-c-black);
     --color-background-soft: var(--vt-c-black-soft);
     --color-background-mute: var(--vt-c-black-mute);

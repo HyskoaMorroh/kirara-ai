@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -20,7 +20,9 @@ class BlockInstance(BaseModel):
     type_name: str
     name: str
     config: Dict[str, Any]
-    position: Dict[str, int]  # x, y 坐标
+    # None represents a node that has never been laid out. {"x": 0, "y": 0}
+    # remains a valid, user-chosen position.
+    position: Optional[Dict[str, int]] = None  # x, y 坐标
 
 
 class WorkflowDefinition(BaseModel):
@@ -57,3 +59,20 @@ class WorkflowResponse(BaseModel):
     """单个工作流响应"""
 
     workflow: WorkflowDefinition
+
+
+class WorkflowValidationIssue(BaseModel):
+    """工作流草稿的一项静态诊断。"""
+
+    severity: Literal["error", "warning"]
+    code: str
+    message: str
+    node_name: Optional[str] = None
+    port_name: Optional[str] = None
+
+
+class WorkflowValidationResponse(BaseModel):
+    """预检结果；不会改变工作流、文件或注册表。"""
+
+    errors: List[WorkflowValidationIssue]
+    warnings: List[WorkflowValidationIssue]

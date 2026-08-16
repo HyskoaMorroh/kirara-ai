@@ -10,6 +10,7 @@ from kirara_ai.workflow.core.block import Block, Input, ParamMeta
 # Toggle edit state
 class ToggleEditState(Block):
     name = "toggle_edit_state"
+    description = "在支持的平台上显示/取消“正在输入”状态，让等待回复的过程更自然。"
     inputs = {
         "sender": Input("sender", "聊天对象", ChatSender, "要切换编辑状态的聊天对象")
     }

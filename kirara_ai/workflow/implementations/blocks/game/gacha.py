@@ -1,9 +1,9 @@
 import random
-from typing import Dict, Optional
+from typing import Annotated, Dict, Optional
 
 from kirara_ai.im.message import IMMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
-from kirara_ai.workflow.core.block import Block
+from kirara_ai.workflow.core.block import Block, ParamMeta
 from kirara_ai.workflow.core.block.input_output import Input, Output
 
 
@@ -11,14 +11,21 @@ class GachaSimulator(Block):
     """抽卡模拟器 block"""
 
     name = "gacha_simulator"
+    description = "模拟抽卡，消息中含「十连」时抽 10 次，否则抽 1 次，并给出稀有度统计。"
     inputs = {
-        "message": Input("message", "输入消息", IMMessage, "输入消息包含抽卡命令")
+        "message": Input("message", "输入消息", IMMessage, "包含抽卡命令的消息")
     }
     outputs = {
-        "response": Output("response", "响应消息", IMMessage, "响应消息包含抽卡结果")
+        "response": Output("response", "响应消息", IMMessage, "包含抽卡结果与统计的消息")
     }
 
-    def __init__(self, rates: Optional[Dict[str, float]] = None):
+    def __init__(
+        self,
+        rates: Annotated[
+            Optional[Dict[str, float]],
+            ParamMeta(label="稀有度概率", description="稀有度到概率的映射，留空则使用默认的 SSR 3% / SR 12% / R 85%"),
+        ] = None,
+    ):
         # 默认抽卡概率
         self.rates = rates or {"SSR": 0.03, "SR": 0.12, "R": 0.85}  # 3%  # 12%  # 85%
 

@@ -6,6 +6,7 @@ from kirara_ai.im.adapter import IMAdapter
 from kirara_ai.im.manager import IMManager
 from kirara_ai.im.message import IMMessage
 from kirara_ai.ioc.container import DependencyContainer
+from kirara_ai.logger import get_logger
 from kirara_ai.workflow.core.workflow.registry import WorkflowRegistry
 
 from .base import DispatchRule, RuleConfig
@@ -25,11 +26,13 @@ class RandomChanceMatchRule(DispatchRule):
     def __init__(self, chance: int, workflow_registry: WorkflowRegistry, workflow_id: str):
         super().__init__(workflow_registry, workflow_id)
         self.chance = chance
+        self.logger = get_logger("DispatchRule.RandomChance")
 
     def match(self, message: IMMessage, container: DependencyContainer) -> bool:
-        print(f"Random chance: {self.chance}")
-        print(f"Random number: {random.random()}")
-        return random.random() * 100 < self.chance
+        roll = random.random() * 100
+        # 用日志而非 print，避免每条消息都往 stdout 打调试信息
+        self.logger.debug(f"Random chance: {self.chance}, rolled: {roll:.2f}")
+        return roll < self.chance
 
     def get_config(self) -> RandomChanceRuleConfig:
         return RandomChanceRuleConfig(chance=self.chance)

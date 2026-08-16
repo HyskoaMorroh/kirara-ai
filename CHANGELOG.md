@@ -10,6 +10,8 @@
 
 ### Added
 
+- **触发规则试运行**：规则页可用示例消息按真实的“优先级降序 + 规则 ID 升序”预演命中顺序，逐条显示将执行、被前序规则截断、未命中、已禁用或无法确定；试运行不执行工作流、不发送消息、不保存草稿。随机概率和需要真实 IM 实例的条件会明确标为无法确定，避免把演示结果误当成实际运行结果。
+- **工作流结构预检**：工作流画布的“检查”现在会调用无副作用的服务端预检，统一检查重复节点、未知区块或端口、重复输入连线、类型不兼容、必需输入、入口、不可达节点与非受控环；预检只报告问题，不保存、执行或自动改图，搭建中的草稿仍可按原方式保存。
 - **完整备份与恢复服务**：新增 `kirara_ai.backup.BackupService`，可导出便携式 `.kirara-backup.zip`，覆盖系统与 Web 设置、模型与机器人配置、工作流、触发规则、数据库、记忆、媒体、插件、字体及自动探测状态。
 - **安全恢复机制**：导入前校验归档清单、文件哈希、路径、容量、压缩比和符号链接；写入前自动创建回滚包，验证或恢复失败时保留原数据，避免半恢复状态。
 - **备份管理 API**：在系统 API 中提供备份创建、列表、下载、导入、删除和恢复状态接口；恢复成功后明确要求重启服务以重新加载配置与运行对象。
@@ -18,14 +20,74 @@
 - **MCP 资源读取与提示词采样 API**：新增 `GET /mcp/servers/<id>/resources/<resource_id>` 与 `POST /mcp/servers/<id>/prompts/sample`，补齐 WebUI MCP 详情页「查看资源」「采样提示」两个按钮所需的后端接口。
 - **备份与恢复图形界面**：新增后端自带页面 `GET /backup`（源文件 `kirara_ai/web/static/backup.html`），提供导出、导入前检查、恢复和回滚包下载四组操作。该页面不属于 `kirara-ai-webui` 前端项目，因此不受 WebUI 版本影响，部署后立即可用；会自动复用浏览器中 WebUI 的登录令牌，也支持在页面内单独登录。页面本身不含任何凭据，所有接口调用仍需 Bearer 令牌。
 - **WebUI 内置备份入口**：将 `kirara-ai-webui` 0.1.1-beta.3 源码受版本控制地纳入 `webui/`，在「系统设置」增加与原有界面协调的「备份与恢复」标签页。页面直接使用既有备份 API，支持导出、导入前检查、二次确认恢复和不含令牌 URL 的回滚包下载；`/backup` 旧入口继续保留。
-- **打包声明**：`MANIFEST.in` 与 `pyproject.toml` 增加 `kirara_ai/web/static` 的分发声明，确保 wheel 与 Docker 镜像内包含后端自带页面。
+- **首次部署的内置工作流与规则**：将进阶聊天工作流作为包内预设，并在没有用户规则文件的全新安装中注册系统、游戏及聊天规则；已有 `data/` 中的工作流、规则和明确删除记录仍优先，升级不会覆盖用户配置或复活已删除的预设。
+- **分发完整性契约**：为 wheel 包内预设工作流、Docker 的默认数据初始化以及排除测试工作流夹具增加回归检查，避免源码运行正常而 pip/Docker 首次部署缺失模板或携带测试数据。
+- **打包声明**：`MANIFEST.in` 与 `pyproject.toml` 增加 `kirara_ai/web/static` 和 `kirara_ai.workflow.presets` 的分发声明，确保 wheel 与 Docker 镜像内同时包含后端自带页面和进阶工作流模板。
+
+- **主题与外观系统**：新增 `webui/src/theme/palettes.ts` 与 `webui/src/stores/theme.ts`，提供 6 套配色方案——`classic`（经典蓝，主色沿用项目原始的 `#007AFF`）、`graphite`（石墨灰）、`midnight`（午夜蓝）、`forest`（松林绿）、`contrast`（高对比，全部语义色满足 WCAG AA）、`oled`（纯黑，深色底为 `#000000`），每套都有独立的浅色/深色取值；明暗模式支持「跟随系统 / 浅色 / 深色」三档，跟随系统时监听 `prefers-color-scheme` 实时切换。选择通过 `localStorage` 的 `themeMode` 与 `themePalette` 两个键持久化，刷新后保留。
+- **外观设置界面**：新增 `webui/src/views/settings/components/AppearanceCard.vue`，挂载在「系统设置 → 外观」标签页，可切换明暗模式与配色方案，每个色板卡片用自身色值绘制浅色/深色预览并带 `aria-label`。状态栏另加一个明暗快速切换按钮，方便在工作流画布这类全屏页面直接切换。
+- **首屏防白屏（FOUC）**：`webui/index.html` 增加内联启动脚本与骨架加载动画，在主应用加载前就按 `localStorage` 读到的模式/色板写入 `data-theme`、`.dark` 与背景色。启动脚本内的色板表由 `/* THEME_BOOT_TABLE */` 标记框定，并由新增测试 `webui/tests/theme-boot-table.test.ts` 校验它与 `palettes.ts` 不发生漂移；`localStorage` 不可用（隐私模式等）时脚本静默跳过，交由 CSS 兜底。
+- **设计令牌体系**：`webui/src/assets/main.css` 增加字号阶梯（`--font-size-xs` … `--font-size-3xl`）、行高（`--line-height-tight/normal/relaxed`）、字距（`--letter-spacing-*`）、间距节奏（`--space-1` … `--space-8`）、阴影层级（`--box-shadow-sm/lg/overlay`）与动效时长（`--transition-duration-fast/slow`）；新增 `--border-radius-large`、`--border-radius-pill`；为语义色补充满足 AA 的文字变体 `--primary-color-text`、`--success-color-text`、`--warning-color-text`、`--error-color-text`、`--info-color-text`。全局响应 `prefers-reduced-motion: reduce`（把过渡与动画压到 0.01ms），并为 `:root` / `body` / `#app` 的背景与文字色加上主题切换过渡。
+- **色板级形状差异**：新增 `ThemeShape`（圆角、基础字号、控件高度、字重），让各套色板在颜色之外还能有密度与圆角差异；`DEFAULT_THEME_SHAPE` 逐项等于改动前 `App.vue` 里的取值，未声明 `shape` 的色板行为不变。
+- **画布防重叠与布局工具**：`webui/src/components/workflow/useLayout.ts` 导出 `computeWorkflowLayout`、`resolveNodeOverlaps`、`findFreeNodePosition`、`findOverlappingNodes`、`snapToGrid`、`measureTextWidth`，节点宽度改由按字符类别累加的真实文本测量决定（替换原先 `label.length * 14` 的估算：该系数按纯中文标签调出，西文标签被高估、中英混排被低估），宽度区间由 200 / 300 提升为 `NODE_MIN_WIDTH = 220` / `NODE_MAX_WIDTH = 360`（代码节点单独保留 200 / 300）。
+- **预设坐标重算脚本**：新增只读脚本 `webui/scripts/relayout-presets.mjs`，复用编辑器同一套 `computeWorkflowLayout()` 计算随包预设的无重叠坐标并打印到标准输出，不修改任何文件。
+- **画布可用性增强**：节点级校验角标与问题清单弹窗，可逐条跳转到出问题的节点；缩放控件里新增可见的「自动排布」按钮（原先只有 Ctrl+L 与顶部工具栏图标）；新增节点查找面板，支持 `Ctrl / ⌘ + F` 按名称或 ID 跳转。
+- **8 个新增内置工作流模板**（`kirara_ai/workflow/presets/chat/`，并同步到 `data/workflows/chat/`），把此前没有任何模板覆盖的区块变成开箱可用：
+  - `mcp_tools.yaml`「聊天 - 工具调用 (MCP)」：让模型在回答前自动调用 MCP 工具，使用 `mcp:mcp_tool_provider` 与 `internal:chat_completion_with_tools`。
+  - `function_calling.yaml`「聊天 - 函数调用」：用「基础：代码」节点把对话记录与 `mcp:mcp_tool_provider` 给出的工具列表打包成一次函数调用请求，由 `internal:chat_function_calling` 返回结果；工具的实际执行需自行接节点，只想开箱可用请改用「聊天 - 工具调用 (MCP)」。
+  - `time_aware.yaml`「聊天 - 时间感知」：用 `internal:current_time_block` 在系统提示词里注入实时日期时间。
+  - `plain_text.yaml`「聊天 - 纯文本输出」：用 `internal:text_strip_markdown_block` 去掉回复里的 Markdown 标记，适配语音播报与不支持 Markdown 的平台。
+  - `sensitive_word_filter.yaml`「聊天 - 敏感词替换」：用 `internal:text_replace_block` 在发送前把指定词替换成安全表述。
+  - `long_reply_split.yaml`「聊天 - 长回复分条」：用 `internal:code` 按 `<break>` 把长回复拆成多条消息，并用 `internal:append_im_message` 在末尾追加一条固定提示语。
+  - `custom_script.yaml`「聊天 - 自定义脚本」：仅用 `internal:code` 节点处理消息，不接大模型也能回复。
+  - `group_mention.yaml`「群聊 - 提及触发」：配合「@机器人」条件，先用 `internal:im_message_to_text` 转纯文本、再用 `internal:text_replace_block` 去掉 @ 符号后交给模型。
+- **人设提示词单一来源**：新增 `kirara_ai/workflow/implementations/factories/persona.py`，把此前在多处重复的人设正文收敛为 `DEFAULT_PERSONA_SYSTEM_PROMPT` 与 `DEFAULT_USER_PROMPT_FORMAT`，代码侧工作流工厂统一引用。
+- **采样温度可配置且真正生效**：`kirara_ai/workflow/implementations/blocks/llm/chat.py` 新增 `resolve_temperature()`，`ChatCompletion` 与 `ChatCompletionWithTools` 增加「采样温度」区块配置。取值优先级为 节点配置 → 命中规则的 `metadata.temperature` → 不携带（交由模型默认值），合法区间 `0.0~2.0`，超出范围或非数字会被忽略并记录告警。此前 `data/dispatch_rules/rules.yaml` 里的 `metadata.temperature` 只是注释性的字段，从未进入请求。
+- **模型回退开关**：`ChatCompletion` 新增 `use_deployment_default_model`（默认 `False`）。关闭时只使用节点上配置的主模型与备用模型，不再在全部失败后静默换成部署默认模型；一个模型都没配置时仍会使用默认模型，否则工作流无法运行。
+- **工作流结构预检模块**：新增 `kirara_ai/workflow/core/workflow/validation.py`，改用 `BlockRegistry.get_type_name` 这一新增公开方法（不再触碰私有 `_type_system`），环检测改为带 `MAX_CYCLE_SCAN_DEPTH = 10000` 上限的迭代式 DFS（不再受 Python 递归上限约束），并支持动态端口。
+- **内置默认规则模块**：新增 `kirara_ai/workflow/implementations/rules/default_rules.py`，以常量声明优先级档位 `PRIORITY_SYSTEM = 100`、`PRIORITY_COMMAND = 60`、`PRIORITY_CHAT = 30`、`PRIORITY_FALLBACK = 0`，并提供 `build_default_rules()`、`register_system_dispatch_rules()`、`validate_rule_workflows()`；`kirara_ai/entry.py` 在 `load_rules()` 之后注册内置默认规则（同 ID 的用户规则优先保留），随后校验规则引用的工作流。
+- **模型目录规范化模块**：新增 `kirara_ai/scheduler/model_catalog.py`，导出 `normalize_detected_models` 与 `model_catalogs_equal`，供定时自动检测与手动检测复用同一套去重、排序与比较逻辑。
+- **前端本地存储与前端单元测试**：新增 `webui/src/utils/safe-storage.ts`（`localStorage` 不可用时安全降级）、`webui/vitest.config.ts` 与 `webui/tests/` 下 8 个测试文件。
+- **可测试的前端纯函数模块**：从体量过大的画布与规则页里抽出可单测的纯逻辑——`webui/src/components/workflow/workflow-data.ts`、`workflow-node-utils.ts`（节点稳定唯一命名）、`workflow-model-options.ts`（模型槽位识别）、`webui/src/views/workflow/dispatch-preview-utils.ts`（试运行结论文案）、`dispatch-rule-utils.ts`（规则编辑深拷贝草稿，避免「取消」仍污染列表原规则）。
+
+- **统一的深拷贝实现**：新增 `webui/src/utils/deep-clone.ts`，导出唯一的 `deepClone`。它支持嵌套对象与数组、保持 `Date` / `RegExp` / `Map` / `Set` 的类型、保留原型（class 实例不会被降级成裸对象）、处理循环引用，并在**每一层**都先 `toRaw`、对 `ref` 按 `reactive` 的读取语义解包，因此 Vue 响应式代理不会进到 `structuredClone` 里触发 `DataCloneError`。原先规则编辑器用 `JSON.parse(JSON.stringify())`、工作流历史用 `structuredClone` 加 JSON 回退，两份实现语义不同。现在 `dispatch-rule-utils.ts` 的 `cloneDispatchRule` 与 `store/workflow-editor.ts` 的 `cloneHistoryValue` 都只是转调 `deepClone`；`cloneDispatchRule` 的导出名原样保留，任何导入路径都没有变化。`WorkflowCanvas.vue` 复制节点时也改用它拷贝 `data.config`。
+- **规则可达性的后端单一实现**：新增 `kirara_ai/workflow/core/dispatch/reachability.py`，导出 `dispatch_order_key`、`sort_rules_in_dispatch_order`、`is_unconditional_group`、`is_catch_all_rule`、`analyze_dispatch_reachability`、`DispatchRuleReachability` 与 `FALLBACK_RULE_TYPE`，并从 `kirara_ai.workflow.core.dispatch` 一并导出。「优先级降序 + 规则 ID 升序」的调度顺序、无条件（兜底）规则判定和遮蔽关系至此只有一处定义：`DispatchRuleRegistry.get_active_rules()` 与调度 API 都改为读取本模块。分析是纯静态的，不需要示例消息，也不会创建条件实例、取样随机概率或访问 IM 实例。
+- **可达性接口（纯增量）**：`GET /dispatch/rules` 的响应新增 `reachability` 数组；`DispatchPreviewRuleResult` 新增 `order`、`catch_all`、`unreachable`、`shadowed_by_rule_id` 四个字段（都带默认值，旧客户端不受影响）；新增 `POST /dispatch/reachability`，只做静态可达性分析，可选携带 `draft_rule`——草稿的 `rule_id` 已存在时替换同 ID 规则，否则作为新规则参与排序，因此保存前就能预判遮蔽关系。
+- **规则页的遮蔽提示来自服务端**：`DispatchRules.vue` 不再本地推导遮蔽关系，改为渲染 `/dispatch/rules` 返回的 `reachability`（匹配次序、无条件标记、被哪条规则遮蔽），并在编辑弹窗里对草稿发起 300ms 防抖的 `/dispatch/reachability` 请求，只采纳最后一次响应，保持「边改边看」的即时反馈。请求失败只清空提示，不打断编辑。
+- **试运行判定文案归位**：判定标签与颜色的唯一实现移到 `webui/src/api/dispatch.ts`，与同类的 `getRuleTypeLabel`（后端枚举 → 中文标签）放在一起，并新增可枚举的 `DISPATCH_PREVIEW_DECISIONS` 常量供测试校验映射完整性；`webui/src/views/workflow/dispatch-preview-utils.ts` 保留为纯再导出的兼容层，原有导入路径不变。
+- **首次部署上手指南**：新增 `docs/QUICKSTART.md`，按「启动与首次登录 → 认识内置模板 → 接入聊天平台 → 配置 LLM 后端与模型 → 确认调度规则 → 发测试消息 → 外观设置」的顺序走通第一次部署，包含首次登录即设定密码的机制、随包预设与规则的自动释放、11 个随包 YAML 模板表、模型「先检测目录、再在下拉框里手动选」的机制与 `TaskScheduler` 的周期刷新、四档优先级，以及 6 套配色 × 3 档明暗的说明。
+- **可观测性说明**：新增 `docs/OBSERVABILITY.md`，说明日志去向与标签、`@trace_llm_chat` → `LLMTracer` 的落库路径与 `tracing.llm_tracing_content` 开关、`webui/src/views/tracing/` 下的 5 个文件、`POST /workflow/validate` 的请求/响应结构与全部 14 个 issue code、`POST /dispatch/preview` 的判定与新增的 `POST /dispatch/reachability`、画布上的问题角标，并明确列出**不存在**的观测能力（无 `/metrics`、无工作流执行历史、无分布式追踪、无告警、WebUI 控制台看不到 `DEBUG`）。
+- **扩展开发指南**：新增 `docs/EXTENDING.md`，分八节讲自定义 Block（含 `ParamMeta` / `options_provider`——它正是「模型手动选择」下拉框的实现机制）、插件（3 个 `@abstractmethod` 生命周期钩子、entry point group 必须逐字写 `chatgpt_mirai.plugins`）、MCP 接入、预设 YAML 结构与坐标、调度规则与 `metadata.temperature`、事件总线、定时任务、全量校验。同时诚实记录当前**没有**的能力：没有消息拦截/中间件插入点、事件监听器不能是 `async def`、`BlockRegistry` 没有 `unregister`、`data/plugins/` 当前不会被自动扫描（只扫包内的 `kirara_ai/plugins/`）、`TaskScheduler` 不是通用任务注册中心、MCP 的 prompts/resources 没有对应 Block。
 
 ### Fixed
 
+- **自动检测与五档模型链兼容性**：定时自动检测现在仅刷新后端当前可发现的模型目录，并识别同 ID 的能力元数据更新；它不会改写任何工作流的主模型或 4 个备用模型。若已配置模型不再被检测到，工作流编辑器对应下拉槽位显示为空，原始配置会保留到用户主动选择替代模型，避免无关保存操作静默删除降级链。
+- **手动检测与定时检测一致性**：模型页的“自动检测”接口现在复用相同的目录规范化逻辑，兼容仍返回字符串 ID 的旧适配器、去除重复项并保留提供商返回顺序；它同样只更新当前后端模型目录，不会触及工作流的五档模型配置。
+- **模型页无关请求**：编辑模型名称、能力或密钥时不再重复请求“是否支持自动检测”；只有切换适配器类型才会检查，并忽略较慢旧请求的返回，避免状态被覆盖。
+- **工作流编辑器状态与撤销完整性**：在节点配置和代码端口变更前记录历史，避免撤销快照已经包含新值；从已有工作流切换到“新建工作流”或其他工作流时会清空并重新初始化画布状态，不会带入上一张图的节点、连线或执行配置。
+- **工作流副本完整性**：管理页复制工作流现在保留原有 `config`、`metadata`、节点坐标、区块和连线，副本不再静默丢失执行时限或模板分类信息。
+- **统计页自动刷新清理**：离开引导页时释放 LLM 统计的五分钟刷新计时器，保留自动刷新能力并避免重复请求与后台内存泄漏。
+- **工作流重命名文件保护**：重命名时除检查内存注册表外，也会检查目标 YAML 路径；未被加载的残留、手工恢复或暂时无效的目标文件不会再被 `os.replace` 静默覆盖，接口返回 409，原工作流保持可用。
+- **工作流预设 wheel 构建告警**：排除本地测试产生的 `__pycache__` 命名空间候选，避免打包时将缓存目录误判为 Python 包；预设 YAML 与运行源码仍会完整进入 wheel。
 - **模型列表在 WebUI 中空白**：Docker 不再从 npm 的 `latest` 或可变 `beta` 标签拉取前端，而是构建仓库内固定的 `kirara-ai-webui` 0.1.1-beta.3 源码。该版本按 `model.id` / `model.type` / `model.ability` 渲染，与 3.3 后端的 `ModelConfig` 对象数组兼容，因此模型卡片会正常显示名称和能力。
 - **MCP 提示词与资源列表接口返回 500**：`/mcp/servers/<id>/prompts` 与 `/mcp/servers/<id>/resources` 此前直接 `jsonify` MCP 原始对象，`Resource.uri` 是 `AnyUrl` 类型无法被 JSON 序列化。现统一转换为 `MCPPromptInfo` / `MCPResourceInfo`，并补上 WebUI 需要的 `id` 字段。
 - **HTTPS 实时连接与工作流白屏**：WebSocket 客户端在 HTTPS 页面自动使用 `wss://`，避免浏览器拦截不安全连接；前端构建产物使用内容哈希文件名，避免代理缓存把旧入口文件与新懒加载模块混用。
 - **非编辑页面首屏负担与配置日志泄露**：Monaco/VSC 编辑器运行时不再随控制台、设置、模型、插件等路由预加载，仅在编辑器页面按需下载；保存配置时不再向浏览器控制台输出密码相关设置。
+- **主题回归修正**：品牌主色恢复为 `#007AFF`（`palettes.ts` 的 `classic` 与 `main.css` 一致）；深色语义色恢复为 `#63e2b7` / `#f3a769` / `#e88080`；`base.css` 重新补上 `prefers-color-scheme: dark` 兜底，与 `.dark` 类并存，`localStorage` 不可用时仍能得到深色底；`App.vue` 里未加 scope 的 `:root` 规则补齐了对应的 `.dark` 版本；`--border-radius` / `--border-radius-small` 修正为 `10px` / `8px`，与 naive-ui 主题覆盖里的取值一致；`forest` 浅色的文字对比度提高。
+- **登录页对比度**：`LoginView.vue` 原先只有一层 0.7→0.45 的主色半透明遮罩，白字对比度仅约 2.5:1（松林色板低至 1.8:1）；改为「主色实底渐变 + 固定深色蒙版」两层后，明暗两态下白字对比度均 ≥8:1，稳过 AA。
+- **硬编码颜色收敛**：12 个此前遗漏的组件改用设计令牌——`Console.vue`、`nodes/CodeNode.vue`、`MCPDetail.vue`、`ModelListForm.vue`、`ConfigurationList.vue`、`MediaList.vue`、`LLMAdapterConfig.vue`、`FrpServiceCard.vue`、`StatusBar.vue`、`LoginView.vue`、`LLMStatistics.vue`、`TopBar.vue`；图表与节点的分类色补上深色模式取值（`utils/node-colors.ts` 按 `<html>` 上的 `dark` 类选取深色适配值并按明暗分别缓存）；8 个文件补上 `:focus-visible` 键盘焦点样式。
+- **必需端口角标被截断**：`CustomNode.vue` 把必填标记 `*` 移出会被 ellipsis 截断的 `.port-label`，改为其兄弟节点并禁止收缩，端口名过长时不会先把 `*` 吃掉。
+- **画布性能**：移除 `{ deep: true, flush: 'sync' }` 里直接 `JSON.stringify` 全部节点的监听（改为节流的签名比对）；Monaco 配置写回改为防抖后统一 flush；`isValidConnection` 结果记忆化，避免 vue-flow 对每个端口反复调用时重复计算；打断 props → emit → `initGraphData` 的回环；`NodeListPanel` 的分组结果记忆化。
+- **撤销/重做与画布健壮性**：切换工作流时清空撤销/重做栈（原先会把上一张图的区块恢复到当前工作流），并以 `MAX_HISTORY_DEPTH = 50` 限制栈深；`handleRedo` 与 `handleUndo` 行为对称；`/block/types/compatibility` 请求失败时进入降级模式（只提示一次并安排重试），不再锁死画布；导出时延后 `URL.revokeObjectURL`，保证下载完成；导入补上不派发 `cancel` 事件浏览器的兜底，并对端口对不上的连线逐条容错、用结果弹窗列出被丢弃的连线明细。
+- **首次部署即可用**：`data/dispatch_rules/rules.yaml` 的私聊规则 `chat_creative` 由 DeepSeek 专用的 `chat:dsr_thinking` 改为通用的 `chat:normal`，全新部署换普通模型时不再输出奇怪内容；`talk_break.yaml` 提示词里写死的 `2025-02-23` 改由 `internal:current_time_block` 提供实时时间；抽卡规则改为整条消息匹配的正则 `^\s*(?:[/.。])?(?:抽卡|十连|单抽)\s*$`，并在说明里写明指令必须单独发送；`normal.yaml`、`dsr_thinking.yaml`、`normal_multimodal.yaml` 里写死的模型 ID（多数用户并未配置）清空为 `''`，改由下拉框手动选择。
+- **预设节点坐标重叠**：随包预设与 `data/workflows/chat/` 副本里写死的坐标全部重算并对齐到规则网格，节点框不再互相压叠（自动排版只对没有保存过位置的节点生效，所以 YAML 里的坐标会原样进入画布）；`data/workflows/chat/` 下的副本按设计保留，并由 `tests/test_workflow_presets.py` 校验两处文件内容逐字一致、且任意两个节点框不重叠。
+- **失效规则引用导致每条消息报错**：`validate_rule_workflows()` 在启动时把指向已删除工作流的规则降级（改指 `chat:normal` 或禁用），不再在每条私聊消息上抛 `WorkflowNotFoundException`。
+- **阻塞式 I/O 与并发安全**：工作流与规则注册表的加载、保存改为 `asyncio.to_thread` 执行，不再在事件循环里做 fsync/复制；两个注册表各自加上 `threading.RLock`，并新增共享的配置写锁 `CONFIG_WRITE_LOCK`，避免后台自动检测改写 `config.llms.api_backends` 与 Web 路由读取交错；`create_rule` 的错误路径不再无条件 `pop`。
+- **启动探测抖动**：`kirara_ai/scheduler/scheduler.py` 的启动首轮模型探测在固定 `STARTUP_DELAY_SECONDS = 60` 之外增加 `STARTUP_JITTER_SECONDS = 300` 的随机抖动，避免全新安装在启动 60 秒后同时探测所有启用的后端。
+- **锁文件不可移植**：`webui/yarn.lock` 中 44 个 `registry.npmmirror.com` 下载地址改为 `registry.npmjs.org`（integrity 哈希与线上注册表一致），中国大陆以外的环境可以正常执行 `yarn install --frozen-lockfile`。
+- **构建缓存入库**：清理并忽略残留的 `.build-tmp/`、`.pytest-tmp/`、`*.tsbuildinfo`；`.gitignore` 补上 `*.py[cod]`，避免落在 `__pycache__/` 之外的 `.pyc` 被误提交；`.dockerignore` 同步排除这些缓存。
+- **未实现路由不再误导**：`/im/platforms`、`/llm/backends`、`/llm/models`、`/llm/chat`、`/memory`、`/memory/search` 这 6 个尚未实现的路由此前一律渲染工作流模板页（点进去会看到与菜单名毫不相干的内容），改为新增的 `webui/src/views/ComingSoon.vue` 占位页；路由守卫读取 `token` 时加上 `try/catch`，浏览器禁用本地存储时按未登录处理而不是抛异常。
+- **规则遮蔽误判为「永不触发」**：规则页原先的本地 `isCatchAll` 只看条件组里是否含 `fallback`，因此把「`and` 组内除 `fallback` 外还有其他条件」的规则也当成无条件规则，给排在它之后的规则打上错误的「永远不会被触发」结论。可达性收敛到后端后，`is_unconditional_group()` 严格对应 `CombinedDispatchRule.match()` 的组内逻辑——`and` 组必须**全部**是兜底条件才恒成立，`or` 组含一个即可——`tests/test_dispatch_reachability.py` 为这种混合 `and` 组补了回归测试。已禁用的规则也不再遮蔽后续规则或被标记为不可达。
 
 ### Changed
 
@@ -41,6 +103,40 @@
 - **发布前快速门禁**：新增 `Release Preflight`，在 `main`、`master` 的推送和 Pull Request 上并行执行发布契约检查与 WebUI 类型检查、生产构建；该检查不构建镜像、不发布 Windows 包、不使用部署密钥。
 - **部署说明**：README 增加 Docker Hub、环境变量、默认工作流初始化和完整备份恢复说明，强调已有 `data/` 卷不会被新镜像自动覆盖。
 - **忽略规则**：`.gitignore` 忽略本机 `.env`，防止部署参数和敏感配置被误提交。
+- **采样参数类型放宽**：`LLMChatRequest` 的 `temperature`、`top_p`、`frequency_penalty`、`presence_penalty` 由 `Optional[int]` 改为 `Optional[float]`，`0.7` 这类取值终于可以表达；`max_tokens` 是 token 个数，仍保持 `int`。pydantic 会把 `int` 自动转成 `float`，旧配置里写 `1` 仍然通过校验，向后兼容。
+- **默认触发规则重排优先级**：`data/dispatch_rules/rules.yaml` 的优先级由原先普遍的 5/10 改为按档位区分——系统指令（`/help`、`/清空记忆`）100、游戏指令（骰子、抽卡）60、聊天（群聊、私聊）30、兜底（记录聊天内容）0，与 `default_rules.py` 里的常量一致；同时补齐每条规则的 `metadata.category` / `metadata.permission` 并把描述改写为可直接照做的说明。
+- **前端 CI 门禁扩展**：`Release Preflight` 的 WebUI 作业改名为「WebUI type check, unit tests and production build」，在类型检查与生产构建之间加入 `yarn test:unit`；`webui/vitest.config.ts` 补上与 `vite.config.ts` 一致的 `@` → `src` 别名（此前非纯类型的 `@/` 导入会解析失败）。
+- **锁文件下载源检查改为白名单**：`tests/test_webui_build_contract.py` 里的注册表守卫从黑名单改为白名单（只允许 `registry.npmjs.org`），黑名单只能挡住已知镜像，`npmmirror.com` 正是这样漏进锁文件的。
+- **wheel 打包排除字节码**：`pyproject.toml` 增加 `exclude = ["*.__pycache__", "*.__pycache__.*"]` 与 `[tool.setuptools.exclude-package-data]`，避免本机字节码进入 wheel 并消除包发现告警。
+
+- **圆角阶梯统一**：`webui/src/assets/main.css` 用一套权威阶梯取代此前 8 种互相竞争的字面量（4 / 6 / 8 / 10 / 12 / 16 / 20 / 24px）：`--radius-xs` 4px（内联小件、圆角容器的内层元素）、`--radius-sm` 8px（交互控件与紧凑表面，含画布节点）、`--radius-md` 12px（卡片、面板、列表项，默认档）、`--radius-lg` 16px（模态、抽屉、页面级主卡片）、`--radius-xl` 24px（登录页外框这类整屏级容器）、`--radius-pill` 999px（胶囊标签、状态徽标）。各档的角色分工与嵌套原则（内层 ≤ 外层，一般降一档）以中文注释块写在令牌旁边。四个历史令牌名全部保留为别名（`--border-radius`→md、`--border-radius-small`→sm、`--border-radius-large`→lg、`--border-radius-pill`→pill），没有重命名或删除任何令牌。
+- **色板圆角由系数派生**：`ThemeShape` 新增 `radiusScale`，`getRadii(scale)` 按 `RADIUS_BASE`（4/8/12/16/24）缩放整套阶梯并设 2px 下限，`pill` 档不参与缩放；`radiusShape(scale)` 顺带填好三个历史字段（`borderRadius`/`borderRadiusSmall`/`borderRadiusLarge` = md/sm/lg），因此单个色板不可能只改一档而让梯度断裂。各色板系数：`classic` 1、`graphite` 0.5、`midnight` 0.75、`forest` 1.25、`contrast` 0.375（最方正——弱视用户依赖清晰的矩形边界定位控件）、`oled` 1.125（纯黑底上 1px 描边几乎不可见，层级只能靠形状表达）。基准梯把通用档由 10px 提到 12px、大档由 12px 提到 16px，小档仍是 8px。
+- **naive-ui 与 CSS 共用同一份圆角**：`App.vue` 的 `themeShape` 与 `stores/theme.ts` 都消费 `getRadiiForSeed`，运行时写入 `--radius-*` 与四个历史别名，两侧不会再各说各话；并补上 `Tag: { borderRadius: pill }` 覆盖，与 `main.css` 的 `.n-tag` 一致。
+- **全站改用圆角令牌**：114 处圆角字面量替换为令牌引用（`webui/src/` 下现有 156 处 `var(--radius-*)`），并对 19 处内层元素按嵌套原则降档并就地写明理由（`.statistic-icon`、`.status-icon`、`.stat-icon`、`.code-preview`、`.tool-response pre`、`.n-descriptions`、`.trace-table`、`.rule-item`、`.adapter-info`、`.config-form` 等）。仅 `LLMView` 的 `.custom-modal .n-card` 变化超过 4px（10px → 16px），原因是模态内的卡片就是模态自身的表面，不该与全局 `.n-modal` 渲染出不同圆角。保留 10 处就地注明的例外：3 处 `border-radius: 0`（贴边满铺的面板与窄屏登录容器，任何圆角都会露出底色）、4 处 2~3px 的发丝级预览装饰、1 处 `50%` 正圆，以及 2 处 ECharts 的数值型 `borderRadius`（canvas 绘制，无法读取 CSS 变量）。
+- **色板预览体现形状性格**：`AppearanceCard` 的色板缩略图圆角取 `getRadii(scale * 0.5)`，让每套色板的方正/圆润差异在选择时就能看出来。
+
+- **后端全量用例成为每个 PR 的门禁**：`.github/workflows/run-tests.yml` 此前**只有** `workflow_dispatch`，全量后端用例从不在 PR 上自动运行；现在触发条件为 `pull_request` / `push` / `merge_group`（均限定 `main`、`master`）+ `workflow_dispatch`。工作流拆成四个作业：`static`（`compileall` 语法门禁为阻塞项，pyflakes 与 isort 以 `continue-on-error` 输出到 Step Summary）、`backend`（ubuntu + Python 3.11，与 Dockerfile 运行时一致，`uv sync --frozen` 装锁定依赖后跑全量用例，上传 Codecov 覆盖率/测试结果与 JUnit artifact；`CODECOV_TOKEN` 缺失时自动跳过上传，fork PR 不会红）、`backend-matrix`（ubuntu×3.10、ubuntu×3.13、windows×3.13，`PYTHONUTF8` 保证中文断言在 Windows 上不炸）、`docker-image`（`needs: backend`，构建镜像并断言 wheel 的 package-data、wheel 可独立导入、镜像内 `/app/web` 有前端产物，再在镜像里跑一遍用例）。后两个重活默认只在推送默认分支 / 合并队列 / 手动触发时运行，PR 上打 `ci:full` 标签可强制拉起。并发组按 `github.ref`，仅 `pull_request` 事件取消进行中的运行。
+- **发布前门禁扩容**：`release-preflight.yml` 补上 `merge_group` 触发，并新增非阻塞的 `webui-lint` 作业（`npx eslint src/`，输出报告与 artifact——此前 CI 从未跑过任何前端 lint）；`webui` 作业把类型检查、单元测试、生产构建拆成三个独立 step，Node 20 + yarn 缓存。`project_check.yml` 触发为 `push` / `merge_group` / `workflow_dispatch`（mypy 报告 + 自动开 issue，并发组不取消以免留下半截报告）；`pr_review.yml` 仍为 `pull_request_target`（文件内已就地记录它的 "pwn request" 暴露面与为何把 `actions/checkout` 停在 v6）；`docker-latest.yml` 与 `quickstart-windows.yml` 为 `workflow_dispatch` + `release: published`；`docker-tag.yml` 仅 `workflow_dispatch`（必填 `image_tag`）；`stale.yml` 为 `workflow_dispatch` + 每日定时。
+- **发布镜像前必须跑全量用例**：`docker-latest.yml` 与 `docker-tag.yml` 各新增 `verify` 作业（`uv sync --frozen` + `pytest ./tests -q`），构建/推送作业 `needs: verify`。理由写在工作流里：镜像一旦推到 Docker Hub 无法收回，而 release 是从 tag 构建的，tag 上的内容未必等于当初通过 CI 的 commit。草稿 release 下 `verify` 直接跳过，`docker` 作业随之跳过，与原有「草稿不发布」行为一致。镜像构建使用 registry buildcache（`type=registry,ref=<镜像>:buildcache`），CI 的镜像校验作业使用 GitHub Actions 缓存（`type=gha`）。
+- **Windows 快速启动包与 PR 门禁跑同一组前端检查**：`quickstart-windows.yml` 的前端构建步骤由只跑 `yarn build` 改为 `yarn type-check` → `yarn test:unit` → `yarn build`，类型错误与单测回归不会再被直接打进用户下载的压缩包。
+- **发布契约测试同步到新架构**：`tests/test_release_workflow_contract.py` 新增两条契约——`run-tests.yml` 必须同时具备 `pull_request` / `push` / `merge_group` 触发、必须用 `uv sync --frozen` 安装并执行 `pytest ./tests -q`、并发取消策略必须是「仅 PR 取消」；`docker-latest.yml` 与 `docker-tag.yml` 都必须有跑全量用例的验证步骤且发布作业 `needs: verify`。同时把 Windows 快速启动包的 `actions/setup-node@v4` 断言放宽为 `actions/setup-node@v`（这条契约要守的是「与镜像用同一套受版本控制的前端源码构建」，钉死 action 大版本只会让例行升级把测试变成噪音），并要求快速启动包与 `release-preflight.yml` 都包含 `yarn test:unit`。
+
+### Tests
+
+- 后端测试现为 413 个，`.venv/Scripts/python.exe -m pytest ./tests -q` 全部通过（系统 `python` 未安装 pytest，必须使用虚拟环境解释器）。`tests/` 顶层测试文件由 12 个增至 16 个。
+- 新增 `tests/test_workflow_presets.py`（预设可发现、名称/说明/节点齐全、区块类型与端口可解析、坐标不重叠、随包预设与 `data/workflows` 副本一致、不写死模型 ID、不写死日期）、`tests/test_default_dispatch_rules.py`、`tests/test_model_catalog.py`、`tests/test_workflow_preset_deletions.py`、`tests/web/api/dispatch/test_dispatch.py`。
+- 扩充 `tests/system_blocks/llm/test_chat.py`（采样温度解析与模型回退开关）、`tests/test_webui_build_contract.py`（锁文件白名单、wheel 预设声明、Docker 默认数据不含测试夹具）、`tests/web/api/workflow/test_workflow.py`。
+- 新增前端单元测试：`webui/tests/` 下 9 个文件共 34 个用例全部通过（`theme-boot-table.test.ts` 校验 `index.html` 启动色板表与 `palettes.ts` 不漂移，另有 `safe-storage`、`workflow-data`、`workflow-editor`、`workflow-model-options`、`workflow-node-utils`、`dispatch-preview-utils`、`dispatch-rule-utils`、`deep-clone`）。
+
+**当前实测数字**：
+
+- 后端 `.venv/Scripts/python.exe -m pytest ./tests -q` → **413 passed**；`tests/` 顶层测试文件 16 个。
+- 前端 `cd webui && npx vitest run --config vitest.config.ts` → **9 个文件 / 34 个用例全部通过**（新增 `deep-clone.test.ts`）。
+- 前端类型检查 `cd webui && npx vue-tsc --noEmit` → 退出码 0。
+- 发布契约 `pytest tests/test_release_workflow_contract.py tests/test_webui_build_contract.py -q` → **23 passed**。
+- 新增 `tests/test_dispatch_reachability.py`：覆盖调度排序键、`or` / `and` 组的无条件判定、已禁用的无条件规则不遮蔽后续规则，以及「`and` 组混合 `fallback` 与其他条件时不得被判为兜底」这条前端旧实现的回归。
+- 新增 `webui/tests/deep-clone.test.ts`：嵌套结构、`Date` / `RegExp` / `Map` / `Set`、原始值与 `undefined`、循环引用，以及「逐层解包 Vue 响应式代理」这条关键回归（`structuredClone` 只在顶层 `toRaw` 时嵌套层仍是 Proxy）。
+- `webui/tests/dispatch-preview-utils.test.ts` 改为直接解析 `kirara_ai/web/api/dispatch/models.py` 里 `decision: Literal[...]` 的取值集合，断言前端标签映射与后端枚举完全一致且没有缺项——写死字符串相等的断言发现不了「后端新增判定、前端渲染出 undefined」。
 
 ### Security
 
@@ -153,3 +249,7 @@
 - **记忆、媒体与聊天平台**：`kirara_ai/memory/`、`kirara_ai/media/`、`kirara_ai/plugins/im_qqbot_adapter/`、`kirara_ai/plugins/im_telegram_adapter/`、`kirara_ai/plugins/im_wecom_adapter/`、`kirara_ai/im/text_render.py`。
 - **Web API 与编辑诊断**：`kirara_ai/web/api/block/`、`kirara_ai/web/api/im/`、`kirara_ai/web/api/llm/`、`kirara_ai/web/api/media/`、`kirara_ai/web/api/system/`、`kirara_ai/web/api/workflow/`。
 - **备份恢复与质量保证**：`kirara_ai/backup/`、`tests/backup/`、`tests/llm_adapters/`、`tests/memory/`、`tests/web/api/`、`tests/test_mcp_server.py`、`tests/test_compatibility_regressions.py`，以及 `docs/superpowers/` 下的备份设计与实施文档。
+- **可达性与前端去重**：`kirara_ai/workflow/core/dispatch/reachability.py`、`kirara_ai/workflow/core/dispatch/registry.py`、`kirara_ai/web/api/dispatch/`、`webui/src/utils/deep-clone.ts`、`webui/src/api/dispatch.ts`、`webui/src/views/workflow/DispatchRules.vue`、`webui/src/views/workflow/dispatch-rule-utils.ts`、`webui/src/views/workflow/dispatch-preview-utils.ts`、`webui/src/store/workflow-editor.ts`、`tests/test_dispatch_reachability.py`、`webui/tests/deep-clone.test.ts`。
+- **圆角与主题形状**：`webui/src/assets/main.css`、`webui/src/theme/palettes.ts`、`webui/src/stores/theme.ts`、`webui/src/App.vue`、`webui/src/views/settings/components/AppearanceCard.vue`。
+- **CI 门禁**：`.github/workflows/run-tests.yml`、`release-preflight.yml`、`project_check.yml`、`docker-latest.yml`、`docker-tag.yml`、`quickstart-windows.yml`、`stale.yml`、`pr_review.yml`、`tests/test_release_workflow_contract.py`。
+- **文档**：`docs/QUICKSTART.md`、`docs/OBSERVABILITY.md`、`docs/EXTENDING.md`。
