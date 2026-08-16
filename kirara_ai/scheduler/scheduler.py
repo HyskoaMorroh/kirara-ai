@@ -144,7 +144,9 @@ class TaskScheduler:
                     f"Failed to reload backend {backend_name} after auto-detect: {e}"
                 )
                 try:
-                    await llm_manager.reload_backend(backend_name)
+                    if backend_name in llm_manager.backends:
+                        await llm_manager.unload_backend(backend_name)
+                    llm_manager.load_backend(backend_name)
                 except Exception as rollback_error:
                     self.logger.error(
                         f"Failed to restore backend {backend_name} after auto-detect: "

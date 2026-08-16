@@ -228,6 +228,52 @@ class TestLLMBackend:
         ConfigLoader.save_config_with_backup.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_update_backend_restores_previous_state_when_loading_fails(
+        self, test_client, auth_headers
+    ):
+        """更新后的后端无法加载时，配置和运行时后端都必须回滚。"""
+        original_response = test_client.get(
+            f"/backend-api/api/llm/backends/{TEST_BACKEND_NAME}",
+            headers=auth_headers,
+        )
+        original_backend = original_response.json()["data"]
+        updated_config = LLMBackendConfig(
+            name=TEST_BACKEND_NAME,
+            adapter=TEST_ADAPTER_TYPE,
+            config={"api_key": "failing-key", "model": "failing-model"},
+            enable=True,
+            models=["failing-model"],
+        )
+        original_load_backend = LLMManager.load_backend
+        load_attempts = 0
+
+        def fail_once_then_restore(manager, backend_name):
+            nonlocal load_attempts
+            load_attempts += 1
+            if load_attempts == 1:
+                raise RuntimeError("updated backend cannot be loaded")
+            return original_load_backend(manager, backend_name)
+
+        with (
+            patch.object(LLMManager, "load_backend", new=fail_once_then_restore),
+            patch.object(ConfigLoader, "save_config_with_backup"),
+        ):
+            response = test_client.put(
+                f"/backend-api/api/llm/backends/{TEST_BACKEND_NAME}",
+                headers=auth_headers,
+                json=updated_config.model_dump(),
+            )
+
+        assert response.status_code == 500
+        restored_response = test_client.get(
+            f"/backend-api/api/llm/backends/{TEST_BACKEND_NAME}",
+            headers=auth_headers,
+        )
+        restored_backend = restored_response.json()["data"]
+        assert restored_backend["config"] == original_backend["config"]
+        assert load_attempts == 2
+
+    @pytest.mark.asyncio
     async def test_delete_backend(self, test_client, auth_headers):
         """测试删除后端"""
         ConfigLoader.save_config_with_backup = MagicMock()

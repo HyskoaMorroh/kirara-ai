@@ -230,6 +230,20 @@ def test_gacha_mention_rule_sits_between_chat_and_fallback():
     assert rules["game_gacha"].priority == PRIORITY_COMMAND
 
 
+def test_default_rule_docs_describe_the_shipped_priority_tiers():
+    """首次部署文档中的规则数量和优先级必须与实际内置规则保持一致。"""
+    project_root = Path(__file__).resolve().parents[1]
+    quickstart = (project_root / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    operations_guide = (
+        project_root / "docs" / "WORKFLOW_OPERATIONS_GUIDE.md"
+    ).read_text(encoding="utf-8")
+
+    assert "8 条内置规则" in quickstart
+    for document in (quickstart, operations_guide):
+        assert "| 15 |" in document
+        assert "game_gacha_mention" in document
+
+
 def test_both_gacha_rules_point_at_the_same_workflow():
     """精确与宽松两条规则必须指向同一个抽卡工作流。"""
     rules = {rule.rule_id: rule for rule in build_default_rules()}

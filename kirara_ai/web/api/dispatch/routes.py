@@ -230,7 +230,7 @@ async def create_rule():
         # 仅当这个 id 本来不存在时才删除：否则会连带把用户原有的同 id 规则
         # 一起从内存里抹掉（虽然上面的重复检查通常会先返回 400）。
         if not rule_existed_before:
-            registry.rules.pop(rule_data.rule_id, None)
+            registry.discard_rule(rule_data.rule_id)
         return jsonify({"error": str(e)}), 400
 
 
@@ -270,7 +270,7 @@ async def update_rule(rule_id: str):
         await registry.save_rules_async()
         return DispatchRuleResponse(rule=rule).model_dump()
     except Exception as e:
-        registry.rules[rule_id] = previous_rule
+        registry.restore_rule(previous_rule)
         return jsonify({"error": str(e)}), 400
 
 
@@ -293,11 +293,7 @@ async def delete_rule(rule_id: str):
         await registry.save_rules_async()
         return jsonify({"message": "Rule deleted successfully"})
     except Exception as e:
-        registry.rules[rule_id] = deleted_rule
-        if had_tombstone:
-            registry.deleted_preset_rule_ids.add(rule_id)
-        else:
-            registry.deleted_preset_rule_ids.discard(rule_id)
+        registry.restore_rule(deleted_rule, had_tombstone)
         return jsonify({"error": str(e)}), 400
 
 

@@ -472,21 +472,40 @@ const convertEdgesToWires = (): Wire[] => {
 
 // ==================== 数据更新函数 ====================
 
-const debounce = (func: () => void, delay: number) => {
+type DebouncedFunction = (() => Promise<void>) & { cancel: () => void }
+
+const debounce = (func: () => void, delay: number): DebouncedFunction => {
   let timer: number | null = null
-  return function (this: any, ...args: any[]) {
+  let resolvePending: (() => void) | null = null
+  const debounced = function (this: any, ...args: any[]) {
     return new Promise<void>((resolve) => {
       if (timer === null) {
+        resolvePending = resolve
         timer = window.setTimeout(() => {
-          func.apply(this, args)
-          timer = null
-          resolve()
+          try {
+            func.apply(this, args)
+          } finally {
+            timer = null
+            resolvePending?.()
+            resolvePending = null
+          }
         }, delay)
       } else {
         resolve()
       }
     })
+  } as DebouncedFunction
+
+  debounced.cancel = () => {
+    if (timer !== null) {
+      window.clearTimeout(timer)
+      timer = null
+      resolvePending?.()
+      resolvePending = null
+    }
   }
+
+  return debounced
 }
 // 更新区块数据
 const updateBlocks = debounce(() => {
@@ -546,6 +565,9 @@ const handleNodeConfigMutation = () => {
  * 保存前调用本函数可确保提交的是画布上的最新状态。
  */
 const flushGraphData = () => {
+  updateBlocks.cancel()
+  updateWires.cancel()
+
   const blocks = convertNodesToBlocks()
   const wires = convertEdgesToWires()
   intent.updateBlocks(blocks)
@@ -1294,17 +1316,29 @@ const initPropertiesData = () => {
  * 这里按引用识别「刚才自己发出去的那一份」；只有真正来自外部的数据
  * （首次加载、路由切换、重新拉取）才继续走初始化。
  */
-const isEchoOfOwnEmit = () =>
-  (lastEmittedBlocks !== null && props.blocks === lastEmittedBlocks) ||
-  (lastEmittedWires !== null && props.wires === lastEmittedWires)
+const isEchoOfOwnEmit = (
+  blocksChanged: boolean,
+  wiresChanged: boolean,
+  blockTypesChanged: boolean
+) =>
+  !blockTypesChanged &&
+  (!blocksChanged || (lastEmittedBlocks !== null && props.blocks === lastEmittedBlocks)) &&
+  (!wiresChanged || (lastEmittedWires !== null && props.wires === lastEmittedWires))
 
 // 监听 props 变化
 // 只观察引用与长度，不做 deep 比较：blocks/wires 的内部编辑总是由画布自己
 // 发起，父组件只会整体替换数组。
 watch(
   [() => props.blocks, () => props.wires, () => props.blockTypes],
-  () => {
-    if (isEchoOfOwnEmit()) return
+  ([blocks, wires, blockTypes], [previousBlocks, previousWires, previousBlockTypes]) => {
+    if (
+      isEchoOfOwnEmit(
+        blocks !== previousBlocks,
+        wires !== previousWires,
+        blockTypes !== previousBlockTypes
+      )
+    )
+      return
     initGraphData()
   }
 )
@@ -1395,6 +1429,8 @@ onMounted(() => {
 
 // 组件卸载
 onBeforeUnmount(() => {
+  updateBlocks.cancel()
+  updateWires.cancel()
   window.removeEventListener('beforeunload', beforeunloadHandler)
   document.removeEventListener('keydown', handleKeydown)
   if (compatibilityRetryTimer) {
@@ -1785,7 +1821,7 @@ const onDrop = (event: DragEvent) => {
       preset="card"
       title="工作流设置"
       class="settings-modal"
-      :style="{ width: '600px' }"
+      :style="{ width: 'min(600px, calc(100vw - 32px))' }"
     >
       <NForm
         ref="formRef"
@@ -1832,7 +1868,7 @@ const onDrop = (event: DragEvent) => {
       preset="card"
       title="快捷键与操作提示"
       class="settings-modal"
-      :style="{ width: '520px' }"
+      :style="{ width: 'min(520px, calc(100vw - 32px))' }"
     >
       <NList hoverable>
         <NListItem v-for="item in shortcutHints" :key="item.keys">
@@ -1873,7 +1909,7 @@ const onDrop = (event: DragEvent) => {
       preset="card"
       title="待处理问题"
       class="settings-modal"
-      :style="{ width: '560px' }"
+      :style="{ width: 'min(560px, calc(100vw - 32px))' }"
     >
       <NList hoverable clickable>
         <NListItem
@@ -1909,7 +1945,7 @@ const onDrop = (event: DragEvent) => {
       preset="card"
       title="导入结果"
       class="settings-modal"
-      :style="{ width: '560px' }"
+      :style="{ width: 'min(560px, calc(100vw - 32px))' }"
     >
       <NText depth="2">以下连线在当前版本中找不到对应端口，已跳过，其余内容导入成功：</NText>
       <NList>

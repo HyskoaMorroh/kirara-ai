@@ -165,17 +165,40 @@ async def update_backend(backend_name: str):
             models=request_data.models,
         )
 
+        original_backend = config.llms.api_backends[backend_index]
+        backend_was_loaded = backend_name in manager.backends
+
         # 如果原后端已启用，先卸载
-        if config.llms.api_backends[backend_index].enable:
+        if original_backend.enable and backend_was_loaded:
             await manager.unload_backend(backend_name)
 
         # 更新配置
         config.llms.api_backends[backend_index] = updated_backend
 
-        # 如果新配置启用则加载后端
-        if updated_backend.enable:
-            manager.load_backend(updated_backend.name)
-        ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
+        try:
+            # 如果新配置启用则加载后端
+            if updated_backend.enable:
+                manager.load_backend(updated_backend.name)
+            ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
+        except Exception:
+            try:
+                if updated_backend.name in manager.backends:
+                    await manager.unload_backend(updated_backend.name)
+
+                config.llms.api_backends[backend_index] = original_backend
+
+                if (
+                    original_backend.enable
+                    and backend_was_loaded
+                    and backend_name not in manager.backends
+                ):
+                    manager.load_backend(backend_name)
+            except Exception as rollback_error:
+                logger.opt(exception=rollback_error).error(
+                    f"Failed to roll back backend {backend_name} after update failure"
+                )
+            raise
+
         return LLMBackendResponse(data=updated_backend).model_dump()
     except Exception as e:
         logger.opt(exception=e).error("Failed to update backend")

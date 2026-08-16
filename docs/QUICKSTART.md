@@ -96,13 +96,14 @@ python -m kirara_ai
 
 ## 第 4 步：确认调度规则
 
-打开「工作流 → 调度规则」。全新部署会看到 6 条内置规则（`build_default_rules()`），优先级分四档，数字越大越先匹配：
+打开「工作流 → 调度规则」。全新部署会看到 8 条内置规则（`build_default_rules()`），优先级分五档，数字越大越先匹配：
 
 | 优先级 | 档位 | 内置规则 |
 | --- | --- | --- |
 | 100 | 系统命令 | `system_help`（`/help`）、`system_clear_memory`（`/清空记忆`） |
 | 60 | 精确指令 | `game_dice`（`.roll 1d100`）、`game_gacha`（「抽卡」「十连」「单抽」） |
 | 30 | 对话 | `chat_normal`（群聊 `/chat` 或 @机器人）、`chat_creative`（私聊直接对话） |
+| 15 | 宽松提及 | `game_gacha_mention`（群聊未用 `/chat` 也未 @机器人时，句中提到「抽卡」即触发） |
 | 0 | 兜底 | `fallback`（静默记录聊天内容，不回复） |
 
 `chat_normal` 与 `chat_creative` 都指向 `chat:normal`。想换成第 1 步里的某个模板，编辑规则把 `workflow_id` 改过去即可；你在 WebUI 里改过的规则会写入 `data/dispatch_rules/rules.yaml`，之后启动都以你的版本为准（`register_system_dispatch_rules` 在检测到已有规则文件时直接返回，不再注入默认值）。

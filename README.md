@@ -76,7 +76,7 @@
 
 ## 📚 文档导航
 
-仓库内的 `docs/` 下有四份面向不同阶段的说明文档：
+仓库内的 `docs/` 下有五份面向不同阶段的说明文档：
 
 | 文档 | 用途 |
 |---|---|
@@ -84,6 +84,7 @@
 | [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | 怎么看清系统在干什么：日志去向、LLM 请求追踪、工作流结构预检与全部 issue code、调度规则试运行与静态可达性分析，以及明确不存在的观测能力 |
 | [`docs/EXTENDING.md`](docs/EXTENDING.md) | 扩展开发：自定义 Block、插件、MCP 接入、预设 YAML、调度规则、事件总线、定时任务，并逐条写明当前**没有**的扩展点 |
 | [`docs/WORKFLOW_OPERATIONS_GUIDE.md`](docs/WORKFLOW_OPERATIONS_GUIDE.md) | 从部署到首条回复：模板选型、手动选模型、自动探测边界、默认规则、画布操作、排错顺序与扩展边界 |
+| [`docs/EXCELLENCE_DEPLOYMENT_GUIDE.md`](docs/EXCELLENCE_DEPLOYMENT_GUIDE.md) | 面向生产部署的品质路线图：现有能力的正确使用、画布体验基线、可靠性门禁，以及 Agents、Skills、Hooks、MCP 与可观测性的分阶段接入方式 |
 
 ## 🎨 主题与外观
 

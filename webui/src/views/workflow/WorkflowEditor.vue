@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
-import { routerKey, useRoute, useRouter } from 'vue-router'
-import { useMessage, NButton, NResult, NSpin } from 'naive-ui'
+import { ref, onMounted, watch, nextTick } from 'vue'
+import { routerKey, useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
+import { useMessage, useDialog, NButton, NResult, NSpin } from 'naive-ui'
 import {
   getWorkflow,
   createWorkflow,
@@ -17,6 +17,7 @@ import { mergeWorkflowConfig } from '@/components/workflow/workflow-data'
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+const dialog = useDialog()
 
 const workflowId = ref('')
 const groupId = ref('')
@@ -32,6 +33,42 @@ const loading = ref(false)
 const saving = ref(false)
 const loadError = ref<string | null>(null)
 const initialized = ref(false)
+
+/**
+ * 是否存在尚未保存的画布改动。
+ *
+ * 画布把编辑经 update:blocks / update:wires / update:config 回传到这里，
+ * 因此在这三个处理函数里置脏、在保存成功与重新载入后清零即可覆盖全部编辑路径。
+ * beforeunload 只能拦住关闭标签页与刷新，拦不住 Vue Router 的站内跳转；
+ * 而画布卸载时会取消 debounce 里待写入的那一次同步，改动会静默丢失，
+ * 所以这里补一道路由离开确认。
+ */
+const hasUnsavedChanges = ref(false)
+/** 载入工作流时会连带触发一轮回显，这段窗口内的回传不算用户编辑。 */
+let suppressDirtyTracking = false
+
+const markDirty = () => {
+  if (suppressDirtyTracking) return
+  hasUnsavedChanges.value = true
+}
+
+/**
+ * 在载入或保存前后暂停置脏。
+ *
+ * 载入会经 props 回流到画布并触发一次 update:blocks（例如为缺失坐标的节点
+ * 补上自动布局结果），保存成功后父组件也会把提交值写回；这些都不是用户编辑。
+ * 用 nextTick 等回显走完再恢复追踪。
+ */
+const withoutDirtyTracking = async (action: () => Promise<void> | void) => {
+  suppressDirtyTracking = true
+  try {
+    await action()
+  } finally {
+    await nextTick()
+    hasUnsavedChanges.value = false
+    suppressDirtyTracking = false
+  }
+}
 
 const handleSave = async (workflowName: string, workflowDesc: string, newWorkflowId: string) => {
   const [group, workflow] = newWorkflowId.split(':')
@@ -49,6 +86,10 @@ const handleSave = async (workflowName: string, workflowDesc: string, newWorkflo
   try {
     if (route.params.id) {
       await updateWorkflow(groupId.value, workflowId.value, data)
+      // 保存成功即视为已落盘。必须在下面的 router.push 之前清零，
+      // 否则改名跳转会被自己的路由守卫当成“带未保存改动离开”而弹确认。
+      suppressDirtyTracking = true
+      hasUnsavedChanges.value = false
       if (groupId.value !== group || workflowId.value !== workflow) {
         groupId.value = group
         workflowId.value = workflow
@@ -64,6 +105,8 @@ const handleSave = async (workflowName: string, workflowDesc: string, newWorkflo
       message.success('保存成功')
     } else {
       await createWorkflow(data.group_id, data.workflow_id, data)
+      suppressDirtyTracking = true
+      hasUnsavedChanges.value = false
       groupId.value = data.group_id
       workflowId.value = data.workflow_id
       description.value = data.description
@@ -77,6 +120,13 @@ const handleSave = async (workflowName: string, workflowDesc: string, newWorkflo
     message.error(`保存失败：${errorMessage}`)
   } finally {
     saving.value = false
+    // 等 props 回流带来的那一轮回显走完，再恢复置脏追踪，
+    // 避免把保存自身写回的值当成新的用户编辑。
+    await nextTick()
+    if (suppressDirtyTracking) {
+      hasUnsavedChanges.value = false
+      suppressDirtyTracking = false
+    }
   }
 }
 
@@ -129,23 +179,28 @@ const fetchBlockTypes = async () => {
 
 const handleBlocksChange = (newBlocks: any[]) => {
   blocks.value = newBlocks
+  markDirty()
 }
 
 const handleWiresChange = (newWires: any[]) => {
   wires.value = newWires
+  markDirty()
 }
 
 const handleConfigChange = (newConfig: WorkflowConfig) => {
   config.value = newConfig
+  markDirty()
 }
 
 const initializeEditor = async () => {
-  initialized.value = false
-  loadError.value = null
-  await Promise.all([fetchWorkflow(), fetchBlockTypes()])
-  if (!loadError.value) {
-    initialized.value = true
-  }
+  await withoutDirtyTracking(async () => {
+    initialized.value = false
+    loadError.value = null
+    await Promise.all([fetchWorkflow(), fetchBlockTypes()])
+    if (!loadError.value) {
+      initialized.value = true
+    }
+  })
 }
 
 onMounted(() => {
@@ -160,6 +215,35 @@ watch(
     void initializeEditor()
   }
 )
+
+/**
+ * 站内跳转前确认未保存的改动。
+ *
+ * beforeunload 只覆盖关闭标签页与刷新；点击侧边栏等站内跳转不会触发它，
+ * 而画布卸载时会取消 debounce 中待写入的同步，改动会静默丢失。
+ * 这里只在确实有未保存改动时拦一次，其余情况不打扰用户。
+ */
+onBeforeRouteLeave(() => {
+  if (!hasUnsavedChanges.value) return true
+
+  return new Promise<boolean>((resolve) => {
+    dialog.warning({
+      title: '离开工作流编辑器',
+      content: '当前工作流有未保存的改动，离开后这些改动会丢失。是否仍要离开？',
+      positiveText: '放弃改动并离开',
+      negativeText: '留在本页',
+      closable: false,
+      maskClosable: false,
+      onPositiveClick: () => {
+        // 用户已明确放弃，清零以免返回本页后又被拦一次
+        hasUnsavedChanges.value = false
+        resolve(true)
+      },
+      onNegativeClick: () => resolve(false),
+      onClose: () => resolve(false)
+    })
+  })
+})
 </script>
 
 <template>
