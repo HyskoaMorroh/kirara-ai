@@ -1,0 +1,67 @@
+name: 聊天 - 自定义脚本
+description: 用「基础：代码」节点写一小段 Python 处理消息，不接大模型也能回复。默认脚本统计消息字数并原样回显，改写 code 参数即可做关键词回复、格式转换、调用自家接口等。
+blocks:
+  - type: internal:get_message
+    name: get_message
+    params: {}
+    position:
+      x: 120
+      y: 120
+    connected_to:
+      - target: im_message_to_text
+        mapping:
+          from: msg
+          to: msg
+  - type: internal:im_message_to_text
+    name: im_message_to_text
+    params: {}
+    position:
+      x: 520
+      y: 120
+    connected_to:
+      - target: custom_script
+        mapping:
+          from: text
+          to: text
+  # 在这里写你自己的处理逻辑：必须定义一个名为 execute 的函数，
+  # 参数名与上面的「输入参数」一致，返回值是以「输出参数」名为键的字典。
+  - type: internal:code
+    name: custom_script
+    params:
+      inputs:
+        - name: text
+          label: 用户文本
+      outputs:
+        - name: reply
+          label: 回复文本
+      code: |
+        def execute(text):
+            content = (text or "").strip()
+            if not content:
+                return {"reply": "你没有说话哦。"}
+            return {"reply": f"你说了 {len(content)} 个字：{content}"}
+    position:
+      x: 920
+      y: 120
+    connected_to:
+      - target: text_to_im_message
+        mapping:
+          from: reply
+          to: text
+  - type: internal:text_to_im_message
+    name: text_to_im_message
+    params: {}
+    position:
+      x: 1320
+      y: 120
+    connected_to:
+      - target: send_message
+        mapping:
+          from: msg
+          to: msg
+  - type: internal:send_message
+    name: send_message
+    params: {}
+    position:
+      x: 1720
+      y: 120

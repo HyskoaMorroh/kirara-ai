@@ -1,6 +1,7 @@
 import { ref, computed } from 'vue'
 import type { BlockInstance, Wire, WorkflowConfig } from '@/api/workflow'
 import type { BlockType } from '@/api/block'
+import { deepClone } from '@/utils/deep-clone'
 
 // 定义意图（Intent）
 export interface WorkflowEditorIntent {
@@ -46,7 +47,27 @@ interface HistoryState {
   name: string
   description: string
   workflowId: string
+  config: WorkflowConfig
 }
+
+/**
+ * 工作流数据最终会被序列化为 JSON/YAML。历史记录必须拥有自己的副本，
+ * 否则节点配置或坐标的原地修改会反向污染已经保存的快照。
+ *
+ * 深拷贝由 `@/utils/deep-clone` 唯一实现：它在每一层都 `toRaw`，因此不会踩到
+ * `structuredClone` 遇 Vue 响应式代理抛 `DataCloneError` 的坑，也不像 JSON 克隆
+ * 那样丢失 Date / Map / Set 或在循环引用时抛错。
+ */
+const cloneHistoryValue = <T>(value: T): T => deepClone(value)
+
+/**
+ * 撤销栈上限。
+ *
+ * 每个快照都是 blocks / wires / config 的深拷贝，节点多的工作流单个快照
+ * 就有几十 KB。编辑器是长驻页面，不设上限意味着内存只增不减，所以按
+ * 先进先出丢弃最早的快照——用户实际用到的都是最近几十步。
+ */
+const MAX_HISTORY_DEPTH = 50
 
 class WorkflowEditorModel {
   private state = ref({
@@ -93,38 +114,53 @@ class WorkflowEditorModel {
   }
 
   // 提取：保存当前状态到 undo 栈
-  private pushToUndoStack() {
-    const currentState: HistoryState = {
-      blocks: [...this.state.value.blocks],
-      wires: [...this.state.value.wires],
+  private createHistoryState(): HistoryState {
+    return {
+      blocks: cloneHistoryValue(this.state.value.blocks),
+      wires: cloneHistoryValue(this.state.value.wires),
       name: this.state.value.name,
       description: this.state.value.description,
-      workflowId: this.state.value.workflowId
+      workflowId: this.state.value.workflowId,
+      config: cloneHistoryValue(this.state.value.config)
     }
+  }
+
+  private pushToUndoStack(clearRedo = true) {
+    const currentState = this.createHistoryState()
     this.state.value.undoStack.push(currentState)
-    this.state.value.redoStack = []
+    // 超出上限时丢弃最早的快照，保证内存占用有界
+    if (this.state.value.undoStack.length > MAX_HISTORY_DEPTH) {
+      this.state.value.undoStack.splice(
+        0,
+        this.state.value.undoStack.length - MAX_HISTORY_DEPTH
+      )
+    }
+    if (clearRedo) {
+      this.state.value.redoStack = []
+    }
   }
 
   // 提取：保存当前状态到 redo 栈
   private pushToRedoStack() {
-    const currentState: HistoryState = {
-      blocks: [...this.state.value.blocks],
-      wires: [...this.state.value.wires],
-      name: this.state.value.name,
-      description: this.state.value.description,
-      workflowId: this.state.value.workflowId
-    }
+    const currentState = this.createHistoryState()
     this.state.value.redoStack.push(currentState)
+    if (this.state.value.redoStack.length > MAX_HISTORY_DEPTH) {
+      this.state.value.redoStack.splice(
+        0,
+        this.state.value.redoStack.length - MAX_HISTORY_DEPTH
+      )
+    }
   }
 
   // 提取：恢复状态
   private restoreState(state: HistoryState) {
     Object.assign(this.state.value, {
-      blocks: state.blocks,
-      wires: state.wires,
+      blocks: cloneHistoryValue(state.blocks),
+      wires: cloneHistoryValue(state.wires),
       name: state.name,
       description: state.description,
-      workflowId: state.workflowId
+      workflowId: state.workflowId,
+      config: cloneHistoryValue(state.config)
     })
   }
 
@@ -140,7 +176,11 @@ class WorkflowEditorModel {
           name: data.name || '',
           description: data.description || '',
           workflowId: data.workflowId || '',
-          config: data.config || {}
+          config: data.config || {},
+          // 这是一个单例 store，切换工作流时会再次 initialize。若不清空历史，
+          // Ctrl+Z 会把另一张工作流的节点恢复到当前画布上。
+          undoStack: [],
+          redoStack: []
         })
       })
     },
@@ -182,8 +222,9 @@ class WorkflowEditorModel {
     redo: () => {
       if (this.state.value.redoStack.length === 0) return
 
-      this.pushToUndoStack()
       const nextState = this.state.value.redoStack.pop()!
+      // 重做时要保留剩余的 redo 历史；普通编辑才会清空 redo 栈。
+      this.pushToUndoStack(false)
       this.restoreState(nextState)
     },
 

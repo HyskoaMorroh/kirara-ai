@@ -32,24 +32,31 @@ import {
   HardwareChipOutline
 } from '@vicons/ionicons5'
 import LLMStatistics from '@/components/LLMStatistics.vue'
+import {
+  getBrowserLocalStorage,
+  readJsonRecord,
+  readStorageItem,
+  writeStorageItem
+} from '@/utils/safe-storage'
 
 const router = useRouter()
 const appStore = useAppStore()
 const message = useMessage()
 
 // 控制引导卡片的显示
-const showGuide = ref(localStorage.getItem('hideGuide') !== 'true')
+const getGuideStorage = () => getBrowserLocalStorage()
+const showGuide = ref(readStorageItem(getGuideStorage(), 'hideGuide') !== 'true')
 
 // 关闭引导卡片
 const hideGuide = () => {
   showGuide.value = false
-  localStorage.setItem('hideGuide', 'true')
+  writeStorageItem(getGuideStorage(), 'hideGuide', 'true')
 }
 
 // 计算每个步骤的完成状态
 const stepsStatus = computed(() => {
   // 从 localStorage 获取已完成的步骤
-  const completedSteps = JSON.parse(localStorage.getItem('completedSteps') || '{}')
+  const completedSteps = readJsonRecord(getGuideStorage(), 'completedSteps')
 
   const steps = [
     {
@@ -99,9 +106,9 @@ const currentStep = computed(() => {
 
 const handleStepClick = (step: number, path: string) => {
   // 标记当前步骤为已完成
-  const completedSteps = JSON.parse(localStorage.getItem('completedSteps') || '{}')
+  const completedSteps = readJsonRecord(getGuideStorage(), 'completedSteps')
   completedSteps[stepsStatus.value[step].key] = true
-  localStorage.setItem('completedSteps', JSON.stringify(completedSteps))
+  writeStorageItem(getGuideStorage(), 'completedSteps', JSON.stringify(completedSteps))
 
   // 跳转到目标页面
   router.push(path)
@@ -354,7 +361,7 @@ watch(
                       :color="getCPUColor(appStore.systemStatus.cpuUsage)"
                       :rail-color="getRailColor()"
                       :height="8"
-                      :border-radius="4"
+                      border-radius="var(--radius-pill)"
                       :show-indicator="false"
                       class="resource-progress"
                     />
@@ -381,7 +388,7 @@ watch(
                       :color="getMemoryColor(appStore.systemStatus.memoryUsage.percent * 100)"
                       :rail-color="getRailColor()"
                       :height="8"
-                      :border-radius="4"
+                      border-radius="var(--radius-pill)"
                       :show-indicator="false"
                       class="resource-progress"
                     />
@@ -454,7 +461,7 @@ watch(
   min-height: 100vh;
   background: linear-gradient(
     135deg,
-    var(--body-bg-color) 0%,
+    var(--bg-color) 0%,
     rgba(var(--primary-color-rgb), 0.05) 100%
   );
 }
@@ -465,7 +472,7 @@ watch(
 .system-info-card {
   background: rgba(var(--card-bg-color-rgb), 0.8);
   backdrop-filter: blur(20px);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.05);
   overflow: hidden;
   border: 1px solid rgba(var(--primary-color-rgb), 0.1);
@@ -504,7 +511,7 @@ watch(
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: rgba(var(--primary-color-rgb), 0.1);
   color: var(--primary-color);
   transition: all 0.3s ease;
@@ -548,7 +555,7 @@ watch(
   align-items: center;
   gap: 16px;
   padding: 16px;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: rgba(var(--primary-color-rgb), 0.03);
   transition: all 0.3s ease;
 }
@@ -564,7 +571,8 @@ watch(
   justify-content: center;
   width: 48px;
   height: 48px;
-  border-radius: 12px;
+  /* 图标底板嵌在 .status-item（md 档）内部，按嵌套原则降一档到 sm */
+  border-radius: var(--radius-sm);
   background: linear-gradient(
     135deg,
     rgba(var(--primary-color-rgb), 0.1) 0%,
@@ -676,7 +684,7 @@ watch(
 /* 系统信息卡片样式 */
 .info-item {
   padding: 16px;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: rgba(var(--primary-color-rgb), 0.03);
   transition: all 0.3s ease;
 }

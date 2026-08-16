@@ -1,0 +1,158 @@
+name: 聊天 - 敏感词替换
+description: 在把模型回复发出去之前，把指定的词替换成安全表述，适合公开群聊的合规需求。请在「基础：替换文本」节点里填写要替换的词，在旁边的文本节点里填写替换后的内容，可按需串接多个替换节点。
+blocks:
+  - type: internal:get_message
+    name: get_message
+    params: {}
+    position:
+      x: 120
+      y: 120
+    connected_to:
+      - target: toggle_edit_state
+        mapping:
+          from: sender
+          to: sender
+      - target: query_memory
+        mapping:
+          from: sender
+          to: chat_sender
+      - target: chat_message_constructor
+        mapping:
+          from: msg
+          to: user_msg
+      - target: chat_memory_store
+        mapping:
+          from: msg
+          to: user_msg
+  - type: internal:toggle_edit_state
+    name: toggle_edit_state
+    params:
+      is_editing: true
+    position:
+      x: 520
+      y: 120
+  - type: internal:chat_memory_query
+    name: query_memory
+    params:
+      scope_type: group
+    position:
+      x: 520
+      y: 540
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: memory_content
+          to: memory_content
+  - type: internal:text_block
+    name: user_prompt
+    params:
+      text: '{user_name}说：{user_msg}'
+    position:
+      x: 120
+      y: 540
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: text
+          to: user_prompt_format
+  - type: internal:text_block
+    name: system_prompt
+    params:
+      text: "# Information\n以下是当前的系统信息：\n当前日期时间：{current_date_time}\n\n# Memories\n以下是之前发生过的对话记录。\n-- 对话记录开始 --\n{memory_content}\n-- 对话记录结束 --\n\n# Rules\n1. 这是公开群聊，请保持中立、克制，不要讨论敏感话题。\n2. 不确定的信息要说明不确定，不要编造。\n\n接下来，请基于以上信息回答用户的问题。"
+    position:
+      x: 120
+      y: 960
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: text
+          to: system_prompt_format
+  - type: internal:chat_message_constructor
+    name: chat_message_constructor
+    params: {}
+    position:
+      x: 920
+      y: 120
+    connected_to:
+      - target: llm_chat
+        mapping:
+          from: llm_msg
+          to: prompt
+  # model_name 留空：请在编辑器的下拉框里选择本机已配置的模型。
+  - type: internal:chat_completion
+    name: llm_chat
+    params:
+      model_name: ''
+    position:
+      x: 1320
+      y: 120
+    connected_to:
+      - target: llm_response_to_text
+        mapping:
+          from: resp
+          to: response
+      - target: chat_memory_store
+        mapping:
+          from: resp
+          to: llm_resp
+  - type: internal:llm_response_to_text
+    name: llm_response_to_text
+    params: {}
+    position:
+      x: 1720
+      y: 120
+    connected_to:
+      - target: replace_sensitive_word
+        mapping:
+          from: text
+          to: text
+  # 替换后的内容。想换成别的说法时改这里即可。
+  - type: internal:text_block
+    name: safe_word
+    params:
+      text: '[已屏蔽]'
+    position:
+      x: 1720
+      y: 540
+    connected_to:
+      - target: replace_sensitive_word
+        mapping:
+          from: text
+          to: new_text
+  # variable 填写要被替换掉的词。需要过滤多个词时，复制本节点串联即可。
+  - type: internal:text_replace_block
+    name: replace_sensitive_word
+    params:
+      variable: 敏感词
+    position:
+      x: 2120
+      y: 120
+    connected_to:
+      - target: text_to_im_message
+        mapping:
+          from: text
+          to: text
+  - type: internal:text_to_im_message
+    name: text_to_im_message
+    params: {}
+    position:
+      x: 2520
+      y: 120
+    connected_to:
+      - target: send_message
+        mapping:
+          from: msg
+          to: msg
+  - type: internal:send_message
+    name: send_message
+    params: {}
+    position:
+      x: 2920
+      y: 120
+  - type: internal:chat_memory_store
+    name: chat_memory_store
+    params:
+      scope_type: group
+    position:
+      x: 1320
+      y: 540

@@ -623,13 +623,13 @@ const getStateType = (state: string) => {
 // 获取状态对应的颜色
 const getStateColor = (state: string) => {
   const colorMap: Record<string, string> = {
-    connected: '#18a058',
-    connecting: '#2080f0',
-    disconnected: '#d03050',
-    disconnecting: '#f0a020',
-    error: '#d03050'
+    connected: 'var(--success-color, #18a058)',
+    connecting: 'var(--primary-color, #2080f0)',
+    disconnected: 'var(--error-color, #d03050)',
+    disconnecting: 'var(--warning-color, #f0a020)',
+    error: 'var(--error-color, #d03050)'
   }
-  return colorMap[state] || '#d03050'
+  return colorMap[state] || 'var(--error-color, #d03050)'
 }
 
 // 页面加载时初始化
@@ -645,7 +645,8 @@ onMounted(() => {
 }
 
 .main-card {
-  border-radius: 12px;
+  /* 页面级主卡片，用大型表面档 */
+  border-radius: var(--radius-lg);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
   overflow: hidden;
 }
@@ -653,7 +654,7 @@ onMounted(() => {
 .mcp-header {
   margin-bottom: 24px;
   padding-bottom: 16px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  border-bottom: 1px solid var(--border-color);
 }
 
 .mcp-title {
@@ -666,7 +667,7 @@ onMounted(() => {
 
 .title-icon {
   margin-right: 12px;
-  color: #2080f0;
+  color: var(--primary-color, #2080f0);
 }
 
 .mcp-description {
@@ -687,33 +688,34 @@ onMounted(() => {
 .stat-icon {
   width: 48px;
   height: 48px;
-  border-radius: 12px;
-  background-color: rgba(32, 128, 240, 0.1);
+  /* 图标底板嵌在统计卡（md 档）内部，按嵌套原则降一档到 sm */
+  border-radius: var(--radius-sm);
+  background-color: rgba(var(--primary-color-rgb), 0.1);
   display: flex;
   align-items: center;
   justify-content: center;
   margin-right: 16px;
-  color: #2080f0;
+  color: var(--primary-color, #2080f0);
 }
 
 .stat-icon.success {
-  background-color: rgba(24, 160, 88, 0.1);
-  color: #18a058;
+  background-color: rgba(var(--success-color-rgb), 0.1);
+  color: var(--success-color, #18a058);
 }
 
 .stat-icon.info {
-  background-color: rgba(32, 128, 240, 0.1);
-  color: #2080f0;
+  background-color: rgba(var(--primary-color-rgb), 0.1);
+  color: var(--primary-color, #2080f0);
 }
 
 .stat-icon.warning {
-  background-color: rgba(240, 160, 32, 0.1);
-  color: #f0a020;
+  background-color: rgba(var(--warning-color-rgb), 0.1);
+  color: var(--warning-color, #f0a020);
 }
 
 .stat-icon.error {
-  background-color: rgba(208, 48, 80, 0.1);
-  color: #d03050;
+  background-color: rgba(var(--error-color-rgb), 0.1);
+  color: var(--error-color, #d03050);
 }
 
 .stat-content {
@@ -740,7 +742,7 @@ onMounted(() => {
 }
 
 .action-button {
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   transition: all 0.2s ease;
 }
 
@@ -756,21 +758,21 @@ onMounted(() => {
 
 .search-input {
   width: 220px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 .filter-select {
   width: 120px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 .filter-button {
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 .server-list-card {
   margin-bottom: 24px;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
 }
 
 .empty-state {
@@ -788,7 +790,7 @@ onMounted(() => {
 .server-card {
   transition: all 0.3s ease;
   height: 100%;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   position: relative;
   overflow: hidden;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
@@ -808,19 +810,19 @@ onMounted(() => {
 }
 
 .server-status-indicator.success {
-  background-color: #18a058;
+  background-color: var(--success-color, #18a058);
 }
 
 .server-status-indicator.info {
-  background-color: #2080f0;
+  background-color: var(--primary-color, #2080f0);
 }
 
 .server-status-indicator.warning {
-  background-color: #f0a020;
+  background-color: var(--warning-color, #f0a020);
 }
 
 .server-status-indicator.error {
-  background-color: #d03050;
+  background-color: var(--error-color, #d03050);
 }
 
 .server-card-header {
@@ -828,7 +830,7 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 16px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  border-bottom: 1px solid var(--border-color);
 }
 
 .server-card-title {
@@ -885,9 +887,9 @@ onMounted(() => {
 
 .command-code,
 .url-code {
-  background-color: rgba(0, 0, 0, 0.04);
+  background-color: var(--node-header-bg);
   padding: 4px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   font-family: monospace;
   white-space: nowrap;
   overflow: hidden;
@@ -917,11 +919,11 @@ onMounted(() => {
 
 .tool-item {
   transition: all 0.2s ease;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 .tool-item:hover {
-  background-color: rgba(0, 0, 0, 0.02);
+  background-color: var(--node-muted-bg);
 }
 
 .empty-tools,
@@ -939,7 +941,8 @@ onMounted(() => {
 
 .server-modal {
   width: 600px;
-  border-radius: 12px;
+  /* 模态属于大型表面档，与全局 .n-modal 保持一致 */
+  border-radius: var(--radius-lg);
 }
 
 .connection-type-buttons {
@@ -949,24 +952,24 @@ onMounted(() => {
 
 .connection-type-button {
   flex: 1;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   transition: all 0.2s ease;
 }
 
 .stat-value.success {
-  color: #18a058;
+  color: var(--success-color, #18a058);
 }
 
 .stat-value.info {
-  color: #2080f0;
+  color: var(--primary-color, #2080f0);
 }
 
 .stat-value.warning {
-  color: #f0a020;
+  color: var(--warning-color, #f0a020);
 }
 
 .stat-value.error {
-  color: #d03050;
+  color: var(--error-color, #d03050);
 }
 
 @keyframes fade-in {

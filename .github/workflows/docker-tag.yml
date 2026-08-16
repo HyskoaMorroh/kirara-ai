@@ -8,8 +8,48 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: docker-tag-${{ inputs.image_tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
 jobs:
+  verify:
+    # 手动发版同样要过门禁：镜像 push 到 Docker Hub 之后无法收回，而这个
+    # workflow 从默认分支的当前状态构建，不保证正好是某个通过了 CI 的 commit。
+    name: Pre-publish verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # uv.lock 指向 USTC 镜像，GitHub runner 在境外访问不稳定；--frozen 仍按
+      # lock 里的 sha256 校验每个包，换索引不影响可复现性，只影响下载速度。
+      # 放在 job 级，sync 与 run 两步都能生效。
+      UV_DEFAULT_INDEX: https://pypi.org/simple
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --python 3.11
+
+      - name: Run backend suite and release contracts
+        run: uv run --frozen python -m pytest ./tests -q
+
   docker:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - name: Set output
@@ -29,7 +69,7 @@ jobs:
           echo ${{ steps.vars.outputs.tag }}
       -
         name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       -
         name: Resolve image name
         id: image
@@ -42,22 +82,22 @@ jobs:
           echo "Resolved image name: $IMAGE_NAME"
       -
         name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       -
         name: qemu workaround
         run: docker run --rm --privileged multiarch/qemu-user-static --reset -p yes -c yes
       -
         name: Login to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       -
         name: Build and push
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true

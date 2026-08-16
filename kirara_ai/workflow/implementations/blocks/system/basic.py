@@ -10,6 +10,7 @@ from kirara_ai.workflow.core.block.input_output import Input
 
 class TextBlock(Block):
     name = "text_block"
+    description = "输出一段固定文本，常用于填写系统提示词、模板等固定内容。"
     outputs = {"text": Output("text", "文本", str, "文本")}
 
     def __init__(
@@ -24,11 +25,12 @@ class TextBlock(Block):
 # 拼接文本
 class TextConcatBlock(Block):
     name = "text_concat_block"
+    description = "把两段文本按先后顺序直接拼接成一段。"
     inputs = {
-        "text1": Input("text1", "文本1", str, "文本1"),
-        "text2": Input("text2", "文本2", str, "文本2"),
+        "text1": Input("text1", "文本1", str, "拼接后位于前面的文本"),
+        "text2": Input("text2", "文本2", str, "拼接后位于后面的文本"),
     }
-    outputs = {"text": Output("text", "拼接后的文本", str, "拼接后的文本")}
+    outputs = {"text": Output("text", "拼接后的文本", str, "拼接后的完整文本")}
 
     def execute(self, text1: str, text2: str) -> Dict[str, Any]:
         return {"text": text1 + text2}
@@ -37,11 +39,12 @@ class TextConcatBlock(Block):
 # 替换输入文本中的某一块文字为变量
 class TextReplaceBlock(Block):
     name = "text_replace_block"
+    description = "把原始文本中指定的占位文字全部替换为输入的新内容。"
     inputs = {
-        "text": Input("text", "原始文本", str, "原始文本"),
-        "new_text": Input("new_text", "新文本", Any, "新文本"),  # type: ignore
+        "text": Input("text", "原始文本", str, "待处理的原始文本"),
+        "new_text": Input("new_text", "新文本", Any, "用于替换占位文字的新内容"),  # type: ignore
     }
-    outputs = {"text": Output("text", "替换后的文本", str, "替换后的文本")}
+    outputs = {"text": Output("text", "替换后的文本", str, "完成替换后的文本")}
 
     def __init__(
         self, variable: Annotated[str, ParamMeta(label="被替换的文本", description="被替换的文本")]
@@ -57,8 +60,9 @@ class TextReplaceBlock(Block):
 # 正则表达式提取
 class TextExtractByRegexBlock(Block):
     name = "text_extract_by_regex_block"
-    inputs = {"text": Input("text", "原始文本", str, "原始文本")}
-    outputs = {"text": Output("text", "提取后的文本", str, "提取后的文本")}
+    description = "用正则表达式从文本中提取第一个捕获组的内容，未匹配时输出空字符串。"
+    inputs = {"text": Input("text", "原始文本", str, "待提取的原始文本")}
+    outputs = {"text": Output("text", "提取后的文本", str, "第一个捕获组匹配到的内容")}
     def __init__(
         self, regex: Annotated[str, ParamMeta(label="正则表达式", description="正则表达式")]
     ):
@@ -78,6 +82,7 @@ class TextExtractByRegexBlock(Block):
 # 获取当前时间
 class CurrentTimeBlock(Block):
     name = "current_time_block"
+    description = "输出服务器当前时间，格式为 YYYY-MM-DD HH:MM:SS。"
     outputs = {"time": Output("time", "当前时间", str, "当前时间")}
 
     def execute(self) -> Dict[str, Any]:
@@ -87,6 +92,7 @@ class CurrentTimeBlock(Block):
 # 清除 Markdown 标记，输出适合 IM 平台阅读的纯文本
 class TextStripMarkdownBlock(Block):
     name = "text_strip_markdown_block"
+    description = "去除 Markdown 标记，把模型回复整理成适合聊天平台阅读的纯文本。"
     inputs = {"text": Input("text", "原始文本", str, "含 Markdown 标记的文本")}
     outputs = {"text": Output("text", "纯文本", str, "去除 Markdown 标记后的文本")}
 
@@ -179,6 +185,7 @@ class TextStripMarkdownBlock(Block):
 
 class CodeBlock(Block):
     name = "code_block"
+    description = "运行自定义 Python 代码，入口为 execute(...) 函数，输入输出端口可自行增删。"
     inputs = {}
     outputs = {}
 

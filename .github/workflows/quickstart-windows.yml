@@ -71,12 +71,12 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         ref: ${{ github.event.release.tag_name || github.sha }}
 
     - name: Set up Python for building
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.11'
         cache: 'pip'
@@ -104,6 +104,29 @@ jobs:
         cd ${{ env.DIST_DIR }}
         ./WPy64-31320/python/python.exe -m pip install "${{ github.workspace }}/dist/${{ env.WHEEL_FILE }}"
         ./WPy64-31320/python/python.exe -m pip install --upgrade pip
+
+    - name: Verify the bundled interpreter can import the shipped wheel
+      # 快速启动包是「解释器 + wheel」的组合，二者任一坏了用户开箱即崩。
+      # 在打包用的 WinPython 里真的 import 一次，并确认 package-data 到位
+      # （/backup 页面与预设工作流都曾缺失过，靠的就是这类断言兜住）。
+      #
+      # working-directory 必须离开 github.workspace：仓库根下就有 kirara_ai/
+      # 源码目录，`python -` 会把 cwd 放进 sys.path[0]，在 workspace 里跑会
+      # 导入源码而不是装好的 wheel，检查就白做了。
+      working-directory: ${{ env.DIST_DIR }}
+      env:
+        PYTHONUTF8: "1"
+      run: |
+        $verify = @'
+        import importlib.util, pathlib
+        import kirara_ai
+        root = pathlib.Path(next(iter(importlib.util.find_spec("kirara_ai").submodule_search_locations)))
+        assert (root / "web" / "static" / "backup.html").is_file(), "backup.html missing"
+        presets = sorted((root / "workflow" / "presets" / "chat").glob("*.yaml"))
+        assert any(p.name == "normal_multimodal.yaml" for p in presets), presets
+        print(f"quickstart wheel OK: {kirara_ai.__file__}, {len(presets)} chat presets")
+        '@
+        $verify | & "${{ env.DIST_DIR }}/WPy64-31320/python/python.exe" -
 
     - name: Download and setup FFmpeg
       run: |
@@ -134,7 +157,7 @@ jobs:
         Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "${{ env.DIST_DIR }}/【语音功能依赖】vc_redist.x64.exe"
 
     - name: Set up Node.js for Web UI
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v6
       with:
         node-version: '20'
         cache: 'yarn'
@@ -147,6 +170,8 @@ jobs:
       run: |
         corepack enable
         yarn install --frozen-lockfile
+        yarn type-check
+        yarn test:unit
         yarn build
 
     - name: Setup Web UI
@@ -161,7 +186,7 @@ jobs:
         Copy-Item -Path "${{ github.workspace }}/data" -Destination "${{ env.DIST_DIR }}/" -Recurse
 
     - name: Upload workflow artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: ${{ env.PACKAGE_NAME }}
         path: ${{ env.DIST_DIR }}

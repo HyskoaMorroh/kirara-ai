@@ -42,8 +42,9 @@ class GenerateHelp(Block):
     """生成帮助信息 block"""
 
     name = "generate_help"
+    description = "根据当前已启用的调度规则自动生成帮助文本，新增规则后无需手工维护帮助内容。"
     inputs = {}  # 不需要输入
-    outputs = {"response": Output("response", "帮助信息", IMMessage, "帮助信息")}
+    outputs = {"response": Output("response", "帮助信息", IMMessage, "自动汇总的帮助消息")}
     container: DependencyContainer
 
     def execute(self) -> Dict[str, Any]:
@@ -55,7 +56,18 @@ class GenerateHelp(Block):
         commands: Dict[str, List[Dict[str, Any]]] = {}
         for rule in rules:
             # 从 workflow 名称获取类别
-            category = rule.workflow_id.split(":")[0].lower()
+            is_fallback = any(
+                simple_rule.type == "fallback"
+                for group in rule.rule_groups
+                for simple_rule in group.rules
+            )
+            # Fallback rules are operational safety nets, not user commands.
+            if is_fallback and not rule.metadata.get("visible_in_help", False):
+                continue
+
+            # Metadata describes user-facing categories more accurately than a
+            # workflow ID prefix (for example chat:memory_store).
+            category = rule.metadata.get("category") or rule.workflow_id.split(":")[0].lower()
             if category not in commands:
                 commands[category] = []
 
@@ -80,7 +92,8 @@ class GenerateHelp(Block):
 
         for category, cmds in sorted(commands.items()):
             help_text += f"📑 {category.upper()}\n"
-            for cmd in sorted(cmds, key=lambda x: x["name"]):
+            # get_active_rules() is already in real execution order.
+            for cmd in cmds:
                 help_text += f"🔸 {cmd['name']}\n"
                 help_text += f"  触发条件: {cmd['format']}\n"
                 if cmd["description"]:

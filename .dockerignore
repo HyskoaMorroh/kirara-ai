@@ -21,6 +21,12 @@ dist
 .pytest_cache
 .mypy_cache
 
+# 本机构建/测试缓存（vue-tsc、node、pytest 的临时目录），不参与镜像构建
+.build-tmp
+.npm-cache
+.pytest-tmp
+*.tsbuildinfo
+
 # 测试代码不参与运行时
 tests
 pytest.ini
@@ -38,6 +44,7 @@ data/auto_detect_state.json
 data/memory/*.json
 data/media/metadata
 data/media/files
+data/workflows/**/test-workflow-new.yaml
 
 # WebUI 构建产物由 Dockerfile 从受版本控制的 webui 源码生成，无需带入
 web/assets

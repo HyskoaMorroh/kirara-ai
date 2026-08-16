@@ -1,6 +1,7 @@
 from kirara_ai.workflow.core.workflow.registry import WorkflowRegistry
 from kirara_ai.workflow.implementations.factories.default_factory import DefaultWorkflowFactory
 from kirara_ai.workflow.implementations.factories.game_factory import GameWorkflowFactory
+from kirara_ai.workflow.implementations.factories.memory_factory import MemoryWorkflowFactory
 from kirara_ai.workflow.implementations.factories.system_factory import SystemWorkflowFactory
 
 
@@ -26,4 +27,9 @@ def register_system_workflows(registry: WorkflowRegistry):
     # 聊天相关工作流
     registry.register_preset_workflow(
         "chat", "normal", DefaultWorkflowFactory.create_default_workflow()
+    )
+    # 兜底规则引用的「只记录不回复」工作流。原先仅以 data/workflows 下的
+    # YAML 形式存在，而 data 目录不随 wheel 分发，pip 安装后会找不到它。
+    registry.register_preset_workflow(
+        "chat", "memory_store", MemoryWorkflowFactory.create_memory_store_workflow()
     )

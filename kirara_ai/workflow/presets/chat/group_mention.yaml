@@ -1,0 +1,173 @@
+name: 群聊 - 提及触发
+description: 只在群里被 @ 时才回答。配合调度规则里的「@机器人」条件使用：先把消息转成纯文本并去掉 @ 符号，再交给模型，避免把「@机器人」本身当成提问内容。
+blocks:
+  - type: internal:get_message
+    name: get_message
+    params: {}
+    position:
+      x: 120
+      y: 120
+    connected_to:
+      - target: toggle_edit_state
+        mapping:
+          from: sender
+          to: sender
+      - target: query_memory
+        mapping:
+          from: sender
+          to: chat_sender
+      - target: chat_message_constructor
+        mapping:
+          from: msg
+          to: user_msg
+      - target: chat_memory_store
+        mapping:
+          from: msg
+          to: user_msg
+      - target: im_message_to_text
+        mapping:
+          from: msg
+          to: msg
+  - type: internal:toggle_edit_state
+    name: toggle_edit_state
+    params:
+      is_editing: true
+    position:
+      x: 520
+      y: 120
+  - type: internal:chat_memory_query
+    name: query_memory
+    params:
+      scope_type: group
+    position:
+      x: 520
+      y: 540
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: memory_content
+          to: memory_content
+  # 把整条群消息（可能含图片、表情）压成纯文本，便于后续清理 @ 标记。
+  - type: internal:im_message_to_text
+    name: im_message_to_text
+    params: {}
+    position:
+      x: 520
+      y: 960
+    connected_to:
+      - target: strip_mention
+        mapping:
+          from: text
+          to: text
+  # 替换成空串，等于删掉 @ 符号。
+  - type: internal:text_block
+    name: empty_text
+    params:
+      text: ''
+    position:
+      x: 520
+      y: 1380
+    connected_to:
+      - target: strip_mention
+        mapping:
+          from: text
+          to: new_text
+  - type: internal:text_replace_block
+    name: strip_mention
+    params:
+      variable: '@'
+    position:
+      x: 920
+      y: 960
+    connected_to:
+      - target: build_user_prompt
+        mapping:
+          from: text
+          to: text2
+  - type: internal:text_block
+    name: user_prompt_prefix
+    params:
+      text: '{user_name}在群里问：'
+    position:
+      x: 920
+      y: 1380
+    connected_to:
+      - target: build_user_prompt
+        mapping:
+          from: text
+          to: text1
+  - type: internal:text_concat_block
+    name: build_user_prompt
+    params: {}
+    position:
+      x: 1320
+      y: 960
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: text
+          to: user_prompt_format
+  - type: internal:text_block
+    name: system_prompt
+    params:
+      text: "# Information\n以下是当前的系统信息：\n当前日期时间：{current_date_time}\n\n# Memories\n以下是本群之前发生过的对话记录。\n-- 对话记录开始 --\n{memory_content}\n-- 对话记录结束 --\n\n# Rules\n1. 这是群聊，你只在被人 @ 时说话，回答尽量简短，不要长篇大论。\n2. 只回答当前这位群友的问题，不要替其他人发言。\n\n接下来，请基于以上信息回答这位群友的问题。"
+    position:
+      x: 120
+      y: 540
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: text
+          to: system_prompt_format
+  - type: internal:chat_message_constructor
+    name: chat_message_constructor
+    params: {}
+    position:
+      x: 1720
+      y: 120
+    connected_to:
+      - target: llm_chat
+        mapping:
+          from: llm_msg
+          to: prompt
+  # model_name 留空：请在编辑器的下拉框里选择本机已配置的模型。
+  - type: internal:chat_completion
+    name: llm_chat
+    params:
+      model_name: ''
+    position:
+      x: 2120
+      y: 120
+    connected_to:
+      - target: chat_response_converter
+        mapping:
+          from: resp
+          to: resp
+      - target: chat_memory_store
+        mapping:
+          from: resp
+          to: llm_resp
+  - type: internal:chat_response_converter
+    name: chat_response_converter
+    params: {}
+    position:
+      x: 2520
+      y: 120
+    connected_to:
+      - target: send_message
+        mapping:
+          from: msg
+          to: msg
+  - type: internal:send_message
+    name: send_message
+    params: {}
+    position:
+      x: 2920
+      y: 120
+  - type: internal:chat_memory_store
+    name: chat_memory_store
+    params:
+      scope_type: group
+    position:
+      x: 2520
+      y: 540

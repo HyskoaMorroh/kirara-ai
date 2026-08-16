@@ -1,23 +1,35 @@
 import asyncio
 import json
 import os
+import random
+import threading
 from datetime import datetime
 from typing import Any, Dict, Optional
 
 from kirara_ai.config import DATA_PATH
 from kirara_ai.config.config_loader import CONFIG_FILE, ConfigLoader
-from kirara_ai.config.global_config import GlobalConfig, ModelConfig
+from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.llm.adapter import AutoDetectModelsProtocol
 from kirara_ai.llm.llm_manager import LLMManager
-from kirara_ai.llm.model_types import LLMAbility, ModelType
 from kirara_ai.logger import get_logger
+from kirara_ai.scheduler.model_catalog import model_catalogs_equal, normalize_detected_models
 
 # 记录每个后端上次自动检测时间的状态文件
 STATE_FILE = os.path.join(DATA_PATH, "auto_detect_state.json")
 
 # 后台循环的检查周期（秒），每 24 小时检查一次是否有到期的后端
 CHECK_INTERVAL_SECONDS = 86400
+
+# 启动后首次检查前的等待时间（秒）。原先固定为 60 秒，且 `_is_due` 对"从未
+# 检测过"的后端一律返回 True，于是全新安装会在启动 60 秒后同时探测所有启用
+# 的后端。这里加一段随机抖动，把首轮探测分散开，减少对上游接口的瞬时压力。
+STARTUP_DELAY_SECONDS = 60
+STARTUP_JITTER_SECONDS = 300
+
+# 全局的配置写锁。TaskScheduler 会在后台任务里改写 config.llms.api_backends，
+# 而 Web 路由同时在读同一份对象；共用一把锁让两侧的读写不会交错。
+CONFIG_WRITE_LOCK = threading.RLock()
 
 
 class TaskScheduler:
@@ -109,28 +121,22 @@ class TaskScheduler:
             self.logger.warning(f"Backend {backend_name} not found in config, skip update")
             return False
 
-        # 3.3 起 auto_detect_models 返回 ModelConfig 列表，按模型 ID 去重并排序
-        deduped_models: Dict[str, ModelConfig] = {}
-        for model in models:
-            model_config = (
-                model
-                if isinstance(model, ModelConfig)
-                else ModelConfig(id=str(model), type=ModelType.LLM.value, ability=LLMAbility.TextChat.value)
-            )
-            deduped_models[model_config.id] = model_config
+        # 自动检测只刷新当前后端的模型目录；它不会修改任何工作流内的
+        # model_name / fallback_model_1..4。若某个旧配置已不在目录中，编辑器
+        # 将把对应槽位显示为空，直到用户主动选择当前可用模型。
+        old_model_count = len(backend_config.models)
+        new_models = normalize_detected_models(models)
 
-        old_models = [m.id for m in backend_config.models]
-        new_models = [deduped_models[model_id] for model_id in sorted(deduped_models)]
-        new_model_ids = [m.id for m in new_models]
+        # 写配置对象时上锁：Web 路由此刻可能正在读取同一份 api_backends
+        with CONFIG_WRITE_LOCK:
+            if model_catalogs_equal(backend_config.models, new_models):
+                self.logger.info(f"Backend {backend_name} model list unchanged ({len(new_models)} models)")
+                return True
 
-        if old_models == new_model_ids:
-            self.logger.info(f"Backend {backend_name} model list unchanged ({len(new_models)} models)")
-            return True
-
-        backend_config.models = new_models
+            backend_config.models = new_models
         self.logger.info(
             f"Backend {backend_name} model list updated: "
-            f"{len(old_models)} -> {len(new_models)} models"
+            f"{old_model_count} -> {len(new_models)} models"
         )
 
         # 重新加载后端，让新模型列表进入 active_backends
@@ -171,7 +177,13 @@ class TaskScheduler:
         if config_changed:
             self._save_state()
             try:
-                ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
+                # 备份 + 落盘是同步磁盘 I/O，放到线程池执行，
+                # 否则会在事件循环里卡住所有 IM 适配器的消息收发
+                def save_config() -> None:
+                    with CONFIG_WRITE_LOCK:
+                        ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
+
+                await asyncio.to_thread(save_config)
                 self.logger.info("Configuration saved after auto-detect")
             except Exception as e:
                 self.logger.error(f"Failed to save config after auto-detect: {e}")
@@ -180,9 +192,13 @@ class TaskScheduler:
 
     async def _loop(self) -> None:
         """后台循环，定期检查是否有后端到期"""
-        # 启动后先等一会儿，避免和应用启动流程抢资源
+        # 启动后先等一会儿，避免和应用启动流程抢资源。
+        # 加随机抖动：全新安装时所有后端都"从未检测过"，固定延迟会让它们
+        # 在同一时刻一起发起探测。
+        startup_delay = STARTUP_DELAY_SECONDS + random.uniform(0, STARTUP_JITTER_SECONDS)
+        self.logger.debug(f"Auto-detect first run scheduled in {startup_delay:.0f}s")
         try:
-            await asyncio.wait_for(self._stop_event.wait(), timeout=60)
+            await asyncio.wait_for(self._stop_event.wait(), timeout=startup_delay)
             return
         except asyncio.TimeoutError:
             pass

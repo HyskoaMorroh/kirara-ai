@@ -182,6 +182,8 @@ const confirmAutoDetect = async () => {
   autoDetectLoading.value = true
   try {
     if (await handleSave()) {
+      // 后端已经与定时任务共用模型目录规范化逻辑。这里仅替换当前后端的
+      // 最新可发现模型；工作流中的主模型和四个备用模型从未参与本次请求。
       currentAdapter.value!!.models = (await llmApi.getBackendModels(currentAdapter.value!!.name))
         .models as ModelInfo[]
       await handleSave() // 保存检测到的模型列表
@@ -274,18 +276,28 @@ watch(
   }
 )
 
+let autoDetectSupportRequest = 0
 watch(
-  () => currentAdapter.value,
-  async (newAdapter) => {
-    if (newAdapter?.adapter && newAdapter?.name) {
-      isAutoDetectModelsSupported.value = (
-        await llmApi.getAdapterSupportsAutoDetectModels(newAdapter.adapter)
-      ).supportsAutoDetectModels
-    } else {
+  () => currentAdapter.value?.adapter,
+  async (adapterType) => {
+    const requestId = ++autoDetectSupportRequest
+    if (!adapterType) {
       isAutoDetectModelsSupported.value = true
+      return
     }
-  },
-  { deep: true }
+    try {
+      const { supportsAutoDetectModels } =
+        await llmApi.getAdapterSupportsAutoDetectModels(adapterType)
+      // 切换后端时，忽略较慢旧请求的返回，避免错误覆盖当前卡片状态。
+      if (requestId === autoDetectSupportRequest) {
+        isAutoDetectModelsSupported.value = supportsAutoDetectModels
+      }
+    } catch {
+      if (requestId === autoDetectSupportRequest) {
+        isAutoDetectModelsSupported.value = false
+      }
+    }
+  }
 )
 
 // 初始化加载
@@ -331,7 +343,7 @@ onMounted(() => {
     <n-card style="width: 400px" :bordered="false" size="huge" role="dialog" aria-modal="true">
       <LLMConfirmContent
         title="确认"
-        content="自动检测前会自动保存当前配置，请确保 API 信息正确填写，然后点击继续。"
+        content="自动检测前会保存当前配置，并仅刷新此后端当前可发现的模型目录；不会改写工作流中的主模型或备用模型。已下线模型在工作流的对应下拉槽位会显示为空，等待你手动选择替代项。"
         confirmText="继续"
         :loading="autoDetectLoading"
         @confirm="confirmAutoDetect"
@@ -380,7 +392,8 @@ onMounted(() => {
 }
 
 .custom-modal .n-card {
-  border-radius: var(--border-radius);
+  /* 模态内的卡片就是模态自身的表面，与 .n-modal 同为大型表面档 */
+  border-radius: var(--radius-lg);
   box-shadow: var(--box-shadow);
 }
 

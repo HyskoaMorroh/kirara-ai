@@ -275,8 +275,8 @@ const changeObjectKey = (arr: number, keyName: string, newKeyName: string) => {
 
 <style scoped>
 .topbar {
-  background-color: var(--vt-c-white-mute);
-  color: #111;
+  background-color: var(--panel-bg-color, var(--vt-c-white-mute));
+  color: var(--text-primary, #111);
   height: 50px;
   display: flex;
   justify-content: space-between;
@@ -294,11 +294,17 @@ li {
 }
 
 a {
-  color: #111;
+  color: var(--text-primary, #111);
   text-decoration: none;
 }
 
 a:hover {
   text-decoration: underline;
+}
+
+/* 链接需要可见的键盘聚焦环 */
+a:focus-visible {
+  outline: 2px solid var(--primary-color, #4080ff);
+  outline-offset: 2px;
 }
 </style>

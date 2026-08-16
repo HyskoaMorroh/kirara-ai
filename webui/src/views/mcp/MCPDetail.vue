@@ -828,14 +828,15 @@ const getStateType = (
 
 // 获取状态对应的颜色
 const getStateColor = (state: string) => {
+  // 返回 CSS 变量表达式，交给主题决定具体色值（内联 style 支持 var()）
   const colorMap: Record<string, string> = {
-    connected: '#18a058',
-    connecting: '#2080f0',
-    disconnected: '#d03050',
-    disconnecting: '#f0a020',
-    error: '#d03050'
+    connected: 'var(--success-color, #18a058)',
+    connecting: 'var(--primary-color, #2080f0)',
+    disconnected: 'var(--error-color, #d03050)',
+    disconnecting: 'var(--warning-color, #f0a020)',
+    error: 'var(--error-color, #d03050)'
   }
-  return colorMap[state] || '#d03050'
+  return colorMap[state] || 'var(--error-color, #d03050)'
 }
 
 // 格式化时间
@@ -851,8 +852,9 @@ const formatTime = (timestamp: number) => {
 }
 
 .main-card {
-  border-radius: 12px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  /* 页面级主卡片，用大型表面档 */
+  border-radius: var(--radius-lg);
+  box-shadow: var(--box-shadow, 0 4px 16px rgba(0, 0, 0, 0.08));
   overflow: hidden;
 }
 
@@ -862,13 +864,13 @@ const formatTime = (timestamp: number) => {
   align-items: center;
   margin-bottom: 24px;
   padding-bottom: 16px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  border-bottom: 1px solid var(--divider-color, rgba(0, 0, 0, 0.06));
 }
 
 .server-title {
   display: flex;
   align-items: center;
-  font-size: 20px;
+  font-size: var(--font-size-xl, 20px);
   font-weight: 600;
   gap: 12px;
 }
@@ -889,12 +891,12 @@ const formatTime = (timestamp: number) => {
 
 .detail-card {
   height: 100%;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   transition: all 0.3s ease;
 }
 
 .detail-card:hover {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--box-shadow-hover, 0 4px 12px rgba(0, 0, 0, 0.1));
 }
 
 .code-container {
@@ -903,9 +905,10 @@ const formatTime = (timestamp: number) => {
 }
 
 .code-container code {
-  background-color: rgba(0, 0, 0, 0.04);
+  background-color: var(--code-bg-color, #f3f4f6);
+  color: var(--code-text-color, #1f2937);
   padding: 4px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   font-family: monospace;
   flex: 1;
   overflow: hidden;
@@ -917,7 +920,7 @@ const formatTime = (timestamp: number) => {
 }
 
 .tabs-card {
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   margin-top: 16px;
 }
 
@@ -929,7 +932,7 @@ const formatTime = (timestamp: number) => {
 
 .section-header h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--font-size-lg, 16px);
   font-weight: 600;
 }
 
@@ -946,7 +949,7 @@ const formatTime = (timestamp: number) => {
 }
 
 .loading-container p {
-  color: rgba(0, 0, 0, 0.45);
+  color: var(--text-color-tertiary, rgba(0, 0, 0, 0.45));
 }
 
 .tools-list,
@@ -960,7 +963,7 @@ const formatTime = (timestamp: number) => {
 .tool-card,
 .resource-card,
 .prompt-card {
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   transition: all 0.2s ease;
 }
 
@@ -968,7 +971,7 @@ const formatTime = (timestamp: number) => {
 .resource-card:hover,
 .prompt-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--box-shadow, 0 4px 12px rgba(0, 0, 0, 0.08));
 }
 
 .tool-header,
@@ -992,8 +995,8 @@ const formatTime = (timestamp: number) => {
 .tool-description,
 .resource-description,
 .prompt-description {
-  color: rgba(0, 0, 0, 0.65);
-  font-size: 14px;
+  color: var(--text-color-secondary, rgba(0, 0, 0, 0.65));
+  font-size: var(--font-size-base, 14px);
   margin-top: 8px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -1009,7 +1012,7 @@ const formatTime = (timestamp: number) => {
 
 .modal-description {
   margin-bottom: 16px;
-  color: rgba(0, 0, 0, 0.65);
+  color: var(--text-color-secondary, rgba(0, 0, 0, 0.65));
 }
 
 .tool-form,
@@ -1023,16 +1026,19 @@ const formatTime = (timestamp: number) => {
 }
 
 .tool-response pre {
-  background-color: rgba(0, 0, 0, 0.02);
+  background-color: var(--code-bg-color, #f3f4f6);
+  color: var(--code-text-color, #1f2937);
   padding: 12px;
-  border-radius: 8px;
+  /* 代码块嵌在 .tool-card（md 档）内部，按嵌套原则降一档到 sm */
+  border-radius: var(--radius-sm);
   overflow: auto;
   font-family: monospace;
-  font-size: 13px;
+  font-size: var(--font-size-sm, 13px);
 }
 
 .response-card {
-  background-color: rgba(0, 0, 0, 0.02);
+  background-color: var(--code-bg-color, #f3f4f6);
+  color: var(--code-text-color, #1f2937);
   font-family: monospace;
   white-space: pre-wrap;
 }
@@ -1040,7 +1046,7 @@ const formatTime = (timestamp: number) => {
 .slider-value {
   text-align: center;
   margin-top: 4px;
-  color: rgba(0, 0, 0, 0.65);
+  color: var(--text-color-secondary, rgba(0, 0, 0, 0.65));
 }
 
 .empty-box {

@@ -69,6 +69,37 @@ const distinctColors = [
   '#bb8978'
 ]
 
+/** 感知亮度（0~1），用于判断某个分类色在深色底上是否偏暗 */
+const perceivedLuminance = (hex: string): number => {
+  let color = hex.replace('#', '')
+  if (color.length === 3) {
+    color = color[0] + color[0] + color[1] + color[1] + color[2] + color[2]
+  }
+  const r = parseInt(color.substring(0, 2), 16) / 255
+  const g = parseInt(color.substring(2, 4), 16) / 255
+  const b = parseInt(color.substring(4, 6), 16) / 255
+  if ([r, g, b].some((channel) => Number.isNaN(channel))) {
+    return 0.5
+  }
+  return 0.299 * r + 0.587 * g + 0.114 * b
+}
+
+/**
+ * 分类色的深色主题适配。
+ *
+ * 这些颜色是数据类别色（端口类型），不能收敛成主题主色，否则类型之间就分不开了；
+ * 因此只按感知亮度自适应提亮：越暗的色提得越多，本来就亮的色几乎不动，
+ * 色相与彼此之间的区分度都保持不变。
+ */
+const adaptForDark = (hex: string): string => {
+  const factor = Math.max(0, Math.min(0.45, 0.6 - perceivedLuminance(hex)))
+  return lightenColor(hex, factor)
+}
+
+/** 当前是否深色主题：theme store 会在 <html> 上切换 dark 类 */
+const isDarkScheme = (): boolean =>
+  typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
+
 const generateColor = (type: string) => {
   // 根据类型字符串计算哈希值，并用哈希值从颜色表中选择一个颜色
   let hash = 0
@@ -80,8 +111,10 @@ const generateColor = (type: string) => {
 }
 
 export const getTypeColor = (type: string, required: boolean = true) => {
-  if (typeColors[type]) {
-    return typeColors[type]
+  // 缓存键带上明暗方案，切换主题后不会继续复用另一套色值
+  const cacheKey = `${isDarkScheme() ? 'dark' : 'light'}|${type}`
+  if (typeColors[cacheKey]) {
+    return typeColors[cacheKey]
   }
 
   let baseColor = baseColors[type]
@@ -89,13 +122,14 @@ export const getTypeColor = (type: string, required: boolean = true) => {
     baseColor = generateColor(type)
     baseColors[type] = baseColor
   }
-  const color_on = baseColor
-  let color_off = darkenColor(baseColor, 0.2)
+  const themedBase = isDarkScheme() ? adaptForDark(baseColor) : baseColor
+  const color_on = themedBase
+  let color_off = darkenColor(themedBase, 0.2)
 
   if (!required) {
     color_off = darkenColor(color_off, 0.2) // Further darken if not required
   }
 
-  typeColors[type] = { color_on, color_off }
-  return typeColors[type]
+  typeColors[cacheKey] = { color_on, color_off }
+  return typeColors[cacheKey]
 }

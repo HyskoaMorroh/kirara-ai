@@ -1,0 +1,147 @@
+name: 聊天 - 纯文本输出
+description: 去掉模型回复里的 Markdown 标记（#、**、列表、表格等），输出适合语音播报与不支持 Markdown 的 IM 平台阅读的纯文本。
+blocks:
+  - type: internal:get_message
+    name: get_message
+    params: {}
+    position:
+      x: 120
+      y: 120
+    connected_to:
+      - target: toggle_edit_state
+        mapping:
+          from: sender
+          to: sender
+      - target: query_memory
+        mapping:
+          from: sender
+          to: chat_sender
+      - target: chat_message_constructor
+        mapping:
+          from: msg
+          to: user_msg
+      - target: chat_memory_store
+        mapping:
+          from: msg
+          to: user_msg
+  - type: internal:toggle_edit_state
+    name: toggle_edit_state
+    params:
+      is_editing: true
+    position:
+      x: 500
+      y: 120
+  - type: internal:chat_memory_query
+    name: query_memory
+    params:
+      scope_type: group
+    position:
+      x: 500
+      y: 520
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: memory_content
+          to: memory_content
+  - type: internal:text_block
+    name: user_prompt
+    params:
+      text: '{user_name}说：{user_msg}'
+    position:
+      x: 120
+      y: 520
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: text
+          to: user_prompt_format
+  - type: internal:text_block
+    name: system_prompt
+    params:
+      text: "# Information\n以下是当前的系统信息：\n当前日期时间：{current_date_time}\n\n# Memories\n以下是之前发生过的对话记录。\n-- 对话记录开始 --\n{memory_content}\n-- 对话记录结束 --\n\n# Rules\n1. 本对话会被朗读或在不支持 Markdown 的平台展示，请用平铺直叙的句子回答。\n2. 不要使用标题、加粗、代码块、表格等排版标记；需要列举时用「第一」「第二」这样的口语顺序词。\n\n接下来，请基于以上信息回答用户的问题。"
+    position:
+      x: 120
+      y: 920
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: text
+          to: system_prompt_format
+  - type: internal:chat_message_constructor
+    name: chat_message_constructor
+    params: {}
+    position:
+      x: 880
+      y: 120
+    connected_to:
+      - target: llm_chat
+        mapping:
+          from: llm_msg
+          to: prompt
+  # model_name 留空：请在编辑器的下拉框里选择本机已配置的模型。
+  - type: internal:chat_completion
+    name: llm_chat
+    params:
+      model_name: ''
+    position:
+      x: 1260
+      y: 120
+    connected_to:
+      - target: llm_response_to_text
+        mapping:
+          from: resp
+          to: response
+      - target: chat_memory_store
+        mapping:
+          from: resp
+          to: llm_resp
+  - type: internal:llm_response_to_text
+    name: llm_response_to_text
+    params: {}
+    position:
+      x: 1640
+      y: 120
+    connected_to:
+      - target: strip_markdown
+        mapping:
+          from: text
+          to: text
+  # 兜底清洗：即使模型忘记了上面的规则，这里也会去掉残留的 Markdown 标记。
+  - type: internal:text_strip_markdown_block
+    name: strip_markdown
+    params:
+      keep_heading_text: true
+      bullet_char: '·'
+      table_style: plain
+    position:
+      x: 2020
+      y: 120
+    connected_to:
+      - target: text_to_im_message
+        mapping:
+          from: text
+          to: text
+  - type: internal:text_to_im_message
+    name: text_to_im_message
+    params: {}
+    position:
+      x: 2400
+      y: 120
+    connected_to:
+      - target: send_message
+        mapping:
+          from: msg
+          to: msg
+  - type: internal:send_message
+    name: send_message
+    params: {}
+    position:
+      x: 2780
+      y: 120
+  - type: internal:chat_memory_store
+    name: chat_memory_store
+    params:
+      scope_type: group
+    position:
+      x: 1640
+      y: 520

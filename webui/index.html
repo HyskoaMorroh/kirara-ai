@@ -8,9 +8,125 @@
     <meta http-equiv="Expires" content="0"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Kirara AI</title>
+    <script>
+      // 在首个字节到达时就按上次选择的主题给出底色，避免深色用户先看到一帧白屏。
+      // 逻辑与 stores/theme.ts 保持一致：显式选择优先，未选择时读系统偏好。
+      (function () {
+        try {
+          var mode = localStorage.getItem('themeMode') || 'light'
+          var palette = localStorage.getItem('themePalette') || 'classic'
+          var dark =
+            mode === 'dark' ||
+            (mode === 'system' &&
+              window.matchMedia &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches)
+          // 只包含首屏骨架需要的前景/背景色；完整语义色仍由 theme store 注入。
+          // 不能直接 import palettes.ts，否则会重新引入入口 chunk 并抵消首屏优化。
+          //
+          // ⚠ 下表是 src/theme/palettes.ts 的手抄副本，格式为
+          //   key: { light: [bg, textTertiary], dark: [bg, textTertiary] }。
+          // 改动色板取值或增删色板时必须同步修改两处；单测会解析下面这个对象
+          // 字面量并与 palettes.ts 的 bootPaletteTable() 逐项比对，漂移即失败。
+          // 请保持它是一个完整、独立、可被 JSON 化解析的对象字面量。
+          /* THEME_BOOT_TABLE */
+          var bootPalettes = {
+            classic: {
+              light: ['#f5f7fa', '#909399'],
+              dark: ['#161719', '#7c828b']
+            },
+            graphite: {
+              light: ['#f6f8fa', '#818b98'],
+              dark: ['#0d1117', '#6e7681']
+            },
+            midnight: {
+              light: ['#eef1f6', '#8a92a0'],
+              dark: ['#1e2127', '#7f8796']
+            },
+            forest: {
+              light: ['#fdf6e3', '#93a1a1'],
+              dark: ['#002b36', '#7a8a8a']
+            },
+            contrast: {
+              light: ['#ffffff', '#595959'],
+              dark: ['#000000', '#b8b8b8']
+            },
+            oled: {
+              light: ['#fafafa', '#6c7076'],
+              dark: ['#000000', '#7b8088']
+            }
+          }
+          /* THEME_BOOT_TABLE_END */
+          var colors = (bootPalettes[palette] || bootPalettes.classic)[dark ? 'dark' : 'light']
+          document.documentElement.style.setProperty('--boot-bg', colors[0])
+          document.documentElement.style.setProperty('--boot-fg', colors[1])
+          if (dark) {
+            document.documentElement.classList.add('dark')
+            document.documentElement.style.colorScheme = 'dark'
+          } else {
+            document.documentElement.classList.remove('dark')
+            document.documentElement.style.colorScheme = 'light'
+          }
+          // 与 theme store 写的是同一个属性：CSS 里的
+          // @media (prefers-color-scheme: dark) 兜底块用 :root:not([data-theme])
+          // 守卫，一旦明暗已被显式决定就自动让位，不会覆盖用户选择的浅色。
+          document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+        } catch (e) {
+          // localStorage 不可用（隐私模式等）时不写 data-theme，交给 CSS 的
+          // prefers-color-scheme 兜底块跟随系统，而不是硬退成浅色。
+        }
+      })()
+    </script>
+    <style>
+      /* 首屏骨架：脚本 chunk 下载期间给出可见反馈，Vue 挂载后被整体替换 */
+      #app {
+        min-height: 100vh;
+      }
+
+      .boot-screen {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        background: var(--boot-bg, #f5f7fa);
+        color: var(--boot-fg, #909399);
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC',
+          'Microsoft YaHei', sans-serif;
+        font-size: 13px;
+      }
+
+      .boot-spinner {
+        width: 30px;
+        height: 30px;
+        border: 3px solid currentColor;
+        border-top-color: transparent;
+        border-radius: 50%;
+        opacity: 0.65;
+        animation: boot-spin 0.8s linear infinite;
+      }
+
+      @keyframes boot-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .boot-spinner {
+          animation-duration: 2.4s;
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <div class="boot-screen">
+        <div class="boot-spinner"></div>
+        <div>正在加载 Kirara AI...</div>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

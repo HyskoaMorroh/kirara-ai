@@ -74,9 +74,20 @@ export default defineConfig({
         manualChunks: {
           'cryptojs': ['crypto-js'],
           'naiveui': ['naive-ui'],
+          // echarts 仅被快速开始页与 LLM 统计使用，独立成块后不再随页面 chunk
+          // 重复下载，并可跨版本命中浏览器缓存。
+          'echarts': ['echarts', 'vue-echarts'],
+          // vue-flow 是工作流画布的核心依赖，单独拆出可与画布逻辑并行下载。
+          'vueflow': [
+            '@vue-flow/core',
+            '@vue-flow/background',
+            '@vue-flow/controls',
+            '@vue-flow/minimap',
+            '@dagrejs/dagre'
+          ]
         }
       }
-      
+
     }
   },
   define: {

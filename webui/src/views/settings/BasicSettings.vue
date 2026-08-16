@@ -9,6 +9,7 @@ import FrpServiceCard from './components/FrpServiceCard.vue'
 import TimezoneCard from './components/TimezoneCard.vue'
 import TracingCard from './components/TracingCard.vue'
 import BackupCard from './components/BackupCard.vue'
+import AppearanceCard from './components/AppearanceCard.vue'
 </script>
 
 <template>
@@ -34,6 +35,10 @@ import BackupCard from './components/BackupCard.vue'
             <TimezoneCard />
             <TracingCard />
           </n-space>
+        </n-tab-pane>
+
+        <n-tab-pane name="appearance" tab="外观">
+          <AppearanceCard />
         </n-tab-pane>
 
         <n-tab-pane name="update" tab="下载源">

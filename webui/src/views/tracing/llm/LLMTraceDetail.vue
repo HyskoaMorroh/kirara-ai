@@ -293,7 +293,8 @@ onUnmounted(() => {
 
 .detail-card {
   min-height: calc(100vh - 28px);
-  border-radius: 20px;
+  /* 页面级主卡片，用大型表面档 */
+  border-radius: var(--radius-lg);
   background-color: var(--card-bg-color);
   box-shadow: var(--box-shadow);
 }
@@ -301,7 +302,7 @@ onUnmounted(() => {
 /* 操作按钮样式 */
 .action-button {
   height: 40px;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -317,7 +318,8 @@ onUnmounted(() => {
 .not-found {
   padding: 48px;
   background-color: var(--bg-color);
-  border-radius: 16px;
+  /* 位于 .detail-card（lg 档）内部，按嵌套原则降一档到 md */
+  border-radius: var(--radius-md);
   margin: 24px 0;
 }
 
@@ -329,7 +331,8 @@ onUnmounted(() => {
 
 .info-card,
 .content-card {
-  border-radius: 16px;
+  /* 内容卡片位于 .detail-card（lg 档）内部，按嵌套原则降一档到 md */
+  border-radius: var(--radius-md);
   background-color: var(--bg-color);
   transition: all 0.3s ease;
   overflow: hidden;
@@ -343,7 +346,8 @@ onUnmounted(() => {
 /* 描述列表样式 */
 :deep(.n-descriptions) {
   background-color: var(--card-bg-color);
-  border-radius: 12px;
+  /* 位于 .info-card（md 档）内部，按嵌套原则降一档到 sm */
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 
@@ -356,18 +360,18 @@ onUnmounted(() => {
   font-family: monospace;
   padding: 4px 8px;
   background-color: var(--card-bg-color);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 .status-tag {
   padding: 2px 12px;
-  border-radius: 12px;
+  border-radius: var(--radius-pill);
 }
 
 .model-tag,
 .backend-tag {
   padding: 2px 12px;
-  border-radius: 12px;
+  border-radius: var(--radius-pill);
 }
 
 /* 代码块容器 */
@@ -376,7 +380,7 @@ onUnmounted(() => {
   max-height: 300px;
   overflow: auto;
   transition: max-height 0.3s ease;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 .code-container.expanded {
@@ -391,11 +395,11 @@ onUnmounted(() => {
 }
 
 :deep(.n-code) {
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 :deep(.n-code-line-numbers) {
-  border-right: 1px solid rgba(255, 255, 255, 0.1);
+  border-right: 1px solid var(--border-color);
 }
 
 :deep(.n-code-word-wrap) {
@@ -404,7 +408,7 @@ onUnmounted(() => {
 
 /* 高亮当前行 */
 :deep(.n-code-current-line) {
-  background-color: rgba(255, 255, 255, 0.05);
+  background-color: var(--node-header-bg);
 }
 
 /* 自定义滚动条 */
@@ -414,17 +418,18 @@ onUnmounted(() => {
 }
 
 .code-container::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.1);
-  border-radius: 4px;
+  background: var(--node-muted-bg);
+  /* 滚动条只有 8px 宽，属于内联小件档 */
+  border-radius: var(--radius-xs);
 }
 
 .code-container::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.2);
-  border-radius: 4px;
+  background: var(--border-color);
+  border-radius: var(--radius-xs);
 }
 
 .code-container::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.3);
+  background: var(--text-color-tertiary);
 }
 
 /* 内容操作按钮 */
@@ -436,7 +441,7 @@ onUnmounted(() => {
 
 .copy-button,
 .expand-button {
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   transition: all 0.2s ease;
 }
 
@@ -450,7 +455,7 @@ onUnmounted(() => {
 .error-text {
   padding: 4px 8px;
   background-color: rgba(237, 60, 80, 0.1);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 /* 动画 */

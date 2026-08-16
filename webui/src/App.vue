@@ -6,45 +6,106 @@ import {
   NMessageProvider,
   NConfigProvider,
   lightTheme,
+  darkTheme,
   NModalProvider,
   useLoadingBar
 } from 'naive-ui'
 import HelloWorld from './components/HelloWorld.vue'
 import AppLayout from './layouts/AppLayout.vue'
-import { createTheme } from 'naive-ui'
+import { computed } from 'vue'
+import { useThemeStore } from '@/stores/theme'
 import hljs from 'highlight.js/lib/core'
 import json from 'highlight.js/lib/languages/json'
 
 hljs.registerLanguage('json', json)
 
-const theme = {
-  common: {
-    primaryColor: '#007AFF',
-    primaryColorHover: '#0063CC',
-    primaryColorPressed: '#005AB3',
-    borderRadius: '10px',
-    fontSize: '14px'
-  },
-  Button: {
-    textColor: '#007AFF',
-    borderRadius: '8px',
-    heightMedium: '38px',
-    fontWeight: '500'
-  },
-  Card: {
-    borderRadius: '12px'
-  },
-  Dialog: {
-    borderRadius: '12px'
-  },
-  Input: {
-    borderRadius: '8px'
+const themeStore = useThemeStore()
+
+// 圆角、字号、控件尺寸等版式约定原先是一个冻结常量，导致切换色板只是换色。
+// 现在由色板自己声明 shape（缺省项回落到 DEFAULT_THEME_SHAPE，与旧常量逐项
+// 相同），theme store 同时把这些值写成 --border-radius* CSS 变量，
+// 因此 naive-ui 与手写 CSS 消费的是同一套圆角，不会再各说各话。
+//
+// 圆角部分改为直接消费 store 的 radii（同一个 getRadiiForSeed 结果）：
+// 语义映射与 main.css 的注释一致——控件走 sm、卡片/弹窗走 lg、标签走 pill。
+const themeShape = computed(() => {
+  const shape = themeStore.shape
+  const radii = themeStore.radii
+  return {
+    common: {
+      borderRadius: radii.md,
+      borderRadiusSmall: radii.sm,
+      fontSize: shape.fontSize
+    },
+    Button: {
+      borderRadius: radii.sm,
+      heightMedium: shape.controlHeight,
+      fontWeight: shape.fontWeight
+    },
+    Card: {
+      borderRadius: radii.lg
+    },
+    Dialog: {
+      borderRadius: radii.lg
+    },
+    Input: {
+      borderRadius: radii.sm,
+      heightMedium: shape.controlHeight
+    },
+    // 标签本就是胶囊形，与 main.css 的 .n-tag 规则保持一致，避免两侧不符
+    Tag: {
+      borderRadius: radii.pill
+    }
   }
-}
+})
+
+const theme = computed(() => {
+  const seed = themeStore.seed
+  const shape = themeShape.value
+  return {
+    common: {
+      ...shape.common,
+      primaryColor: seed.primary,
+      primaryColorHover: seed.primaryHover,
+      primaryColorPressed: seed.primaryPressed,
+      primaryColorSuppl: seed.primaryHover,
+      successColor: seed.success,
+      warningColor: seed.warning,
+      errorColor: seed.error,
+      infoColor: seed.info,
+      bodyColor: seed.bg,
+      cardColor: seed.card,
+      modalColor: seed.card,
+      popoverColor: seed.elevated,
+      tableColor: seed.card,
+      inputColor: seed.input,
+      textColorBase: seed.text,
+      textColor1: seed.text,
+      textColor2: seed.textSecondary,
+      textColor3: seed.textTertiary,
+      borderColor: seed.border,
+      dividerColor: seed.divider,
+      hoverColor: `rgba(${themeStore.isDark ? '255, 255, 255' : '0, 0, 0'}, 0.06)`
+    },
+    Button: {
+      ...shape.Button,
+      // 次要按钮的文字用 AA 变体，主色本身在浅色下作为文字常常不足 4.5:1
+      textColor: seed.primaryText ?? seed.primary
+    },
+    Card: { ...shape.Card },
+    Dialog: { ...shape.Dialog },
+    Input: { ...shape.Input },
+    Tag: { ...shape.Tag }
+  }
+})
+
+// 深色方案下切换 naive-ui 的内建基础主题，未被 themeOverrides 覆盖的
+// 组件（滚动条、下拉、日期选择器等）也能得到正确的底色。
+const baseTheme = computed(() => (themeStore.isDark ? darkTheme : null))
 </script>
 
 <template>
-  <n-config-provider :theme-overrides="theme" abstract :hljs="hljs">
+  <n-config-provider :theme="baseTheme" :theme-overrides="theme" abstract :hljs="hljs">
     <n-modal-provider>
       <n-message-provider>
         <n-loading-bar-provider>
@@ -69,6 +130,36 @@ const theme = {
   --background-color: #f2f2f7;
   --text-primary: #000000;
   --text-secondary: #8e8e93;
+}
+
+/*
+ * 深色对应值。上面这组是 iOS 系统色，被 html/body 直接消费；此前没有 .dark
+ * 版本，JS 未执行或 store 初始化失败时深色用户会看到浅底深字。
+ * --secondary-color 目前没有消费方，仍两套都保留，方便后续需要时直接可用。
+ */
+.dark {
+  --primary-color: #0a84ff;
+  --secondary-color: #5e5ce6;
+  --success-color: #30d158;
+  --warning-color: #ff9f0a;
+  --error-color: #ff453a;
+  --background-color: #161719;
+  --text-primary: #ffffff;
+  --text-secondary: #98989d;
+}
+
+/* 无 JS 兜底：data-theme 缺失说明明暗尚未被任何一方决定，此时才跟随系统 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --primary-color: #0a84ff;
+    --secondary-color: #5e5ce6;
+    --success-color: #30d158;
+    --warning-color: #ff9f0a;
+    --error-color: #ff453a;
+    --background-color: #161719;
+    --text-primary: #ffffff;
+    --text-secondary: #98989d;
+  }
 }
 
 html,

@@ -1,0 +1,139 @@
+name: 聊天 - 工具调用 (MCP)
+description: '让模型在回答前自动调用 MCP 工具（联网搜索、读写文件等）。请先在「MCP」页面添加服务器，再在「MCP: 提供工具」节点里勾选要开放的工具，并为「LLM: 执行对话并调用工具」选择一个支持函数调用的模型。'
+blocks:
+  - type: internal:get_message
+    name: get_message
+    params: {}
+    position:
+      x: 120
+      y: 120
+    connected_to:
+      - target: toggle_edit_state
+        mapping:
+          from: sender
+          to: sender
+      - target: query_memory
+        mapping:
+          from: sender
+          to: chat_sender
+      - target: chat_message_constructor
+        mapping:
+          from: msg
+          to: user_msg
+      - target: chat_memory_store
+        mapping:
+          from: msg
+          to: user_msg
+  - type: internal:toggle_edit_state
+    name: toggle_edit_state
+    params:
+      is_editing: true
+    position:
+      x: 500
+      y: 120
+  - type: internal:chat_memory_query
+    name: query_memory
+    params:
+      scope_type: group
+    position:
+      x: 500
+      y: 520
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: memory_content
+          to: memory_content
+  - type: internal:text_block
+    name: system_prompt
+    params:
+      text: "# Information\n以下是当前的系统信息：\n当前日期时间：{current_date_time}\n\n# Memories\n以下是之前发生过的对话记录。\n-- 对话记录开始 --\n{memory_content}\n-- 对话记录结束 --\n\n# Tools\n你可以使用外部工具来获取自己不知道的信息。\n1. 需要实时数据、文件内容或站外资料时，优先调用工具，不要凭印象编造。\n2. 工具返回结果后，用中文把结论讲清楚，不要直接把原始 JSON 丢给用户。\n3. 若工具全部失败，请如实说明失败原因。\n\n接下来，请基于以上信息回答用户的问题。"
+    position:
+      x: 120
+      y: 920
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: text
+          to: system_prompt_format
+  - type: internal:text_block
+    name: user_prompt
+    params:
+      text: '{user_name}说：{user_msg}'
+    position:
+      x: 120
+      y: 520
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: text
+          to: user_prompt_format
+  - type: internal:chat_message_constructor
+    name: chat_message_constructor
+    params: {}
+    position:
+      x: 880
+      y: 120
+    connected_to:
+      - target: llm_chat_with_tools
+        mapping:
+          from: llm_msg
+          to: msg
+  # 在此勾选允许模型调用的 MCP 工具；留空表示暂不开放任何工具。
+  - type: mcp:mcp_tool_provider
+    name: mcp_tools
+    params:
+      enabled_tools: []
+    position:
+      x: 880
+      y: 520
+    connected_to:
+      - target: llm_chat_with_tools
+        mapping:
+          from: tools
+          to: tools
+  # model_name 故意留空：请在编辑器的下拉框里选择一个支持函数调用的模型。
+  - type: internal:chat_completion_with_tools
+    name: llm_chat_with_tools
+    params:
+      model_name: ''
+      max_iterations: 4
+    position:
+      x: 1260
+      y: 120
+    connected_to:
+      - target: chat_response_converter
+        mapping:
+          from: resp
+          to: resp
+      - target: chat_memory_store
+        mapping:
+          from: resp
+          to: llm_resp
+      - target: chat_memory_store
+        mapping:
+          from: iteration_msgs
+          to: middle_steps
+  - type: internal:chat_response_converter
+    name: chat_response_converter
+    params: {}
+    position:
+      x: 1640
+      y: 120
+    connected_to:
+      - target: send_message
+        mapping:
+          from: msg
+          to: msg
+  - type: internal:send_message
+    name: send_message
+    params: {}
+    position:
+      x: 2020
+      y: 120
+  - type: internal:chat_memory_store
+    name: chat_memory_store
+    params:
+      scope_type: group
+    position:
+      x: 1640
+      y: 520

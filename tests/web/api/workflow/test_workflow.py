@@ -53,8 +53,13 @@ class LLMBlock(Block):
 
 # ==================== Fixtures ====================
 @pytest.fixture
-def app():
+def app(tmp_path, monkeypatch):
     """创建测试应用实例"""
+    # API tests must not read or write the developer's real `data/workflows`
+    # directory.  In particular, a prior test run may leave an ignored test
+    # YAML behind, which would otherwise make a fresh in-memory registry look
+    # like a collision.
+    monkeypatch.setattr(WorkflowRegistry, "WORKFLOWS_DIR", str(tmp_path / "workflows"))
     container = DependencyContainer()
 
     # 配置
@@ -99,6 +104,45 @@ def test_client(app):
 # ==================== 测试用例 ====================
 class TestWorkflow:
     @pytest.mark.asyncio
+    async def test_validate_workflow_reports_structural_errors_without_persisting(
+        self, test_client, auth_headers
+    ):
+        """预检必须只诊断草稿，不创建 YAML 或改写当前注册表。"""
+        before = test_client.get("/backend-api/api/workflow", headers=auth_headers).json()
+        draft = {
+            "workflow_id": "draft",
+            "group_id": TEST_GROUP_ID,
+            "name": "Draft validation",
+            "description": "",
+            "blocks": [
+                {"type_name": "test:message", "name": "source", "config": {}},
+                {"type_name": "test:llm", "name": "target", "config": {}},
+                {"type_name": "missing:plugin", "name": "unknown", "config": {}},
+            ],
+            "wires": [
+                {
+                    "source_block": "source",
+                    "source_output": "missing_output",
+                    "target_block": "target",
+                    "target_input": "input",
+                }
+            ],
+        }
+
+        response = test_client.post(
+            "/backend-api/api/workflow/validate", headers=auth_headers, json=draft
+        )
+
+        assert response.status_code == 200
+        issues = response.json()
+        assert {issue["code"] for issue in issues["errors"]} >= {
+            "unknown_block_type",
+            "unknown_output_port",
+            "missing_required_input",
+        }
+        assert test_client.get("/backend-api/api/workflow", headers=auth_headers).json() == before
+
+    @pytest.mark.asyncio
     async def test_list_workflows(self, test_client, auth_headers):
         """测试获取工作流列表"""
         response = test_client.get(
@@ -129,6 +173,7 @@ class TestWorkflow:
         assert workflow["group_id"] == TEST_GROUP_ID
         assert workflow["name"] == TEST_WORKFLOW_NAME
         assert len(workflow["wires"]) == 1
+        assert workflow["blocks"][0]["position"] is None
 
     @pytest.mark.asyncio
     async def test_create_workflow(self, test_client, auth_headers):
@@ -138,6 +183,7 @@ class TestWorkflow:
             "group_id": TEST_GROUP_ID,
             "name": TEST_WORKFLOW_NAME,
             "description": TEST_WORKFLOW_DESC,
+            "metadata": {"category": "chat", "tags": ["test"]},
             "blocks": [
                 {
                     "block_id": "node1",
@@ -162,6 +208,13 @@ class TestWorkflow:
         assert data["group_id"] == TEST_GROUP_ID
         assert data["name"] == TEST_WORKFLOW_NAME
         assert len(data["blocks"]) == 1
+        assert data["metadata"] == {"category": "chat", "tags": ["test"]}
+
+        stored = test_client.get(
+            f"/backend-api/api/workflow/{TEST_GROUP_ID}/{TEST_WORKFLOW_ID_NEW}",
+            headers=auth_headers,
+        ).json()["workflow"]
+        assert stored["metadata"] == {"category": "chat", "tags": ["test"]}
 
     @pytest.mark.asyncio
     async def test_update_workflow(self, test_client, auth_headers):
@@ -197,6 +250,93 @@ class TestWorkflow:
         assert data["description"] == "Updated workflow description"
         assert len(data["blocks"]) == 1
         assert data["blocks"][0]["config"]["text"] == "Updated text"
+
+    @pytest.mark.asyncio
+    async def test_rename_workflow_rejects_an_existing_target(self, test_client, auth_headers):
+        """Changing an ID must not overwrite an existing workflow."""
+        target_data = {
+            "workflow_id": TEST_WORKFLOW_ID_NEW,
+            "group_id": TEST_GROUP_ID,
+            "name": "Collision target",
+            "description": TEST_WORKFLOW_DESC,
+            "blocks": [
+                {
+                    "block_id": "node1",
+                    "type_name": "test:message",
+                    "name": "Message Node",
+                    "config": {"text": "Target text"},
+                    "position": {"x": 0, "y": 0},
+                }
+            ],
+            "wires": [],
+        }
+        create_response = test_client.post(
+            f"/backend-api/api/workflow/{TEST_GROUP_ID}/{TEST_WORKFLOW_ID_NEW}",
+            headers=auth_headers,
+            json=target_data,
+        )
+        assert create_response.status_code == 200
+
+        source_as_target = {**target_data, "name": "Should not overwrite target"}
+        response = test_client.put(
+            f"/backend-api/api/workflow/{TEST_GROUP_ID}/{TEST_WORKFLOW_ID}",
+            headers=auth_headers,
+            json=source_as_target,
+        )
+
+        assert response.status_code == 409
+        assert test_client.get(
+            f"/backend-api/api/workflow/{TEST_GROUP_ID}/{TEST_WORKFLOW_ID}",
+            headers=auth_headers,
+        ).status_code == 200
+        target_response = test_client.get(
+            f"/backend-api/api/workflow/{TEST_GROUP_ID}/{TEST_WORKFLOW_ID_NEW}",
+            headers=auth_headers,
+        )
+        assert target_response.status_code == 200
+        assert target_response.json()["workflow"]["name"] == "Collision target"
+
+    @pytest.mark.asyncio
+    async def test_rename_workflow_rejects_a_target_file_outside_registry(
+        self, test_client, auth_headers, monkeypatch
+    ):
+        """A stale target YAML must not be overwritten just because it was not loaded."""
+        from kirara_ai.web.api.workflow import routes as workflow_routes
+
+        original_exists = workflow_routes.os.path.exists
+
+        def target_file_exists(file_path):
+            return file_path.endswith(f"{TEST_WORKFLOW_ID_NEW}.yaml") or original_exists(file_path)
+
+        monkeypatch.setattr(workflow_routes.os.path, "exists", target_file_exists)
+        workflow_data = {
+            "workflow_id": TEST_WORKFLOW_ID_NEW,
+            "group_id": TEST_GROUP_ID,
+            "name": "Must not overwrite an unregistered file",
+            "description": TEST_WORKFLOW_DESC,
+            "blocks": [
+                {
+                    "block_id": "node1",
+                    "type_name": "test:message",
+                    "name": "Message Node",
+                    "config": {"text": "Hello"},
+                    "position": {"x": 0, "y": 0},
+                }
+            ],
+            "wires": [],
+        }
+
+        response = test_client.put(
+            f"/backend-api/api/workflow/{TEST_GROUP_ID}/{TEST_WORKFLOW_ID}",
+            headers=auth_headers,
+            json=workflow_data,
+        )
+
+        assert response.status_code == 409
+        assert test_client.get(
+            f"/backend-api/api/workflow/{TEST_GROUP_ID}/{TEST_WORKFLOW_ID}",
+            headers=auth_headers,
+        ).status_code == 200
 
     @pytest.mark.asyncio
     async def test_delete_workflow(self, test_client, auth_headers):

@@ -2,7 +2,11 @@ name: PR Code Review
 
 on:
   pull_request_target:
-    branches: [ "master" ]
+    branches: [ "master", "main" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   mypy-review:
@@ -14,16 +18,32 @@ jobs:
       issues: write
 
     steps:
+      # 安全提示（保留现状，但必须记录清楚）：本工作流用
+      # `pull_request_target` 触发，拿的是基仓库的 GITHUB_TOKEN（可写 PR 评论
+      # 与标签），同时又 checkout 了 PR head 并对其执行 `pip install .`——
+      # 也就是在可信上下文里运行 fork 提交的构建脚本，属于典型的
+      # "pwn request" 暴露面。
+      #
+      # 正因如此，checkout 停在 v6：v7 起默认拒绝在 pull_request_target /
+      # workflow_run 里 checkout fork 代码，要继续必须显式写
+      # `allow-unsafe-pr-checkout: true`。把那个开关静默打开等于把安全默认值
+      # 关掉，所以这里不做。
+      #
+      # 彻底的修法是拆成两段：不带 secrets 的 `pull_request` 作业跑 mypy 并把
+      # 结果作为 artifact 上传，另一个 `workflow_run` 作业下载 artifact 后再发
+      # 评论。这需要改动本文件里数百行内嵌脚本，属于独立的安全改造，不在本次
+      # CI 覆盖度升级的范围内。
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+          cache: 'pip'
 
       - name: Install project dependencies
         run: |
@@ -227,7 +247,7 @@ jobs:
 
       - name: Post line-level PR review comments
         if: steps.process-results.outputs.diff_error_count != '0'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{secrets.GITHUB_TOKEN}}
           script: |
@@ -259,7 +279,7 @@ jobs:
 
       - name: Post success comment
         if: steps.process-results.outputs.result == 'pass'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{secrets.GITHUB_TOKEN}}
           script: |
@@ -318,7 +338,7 @@ jobs:
 
       - name: Post notification if no Python files changed
         if: steps.run-mypy.outputs.has_changed_files == 'false'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{secrets.GITHUB_TOKEN}}
           script: |

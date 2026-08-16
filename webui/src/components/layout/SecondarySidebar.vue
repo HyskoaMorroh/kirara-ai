@@ -168,7 +168,7 @@ watch(
 :deep(.n-menu-item) {
   height: 40px;
   margin: 4px 12px;
-  border-radius: var(--border-radius-small);
+  border-radius: var(--radius-sm);
 }
 
 :deep(.n-menu-item-content) {

@@ -33,6 +33,8 @@ export interface BlockType {
   name: string
   label: string
   description: string
+  /** 画布上节点标题栏颜色，后端未配置时为空字符串，前端回退到主题色 */
+  color?: string
   inputs: BlockInput[]
   outputs: BlockOutput[]
   configs: BlockConfig[]

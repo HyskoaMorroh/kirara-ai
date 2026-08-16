@@ -98,15 +98,16 @@ defineExpose({
 .version-info {
   margin-bottom: 20px;
   padding: 15px;
-  background: rgba(0, 0, 0, 0.02);
-  border-radius: 8px;
+  background: var(--node-muted-bg, rgba(0, 0, 0, 0.02));
+  /* 位于弹窗（lg 档）内部的信息块，按嵌套原则用 sm */
+  border-radius: var(--radius-sm);
 }
 
 .version-title {
   font-size: 16px;
   font-weight: 500;
   margin-bottom: 10px;
-  color: #333;
+  color: var(--text-color, #333);
 }
 
 .version-row {
@@ -117,7 +118,7 @@ defineExpose({
 
 .version-label {
   width: 100px;
-  color: #666;
+  color: var(--text-color-secondary, #666);
 }
 
 .update-progress {
@@ -127,7 +128,7 @@ defineExpose({
 .progress-step {
   margin-bottom: 15px;
   font-size: 14px;
-  color: #666;
+  color: var(--text-color-secondary, #666);
   text-align: center;
 }
 </style>

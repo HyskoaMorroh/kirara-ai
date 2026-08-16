@@ -30,3 +30,19 @@ uv.lock
 **/mypy_cache/
 **/test-workflow-new.yaml
 **/test_password.hash
+
+# Python 字节码：__pycache__/ 只挡住目录，pytest 的 .pyc（含
+# *-pytest-*.pyc）若落在其他位置仍会被误提交。
+*.py[cod]
+*$py.class
+
+# 本机构建/测试缓存，不属于版本库
+.build-tmp/
+.npm-cache/
+.pytest-tmp/
+.pytest_cache/
+*.tsbuildinfo
+
+# graphify 知识图谱产物（本地分析用，不随项目分发）
+graphify-out/
+.graphify/

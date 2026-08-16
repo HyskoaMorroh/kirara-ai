@@ -30,7 +30,7 @@ const router = createRouter({
         {
           path: '/im/platforms',
           name: 'im-platforms',
-          component: () => import('@/views/workflow/WorkflowTemplates.vue')
+          component: () => import('@/views/ComingSoon.vue')
         },
         {
           path: '/llm',
@@ -40,17 +40,17 @@ const router = createRouter({
         {
           path: '/llm/backends',
           name: 'llm-backends',
-          component: () => import('@/views/workflow/WorkflowTemplates.vue')
+          component: () => import('@/views/ComingSoon.vue')
         },
         {
           path: '/llm/models',
           name: 'llm-models',
-          component: () => import('@/views/workflow/WorkflowTemplates.vue')
+          component: () => import('@/views/ComingSoon.vue')
         },
         {
           path: '/llm/chat',
           name: 'llm-chat',
-          component: () => import('@/views/workflow/WorkflowTemplates.vue')
+          component: () => import('@/views/ComingSoon.vue')
         },
         {
           path: '/workflow',
@@ -85,12 +85,12 @@ const router = createRouter({
         {
           path: '/memory',
           name: 'memory',
-          component: () => import('@/views/workflow/WorkflowTemplates.vue')
+          component: () => import('@/views/ComingSoon.vue')
         },
         {
           path: '/memory/search',
           name: 'memory-search',
-          component: () => import('@/views/workflow/WorkflowTemplates.vue')
+          component: () => import('@/views/ComingSoon.vue')
         },
         {
           path: '/guide',
@@ -170,7 +170,12 @@ const router = createRouter({
 
 // 路由守卫
 router.beforeEach((to, from, next) => {
-  const token = localStorage.getItem('token')
+  let token: string | null = null
+  try {
+    token = localStorage.getItem('token')
+  } catch {
+    // 隐私策略禁用存储时按未登录处理，避免路由守卫抛出异常。
+  }
   if (to.name !== 'login' && !token) {
     next({ name: 'login' })
   } else {

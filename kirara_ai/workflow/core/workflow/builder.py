@@ -1,6 +1,8 @@
 import importlib
+import os
 import random
 import string
+import tempfile
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
@@ -177,6 +179,7 @@ class WorkflowBuilder:
         self.id: Optional[str] = None
         self.name: str = name
         self.description: str = ""
+        self.metadata: Optional[Dict[str, Any]] = None
         self.head: Optional[Node] = None
         self.current: Optional[Node] = None
         self.nodes: List[Node] = []  # 存储所有节点
@@ -513,6 +516,8 @@ class WorkflowBuilder:
             "blocks": [],
             "config": self.config.model_dump(),
         }
+        if self.metadata is not None:
+            workflow_data["metadata"] = self.metadata
 
         def serialize_node(node: Node) -> dict:
             block_data: Dict[str, Any] = {
@@ -556,9 +561,27 @@ class WorkflowBuilder:
         for node in self.nodes_by_name.values():
             workflow_data["blocks"].append(serialize_node(node))
 
-        # 保存到文件
-        with open(file_path, "w", encoding="utf-8") as f:
-            yaml.dump(workflow_data, f)
+        # Write beside the target and replace only after the complete YAML has
+        # been flushed.  A failed process must never leave a half-written
+        # workflow that prevents the next startup from loading the registry.
+        directory = os.path.dirname(os.path.abspath(file_path))
+        os.makedirs(directory, exist_ok=True)
+        temp_file_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=directory, delete=False, suffix=".tmp"
+            ) as file:
+                temp_file_path = file.name
+                yaml.dump(workflow_data, file)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temp_file_path, file_path)
+        finally:
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except OSError:
+                    pass
 
         return self
 
@@ -582,6 +605,7 @@ class WorkflowBuilder:
         builder: WorkflowBuilder = cls(workflow_data["name"])
         builder.config = WorkflowConfig.model_validate(workflow_data.get("config", {}))
         builder.description = workflow_data.get("description", "")
+        builder.metadata = workflow_data.get("metadata")
         registry: BlockRegistry = container.resolve(BlockRegistry)
 
         # 第一遍：创建所有块

@@ -1,0 +1,168 @@
+name: 聊天 - 时间感知
+description: 在系统提示词里注入实时日期时间，让模型知道「今天是几号、现在几点」。适合需要回答时间、排期、节日相关问题的场景。
+blocks:
+  - type: internal:get_message
+    name: get_message
+    params: {}
+    position:
+      x: 120
+      y: 120
+    connected_to:
+      - target: toggle_edit_state
+        mapping:
+          from: sender
+          to: sender
+      - target: query_memory
+        mapping:
+          from: sender
+          to: chat_sender
+      - target: chat_message_constructor
+        mapping:
+          from: msg
+          to: user_msg
+      - target: chat_memory_store
+        mapping:
+          from: msg
+          to: user_msg
+  - type: internal:toggle_edit_state
+    name: toggle_edit_state
+    params:
+      is_editing: true
+    position:
+      x: 500
+      y: 120
+  - type: internal:chat_memory_query
+    name: query_memory
+    params:
+      scope_type: group
+    position:
+      x: 500
+      y: 520
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: memory_content
+          to: memory_content
+  - type: internal:text_block
+    name: user_prompt
+    params:
+      text: '{user_name}说：{user_msg}'
+    position:
+      x: 120
+      y: 520
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: text
+          to: user_prompt_format
+  # 提示词开头部分。真实时间由「基础：当前时间」节点提供，不要在这里写死日期。
+  - type: internal:text_block
+    name: prompt_head
+    params:
+      text: "# Information\n以下是当前的系统信息。\n当前日期时间："
+    position:
+      x: 120
+      y: 920
+    connected_to:
+      - target: concat_time
+        mapping:
+          from: text
+          to: text1
+  - type: internal:current_time_block
+    name: current_time
+    params: {}
+    position:
+      x: 120
+      y: 1320
+    connected_to:
+      - target: concat_time
+        mapping:
+          from: time
+          to: text2
+  - type: internal:text_concat_block
+    name: concat_time
+    params: {}
+    position:
+      x: 500
+      y: 920
+    connected_to:
+      - target: concat_body
+        mapping:
+          from: text
+          to: text1
+  # 提示词剩余部分，接在时间之后。
+  - type: internal:text_block
+    name: prompt_tail
+    params:
+      text: "\n\n# Memories\n以下是之前发生过的对话记录。\n-- 对话记录开始 --\n{memory_content}\n-- 对话记录结束 --\n\n# Rules\n1. 涉及日期、星期、节假日、时间差的问题，一律以上面的当前日期时间为准，不要凭训练数据推测。\n2. 用户说「今天」「明天」「刚才」时，请换算成具体日期后再回答。\n\n接下来，请基于以上信息回答用户的问题。"
+    position:
+      x: 500
+      y: 1320
+    connected_to:
+      - target: concat_body
+        mapping:
+          from: text
+          to: text2
+  - type: internal:text_concat_block
+    name: concat_body
+    params: {}
+    position:
+      x: 880
+      y: 920
+    connected_to:
+      - target: chat_message_constructor
+        mapping:
+          from: text
+          to: system_prompt_format
+  - type: internal:chat_message_constructor
+    name: chat_message_constructor
+    params: {}
+    position:
+      x: 1260
+      y: 120
+    connected_to:
+      - target: llm_chat
+        mapping:
+          from: llm_msg
+          to: prompt
+  # model_name 留空：请在编辑器的下拉框里选择本机已配置的模型。
+  - type: internal:chat_completion
+    name: llm_chat
+    params:
+      model_name: ''
+    position:
+      x: 1640
+      y: 120
+    connected_to:
+      - target: chat_response_converter
+        mapping:
+          from: resp
+          to: resp
+      - target: chat_memory_store
+        mapping:
+          from: resp
+          to: llm_resp
+  - type: internal:chat_response_converter
+    name: chat_response_converter
+    params: {}
+    position:
+      x: 2020
+      y: 120
+    connected_to:
+      - target: send_message
+        mapping:
+          from: msg
+          to: msg
+  - type: internal:send_message
+    name: send_message
+    params: {}
+    position:
+      x: 2400
+      y: 120
+  - type: internal:chat_memory_store
+    name: chat_memory_store
+    params:
+      scope_type: group
+    position:
+      x: 2020
+      y: 520

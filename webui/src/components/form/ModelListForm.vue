@@ -238,15 +238,16 @@ const getModelIndex = (model: ModelInfo) => {
   z-index: 10;
   margin-bottom: 12px;
   padding: 8px 8px 0;
-  background-color: var(--n-body-color, #fff);
+  /* 原先读 --n-body-color 并回退 #fff，该变量未定义，深色下会被写死成白底 */
+  background-color: var(--card-bg-color, #ffffff);
 }
 
 .group-title {
-  font-size: 16px;
+  font-size: var(--font-size-lg, 16px);
   font-weight: 500;
-  color: var(--n-text-color);
+  color: var(--text-primary, #333639);
   padding-left: 8px;
-  border-left: 3px solid var(--n-primary-color, #1f93ff);
+  border-left: 3px solid var(--primary-color, #1f93ff);
 }
 
 .model-list {
@@ -258,16 +259,16 @@ const getModelIndex = (model: ModelInfo) => {
 
 .model-card {
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   overflow: hidden;
-  background-color: var(--n-card-color);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+  background-color: var(--card-bg-color, #ffffff);
+  box-shadow: var(--box-shadow-sm, 0 2px 6px rgba(0, 0, 0, 0.04));
   z-index: 1;
 }
 
 .model-card:hover {
   transform: translateY(-3px);
-  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.06);
+  box-shadow: var(--box-shadow, 0 6px 12px rgba(0, 0, 0, 0.06));
 }
 
 .model-card-content {
@@ -287,7 +288,7 @@ const getModelIndex = (model: ModelInfo) => {
 .model-avatar {
   flex-shrink: 0;
   font-weight: 500;
-  font-size: 16px;
+  font-size: var(--font-size-lg, 16px);
 }
 
 .model-card-title {
@@ -301,21 +302,21 @@ const getModelIndex = (model: ModelInfo) => {
 
 .model-name {
   font-weight: 500;
-  font-size: 15px;
+  font-size: var(--font-size-base, 15px);
   word-wrap: break-word;
   overflow: hidden;
-  color: var(--n-text-color);
+  color: var(--text-primary, #333639);
 }
 
 .model-type-badge {
   display: inline-block;
-  font-size: 12px;
+  font-size: var(--font-size-sm, 12px);
   padding: 1px 8px;
-  border-radius: 10px;
-  background-color: rgba(64, 158, 255, 0.1);
-  color: var(--n-primary-color);
+  border-radius: var(--radius-pill);
+  background-color: rgba(var(--primary-color-rgb, 64, 158, 255), 0.1);
+  color: var(--primary-color-text, var(--primary-color, #1f93ff));
   font-weight: 400;
-  border: 1px solid rgba(64, 158, 255, 0.2);
+  border: 1px solid rgba(var(--primary-color-rgb, 64, 158, 255), 0.2);
   width: fit-content;
 }
 
@@ -331,25 +332,25 @@ const getModelIndex = (model: ModelInfo) => {
 }
 
 .ability-tag {
-  font-size: 12px;
+  font-size: var(--font-size-sm, 12px);
   padding: 1px 8px;
-  background-color: rgba(64, 158, 255, 0.05);
-  color: var(--n-text-color);
-  border-radius: 10px;
+  background-color: rgba(var(--primary-color-rgb, 64, 158, 255), 0.05);
+  color: var(--text-primary, #333639);
+  border-radius: var(--radius-pill);
   white-space: nowrap;
   transition: all 0.2s ease;
   font-weight: 400;
-  border: 1px solid rgba(128, 128, 128, 0.3);
+  border: 1px solid var(--border-color, rgba(128, 128, 128, 0.3));
 }
 
 .ability-tag:hover {
-  background-color: rgba(64, 158, 255, 0.1);
-  border-color: rgba(64, 158, 255, 0.3);
+  background-color: rgba(var(--primary-color-rgb, 64, 158, 255), 0.1);
+  border-color: rgba(var(--primary-color-rgb, 64, 158, 255), 0.3);
 }
 
 .no-abilities {
-  font-size: 12px;
-  color: var(--n-text-color-3);
+  font-size: var(--font-size-sm, 12px);
+  color: var(--text-color-tertiary, #909399);
   font-style: italic;
   padding: 4px 0;
 }
@@ -376,16 +377,23 @@ const getModelIndex = (model: ModelInfo) => {
   justify-content: center;
   width: 28px;
   height: 28px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   transition: all 0.2s ease;
 }
 
 .edit-button:hover {
-  background-color: rgba(64, 158, 255, 0.1);
+  background-color: rgba(var(--primary-color-rgb, 64, 158, 255), 0.1);
+}
+
+/* 图标按钮为纯文本按钮，需要显式的键盘聚焦环 */
+.edit-button:focus-visible,
+.delete-button:focus-visible {
+  outline: 2px solid var(--primary-color, #4080ff);
+  outline-offset: 2px;
 }
 
 .delete-button:not(:disabled):hover {
-  background-color: rgba(239, 71, 78, 0.1);
+  background-color: rgba(var(--error-color-rgb, 239, 71, 78), 0.1);
 }
 
 .empty-list {
@@ -393,10 +401,10 @@ const getModelIndex = (model: ModelInfo) => {
   justify-content: center;
   align-items: center;
   height: 140px;
-  background-color: var(--n-card-color, #fff);
-  border: 2px dashed rgba(128, 128, 128, 0.3);
-  border-radius: 10px;
-  color: var(--n-text-color-3);
+  background-color: var(--card-bg-color, #ffffff);
+  border: 2px dashed var(--border-color, rgba(128, 128, 128, 0.3));
+  border-radius: var(--radius-md);
+  color: var(--text-color-tertiary, #909399);
   margin: 16px 4px;
 }
 </style>

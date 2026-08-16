@@ -136,7 +136,7 @@ const handleCreateAdapter = () => {
 .adapter-item {
   padding: 12px;
   margin: 4px 0;
-  border-radius: var(--border-radius);
+  border-radius: var(--radius-md);
   transition: all var(--transition-duration) var(--transition-timing-function);
 }
 

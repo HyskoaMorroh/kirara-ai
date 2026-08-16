@@ -12,9 +12,10 @@ class LLMResponseToText(Block):
     """LLM 响应转纯文本"""
 
     name = "llm_response_to_text"
+    description = "把模型回复提取成纯文本，便于交给正则提取、文本替换等节点继续处理。"
     container: DependencyContainer
-    inputs = {"response": Input("response", "LLM 响应", LLMChatResponse, "LLM 响应")}
-    outputs = {"text": Output("text", "纯文本", str, "纯文本")}
+    inputs = {"response": Input("response", "LLM 响应", LLMChatResponse, "模型返回的回复")}
+    outputs = {"text": Output("text", "纯文本", str, "回复中的文字内容")}
 
     def execute(self, response: LLMChatResponse) -> Dict[str, Any]:
         content = ""

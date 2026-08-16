@@ -26,12 +26,13 @@ class MCPToolProvider(Block):
 
     """
     name = "mcp_tool_provider"
+    description = "输出选中的 MCP 工具列表，连到「LLM: 执行对话并调用工具」即可让模型使用这些工具。"
     outputs = {
-        "tools": Output("tools", "工具列表", List[Tool], "工具列表")
+        "tools": Output("tools", "工具列表", List[Tool], "可供模型调用的工具列表")
     }
     container: DependencyContainer
 
-    def __init__(self, enabled_tools: Annotated[List[str], ParamMeta(label="启用工具列表", description="启用工具列表", options_provider=get_enabled_mcp_tools)]):
+    def __init__(self, enabled_tools: Annotated[List[str], ParamMeta(label="启用工具列表", description="勾选允许模型调用的 MCP 工具，需先在 MCP 页面连接服务器", options_provider=get_enabled_mcp_tools)]):
         self.logger = get_logger("MCPCallTool")
         self.enabled_tools = enabled_tools
 

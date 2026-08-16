@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, defineAsyncComponent, h, onBeforeUnmount } from 'vue'
 import {
   NCard,
   NForm,
@@ -17,6 +17,7 @@ import {
   NCollapse,
   NCollapseItem,
   NScrollbar,
+  NSpin,
   NText
 } from 'naive-ui'
 import {
@@ -32,8 +33,37 @@ import { useVueFlow } from '@vue-flow/core'
 import type { Node, Edge } from '@vue-flow/core'
 import type { BlockType } from '@/api/block'
 import { getTypeColor } from '@/utils/node-colors'
-import Editor from '@/editor/Editor.vue'
+import { useThemeStore } from '@/stores/theme'
+import { getVisibleModelSlotValue } from './workflow-model-options'
 import type { MonacoLanguageClient } from 'monaco-languageclient'
+
+// Monaco 编辑器连同 vscode 服务层约 9MB，静态导入会被打进工作流编辑器的首屏
+// chunk，导致打开画布时长时间白屏。改为异步组件后，只有选中代码节点、真正需要
+// 编辑代码时才下载这部分资源；下载期间用一个占位骨架保持布局稳定。
+// 占位组件是独立组件，拿不到本文件的 scoped 属性，因此样式写成内联。
+const Editor = defineAsyncComponent({
+  loader: () => import('@/editor/Editor.vue'),
+  loadingComponent: {
+    name: 'EditorLoading',
+    render: () =>
+      h(
+        'div',
+        {
+          style: {
+            flex: '1',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '10px',
+            minHeight: '200px',
+            color: 'var(--text-color-secondary)'
+          }
+        },
+        [h(NSpin, { size: 'small' }), h('span', { style: { fontSize: '13px' } }, '正在加载代码编辑器...')]
+      )
+  },
+  delay: 0
+})
 
 const props = defineProps<{
   selectedNode: Node | null
@@ -43,6 +73,11 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
+  /**
+   * Vue Flow applies updateNode synchronously. Tell the canvas before that
+   * happens so it can capture the pre-edit state for undo/redo.
+   */
+  'before-node-mutation': []
 }>()
 
 const {
@@ -61,6 +96,8 @@ const isCodeNode = computed(() => {
   if (!props.selectedNode) return false
   return props.selectedNode.type === 'code'
 })
+
+const themeStore = useThemeStore()
 
 const formValue = ref<any>({})
 const lspClientRef = ref<MonacoLanguageClient | null>(null)
@@ -110,6 +147,37 @@ def execute(${
   { immediate: true, deep: true }
 )
 
+/** 只有这几个字段会被面板改动；blockType 等只读字段不必参与比较 */
+const MUTABLE_NODE_DATA_KEYS = ['config', 'inputs', 'outputs'] as const
+
+/**
+ * 变更检测用的轻量指纹。
+ *
+ * 原先直接 `JSON.stringify(node.data)` 两次：node.data 里嵌着完整的
+ * blockType（含全部端口与配置项定义），代码节点还带着整个代码缓冲区，
+ * 每敲一个字符就要序列化两遍。这里只序列化真正可变的三个字段。
+ */
+const getNodeDataFingerprint = (data: any) => {
+  if (!data) return ''
+  const picked: Record<string, unknown> = {}
+  for (const key of MUTABLE_NODE_DATA_KEYS) {
+    picked[key] = data[key]
+  }
+  return JSON.stringify(picked)
+}
+
+/**
+ * Keep undo history meaningful: a form close or an editor event that leaves
+ * the serializable node data unchanged must not create a no-op history entry.
+ */
+const updateSelectedNodeData = (updatedData: any) => {
+  const node = props.selectedNode
+  if (!node || getNodeDataFingerprint(node.data) === getNodeDataFingerprint(updatedData)) return
+
+  emit('before-node-mutation')
+  updateNode(node.id, { data: updatedData })
+}
+
 const applyNodeConfig = () => {
   if (!props.selectedNode) return
 
@@ -128,13 +196,81 @@ const applyNodeConfig = () => {
     updatedData.config.code = formValue.value.code
   }
 
-  updateNode(props.selectedNode.id, { data: updatedData })
+  updateSelectedNodeData(updatedData)
 }
 
 const closeNodeConfig = () => {
+  // 关闭前先把 Monaco 的防抖尾巴落盘，否则最后几个字符会丢
+  flushPendingCodeConfig()
   applyNodeConfig()
   emit('close')
 }
+
+/**
+ * Monaco 输入的防抖写回。
+ *
+ * `@update:modelValue` 在代码编辑器里是逐字符触发的，直接调 applyNodeConfig
+ * 意味着每敲一个键就要遍历配置项、拷贝一份 data、再做一次指纹比较，
+ * 并同步推动画布的历史与 emit 链路。代码是长文本，这条路径最贵。
+ * 这里合并 300ms 内的连续输入。
+ *
+ * 待写回的内容在排定定时器时就连节点 id 一起记下，而不是等触发时再读
+ * props.selectedNode——否则用户在 300ms 内切换到别的节点，这次编辑会被
+ * 写到错误的节点上或者直接丢失。
+ */
+const CODE_APPLY_DEBOUNCE = 300
+let codeApplyTimer: number | null = null
+let pendingCodeEdit: { nodeId: string; code: string } | null = null
+
+const commitPendingCodeEdit = () => {
+  const pending = pendingCodeEdit
+  pendingCodeEdit = null
+  if (!pending) return
+
+  const node = findNode(pending.nodeId)
+  if (!node) return
+
+  const updatedData = {
+    ...node.data,
+    config: { ...node.data.config, code: pending.code }
+  }
+  if (getNodeDataFingerprint(node.data) === getNodeDataFingerprint(updatedData)) return
+  emit('before-node-mutation')
+  updateNode(node.id, { data: updatedData })
+}
+
+const flushPendingCodeConfig = () => {
+  if (codeApplyTimer !== null) {
+    clearTimeout(codeApplyTimer)
+    codeApplyTimer = null
+  }
+  commitPendingCodeEdit()
+}
+
+const applyCodeConfigDebounced = () => {
+  if (!props.selectedNode) return
+  pendingCodeEdit = { nodeId: props.selectedNode.id, code: formValue.value.code }
+  if (codeApplyTimer !== null) {
+    clearTimeout(codeApplyTimer)
+  }
+  codeApplyTimer = window.setTimeout(() => {
+    codeApplyTimer = null
+    commitPendingCodeEdit()
+  }, CODE_APPLY_DEBOUNCE)
+}
+
+onBeforeUnmount(() => {
+  flushPendingCodeConfig()
+})
+
+// 切换到别的节点前，先把上一个节点尚未落盘的代码写回，避免编辑内容丢失。
+// commitPendingCodeEdit 用记下的 nodeId 定位节点，所以此时 props 已经换掉也无妨。
+watch(
+  () => props.selectedNode?.id,
+  () => {
+    flushPendingCodeConfig()
+  }
+)
 
 const inputConnections = computed(() => {
   if (!props.selectedNode) return []
@@ -226,7 +362,7 @@ const addInputPort = () => {
       }
     }
     updatedData.config.inputs = updatedData.inputs
-    updateNode(props.selectedNode.id, { data: updatedData })
+    updateSelectedNodeData(updatedData)
     inputEditMode.value = false
     newInputData.value = { name: '', label: '', type: 'str', required: false }
     updateLspMandatoryFunction()
@@ -240,7 +376,7 @@ const removeInputPort = (name: string) => {
       inputs: props.selectedNode.data.inputs?.filter((input: any) => input.name !== name)
     }
     updatedData.config.inputs = updatedData.inputs
-    updateNode(props.selectedNode.id, { data: updatedData })
+    updateSelectedNodeData(updatedData)
     updateLspMandatoryFunction()
   }
 }
@@ -259,7 +395,7 @@ const addOutputPort = () => {
       ]
     }
     updatedData.config.outputs = updatedData.outputs
-    updateNode(props.selectedNode.id, { data: updatedData })
+    updateSelectedNodeData(updatedData)
     outputEditMode.value = false
     newOutputData.value = { name: '', label: '', type: 'str' }
   }
@@ -272,7 +408,7 @@ const removeOutputPort = (name: string) => {
       outputs: props.selectedNode.data.outputs?.filter((output: any) => output.name !== name)
     }
     updatedData.config.outputs = updatedData.outputs
-    updateNode(props.selectedNode.id, { data: updatedData })
+    updateSelectedNodeData(updatedData)
   }
 }
 
@@ -374,6 +510,11 @@ const getSelectOptions = (config: any) => {
     options.unshift({ label: '不指定', value: null })
   }
   return options
+}
+
+const updateSelectConfigValue = (configName: string, value: unknown) => {
+  formValue.value[configName] = value
+  applyNodeConfig()
 }
 
 function getTypeColorStyle(type: string) {
@@ -798,11 +939,15 @@ const getTypeOptions = () => {
               <!-- 单选类型配置 -->
               <NSelect
                 v-else-if="config.has_options && !isListType(config.type)"
-                v-model:value="formValue[config.name]"
+                :value="getVisibleModelSlotValue(
+                  config.name,
+                  formValue[config.name],
+                  getSelectOptions(config)
+                )"
                 :options="getSelectOptions(config)"
                 :placeholder="`请选择${config.label || config.name}`"
                 class="custom-select"
-                @update:value="applyNodeConfig"
+                @update:value="(value) => updateSelectConfigValue(config.name, value)"
               />
 
               <!-- 多选类型配置 List[actual_type]-->
@@ -859,6 +1004,7 @@ const getTypeOptions = () => {
                 <Editor
                   v-model="formValue.code"
                   language="python"
+                  :theme="themeStore.monacoTheme"
                   :options="{
                     minimap: { enabled: false },
                     lineNumbers: 'on',
@@ -867,7 +1013,7 @@ const getTypeOptions = () => {
                   }"
                   ref="codeEditorRef"
                   @editorDidMount="handleEditorMount"
-                  @update:modelValue="applyNodeConfig"
+                  @update:modelValue="applyCodeConfigDebounced"
                 />
               </div>
             </div>
@@ -909,7 +1055,7 @@ const getTypeOptions = () => {
                   }"
                   ref="codeEditorRef"
                   @editorDidMount="handleEditorMount"
-                  @update:modelValue="applyNodeConfig"
+                  @update:modelValue="applyCodeConfigDebounced"
                 />
               </div>
             </div>
@@ -948,8 +1094,9 @@ const getTypeOptions = () => {
 <style scoped>
 .node-config-panel {
   width: 500px;
-  background-color: rgba(255, 255, 255, 0.8);
+  background-color: var(--panel-bg-color);
   backdrop-filter: blur(10px);
+  /* 例外：该面板贴着画布右缘满高铺满，任何圆角都会露出画布底色，故保持直角 */
   border-radius: 0;
   transition: all 0.3s ease;
   height: 100%;
@@ -964,13 +1111,13 @@ const getTypeOptions = () => {
 }
 
 .header-icon {
-  color: #1890ff;
+  color: var(--primary-color);
 }
 
 .header-title {
   font-weight: 600;
   font-size: 16px;
-  color: #1f2937;
+  color: var(--text-color);
 }
 
 .header-actions {
@@ -980,8 +1127,8 @@ const getTypeOptions = () => {
 }
 
 .close-button:hover {
-  background-color: rgba(0, 0, 0, 0.05);
-  color: #ff4d4f;
+  background-color: rgba(var(--primary-color-rgb), 0.08);
+  color: var(--error-color);
 }
 
 .config-content {
@@ -996,23 +1143,23 @@ const getTypeOptions = () => {
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  background-color: #f9fafb;
-  border-radius: 8px;
+  background-color: var(--node-muted-bg);
+  border-radius: var(--radius-sm);
   margin-bottom: 8px;
 }
 
 .node-id-label {
   font-size: 13px;
   font-weight: 500;
-  color: #374151;
+  color: var(--text-color);
 }
 
 .node-id-value {
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
   font-size: 13px;
-  color: #1890ff;
-  background-color: rgba(24, 144, 255, 0.1);
-  border-radius: 4px;
+  color: var(--primary-color);
+  background-color: rgba(var(--primary-color-rgb), 0.1);
+  border-radius: var(--radius-xs);
 }
 
 .node-description {
@@ -1021,7 +1168,7 @@ const getTypeOptions = () => {
 
 .node-description-value {
   font-size: 13px;
-  color: #6b7280;
+  color: var(--text-color-secondary);
   line-height: 1.4;
 }
 
@@ -1036,13 +1183,13 @@ const getTypeOptions = () => {
 .config-label {
   font-size: 13px;
   font-weight: 500;
-  color: #374151;
+  color: var(--text-color);
   margin-bottom: 6px;
 }
 
 .config-description {
   font-size: 12px;
-  color: #6b7280;
+  color: var(--text-color-secondary);
   margin-bottom: 8px;
   line-height: 1.4;
 }
@@ -1050,7 +1197,7 @@ const getTypeOptions = () => {
 .custom-input,
 .custom-select,
 .custom-input-number {
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   transition: all 0.2s;
   width: 100%;
   margin-top: 4px;
@@ -1059,7 +1206,7 @@ const getTypeOptions = () => {
 .custom-input:hover,
 .custom-select:hover,
 .custom-input-number:hover {
-  border-color: #1890ff;
+  border-color: var(--primary-color);
 }
 
 .custom-switch {
@@ -1068,18 +1215,18 @@ const getTypeOptions = () => {
 }
 
 .cancel-button {
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 .apply-button {
-  border-radius: 6px;
-  background-color: #1890ff;
-  border-color: #1890ff;
+  border-radius: var(--radius-sm);
+  background-color: var(--primary-color);
+  border-color: var(--primary-color);
 }
 
 .apply-button:hover {
-  background-color: #40a9ff;
-  border-color: #40a9ff;
+  background-color: var(--primary-color-hover);
+  border-color: var(--primary-color-hover);
 }
 
 .empty-config {
@@ -1088,18 +1235,18 @@ const getTypeOptions = () => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #999;
+  color: var(--text-color-tertiary);
   height: 100%;
 }
 
 .empty-icon {
-  color: #d9d9d9;
+  color: var(--text-color-tertiary);
 }
 
 .connection-group {
   margin-bottom: 12px;
-  background-color: #fff;
-  border-radius: 6px;
+  background-color: var(--card-bg-color);
+  border-radius: var(--radius-sm);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
   overflow: hidden;
 }
@@ -1110,7 +1257,7 @@ const getTypeOptions = () => {
 
 .connection-point-header {
   padding: 8px 12px;
-  background-color: #f9fafb;
+  background-color: var(--node-muted-bg);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1119,32 +1266,32 @@ const getTypeOptions = () => {
 .connection-point-name {
   font-size: 13px;
   font-weight: 500;
-  color: #374151;
+  color: var(--text-color);
 }
 
 .connection-type-badge {
   font-size: 11px;
-  color: #6b7280;
-  background-color: #f3f4f6;
+  color: var(--text-color-secondary);
+  background-color: var(--code-bg-color);
   padding: 1px 6px;
-  border-radius: 10px;
+  border-radius: var(--radius-pill);
 }
 
 .required-badge {
   font-size: 11px;
-  color: #ef4444;
+  color: var(--error-color);
   background-color: rgba(239, 68, 68, 0.1);
   padding: 1px 6px;
-  border-radius: 10px;
+  border-radius: var(--radius-pill);
   margin-left: auto;
 }
 
 .optional-badge {
   font-size: 11px;
-  color: #6b7280;
+  color: var(--text-color-secondary);
   background-color: rgba(107, 114, 128, 0.1);
   padding: 1px 6px;
-  border-radius: 10px;
+  border-radius: var(--radius-pill);
   margin-left: auto;
 }
 
@@ -1157,7 +1304,7 @@ const getTypeOptions = () => {
   align-items: center;
   justify-content: space-between;
   padding: 8px 12px;
-  border-bottom: 1px solid #f3f4f6;
+  border-bottom: 1px solid var(--divider-color);
 }
 
 .connection-item:last-child {
@@ -1165,7 +1312,7 @@ const getTypeOptions = () => {
 }
 
 .connection-item:hover {
-  background-color: #f9fafb;
+  background-color: var(--node-muted-bg);
 }
 
 .connection-info {
@@ -1177,7 +1324,7 @@ const getTypeOptions = () => {
 }
 
 .connection-icon {
-  color: #9ca3af;
+  color: var(--text-color-tertiary);
   flex-shrink: 0;
 }
 
@@ -1196,26 +1343,26 @@ const getTypeOptions = () => {
 
 .connection-label {
   font-size: 13px;
-  color: #374151;
+  color: var(--text-color);
   font-weight: 500;
 }
 
 .connection-handle {
   font-size: 12px;
-  color: #6b7280;
-  background-color: #f3f4f6;
+  color: var(--text-color-secondary);
+  background-color: var(--code-bg-color);
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 .navigate-button {
-  color: #6b7280;
+  color: var(--text-color-secondary);
   transition: all 0.2s;
 }
 
 .navigate-button:hover {
-  color: #1890ff;
-  background-color: rgba(24, 144, 255, 0.1);
+  color: var(--primary-color);
+  background-color: rgba(var(--primary-color-rgb), 0.1);
 }
 
 .no-connections {
@@ -1223,18 +1370,18 @@ const getTypeOptions = () => {
   align-items: center;
   gap: 8px;
   padding: 12px;
-  color: #9ca3af;
+  color: var(--text-color-tertiary);
   font-size: 12px;
   font-style: italic;
 }
 
 .no-connection-points {
   font-size: 13px;
-  color: #6b7280;
+  color: var(--text-color-secondary);
   padding: 12px;
   text-align: center;
-  background-color: #f9fafb;
-  border-radius: 6px;
+  background-color: var(--node-muted-bg);
+  border-radius: var(--radius-sm);
 }
 
 /* 添加内联表单相关样式 */
@@ -1244,14 +1391,14 @@ const getTypeOptions = () => {
   align-items: center;
   margin-bottom: 12px;
   padding: 8px 12px;
-  background-color: #f9fafb;
+  background-color: var(--node-muted-bg);
   height: 140px;
 }
 
 .inline-form {
-  background-color: #f9fafb;
+  background-color: var(--node-muted-bg);
   padding: 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   margin-bottom: 16px;
 }
 
@@ -1273,7 +1420,7 @@ const getTypeOptions = () => {
 
 .switch-label {
   font-size: 13px;
-  color: #374151;
+  color: var(--text-color);
 }
 
 .inline-form-button {
@@ -1286,8 +1433,8 @@ const getTypeOptions = () => {
 
 .port-item {
   margin-bottom: 8px;
-  background-color: #fff;
-  border-radius: 6px;
+  background-color: var(--card-bg-color);
+  border-radius: var(--radius-sm);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
   overflow: hidden;
 }
@@ -1302,7 +1449,7 @@ const getTypeOptions = () => {
 .port-name {
   font-size: 13px;
   font-weight: 500;
-  color: #374151;
+  color: var(--text-color);
 }
 
 .port-details {
@@ -1313,46 +1460,46 @@ const getTypeOptions = () => {
 
 .port-type-tag {
   font-size: 11px;
-  color: #6b7280;
-  background-color: #f3f4f6;
+  color: var(--text-color-secondary);
+  background-color: var(--code-bg-color);
   padding: 1px 6px;
-  border-radius: 10px;
+  border-radius: var(--radius-pill);
 }
 
 .port-required-tag {
   font-size: 11px;
-  color: #ef4444;
+  color: var(--error-color);
   background-color: rgba(239, 68, 68, 0.1);
   padding: 1px 6px;
-  border-radius: 10px;
+  border-radius: var(--radius-pill);
 }
 
 .port-optional-tag {
   font-size: 11px;
-  color: #6b7280;
+  color: var(--text-color-secondary);
   background-color: rgba(107, 114, 128, 0.1);
   padding: 1px 6px;
-  border-radius: 10px;
+  border-radius: var(--radius-pill);
 }
 
 .remove-port-button {
-  color: #6b7280;
+  color: var(--text-color-secondary);
   transition: all 0.2s;
 }
 
 .remove-port-button:hover {
-  color: #ff4d4f;
+  color: var(--error-color);
   background-color: rgba(255, 77, 79, 0.1);
 }
 
 .code-editor-container {
   width: 100%;
   height: 500px;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
   overflow: hidden;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-  background-color: #f9fafb;
+  background-color: var(--node-muted-bg);
   display: flex;
   flex-direction: column;
 }
@@ -1361,25 +1508,25 @@ const getTypeOptions = () => {
   display: flex;
   justify-content: flex-end;
   padding: 8px 12px;
-  background-color: #f3f4f6;
-  border-bottom: 1px solid #e5e7eb;
+  background-color: var(--code-bg-color);
+  border-bottom: 1px solid var(--border-color);
 }
 
 .editor-action-button {
-  background-color: rgba(255, 255, 255, 0.7);
-  border: 1px solid #e0e0e0;
+  background-color: var(--elevated-bg-color);
+  border: 1px solid var(--border-color);
   transition: all 0.2s;
 }
 
 .editor-action-button:hover {
-  background-color: #ffffff;
-  border-color: #1890ff;
+  background-color: var(--card-bg-color);
+  border-color: var(--primary-color);
 }
 
 .section-title {
   font-size: 13px;
   font-weight: 500;
-  color: #374151;
+  color: var(--text-color);
   margin-bottom: 8px;
 }
 
@@ -1394,7 +1541,7 @@ const getTypeOptions = () => {
 .param-label {
   font-size: 13px;
   font-weight: 500;
-  color: #374151;
+  color: var(--text-color);
   margin-right: 8px;
 }
 
@@ -1405,7 +1552,7 @@ const getTypeOptions = () => {
 .empty-params {
   padding: 12px;
   text-align: center;
-  color: #999;
+  color: var(--text-color-tertiary);
   font-size: 12px;
 }
 
@@ -1414,9 +1561,9 @@ const getTypeOptions = () => {
 }
 
 .result-container {
-  background-color: #fff;
+  background-color: var(--card-bg-color);
   padding: 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   overflow: auto;
 }
 
@@ -1431,7 +1578,7 @@ const getTypeOptions = () => {
   bottom: 0;
   right: 0;
   z-index: 9999;
-  background-color: #fff;
+  background-color: var(--card-bg-color);
   display: flex;
   flex-direction: column;
 }
@@ -1441,22 +1588,22 @@ const getTypeOptions = () => {
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  background-color: #ffffff;
-  border-bottom: 1px solid #e0e0e0;
+  background-color: var(--card-bg-color);
+  border-bottom: 1px solid var(--border-color);
 }
 
 .fullscreen-editor-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #333333;
+  color: var(--text-color);
   font-weight: 500;
 }
 
 .fullscreen-editor-content {
   flex: 1;
   height: calc(100vh - 56px);
-  background-color: #f9fafb;
-  border-top: 1px solid #e5e7eb;
+  background-color: var(--node-muted-bg);
+  border-top: 1px solid var(--border-color);
 }
 </style>

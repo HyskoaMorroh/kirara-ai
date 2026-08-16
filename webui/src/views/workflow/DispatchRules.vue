@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, h, computed } from 'vue'
+import { ref, onMounted, onBeforeUnmount, h, computed, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   NDataTable,
   NButton,
@@ -15,6 +16,9 @@ import {
   NModal,
   NDivider,
   NScrollbar,
+  NAlert,
+  NTag,
+  NCheckbox,
   type FormInst,
   NIcon,
   NTooltip
@@ -23,6 +27,10 @@ import {
   dispatchApi,
   getRuleTypeLabel,
   type DispatchRule,
+  type DispatchPreviewInput,
+  type DispatchPreviewResponse,
+  type DispatchPreviewRuleResult,
+  type DispatchRuleReachability,
   type RuleGroup,
   type SimpleRule
 } from '@/api/dispatch'
@@ -30,9 +38,23 @@ import { listWorkflows, type WorkflowInfo } from '@/api/workflow'
 import DynamicConfigForm from '@/components/form/DynamicConfigForm.vue'
 import { Add, Remove, PencilOutline, HelpCircleOutline } from '@vicons/ionicons5'
 import { v4 as uuidv4 } from 'uuid'
+import { cloneDispatchRule } from './dispatch-rule-utils'
+import {
+  getDispatchPreviewDecisionLabel,
+  getDispatchPreviewDecisionType
+} from './dispatch-preview-utils'
 
 const message = useMessage()
+const route = useRoute()
 const rules = ref<DispatchRule[]>([])
+/**
+ * 规则的匹配次序与遮蔽状态，全部来自后端。
+ *
+ * 「无条件规则会让后续规则永远不被判断」这套语义只在
+ * `kirara_ai/workflow/core/dispatch/reachability.py` 中定义一次，前端不再复刻，
+ * 否则界面与调度器迟早会对「这条规则到底会不会触发」给出相反的结论。
+ */
+const ruleReachability = ref<DispatchRuleReachability[]>([])
 const ruleTypes = ref<string[]>([])
 const showEditModal = ref(false)
 const currentRule = ref<DispatchRule>({
@@ -57,9 +79,46 @@ const selectedRuleType = ref<string>('')
 const selectedRuleGroupIndex = ref<number>(-1)
 const selectedRuleIndex = ref<number>(-1)
 const showRuleConfigModal = ref(false)
+const showPreviewModal = ref(false)
+const previewLoading = ref(false)
+const previewResult = ref<DispatchPreviewResponse | null>(null)
+const previewDraft = ref<DispatchRule | undefined>()
+const previewInput = ref<DispatchPreviewInput>({
+  content: '',
+  chat_type: '私聊',
+  sender_id: 'preview-user',
+  group_id: '',
+  mentioned: false
+})
 
 // 表格列定义
 const columns = [
+  {
+    title: '#',
+    key: '_order',
+    width: 56,
+    render: (row: any) =>
+      h(
+        NTooltip,
+        { trigger: 'hover', placement: 'right' },
+        {
+          trigger: () =>
+            h(
+              NTag,
+              {
+                size: 'small',
+                round: true,
+                bordered: false,
+                type: row._shadowed ? 'warning' : 'default'
+              },
+              { default: () => String(row._order) }
+            ),
+          default: () =>
+            row._shadowed
+              ? '此规则排在一条无条件规则之后，永远不会被判断到。请提高它的优先级。'
+              : `匹配顺序第 ${row._order} 位，命中后不再判断后续规则。`        }
+      )
+  },
   { title: '名称', key: 'name' },
   { title: '描述', key: 'description' },
   {
@@ -172,8 +231,10 @@ const validationRules = ref<any>({
 // 加载规则列表
 const loadRules = async () => {
   try {
-    const { rules: ruleList } = await dispatchApi.getRules()
+    const { rules: ruleList, reachability } = await dispatchApi.getRules()
     rules.value = ruleList
+    // 后端在同一次响应里给出可达性，列表与遮蔽提示天然一致，不会出现中间态。
+    ruleReachability.value = reachability ?? []
   } catch (error) {
     message.error('加载规则列表失败')
   }
@@ -209,7 +270,7 @@ const loadConfigSchema = async (type: string) => {
 }
 
 // 创建规则
-const createRule = () => {
+const createRule = (workflowId = '') => {
   isCreate.value = true
   currentRule.value = {
     rule_id: uuidv4(),
@@ -217,7 +278,7 @@ const createRule = () => {
     enabled: true,
     name: '',
     description: '',
-    workflow_id: '',
+    workflow_id: workflowId,
     rule_groups: [
       {
         operator: 'or',
@@ -232,7 +293,7 @@ const createRule = () => {
 // 编辑规则
 const editRule = (rule: DispatchRule) => {
   isCreate.value = false
-  currentRule.value = { ...rule }
+  currentRule.value = cloneDispatchRule(rule)
   showEditModal.value = true
 }
 
@@ -266,6 +327,36 @@ const saveRule = async (isCreate: boolean) => {
   } catch (error) {
     message.error('保存失败:' + (error as Error).message)
   }
+}
+
+/** 打开只读试运行；编辑中的草稿会作为临时规则参与排序，绝不写入服务端。 */
+const openPreview = (draftRule?: DispatchRule) => {
+  previewDraft.value = draftRule ? cloneDispatchRule(draftRule) : undefined
+  previewResult.value = null
+  showPreviewModal.value = true
+}
+
+const runPreview = async () => {
+  previewLoading.value = true
+  try {
+    previewResult.value = await dispatchApi.previewRules({
+      ...previewInput.value,
+      group_id: previewInput.value.group_id || null,
+      draft_rule: previewDraft.value
+    })
+  } catch (error) {
+    message.error('试运行失败：' + (error as Error).message)
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+const previewReason = (result: DispatchPreviewRuleResult) => {
+  if (result.explanation.reason) return result.explanation.reason as string
+  const conditions = (result.explanation.groups || []).flatMap((group: any) => group.rules || [])
+  const failed = conditions.filter((condition: any) => condition.matched === false)
+  if (failed.length) return `未满足：${failed.map((condition: any) => getRuleTypeLabel(condition.type)).join('、')}`
+  return result.matched ? '全部条件满足' : ''
 }
 
 // 添加规则组
@@ -310,6 +401,120 @@ const ruleTypeOptions = computed(() =>
   }))
 )
 
+/**
+ * 按实际匹配顺序排列的规则视图。
+ *
+ * 后端 `get_active_rules()` 按「优先级降序 + rule_id 升序」排序后**首个命中即执行**，
+ * 但表格原先按接口返回顺序展示，用户无法看出谁会先被判断。这里复刻同一套
+ * 排序，并标注序号与遮蔽风险，让「为什么这条规则没生效」变得可见。
+ *
+ * 排序与遮蔽判定都来自后端 `/dispatch/rules` 的 reachability 字段（唯一实现），
+ * 本计算属性只负责把它挂到表格行上，不再自己判断什么是无条件规则。
+ */
+const orderedRules = computed(() => {
+  const reachabilityByRuleId = new Map(
+    ruleReachability.value.map((item) => [item.rule_id, item])
+  )
+  const ruleByRuleId = new Map(rules.value.map((rule) => [rule.rule_id, rule]))
+
+  // 以后端给出的次序为准；接口已按调度顺序返回规则，两者天然对齐。
+  const orderedIds = ruleReachability.value.length
+    ? ruleReachability.value.map((item) => item.rule_id)
+    : rules.value.map((rule) => rule.rule_id)
+
+  return orderedIds
+    .map((ruleId, index) => {
+      const rule = ruleByRuleId.get(ruleId)
+      if (!rule) return null
+      const reachability = reachabilityByRuleId.get(ruleId)
+      return {
+        ...rule,
+        _order: reachability?.order ?? index + 1,
+        _catchAll: reachability?.catch_all ?? false,
+        // 被前面的无条件规则完全遮蔽
+        _shadowed: reachability?.unreachable ?? false,
+        _shadowedBy: reachability?.shadowed_by_rule_id ?? null
+      }
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== null)
+})
+
+/** 存在被遮蔽的规则时在页面顶部给出提示 */
+const shadowedRules = computed(() => orderedRules.value.filter((rule) => rule._shadowed))
+
+/**
+ * 编辑草稿的可达性预判。
+ *
+ * 语义仍然只有后端那一份：这里把草稿 POST 给 `/dispatch/reachability` 做静态分析，
+ * 只是把请求 debounce 起来以保持「边改边看」的即时感，绝不在本地重算遮蔽关系。
+ * 因此界面不可能与后端对「这条规则会不会被触发」产生分歧。
+ */
+const draftReachability = ref<DispatchRuleReachability | null>(null)
+const draftShadowedRuleNames = ref<string[]>([])
+let draftReachabilityTimer: number | null = null
+/** 只采纳最后一次请求的结果，避免慢响应覆盖新草稿的判断 */
+let draftReachabilityRequestId = 0
+
+const refreshDraftReachability = async () => {
+  const requestId = ++draftReachabilityRequestId
+  const draft = cloneDispatchRule(currentRule.value)
+  // 还没配置任何条件的草稿在后端看来等同于无条件规则，但它本来就无法保存
+  // （创建/更新接口会拒绝空条件规则），此时提示“会遮蔽后续规则”只是噪音。
+  const draftHasConditions = (draft.rule_groups || []).some((group) => group.rules.length > 0)
+  try {
+    const { reachability } = await dispatchApi.analyzeReachability(draft)
+    if (requestId !== draftReachabilityRequestId) return
+    const draftEntry = reachability.find((item) => item.rule_id === draft.rule_id) ?? null
+    draftReachability.value = draftEntry
+    // 草稿自身是无条件规则时，它会遮蔽排在后面的其他规则，同样值得提示。
+    draftShadowedRuleNames.value = draftHasConditions
+      ? reachability
+          .filter((item) => item.unreachable && item.shadowed_by_rule_id === draft.rule_id)
+          .map((item) => item.name)
+      : []
+  } catch (error) {
+    if (requestId !== draftReachabilityRequestId) return
+    // 预判失败不该打断编辑：清空提示即可，保存时后端仍是权威判断。
+    draftReachability.value = null
+    draftShadowedRuleNames.value = []
+  }
+}
+
+const scheduleDraftReachability = () => {
+  if (draftReachabilityTimer !== null) {
+    window.clearTimeout(draftReachabilityTimer)
+  }
+  draftReachabilityTimer = window.setTimeout(() => {
+    draftReachabilityTimer = null
+    void refreshDraftReachability()
+  }, 300)
+}
+
+watch(
+  [showEditModal, currentRule],
+  ([isEditing]) => {
+    if (!isEditing) {
+      if (draftReachabilityTimer !== null) {
+        window.clearTimeout(draftReachabilityTimer)
+        draftReachabilityTimer = null
+      }
+      draftReachabilityRequestId += 1
+      draftReachability.value = null
+      draftShadowedRuleNames.value = []
+      return
+    }
+    scheduleDraftReachability()
+  },
+  { deep: true }
+)
+
+onBeforeUnmount(() => {
+  if (draftReachabilityTimer !== null) {
+    window.clearTimeout(draftReachabilityTimer)
+    draftReachabilityTimer = null
+  }
+})
+
 // 规则类型变化时更新配置表单
 const handleRuleTypeChange = async (type: string, groupIndex: number, ruleIndex: number) => {
   if (!type) return // 如果用户清空了选择，直接返回
@@ -344,6 +549,16 @@ const closeRuleConfigModal = () => {
 
 onMounted(async () => {
   await Promise.all([loadRules(), loadRuleTypes(), loadWorkflows()])
+
+  // 模板中心只通过 URL 传入“创建草稿”的意图；不自动保存、更不会覆盖已有规则。
+  const workflowId = typeof route.query.workflow_id === 'string' ? route.query.workflow_id : ''
+  if (workflowId) {
+    if (workflows.value.some((workflow) => `${workflow.group_id}:${workflow.workflow_id}` === workflowId)) {
+      createRule(workflowId)
+    } else {
+      message.warning('目标工作流不存在，未创建触发规则草稿')
+    }
+  }
 })
 </script>
 
@@ -352,7 +567,10 @@ onMounted(async () => {
     <n-space vertical>
       <n-card title="规则列表" class="dispatch-rules-card">
         <template #header-extra>
-          <n-button type="primary" @click="createRule"> 创建规则 </n-button>
+          <n-space>
+            <n-button @click="openPreview()"> 试运行消息 </n-button>
+            <n-button type="primary" @click="createRule"> 创建规则 </n-button>
+          </n-space>
         </template>
         <div class="dispatch-rules-description">
           触发规则决定了 Kirara AI 何时会执行工作流，更多介绍请阅读<a
@@ -361,7 +579,26 @@ onMounted(async () => {
             >官方文档</a
           >。
         </div>
-        <n-data-table :columns="columns" :data="rules" :bordered="false" :single-line="false" />
+        <n-alert
+          v-if="shadowedRules.length > 0"
+          type="warning"
+          :bordered="false"
+          class="dispatch-rules-alert"
+        >
+          有 {{ shadowedRules.length }} 条规则排在无条件规则（如默认兜底规则）之后，永远不会被触发：
+          {{ shadowedRules.map((rule) => rule.name).join('、') }}。
+          请提高这些规则的优先级，或降低兜底规则的优先级。
+        </n-alert>
+        <div class="dispatch-rules-hint">
+          下表按实际匹配顺序排列：从上到下依次判断，<strong>命中第一条后即执行并停止</strong>。
+        </div>
+        <n-data-table
+          :columns="columns"
+          :data="orderedRules"
+          :bordered="false"
+          :single-line="false"
+          :row-class-name="(row: any) => (row._shadowed ? 'rule-row-shadowed' : '')"
+        />
       </n-card>
       <!-- 编辑规则对话框 -->
       <n-modal
@@ -370,6 +607,26 @@ onMounted(async () => {
         :title="isCreate ? '创建规则' : '编辑规则'"
         style="width: 1200px"
       >
+        <n-alert
+          v-if="draftReachability?.unreachable"
+          type="warning"
+          :bordered="false"
+          class="draft-reachability-alert"
+        >
+          这条规则排在无条件规则
+          {{ draftReachability.shadowed_by_rule_id }} 之后（匹配顺序第
+          {{ draftReachability.order }} 位），保存后永远不会被触发。请提高它的优先级。
+        </n-alert>
+        <n-alert
+          v-else-if="draftShadowedRuleNames.length > 0"
+          type="warning"
+          :bordered="false"
+          class="draft-reachability-alert"
+        >
+          这条规则是无条件规则，保存后会让排在它之后的
+          {{ draftShadowedRuleNames.length }} 条规则永远不被触发：
+          {{ draftShadowedRuleNames.join('、') }}。
+        </n-alert>
         <div class="rule-edit-container">
           <!-- 基本信息 -->
           <div class="rule-basic-form">
@@ -526,7 +783,70 @@ onMounted(async () => {
         </n-modal>
 
         <template #action>
+          <n-button secondary @click="openPreview(currentRule)">试运行当前草稿</n-button>
           <n-button type="primary" @click="saveRule(isCreate)"> 确定 </n-button>
+        </template>
+      </n-modal>
+
+      <n-modal
+        v-model:show="showPreviewModal"
+        preset="dialog"
+        title="试运行触发规则"
+        style="width: min(760px, calc(100vw - 32px))"
+      >
+        <p class="preview-description">
+          仅在内存中按真实优先级判断；不会执行工作流、发送消息、保存规则或连接 IM。
+        </p>
+        <n-form label-placement="left" label-width="88">
+          <n-form-item label="示例消息">
+            <n-input v-model:value="previewInput.content" type="textarea" :rows="3" placeholder="输入要模拟的消息" />
+          </n-form-item>
+          <div class="preview-form-row">
+            <n-form-item label="聊天类型">
+              <n-select
+                v-model:value="previewInput.chat_type"
+                :options="[
+                  { label: '私聊', value: '私聊' },
+                  { label: '群聊', value: '群聊' }
+                ]"
+              />
+            </n-form-item>
+            <n-form-item label="发送者 ID">
+              <n-input v-model:value="previewInput.sender_id" />
+            </n-form-item>
+          </div>
+          <div class="preview-form-row">
+            <n-form-item v-if="previewInput.chat_type === '群聊'" label="群号">
+              <n-input v-model:value="previewInput.group_id" placeholder="未填时使用试运行群" />
+            </n-form-item>
+            <n-form-item label="机器人被 @">
+              <n-checkbox v-model:checked="previewInput.mentioned">模拟被机器人提及</n-checkbox>
+            </n-form-item>
+          </div>
+        </n-form>
+        <n-alert v-if="previewResult" :type="previewResult.selected_rule_id ? 'success' : 'info'" :bordered="false">
+          <template v-if="previewResult.selected_rule_id">
+            将执行 {{ previewResult.selected_rule_id }} → {{ previewResult.selected_workflow_id }}。
+          </template>
+          <template v-else>没有可确定的命中规则；请检查“无法确定”项或补充消息条件。</template>
+        </n-alert>
+        <div v-if="previewResult" class="preview-results" aria-live="polite">
+          <div v-for="result in previewResult.rules" :key="result.rule_id" class="preview-rule-row">
+            <n-tag size="small" :type="getDispatchPreviewDecisionType(result.decision)">
+              {{ getDispatchPreviewDecisionLabel(result.decision) }}
+            </n-tag>
+            <div class="preview-rule-main">
+              <strong>{{ result.name }}</strong>
+              <span>第 {{ result.order }} 位 · {{ result.rule_id }} · {{ result.workflow_id }}</span>
+              <small v-if="result.unreachable">
+                排在无条件规则 {{ result.shadowed_by_rule_id }} 之后，对任何消息都不会被判断到。
+              </small>
+              <small v-if="previewReason(result)">{{ previewReason(result) }}</small>
+            </div>
+          </div>
+        </div>
+        <template #action>
+          <n-button :loading="previewLoading" type="primary" @click="runPreview">开始试运行</n-button>
         </template>
       </n-modal>
     </n-space>
@@ -544,6 +864,29 @@ onMounted(async () => {
 
 .dispatch-rules-description {
   margin-bottom: 16px;
+}
+
+/* 遮蔽规则的告警条 */
+.dispatch-rules-alert {
+  margin-bottom: 12px;
+}
+
+/* 编辑草稿的可达性预判提示 */
+.draft-reachability-alert {
+  margin-bottom: 12px;
+}
+
+/* 匹配顺序说明 */
+.dispatch-rules-hint {
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: var(--text-color-secondary);
+}
+
+/* 永远不会被触发的规则整行弱化，与告警条呼应 */
+:deep(.rule-row-shadowed) td {
+  opacity: 0.55;
+  background-color: rgba(var(--warning-color-rgb), 0.06);
 }
 
 .rule-edit-container {
@@ -590,7 +933,7 @@ onMounted(async () => {
 
 .rule-group {
   background: var(--n-card-color);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
 
 .rule-list {
@@ -606,7 +949,8 @@ onMounted(async () => {
   gap: 8px;
   background: var(--n-color-modal);
   padding: 4px;
-  border-radius: 4px;
+  /* 条件行嵌在 .rule-group（sm 档）内部，按嵌套原则降到 xs */
+  border-radius: var(--radius-xs);
 }
 
 .rule-type-select {
@@ -635,5 +979,51 @@ onMounted(async () => {
 
 :deep(.n-input-number) {
   width: 100%;
+}
+
+.preview-description {
+  margin: 0 0 16px;
+  color: var(--n-text-color-3);
+  line-height: 1.6;
+}
+
+.preview-form-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.preview-results {
+  max-height: 300px;
+  margin-top: 16px;
+  overflow: auto;
+  border-top: 1px solid var(--n-border-color);
+}
+
+.preview-rule-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--n-border-color);
+}
+
+.preview-rule-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.preview-rule-main span,
+.preview-rule-main small {
+  color: var(--n-text-color-3);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .preview-form-row {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
 }
 </style>

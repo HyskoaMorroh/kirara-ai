@@ -275,7 +275,7 @@ const renderWebhookUrlText = (key: string, value: string) => {
       {
         style: {
           background: 'rgba(var(--primary-color-rgb), 0.08)',
-          borderRadius: '8px',
+          borderRadius: 'var(--radius-sm)',
           padding: '12px',
           border: '1px solid rgba(var(--primary-color-rgb), 0.15)',
           backdropFilter: 'blur(4px)',
@@ -299,7 +299,8 @@ const renderWebhookUrlText = (key: string, value: string) => {
               fontFamily: 'Consolas, monospace',
               padding: '8px',
               background: 'rgba(var(--card-bg-color-rgb), 0.8)',
-              borderRadius: '4px',
+              // 代码行嵌在上面的 sm 档容器内，按嵌套原则降到 xs
+              borderRadius: 'var(--radius-xs)',
               border: '1px dashed rgba(var(--primary-color-rgb), 0.2)'
             }
           },

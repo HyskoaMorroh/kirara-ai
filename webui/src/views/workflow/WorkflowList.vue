@@ -228,14 +228,14 @@ const confirmCopy = async () => {
       currentWorkflow.value.workflow_id
     )
 
-    // 2. 创建新工作流
+    // 2. 创建新工作流。保留完整定义（包括配置、元数据和节点坐标），不能仅复制
+    // blocks/wires，否则副本会丢失执行时限、模板分类等既有工作流语义。
     await createWorkflow(newGroupId, newWorkflowId, {
+      ...originalWorkflow,
       group_id: newGroupId,
       workflow_id: newWorkflowId,
       name: formData.name,
-      description: formData.description,
-      blocks: originalWorkflow.blocks,
-      wires: originalWorkflow.wires
+      description: formData.description
     })
 
     message.success('复制成功')
@@ -342,7 +342,7 @@ onMounted(() => {
 }
 
 .workflow-table {
-  border-radius: var(--border-radius);
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 

@@ -582,7 +582,8 @@ const getReferencesCount = (item: any) => {
 }
 
 .search-card {
-  border-radius: 20px;
+  /* 页面级筛选主卡片，用大型表面档 */
+  border-radius: var(--radius-lg);
   background-color: var(--bg-color);
 }
 
@@ -590,7 +591,7 @@ const getReferencesCount = (item: any) => {
 .reset-button,
 .search-button {
   height: 40px;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -599,7 +600,7 @@ const getReferencesCount = (item: any) => {
 
 .action-button:hover {
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--box-shadow, 0 4px 12px rgba(0, 0, 0, 0.1));
 }
 
 .search-button {
@@ -613,11 +614,18 @@ const getReferencesCount = (item: any) => {
 
 .media-card-selected {
   border: 2px solid var(--primary-color);
-  box-shadow: 0 8px 25px rgba(64, 128, 255, 0.25);
+  /* 选中态用主色投影强调，色值随主题主色走 */
+  box-shadow: 0 8px 25px rgba(var(--primary-color-rgb, 64, 128, 255), 0.25);
 }
 
 .media-card:hover {
   transform: translateY(-5px) scale(1.02);
+}
+
+/* 整卡可点击，键盘聚焦时需要可见的聚焦环 */
+.media-card:focus-visible {
+  outline: 2px solid var(--primary-color, #4080ff);
+  outline-offset: 2px;
 }
 
 .media-card-content {
@@ -634,7 +642,8 @@ const getReferencesCount = (item: any) => {
   align-items: center;
   justify-content: center;
   background-color: var(--bg-color);
-  border-radius: var(--border-radius) var(--border-radius) 0 0;
+  /* 缩略图铺满卡片顶部，只圆化上方两角，与 .media-card 的 md 档保持同弧 */
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
 }
 
 .media-card-image :deep(img) {
@@ -659,11 +668,12 @@ const getReferencesCount = (item: any) => {
   position: absolute;
   top: 8px;
   right: 8px;
+  /* 角标压在任意缩略图上，必须靠深色蒙版 + 白字保证可读，故两种主题下都保持深色 */
   background-color: rgba(0, 0, 0, 0.6);
-  color: white;
+  color: #ffffff;
   padding: 2px 8px;
-  border-radius: 12px;
-  font-size: 0.75rem;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-xs, 0.75rem);
   z-index: 2;
 }
 
@@ -671,11 +681,11 @@ const getReferencesCount = (item: any) => {
   position: absolute;
   bottom: 8px;
   right: 8px;
-  background-color: rgba(64, 128, 255, 0.8);
-  color: white;
+  background-color: rgba(var(--primary-color-rgb, 64, 128, 255), 0.8);
+  color: #ffffff;
   padding: 2px 8px;
-  border-radius: 12px;
-  font-size: 0.75rem;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-xs, 0.75rem);
   display: flex;
   align-items: center;
   z-index: 2;
@@ -696,7 +706,7 @@ const getReferencesCount = (item: any) => {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
-  font-size: 1rem;
+  font-size: var(--font-size-base, 1rem);
   color: var(--text-color);
   margin-bottom: 0.5rem;
 }
@@ -704,7 +714,7 @@ const getReferencesCount = (item: any) => {
 .media-card-meta {
   display: flex;
   justify-content: space-between;
-  font-size: 0.8rem;
+  font-size: var(--font-size-sm, 0.8rem);
   color: var(--text-color-secondary);
 }
 
@@ -717,7 +727,8 @@ const getReferencesCount = (item: any) => {
 .empty-state {
   padding: 3rem;
   background-color: var(--bg-color);
-  border-radius: 20px;
+  /* 页面级空状态占位，与 .search-card 同为大型表面档 */
+  border-radius: var(--radius-lg);
   margin: 2rem 0;
 }
 
@@ -742,7 +753,8 @@ const getReferencesCount = (item: any) => {
   justify-content: center;
   align-items: center;
   height: 400px;
-  border-radius: 16px;
+  /* 预览区位于模态（lg 档）内部，按嵌套原则降一档到 md */
+  border-radius: var(--radius-md);
   overflow: hidden;
   background-color: oklch(0.967 0.003 264.542);
 }
@@ -751,7 +763,8 @@ const getReferencesCount = (item: any) => {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
-  border-radius: 8px;
+  /* 图片嵌在 .media-preview-content（md 档）内部，再降一档到 sm */
+  border-radius: var(--radius-sm);
   transition: transform 0.3s ease;
 }
 
@@ -763,7 +776,8 @@ const getReferencesCount = (item: any) => {
 .preview-audio {
   max-width: 100%;
   max-height: 100%;
-  border-radius: 12px;
+  /* 与 .preview-image 同层，取同一档 sm */
+  border-radius: var(--radius-sm);
 }
 
 .preview-fallback {
@@ -772,7 +786,7 @@ const getReferencesCount = (item: any) => {
   align-items: center;
   justify-content: center;
   padding: 2rem;
-  border-radius: 16px;
+  border-radius: var(--radius-md);
 }
 
 .media-preview-metadata {
@@ -784,7 +798,8 @@ const getReferencesCount = (item: any) => {
 
 .preview-info {
   background-color: color-mix(in oklab, var(--card-bg-color), var(--primary-color) 2%);
-  border-radius: 16px;
+  /* 信息块位于模态（lg 档）内部，按嵌套原则降一档到 md */
+  border-radius: var(--radius-md);
   padding: 1rem;
   margin-bottom: 1rem;
 }
@@ -798,7 +813,7 @@ const getReferencesCount = (item: any) => {
 
 .preview-action-button {
   height: 40px;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   font-weight: 600;
   display: flex;
   align-items: center;
@@ -810,7 +825,7 @@ const getReferencesCount = (item: any) => {
   align-items: center;
   justify-content: center;
   height: 40px;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
   background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-color-hover) 100%);
   border: none;
   font-weight: 600;
@@ -884,13 +899,13 @@ const getReferencesCount = (item: any) => {
 
 .references-title {
   margin: 0;
-  font-size: 1rem;
+  font-size: var(--font-size-lg, 1rem);
   font-weight: 600;
   color: var(--text-color);
 }
 
 .references-table {
-  border-radius: var(--border-radius);
+  border-radius: var(--radius-md);
   overflow: hidden;
   max-height: 300px;
 }
@@ -910,7 +925,7 @@ const getReferencesCount = (item: any) => {
 
 /* 新增：系统信息卡片样式 */
 .system-info-card {
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   background-color: var(--bg-color);
   margin-bottom: 1.5rem;
 }

@@ -12,6 +12,8 @@ class BlockType(BaseModel):
     name: str
     label: str
     description: str
+    # 画布上节点标题栏的颜色，空字符串表示由前端按主题决定
+    color: str = ""
     inputs: List[BlockInput]
     outputs: List[BlockOutput]
     configs: List[BlockConfig]

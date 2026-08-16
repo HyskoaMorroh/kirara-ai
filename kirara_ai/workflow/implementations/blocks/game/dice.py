@@ -12,12 +12,13 @@ class DiceRoll(Block):
     """骰子掷点 block"""
 
     name = "dice_roll"
+    description = "解析 .roll XdY 格式的消息并掷骰，最多支持 100 个骰子。"
     inputs = {
-        "message": Input("message", "输入消息", IMMessage, "输入消息包含骰子命令")
+        "message": Input("message", "输入消息", IMMessage, "包含 .roll XdY 命令的消息")
     }
     outputs = {
         "response": Output(
-            "response", "响应消息", IMMessage, "响应消息包含骰子掷点结果"
+            "response", "响应消息", IMMessage, "包含掷点结果的消息"
         )
     }
 

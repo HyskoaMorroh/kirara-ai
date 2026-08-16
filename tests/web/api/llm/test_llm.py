@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from kirara_ai.config.config_loader import ConfigLoader
-from kirara_ai.config.global_config import GlobalConfig, LLMBackendConfig, WebConfig
+from kirara_ai.config.global_config import GlobalConfig, LLMBackendConfig, ModelConfig, WebConfig
 from kirara_ai.events.event_bus import EventBus
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.llm.adapter import LLMBackendAdapter, LLMChatProtocol
@@ -56,6 +56,14 @@ class TestAdapter(LLMBackendAdapter, LLMChatProtocol):
                 total_tokens=30
             ),
         )
+
+    async def auto_detect_models(self):
+        """旧适配器仍可能返回字符串 ID；接口必须兼容并规范化它。"""
+        return [
+            "latest-text",
+            ModelConfig(id="latest-vision", type="llm", ability=0),
+            "latest-text",
+        ]
 
 # ==================== Fixtures ====================
 @pytest.fixture(scope="session")
@@ -145,6 +153,20 @@ class TestLLMBackend:
         backend = data.get("data")
         assert backend.get("name") == TEST_BACKEND_NAME
         assert backend.get("adapter") == TEST_ADAPTER_TYPE
+
+    @pytest.mark.asyncio
+    async def test_auto_detect_models_normalizes_legacy_string_ids(self, test_client, auth_headers):
+        """手动检测与定时检测都只更新模型目录，且兼容旧适配器返回的字符串。"""
+        response = test_client.get(
+            f"/backend-api/api/llm/backends/{TEST_BACKEND_NAME}/auto-detect-models",
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 200
+        models = response.json()["models"]
+        assert [model["id"] for model in models] == ["latest-text", "latest-vision"]
+        assert models[0]["type"] == "llm"
+        assert models[1]["ability"] > 0
 
     @pytest.mark.asyncio
     async def test_create_backend(self, test_client, auth_headers):

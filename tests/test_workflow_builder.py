@@ -122,6 +122,8 @@ class TestWorkflowBuilder:
                 ]
             )
         )
+        original_builder.metadata = {"category": "test", "tags": ["round-trip"]}
+        original_builder.update_position("input1", {"x": 0, "y": 0})
 
         # 保存工作流
         original_builder.save_to_yaml(yaml_path, container)
@@ -134,6 +136,8 @@ class TestWorkflowBuilder:
 
         assert len(loaded_workflow.blocks) == 3
         assert loaded_workflow.name == "test_workflow"
+        assert loaded_builder.metadata == {"category": "test", "tags": ["round-trip"]}
+        assert loaded_builder.nodes_by_name["input1"].position == {"x": 0, "y": 0}
 
         # 验证参数是否正确加载
         input_block = next(b for b in loaded_workflow.blocks if b.name == "input1")

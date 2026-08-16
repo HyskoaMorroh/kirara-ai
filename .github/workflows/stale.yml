@@ -14,7 +14,11 @@ jobs:
   stale:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/stale@v8
+      # v8 → v11。v9 起 action 变成有状态的：受 operations-per-run 截断时，
+      # 下一次运行会从上次没处理完的地方接着走（全部处理完后重置）。这里
+      # operations-per-run: 100 且每天运行一次，正好受益于这个行为——积压的
+      # issue 会被逐天推进，而不是每天都从最老的那一批重新开始。
+      - uses: actions/stale@v11
         with:
           # 基本配置
           repo-token: ${{ secrets.GITHUB_TOKEN }}

@@ -217,12 +217,12 @@ const handleAutoDetectModels = () => {
   background-color: var(--card-bg-color);
   border-bottom: 1px solid var(--border-color);
   height: var(--sidebar-title-height);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--box-shadow-sm, 0 1px 3px rgba(0, 0, 0, 0.05));
 }
 
 .content-header h2 {
   margin: 0;
-  font-size: 1.2rem;
+  font-size: var(--font-size-xl, 1.2rem);
   font-weight: 500;
   color: var(--text-color);
   position: relative;
@@ -241,7 +241,7 @@ const handleAutoDetectModels = () => {
 
 .action-button:hover:not(:disabled) {
   transform: translateY(-2px);
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--box-shadow, 0 4px 8px rgba(0, 0, 0, 0.1));
 }
 
 .config-section {
