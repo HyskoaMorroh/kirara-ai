@@ -149,7 +149,15 @@ def test_release_preflight_checks_contracts_and_the_versioned_webui_build():
     ).read_text(encoding="utf-8")
 
     assert "branches: [main, master]" in workflow
-    assert "python -m pytest tests/test_release_workflow_contract.py tests/test_webui_build_contract.py -q" in workflow
+    contract_command = "\n".join(
+        (
+            "          python -m pytest \\",
+            "            tests/test_release_artifact_contract.py \\",
+            "            tests/test_release_workflow_contract.py \\",
+            "            tests/test_webui_build_contract.py -q",
+        )
+    )
+    assert contract_command in workflow
     assert "yarn type-check" in workflow
     assert "VITE_APP_VERSION: v0.0.0-ci" in workflow
     assert "yarn build" in workflow
@@ -268,4 +276,3 @@ def test_every_frozen_uv_sync_workflow_pins_the_default_index():
 
     for filename, contents in frozen_workflows.items():
         assert "UV_DEFAULT_INDEX: https://pypi.org/simple" in contents, filename
-
