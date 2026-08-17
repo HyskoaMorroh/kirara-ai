@@ -36,21 +36,21 @@
 - Consumes: `pyproject.toml` project version `3.3.0a7`, `VITE_APP_VERSION`, `MANIFEST.in`, setuptools package-data configuration.
 - Produces: one source release version and `assert_distribution_contents(archive: Path) -> None` coverage for wheel/sdist contents.
 
-- [ ] **Step 1: Add failing metadata consistency tests**
+- [x] **Step 1: Add failing metadata consistency tests**
 
   Extend `tests/test_release_artifact_contract.py` to parse `pyproject.toml`, `uv.lock`, and `webui/package.json`; assert the Python version is `3.3.0a7` and the npm-compatible WebUI package version is `3.3.0-a7`. Assert `kirara-ai` lock metadata equals `pyproject.toml` and `webui/yarn.lock` remains the declared Yarn lock.
 
-- [ ] **Step 2: Run the metadata tests and confirm stale lock/WebUI versions fail**
+- [x] **Step 2: Run the metadata tests and confirm stale lock/WebUI versions fail**
 
   Run: `uv run --isolated --frozen --python 3.11 python -m pytest tests/test_release_artifact_contract.py -q`
 
   Expected: failure naming `uv.lock` version `3.3.0a5` and WebUI version `0.1.1-beta.3` before implementation.
 
-- [ ] **Step 3: Regenerate authoritative lock and WebUI package metadata**
+- [x] **Step 3: Regenerate authoritative lock and WebUI package metadata**
 
   Run `uv lock`, then set both WebUI package version fields to `3.3.0-a7` because npm semver does not accept PEP 440's compact prerelease form. Keep displayed release identity supplied by `VITE_APP_VERSION=v3.3.0a7`.
 
-- [ ] **Step 4: Add clean archive assertions**
+- [x] **Step 4: Add clean archive assertions**
 
   Implement `assert_distribution_contents` using `zipfile` and `tarfile`. Require backup modules, Alembic files, all bundled plugin assets, and all workflow presets. Reject `.pyc`, `__pycache__`, `.env`, `data/`, credentials, `docs/LOGO.jpg`, and repository-local virtual environments.
 
@@ -58,7 +58,7 @@
 
   Build with `uv build --out-dir dist-release-check` in a clean CI checkout and run the artifact contract against both generated archives. Keep release jobs read-only until existing publish steps.
 
-- [ ] **Step 6: Verify lock and package contracts**
+- [x] **Step 6: Verify lock and package contracts**
 
   Run: `uv lock --check`
 
@@ -86,43 +86,43 @@
 - Produces: `FileMutation`, `FileTransaction.commit()`, `FileTransaction.recover_directory(path)`, `atomic_write_text(path, writer)`, `WorkflowRegistry.snapshot_builders()`, and `WorkflowRegistry.persist_builder(...)`.
 - Consumes: existing YAML serializers, preset tombstone paths, registry locks, and route response schemas.
 
-- [ ] **Step 1: Add interruption and rollback tests**
+- [x] **Step 1: Add interruption and rollback tests**
 
   Cover failure after the first replacement in a two-file dispatch save, workflow create failure after YAML staging, rename failure before old-file removal, delete failure before tombstone publication, and startup recovery with a prepared transaction journal. Assert restart resolves each case to a complete old or complete new state.
 
-- [ ] **Step 2: Add the locked snapshot test**
+- [x] **Step 2: Add the locked snapshot test**
 
   Start concurrent register/unregister operations while repeatedly calling `snapshot_builders()`. Assert snapshots are tuples of stable `(full_name, builder)` pairs and list routing never reads `_workflows` directly.
 
-- [ ] **Step 3: Run persistence tests and confirm current partial-commit cases fail**
+- [x] **Step 3: Run persistence tests and confirm current partial-commit cases fail**
 
   Run: `uv run --isolated --frozen --python 3.11 python -m pytest tests/test_workflow_persistence.py tests/test_workflow_preset_deletions.py tests/web/api/workflow/test_workflow.py tests/web/api/dispatch/test_dispatch.py -q`
 
-- [ ] **Step 4: Implement same-directory staged file transactions**
+- [x] **Step 4: Implement same-directory staged file transactions**
 
   `FileTransaction` writes a versioned JSON journal containing operation IDs, target paths, staged paths, backup paths, and phase. It fsyncs staged files and the journal, publishes replacements, fsyncs parent directories where supported, marks committed, removes backups, and finally removes the journal. Recovery completes a fully staged transaction or restores backups when publication was incomplete.
 
-- [ ] **Step 5: Route rule YAML and tombstones through one transaction**
+- [x] **Step 5: Route rule YAML and tombstones through one transaction**
 
   Snapshot rules and tombstones under `DispatchRuleRegistry._lock`, serialize outside shared mutation, and commit both files together. Preserve legacy rule loading, deletion markers, preset ownership, and `save_rules_async()` behavior.
 
-- [ ] **Step 6: Route workflow create, update, rename, and delete through registry persistence**
+- [x] **Step 6: Route workflow create, update, rename, and delete through registry persistence**
 
   Keep route URLs and response payloads unchanged. Perform filesystem publication and registry mutation as one coordinated operation with rollback. Rename publishes the new YAML before retiring the old YAML and updates the registry only after persistence succeeds.
 
-- [ ] **Step 7: Replace private registry iteration**
+- [x] **Step 7: Replace private registry iteration**
 
   Make `list_workflows()` consume `registry.snapshot_builders()`. Do not expose a mutable mapping or hold the registry lock while building HTTP payloads.
 
-- [ ] **Step 8: Recover journals before loading persisted state**
+- [x] **Step 8: Recover journals before loading persisted state**
 
   Call `FileTransaction.recover_directory()` for workflow and dispatch directories before tombstones, YAML files, or bundled presets are loaded.
 
-- [ ] **Step 9: Verify persistence and legacy behavior**
+- [x] **Step 9: Verify persistence and legacy behavior**
 
   Run the Task 2 test command again. Expected: all interruption, preset deletion, route, and dispatch tests pass.
 
-- [ ] **Step 10: Commit the persistence boundary**
+- [x] **Step 10: Commit the persistence boundary**
 
   Commit with message `fix: make workflow persistence recoverable`.
 
@@ -138,27 +138,27 @@
 - Produces: `backend_config_fingerprint(config) -> str` and a scheduler CAS check using backend name, adapter object identity, and pre-request configuration fingerprint.
 - Consumes: `LLMManager.get`, `AutoDetectModelsProtocol.auto_detect_models`, `normalize_detected_models`, `CONFIG_UPDATE_LOCK`.
 
-- [ ] **Step 1: Add stale-adapter and edited-config tests**
+- [x] **Step 1: Add stale-adapter and edited-config tests**
 
   Delay `auto_detect_models()`, then replace the adapter or edit endpoint/auth/adapter configuration under the same backend name. Assert the old result is discarded, configuration is not saved, reload is not called, and scheduler state does not record a successful refresh.
 
-- [ ] **Step 2: Add preservation tests**
+- [x] **Step 2: Add preservation tests**
 
   Assert successful refresh changes only `backend.models`; it leaves backend name, adapter, endpoint, credentials, `model_name`, fallback slots, and user workflow drafts unchanged.
 
-- [ ] **Step 3: Run scheduler tests and confirm stale-result cases fail**
+- [x] **Step 3: Run scheduler tests and confirm stale-result cases fail**
 
   Run: `uv run --isolated --frozen --python 3.11 python -m pytest tests/test_scheduler.py tests/test_model_catalog.py -q`
 
-- [ ] **Step 4: Implement stable configuration fingerprints and CAS**
+- [x] **Step 4: Implement stable configuration fingerprints and CAS**
 
   Hash a canonical JSON dump excluding only the model catalog. Capture adapter identity and fingerprint before awaiting detection. Under `CONFIG_UPDATE_LOCK`, re-resolve both and apply only when name, object identity, and fingerprint still match.
 
-- [ ] **Step 5: Verify scheduler behavior**
+- [x] **Step 5: Verify scheduler behavior**
 
   Run the Task 3 test command. Expected: stale results are logged and discarded; valid updates preserve all manual selections.
 
-- [ ] **Step 6: Commit model refresh correctness**
+- [x] **Step 6: Commit model refresh correctness**
 
   Commit with message `fix: reject stale model catalog refreshes`.
 
@@ -176,35 +176,35 @@
 - Produces: `useLatestRequest()` with `begin(): { generation, signal }`, `isCurrent(generation)`, and `cancel()`.
 - Consumes: existing workflow and LLM API promises, route params, editor dirty state, pending edit flush, and Vue lifecycle hooks.
 
-- [ ] **Step 1: Test out-of-order workflow and schema responses**
+- [x] **Step 1: Test out-of-order workflow and schema responses**
 
   Resolve request A after request B. Assert only B updates visible data, A cannot clear loading for B, A cannot reset dirty state, and A can never become the target of a later save.
 
-- [ ] **Step 2: Test route leave and unmount cancellation**
+- [x] **Step 2: Test route leave and unmount cancellation**
 
   Assert outstanding controllers abort and resolved aborted promises do not mutate component state.
 
-- [ ] **Step 3: Run frontend request tests and observe current failures**
+- [x] **Step 3: Run frontend request tests and observe current failures**
 
   Run: `npm --prefix webui test -- --run webui/tests/latest-request.test.ts webui/tests/workflow-editor.test.ts webui/tests/llm-view-requests.test.ts`
 
-- [ ] **Step 4: Implement the shared latest-request helper**
+- [x] **Step 4: Implement the shared latest-request helper**
 
   Each `begin()` aborts the prior request, increments a monotonic generation, and returns a signal. `cancel()` aborts and increments generation so non-abortable promises also become stale.
 
-- [ ] **Step 5: Guard workflow load and save targets**
+- [x] **Step 5: Guard workflow load and save targets**
 
   Capture `groupId`, `workflowId`, generation, and loaded revision before awaiting. Apply data only when all still match. A save uses the editor's loaded identity rather than mutable route refs and rejects if the load generation changed.
 
-- [ ] **Step 6: Guard LLM schema and support requests**
+- [x] **Step 6: Guard LLM schema and support requests**
 
   Reuse the same generation rule for schema and capability lookups. Keep manually entered adapter configuration unless the current adapter type's current request explicitly replaces it.
 
-- [ ] **Step 7: Verify frontend request ordering**
+- [x] **Step 7: Verify frontend request ordering**
 
   Run the Task 4 test command. Expected: all ordering, cancellation, dirty-state, and save-target tests pass.
 
-- [ ] **Step 8: Commit request-generation guards**
+- [x] **Step 8: Commit request-generation guards**
 
   Commit with message `fix: ignore stale editor requests`.
 
@@ -224,35 +224,35 @@
 - Produces: `GridSpatialIndex`, `layoutMissingNodes(...)`, immutable `WorkflowGraphSnapshot`, and bounded history with unchanged `undo()`, `redo()`, and `performActionWithoutHistory()` entry points.
 - Consumes: Vue Flow node dimensions, dagre layout, existing 20 px grid, validation issue model, and pending edit flush.
 
-- [ ] **Step 1: Add correctness and scale tests**
+- [x] **Step 1: Add correctness and scale tests**
 
   Generate 1,000 deterministic nodes and assert overlap queries return the same pairs as a brute-force oracle. Assert opening a graph with valid saved positions never runs full dagre layout. Assert only missing/invalid positions receive new coordinates and all produced boxes are non-overlapping.
 
-- [ ] **Step 2: Add bounded undo/redo tests**
+- [x] **Step 2: Add bounded undo/redo tests**
 
   Assert 101 graph changes retain the configured latest 100 entries, redo invalidates after a new edit, no-op edits do not create history, and nested config data remains isolated across snapshots.
 
-- [ ] **Step 3: Run layout and history tests**
+- [x] **Step 3: Run layout and history tests**
 
   Run: `npm --prefix webui test -- --run webui/tests/workflow-layout.test.ts webui/tests/workflow-spatial-index.test.ts webui/tests/workflow-editor.test.ts`
 
-- [ ] **Step 4: Implement grid-bucket spatial indexing**
+- [x] **Step 4: Implement grid-bucket spatial indexing**
 
   Index each node box into covered fixed-size cells, deduplicate candidate IDs, and perform exact rectangle checks only for candidates. Use it in `findFreeNodePosition`, `findOverlappingNodes`, and post-layout collision resolution.
 
-- [ ] **Step 5: Preserve valid user coordinates and lay out only missing nodes**
+- [x] **Step 5: Preserve valid user coordinates and lay out only missing nodes**
 
   Treat finite coordinates as user-owned. Anchor missing nodes near connected positioned neighbors, then place disconnected nodes in deterministic lanes. Full auto-layout remains an explicit undoable command.
 
-- [ ] **Step 6: Replace repeated whole-graph deep clones with immutable snapshots**
+- [x] **Step 6: Replace repeated whole-graph deep clones with immutable snapshots**
 
   Reuse unchanged block/config/wire references, clone only mutated records, cap history at 100, and retain serializable isolation. Keep existing editor method names and pending edit flush semantics.
 
-- [ ] **Step 7: Verify scale, determinism, and history**
+- [x] **Step 7: Verify scale, determinism, and history**
 
   Run the Task 5 test command. Expected: 1,000-node tests complete without overlaps and all existing undo/redo tests pass.
 
-- [ ] **Step 8: Commit canvas performance work**
+- [x] **Step 8: Commit canvas performance work**
 
   Commit with message `perf: make workflow canvas scale predictably`.
 
@@ -432,13 +432,13 @@
 
   Copy the fixture to a temporary data directory, start registries, run recovery, and assert all required built-ins and custom records load; edited presets stay edited; deleted presets stay deleted; manual model slots remain unchanged; rules dispatch to the same workflow IDs.
 
-- [ ] **Step 3: Run full backend verification**
+- [x] **Step 3: Run full backend verification**
 
   Run: `uv run --isolated --frozen --python 3.11 python -m pytest ./tests -q`
 
   Expected: all backend tests pass with no new unhandled warnings.
 
-- [ ] **Step 4: Run full frontend verification**
+- [x] **Step 4: Run full frontend verification**
 
   Run: `npm --prefix webui run type-check`
 
