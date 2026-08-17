@@ -54,7 +54,7 @@
 
   Implement `assert_distribution_contents` using `zipfile` and `tarfile`. Require backup modules, Alembic files, all bundled plugin assets, and all workflow presets. Reject `.pyc`, `__pycache__`, `.env`, `data/`, credentials, `docs/LOGO.jpg`, and repository-local virtual environments.
 
-- [ ] **Step 5: Add release-preflight build and archive inspection**
+- [x] **Step 5: Add release-preflight build and archive inspection**
 
   Build with `uv build --out-dir dist-release-check` in a clean CI checkout and run the artifact contract against both generated archives. Keep release jobs read-only until existing publish steps.
 
@@ -66,7 +66,7 @@
 
   Expected: all tests pass and the lock reports no update required.
 
-- [ ] **Step 7: Commit the release contract**
+- [x] **Step 7: Commit the release contract**
 
   Commit only tracked release files with message `fix: unify 3.3.0a7 release metadata`.
 
