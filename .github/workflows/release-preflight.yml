@@ -47,8 +47,33 @@ jobs:
 
       - name: Run release contract checks
         run: |
-          python -m pip install --upgrade pip pytest
-          python -m pytest tests/test_release_workflow_contract.py tests/test_webui_build_contract.py -q
+          python -m pip install --upgrade pip pytest uv
+          uv build --out-dir dist-release-check
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          archives = sorted(Path("dist-release-check").glob("*"))
+          wheel = [path for path in archives if path.suffix == ".whl"]
+          sdist = [path for path in archives if path.name.endswith(".tar.gz")]
+          if len(wheel) != 1 or len(sdist) != 1 or len(archives) != 2:
+              raise SystemExit(
+                  f"expected one wheel and one sdist, found: {[path.name for path in archives]}"
+              )
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(
+                  "KIRARA_RELEASE_ARCHIVES="
+                  + os.pathsep.join(str(path.resolve()) for path in archives)
+                  + "\n"
+              )
+          PY
+
+      - name: Inspect release archives and contracts
+        run: |
+          python -m pytest \
+            tests/test_release_artifact_contract.py \
+            tests/test_release_workflow_contract.py \
+            tests/test_webui_build_contract.py -q
 
   webui:
     name: WebUI type check, unit tests and production build

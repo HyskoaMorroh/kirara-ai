@@ -1,6 +1,7 @@
 import dagre from '@dagrejs/dagre'
 import { Position, useVueFlow, type Edge, type Node } from '@vue-flow/core'
 import { ref } from 'vue'
+import { GridSpatialIndex, type SpatialBox } from './spatial-index'
 
 /** 节点尺寸估算用的版式常量，与 CustomNode.vue / CodeNode.vue 的 CSS 保持一致 */
 /**
@@ -112,6 +113,8 @@ export interface LayoutBlockDescriptor {
   configs?: LayoutConfigDescriptor[]
   /** 已渲染节点的实测尺寸；提供时优先于估算值 */
   size?: { width: number; height: number }
+  /** Saved canvas position. Invalid or absent coordinates are repaired locally. */
+  position?: { x: number; y: number } | null
 }
 
 export interface LayoutEdgeDescriptor {
@@ -132,6 +135,11 @@ export interface ComputeLayoutOptions {
   nodeSeparation?: number
   rankSeparation?: number
   edgeSeparation?: number
+}
+
+export interface LayoutMissingNodesOptions {
+  separation?: number
+  grid?: number
 }
 
 /** 估算普通节点的尺寸；纯函数，不依赖 vue-flow */
@@ -380,12 +388,16 @@ export function findFreeNodePosition(
   const stepX = Math.max(grid, snapToGrid(size.width / 2, grid))
   const stepY = Math.max(grid, snapToGrid(size.height / 2, grid))
 
+  const index = new GridSpatialIndex()
+  occupied.forEach((box) => index.insert(box))
   const collides = (x: number, y: number) =>
-    occupied.some(
-      (box) =>
-        overlapsOnAxis(x, size.width, box.x, box.width, separation) &&
-        overlapsOnAxis(y, size.height, box.y, box.height, separation)
-    )
+    index.query({
+      id: '__candidate__',
+      x: x - separation,
+      y: y - separation,
+      width: size.width + separation * 2,
+      height: size.height + separation * 2
+    }).length > 0
 
   let x = snapToGrid(preferred.x, grid)
   let y = snapToGrid(preferred.y, grid)
@@ -395,6 +407,134 @@ export function findFreeNodePosition(
     y = snapToGrid(preferred.y, grid) + stepY * (step + 1)
   }
   return { x, y }
+}
+
+const getBlockSize = (block: LayoutBlockDescriptor) => {
+  if (
+    block.size &&
+    Number.isFinite(block.size.width) &&
+    Number.isFinite(block.size.height) &&
+    block.size.width > 0 &&
+    block.size.height > 0
+  ) {
+    return { width: block.size.width, height: block.size.height }
+  }
+  return estimateBlockSize(block)
+}
+
+const isFinitePosition = (position: LayoutBlockDescriptor['position']) =>
+  Boolean(position && Number.isFinite(position.x) && Number.isFinite(position.y))
+
+/**
+ * Repair only nodes without a usable saved position.
+ *
+ * Opening a workflow is a hot path: a single legacy node without coordinates
+ * must not send the entire graph through dagre. Existing coordinates are
+ * anchors, and new nodes are placed near their already-positioned neighbours
+ * with the spatial index preventing overlap.
+ */
+export function layoutMissingNodes(
+  blocks: LayoutBlockDescriptor[],
+  edges: LayoutEdgeDescriptor[] = [],
+  options: LayoutMissingNodesOptions = {}
+): Record<string, LayoutBox> {
+  const separation = options.separation ?? NODE_SEPARATION
+  const grid = options.grid ?? LAYOUT_GRID_SIZE
+  const result: Record<string, LayoutBox> = {}
+  const index = new GridSpatialIndex()
+  const sizes = new Map<string, { width: number; height: number }>()
+
+  for (const block of blocks) {
+    sizes.set(block.id, getBlockSize(block))
+  }
+
+  const validBlocks = blocks
+    .filter((block) => isFinitePosition(block.position))
+    .sort((left, right) => left.id.localeCompare(right.id))
+  for (const block of validBlocks) {
+    const size = sizes.get(block.id)!
+    const box = {
+      x: block.position!.x,
+      y: block.position!.y,
+      ...size
+    }
+    result[block.id] = box
+    index.insert({ id: block.id, ...box })
+  }
+
+  const neighbours = new Map<string, { id: string; incoming: boolean }[]>()
+  for (const edge of edges) {
+    if (!sizes.has(edge.source) || !sizes.has(edge.target)) continue
+    const sourceList = neighbours.get(edge.source) || []
+    sourceList.push({ id: edge.target, incoming: false })
+    neighbours.set(edge.source, sourceList)
+    const targetList = neighbours.get(edge.target) || []
+    targetList.push({ id: edge.source, incoming: true })
+    neighbours.set(edge.target, targetList)
+  }
+  for (const list of neighbours.values()) {
+    list.sort((left, right) => Number(right.incoming) - Number(left.incoming) || left.id.localeCompare(right.id))
+  }
+
+  const collides = (position: { x: number; y: number }, size: { width: number; height: number }) =>
+    index.query({
+      id: '__candidate__',
+      x: position.x - separation,
+      y: position.y - separation,
+      width: size.width + separation * 2,
+      height: size.height + separation * 2
+    }).length > 0
+
+  const findFreePosition = (
+    preferred: { x: number; y: number },
+    size: { width: number; height: number }
+  ) => {
+    const baseX = snapToGrid(preferred.x, grid)
+    const baseY = snapToGrid(preferred.y, grid)
+    const stepX = Math.max(grid, snapToGrid(size.width + separation, grid))
+    const stepY = Math.max(grid, snapToGrid(size.height + separation, grid))
+    for (let radius = 0; radius < 100; radius += 1) {
+      const candidates: Array<{ x: number; y: number }> = []
+      for (let offset = -radius; offset <= radius; offset += 1) {
+        candidates.push({ x: baseX + offset * stepX, y: baseY - radius * stepY })
+        if (radius > 0) candidates.push({ x: baseX + offset * stepX, y: baseY + radius * stepY })
+      }
+      for (let offset = -radius + 1; offset < radius; offset += 1) {
+        candidates.push({ x: baseX - radius * stepX, y: baseY + offset * stepY })
+        candidates.push({ x: baseX + radius * stepX, y: baseY + offset * stepY })
+      }
+      for (const candidate of candidates) {
+        if (!collides(candidate, size)) return candidate
+      }
+    }
+    return { x: baseX, y: baseY + stepY * 100 }
+  }
+
+  const missingBlocks = blocks
+    .filter((block) => !isFinitePosition(block.position))
+    .sort((left, right) => left.id.localeCompare(right.id))
+  for (const block of missingBlocks) {
+    const size = sizes.get(block.id)!
+    const anchors = (neighbours.get(block.id) || []).filter((neighbour) => result[neighbour.id])
+    const preferredPositions = anchors.map((anchor) => {
+      const neighbour = result[anchor.id]
+      return anchor.incoming
+        ? { x: neighbour.x + neighbour.width + separation, y: neighbour.y }
+        : { x: neighbour.x - size.width - separation, y: neighbour.y }
+    })
+    // Disconnected nodes start in stable lanes.  The collision search then
+    // naturally fills nearby empty space without depending on input order.
+    if (preferredPositions.length === 0) {
+      const lane = Object.keys(result).length
+      preferredPositions.push({ x: (lane % 8) * (size.width + separation), y: Math.floor(lane / 8) * (size.height + separation) })
+    }
+    const position = findFreePosition(preferredPositions[0], size)
+    const box = { ...position, ...size }
+    result[block.id] = box
+    index.insert({ id: block.id, ...box })
+  }
+
+  return result
 }
 
 /**
@@ -407,25 +547,14 @@ export function findOverlappingNodes(
   boxes: { id: string; x: number; y: number; width: number; height: number }[]
 ): Set<string> {
   const overlapping = new Set<string>()
-  const active: typeof boxes = []
-  const sortedBoxes = [...boxes].sort((a, b) => a.x - b.x || a.id.localeCompare(b.id))
-
-  for (const box of sortedBoxes) {
-    // 只保留右边界仍可能与当前节点相交的候选，避免每次画布变更都做全量两两比较。
-    for (let index = active.length - 1; index >= 0; index -= 1) {
-      const candidate = active[index]
-      if (candidate.x + candidate.width <= box.x) {
-        active.splice(index, 1)
-      }
+  const index = new GridSpatialIndex()
+  boxes.forEach((box) => index.insert(box as SpatialBox))
+  for (const box of boxes) {
+    for (const candidate of index.query(box as SpatialBox)) {
+      if (candidate.id === box.id) continue
+      overlapping.add(box.id)
+      overlapping.add(candidate.id)
     }
-
-    for (const candidate of active) {
-      if (overlapsOnAxis(box.y, box.height, candidate.y, candidate.height, 0)) {
-        overlapping.add(box.id)
-        overlapping.add(candidate.id)
-      }
-    }
-    active.push(box)
   }
   return overlapping
 }

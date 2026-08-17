@@ -48,8 +48,8 @@ export interface BlockTypeResponse {
   type: BlockType
 }
 
-export async function listBlockTypes() {
-  return http.get<BlockTypeListResponse>('/block/types')
+export async function listBlockTypes(signal?: AbortSignal) {
+  return http.get<BlockTypeListResponse>('/block/types', { signal })
 }
 
 export async function getBlockType(typeName: string) {

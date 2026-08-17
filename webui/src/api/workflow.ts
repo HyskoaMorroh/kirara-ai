@@ -71,16 +71,26 @@ export async function listWorkflows() {
   return http.get<WorkflowListResponse>('/workflow')
 }
 
-export async function getWorkflow(groupId: string, workflowId: string) {
-  return http.get<WorkflowResponse>(`/workflow/${groupId}/${workflowId}`)
+export async function getWorkflow(groupId: string, workflowId: string, signal?: AbortSignal) {
+  return http.get<WorkflowResponse>(`/workflow/${groupId}/${workflowId}`, { signal })
 }
 
-export async function createWorkflow(groupId: string, workflowId: string, data: Workflow) {
-  return http.post<WorkflowResponse>(`/workflow/${groupId}/${workflowId}`, data)
+export async function createWorkflow(
+  groupId: string,
+  workflowId: string,
+  data: Workflow,
+  signal?: AbortSignal
+) {
+  return http.post<WorkflowResponse>(`/workflow/${groupId}/${workflowId}`, data, { signal })
 }
 
-export async function updateWorkflow(groupId: string, workflowId: string, data: Workflow) {
-  return http.put<WorkflowResponse>(`/workflow/${groupId}/${workflowId}`, data)
+export async function updateWorkflow(
+  groupId: string,
+  workflowId: string,
+  data: Workflow,
+  signal?: AbortSignal
+) {
+  return http.put<WorkflowResponse>(`/workflow/${groupId}/${workflowId}`, data, { signal })
 }
 
 export async function deleteWorkflow(groupId: string, workflowId: string) {

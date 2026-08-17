@@ -66,7 +66,13 @@ import '@vue-flow/controls/dist/style.css'
 import '@vue-flow/minimap/dist/style.css'
 import type { Connection, Edge, EdgeChange, EdgeUpdateEvent, Node, NodeChange } from '@vue-flow/core'
 import { MarkerType } from '@vue-flow/core'
-import { useLayout, findFreeNodePosition, findOverlappingNodes, snapToGrid } from './useLayout'
+import {
+  useLayout,
+  findFreeNodePosition,
+  findOverlappingNodes,
+  layoutMissingNodes,
+  snapToGrid
+} from './useLayout'
 import {
   filterWiresForBlocks,
   getUnknownBlockTypes,
@@ -585,20 +591,44 @@ const restoreGraph = () => {
   try {
     const vueFlowNodes = convertBlocksToNodes(viewState.value.blocks)
     const vueFlowEdges = convertWiresToEdges(viewState.value.wires)
+    const blocksById = new Map(viewState.value.blocks.map((block) => [block.name, block]))
     const nodesWithoutPosition = new Set(
-      viewState.value.blocks.filter((block) => !block.position).map((block) => block.name)
+      viewState.value.blocks
+        .filter(
+          (block) =>
+            !block.position ||
+            !Number.isFinite(block.position.x) ||
+            !Number.isFinite(block.position.y)
+        )
+        .map((block) => block.name)
     )
 
     setNodes(vueFlowNodes)
     setEdges(vueFlowEdges)
 
     // null / undefined 表示服务端没有保存过布局；{ x: 0, y: 0 } 是用户明确的
-    // 合法坐标，不能再被当成“未布局”而覆盖。只为缺失坐标的节点补上 dagre 结果。
+    // 合法坐标，不能再被当成“未布局”而覆盖。只为缺失或非法坐标的节点局部补位，
+    // 不因一个旧节点而重新计算整张图。
     if (vueFlowNodes.length > 0 && nodesWithoutPosition.size > 0) {
-      const laidOutNodes = layout(vueFlowNodes, vueFlowEdges, 'LR')
-      const laidOutById = new Map(laidOutNodes.map((node) => [node.id, node]))
+      const boxes = layoutMissingNodes(
+        vueFlowNodes.map((node) => {
+          const data: any = node.data || {}
+          return {
+            id: node.id,
+            type: node.type,
+            label: data.label,
+            inputs: data.inputs || [],
+            outputs: data.outputs || [],
+            configs: data.blockType?.configs || [],
+            position: blocksById.get(node.id)?.position
+          }
+        }),
+        vueFlowEdges.map((edge) => ({ source: edge.source, target: edge.target }))
+      )
       const positionedNodes = vueFlowNodes.map((node) =>
-        nodesWithoutPosition.has(node.id) ? laidOutById.get(node.id) || node : node
+        nodesWithoutPosition.has(node.id) && boxes[node.id]
+          ? { ...node, position: { x: boxes[node.id].x, y: boxes[node.id].y } }
+          : node
       )
       setNodes(positionedNodes)
 

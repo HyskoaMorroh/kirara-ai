@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import random
+import tempfile
 import threading
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -13,7 +14,11 @@ from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.llm.adapter import AutoDetectModelsProtocol
 from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.logger import get_logger
-from kirara_ai.scheduler.model_catalog import model_catalogs_equal, normalize_detected_models
+from kirara_ai.scheduler.model_catalog import (
+    backend_config_fingerprint,
+    model_catalogs_equal,
+    normalize_detected_models,
+)
 
 # 记录每个后端上次自动检测时间的状态文件
 STATE_FILE = os.path.join(DATA_PATH, "auto_detect_state.json")
@@ -61,14 +66,29 @@ class TaskScheduler:
             self.logger.warning(f"Failed to load auto-detect state: {e}")
             return {}
 
-    def _save_state(self) -> None:
+    def _save_state(self) -> bool:
         """保存上次检测时间的记录"""
+        temp_path: Optional[str] = None
         try:
-            os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-            with open(STATE_FILE, "w", encoding="utf-8") as f:
+            state_dir = os.path.dirname(STATE_FILE)
+            os.makedirs(state_dir, exist_ok=True)
+            file_descriptor, temp_path = tempfile.mkstemp(
+                prefix=".auto_detect_state-", suffix=".tmp", dir=state_dir
+            )
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as f:
                 json.dump(self._state, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, STATE_FILE)
+            return True
         except Exception as e:
             self.logger.warning(f"Failed to save auto-detect state: {e}")
+            try:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
+            return False
 
     def _is_due(self, backend_name: str, interval_days: int) -> bool:
         """判断某个后端是否到了该检测的时间"""
@@ -105,6 +125,16 @@ class TaskScheduler:
             self.logger.debug(f"Backend {backend_name} does not support auto-detect, skip")
             return False
 
+        backend_config = next(
+            (b for b in config.llms.api_backends if b.name == backend_name), None
+        )
+        if not backend_config:
+            self.logger.warning(
+                f"Backend {backend_name} not found in config, skip update"
+            )
+            return False
+        config_fingerprint = backend_config_fingerprint(backend_config)
+
         try:
             models = await adapter.auto_detect_models()
         except Exception as e:
@@ -126,6 +156,19 @@ class TaskScheduler:
             )
             if not backend_config:
                 self.logger.warning(f"Backend {backend_name} not found in config, skip update")
+                return False
+            current_adapter = llm_manager.get(backend_name)
+            if current_adapter is not adapter:
+                self.logger.warning(
+                    f"Backend {backend_name} changed during auto-detect, "
+                    "discarding stale model list"
+                )
+                return False
+            if backend_config_fingerprint(backend_config) != config_fingerprint:
+                self.logger.warning(
+                    f"Backend {backend_name} configuration changed during "
+                    "auto-detect, discarding stale model list"
+                )
                 return False
 
             old_model_count = len(backend_config.models)
@@ -154,6 +197,35 @@ class TaskScheduler:
                     )
                 return False
 
+            try:
+                def save_config() -> None:
+                    with CONFIG_WRITE_LOCK:
+                        ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
+
+                await asyncio.to_thread(save_config)
+            except Exception as e:
+                backend_config.models = old_models
+                self.logger.error(
+                    f"Failed to save config after auto-detect for {backend_name}: {e}"
+                )
+                try:
+                    await llm_manager.reload_backend(backend_name)
+                except Exception as rollback_error:
+                    self.logger.error(
+                        f"Failed to restore backend {backend_name} after config save failure: "
+                        f"{rollback_error}"
+                    )
+                    try:
+                        if backend_name in llm_manager.backends:
+                            await llm_manager.unload_backend(backend_name)
+                        llm_manager.load_backend(backend_name)
+                    except Exception as restore_error:
+                        self.logger.error(
+                            f"Failed to reload restored backend {backend_name}: "
+                            f"{restore_error}"
+                        )
+                return False
+
             self.logger.info(
                 f"Backend {backend_name} model list updated: "
                 f"{old_model_count} -> {len(new_models)} models"
@@ -169,7 +241,8 @@ class TaskScheduler:
         """
         config: GlobalConfig = self.container.resolve(GlobalConfig)
         results: Dict[str, bool] = {}
-        config_changed = False
+        state_before_run = dict(self._state)
+        state_changed = False
 
         for backend in list(config.llms.api_backends):
             interval_days = getattr(backend, "auto_detect_interval_days", 0) or 0
@@ -186,21 +259,10 @@ class TaskScheduler:
 
             if success:
                 self._state[backend.name] = datetime.now().isoformat()
-                config_changed = True
+                state_changed = True
 
-        if config_changed:
-            self._save_state()
-            try:
-                # 备份 + 落盘是同步磁盘 I/O，放到线程池执行，
-                # 否则会在事件循环里卡住所有 IM 适配器的消息收发
-                def save_config() -> None:
-                    with CONFIG_WRITE_LOCK:
-                        ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
-
-                await asyncio.to_thread(save_config)
-                self.logger.info("Configuration saved after auto-detect")
-            except Exception as e:
-                self.logger.error(f"Failed to save config after auto-detect: {e}")
+        if state_changed and not self._save_state():
+            self._state = state_before_run
 
         return results
 

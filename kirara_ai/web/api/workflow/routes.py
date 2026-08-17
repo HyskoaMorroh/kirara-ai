@@ -1,3 +1,4 @@
+import asyncio
 import os
 from typing import List
 
@@ -46,7 +47,7 @@ async def list_workflows():
     registry: WorkflowRegistry = g.container.resolve(WorkflowRegistry)
 
     workflows = []
-    for workflow_id, builder in registry._workflows.items():
+    for workflow_id, builder in registry.snapshot_builders():
         # 从 workflow_id 解析 group_id
         group_id, wf_id = workflow_id.split(":", 1)
 
@@ -131,7 +132,7 @@ async def create_workflow(group_id: str, workflow_id: str):
     full_id = f"{group_id}:{workflow_id}"
     if registry.get(full_id):
         return jsonify({"error": "Workflow already exists"}), 400
-    file_path = registry.get_workflow_path(group_id, workflow_id)
+    file_path = registry.resolve_workflow_path(group_id, workflow_id)
     if os.path.exists(file_path):
         return jsonify({"error": "Workflow file already exists"}), 409
 
@@ -169,10 +170,13 @@ async def create_workflow(group_id: str, workflow_id: str):
 
         # 保存工作流
         builder.set_config(workflow_def.config)
-        builder.save_to_yaml(file_path, g.container)
-
-        # 注册工作流
-        registry.register(group_id, workflow_id, builder)
+        await asyncio.to_thread(
+            registry.persist_builder,
+            group_id,
+            workflow_id,
+            builder,
+            create_only=True,
+        )
 
         return workflow_def.model_dump()
     except Exception as e:
@@ -202,13 +206,12 @@ async def update_workflow(group_id: str, workflow_id: str):
     # manually restored or invalid YAML can still occupy the target path
     # without an in-memory entry.  Never let a rename replace that file: it
     # may be the user's recoverable workflow source.
-    new_file_path = registry.get_workflow_path(
+    new_file_path = registry.resolve_workflow_path(
         workflow_def.group_id, workflow_def.workflow_id
     )
     if new_full_id != full_id and os.path.exists(new_file_path):
         return jsonify({"error": "Workflow file already exists"}), 409
 
-    temp_file_path = ""
     # 更新工作流
     try:
         # 创建新的工作流构建器
@@ -243,32 +246,19 @@ async def update_workflow(group_id: str, workflow_id: str):
             )
 
         # 保存工作流
-        file_path = registry.get_workflow_path(group_id, workflow_id)
-        temp_file_path = f"{new_file_path}.tmp"
         builder.set_config(workflow_def.config)
-        builder.save_to_yaml(temp_file_path, g.container)
-        os.replace(temp_file_path, new_file_path)
-        if file_path != new_file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except Exception:
-                if os.path.exists(new_file_path):
-                    os.remove(new_file_path)
-                raise
-
-        # 更新注册表
-        registry.unregister(group_id, workflow_id)
-        registry.register(workflow_def.group_id, workflow_def.workflow_id, builder)
+        await asyncio.to_thread(
+            registry.persist_builder,
+            workflow_def.group_id,
+            workflow_def.workflow_id,
+            builder,
+            previous_group_id=group_id,
+            previous_workflow_id=workflow_id,
+        )
 
         return workflow_def.model_dump()
     except Exception as e:
         return jsonify({"error": str(e)}), 400
-    finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-            try:
-                os.remove(temp_file_path)
-            except OSError:
-                pass
 
 
 @workflow_bp.route("/<group_id>/<workflow_id>", methods=["DELETE"])
@@ -283,20 +273,10 @@ async def delete_workflow(group_id: str, workflow_id: str):
         return jsonify({"error": "Workflow not found"}), 404
 
     try:
-        registry.mark_preset_deleted(full_id)
-
-        # 删除文件
-        file_path = registry.get_workflow_path(group_id, workflow_id)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-
-        # Filesystem state is authoritative: only unregister after deletion succeeds.
-        registry.unregister(group_id, workflow_id)
+        await asyncio.to_thread(
+            registry.delete_persisted, group_id, workflow_id
+        )
 
         return jsonify({"message": "Workflow deleted successfully"})
     except Exception as e:
-        try:
-            registry.restore_preset(full_id)
-        except Exception:
-            pass
         return jsonify({"error": str(e)}), 400

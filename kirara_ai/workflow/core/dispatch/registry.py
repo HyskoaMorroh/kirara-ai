@@ -1,8 +1,8 @@
 import asyncio
 import json
 import os
-import tempfile
 import threading
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TextIO
 
 from ruamel.yaml import YAML
@@ -10,6 +10,11 @@ from ruamel.yaml import YAML
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.logger import get_logger
 from kirara_ai.workflow.core.workflow.registry import WorkflowRegistry
+from kirara_ai.workflow.persistence import (
+    FileMutation,
+    FileTransaction,
+    atomic_write_text,
+)
 
 from .models.dispatch_rules import CombinedDispatchRule, RuleGroup, SimpleDispatchRule
 from .reachability import sort_rules_in_dispatch_order
@@ -147,24 +152,7 @@ class DispatchRuleRegistry:
         临时文件和目标文件位于同一目录，`os.replace` 在常见文件系统上是原子
         操作；失败时只清理临时文件，保留上一份有效配置。
         """
-        directory = os.path.dirname(file_path) or "."
-        prefix = f".{os.path.basename(file_path)}."
-        fd, temp_file_path = tempfile.mkstemp(
-            dir=directory,
-            prefix=prefix,
-            suffix=".tmp",
-            text=True,
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as file:
-                write_content(file)
-                file.flush()
-                os.fsync(file.fileno())
-            os.replace(temp_file_path, file_path)
-        except Exception:
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-            raise
+        atomic_write_text(file_path, write_content)
 
     def _load_preset_tombstones(self, rules_dir: str):
         """加载用户删除的内置规则，避免启动时自动恢复。"""
@@ -236,8 +224,11 @@ class DispatchRuleRegistry:
     def load_rules(self, rules_dir: Optional[str] = None):
         """从指定目录加载所有调度规则"""
         rules_dir = rules_dir or self.rules_dir
+        self.rules_dir = rules_dir
         if not os.path.exists(rules_dir):
             os.makedirs(rules_dir)
+
+        FileTransaction.recover_directory(rules_dir)
 
         self.has_persisted_rules = False
         self._load_preset_tombstones(rules_dir)
@@ -290,21 +281,33 @@ class DispatchRuleRegistry:
         yaml = YAML()
         yaml.default_flow_style = False
 
-        # 保存规则
+        file_path = Path(rules_dir, "rules.yaml").resolve()
+        tombstone_path = Path(
+            self._preset_tombstones_path(rules_dir)
+        ).resolve()
+
+        # 保存规则。锁覆盖快照与发布，保证落盘的是一个确定的注册表版本。
         # 注意使用 model_dump 而非 pydantic v1 的 dict()，后者在本项目锁定的
-        # pydantic ≥2 下已废弃并会输出 DeprecationWarning
+        # pydantic ≥2 下已废弃并会输出 DeprecationWarning。
         with self._lock:
             rules_data = [rule.model_dump() for rule in self.rules.values()]
+            rule_ids = sorted(self.deleted_preset_rule_ids)
 
-        # 保存到文件
-        file_path = os.path.join(rules_dir, "rules.yaml")
+            def write_rules(staged_path: Path):
+                with staged_path.open("w", encoding="utf-8") as file:
+                    yaml.dump(rules_data, file)
 
-        def write_rules(file: TextIO):
-            yaml.dump(rules_data, file)
+            def write_tombstones(staged_path: Path):
+                with staged_path.open("w", encoding="utf-8") as file:
+                    json.dump(rule_ids, file, ensure_ascii=False, indent=2)
 
-        self._atomic_write(file_path, write_rules)
-
-        self._save_preset_tombstones(rules_dir)
+            FileTransaction(
+                rules_dir,
+                [
+                    FileMutation.replace(file_path, write_rules),
+                    FileMutation.replace(tombstone_path, write_tombstones),
+                ],
+            ).commit()
 
     async def save_rules_async(self, rules_dir: Optional[str] = None):
         """在线程池里保存规则，避免阻塞事件循环

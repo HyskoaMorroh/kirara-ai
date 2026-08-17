@@ -50,7 +50,10 @@ def app():
     container.register(PluginLoader, plugin_loader)
 
     workflow_registry = MagicMock(spec=WorkflowRegistry)
-    workflow_registry._workflows = {"workflow1": MagicMock(), "workflow2": MagicMock()}
+    workflow_registry.snapshot_builders.return_value = (
+        ("workflow1", MagicMock()),
+        ("workflow2", MagicMock()),
+    )
     container.register(WorkflowRegistry, workflow_registry)
 
     web_server = WebServer(container)

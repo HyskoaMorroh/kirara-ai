@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, nextTick } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { routerKey, useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { useMessage, useDialog, NButton, NResult, NSpin } from 'naive-ui'
 import {
@@ -13,6 +13,7 @@ import {
 import { listBlockTypes, type BlockType } from '@/api/block'
 import WorkflowCanvas from '@/components/workflow/WorkflowCanvas.vue'
 import { mergeWorkflowConfig } from '@/components/workflow/workflow-data'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 
 const route = useRoute()
 const router = useRouter()
@@ -33,6 +34,19 @@ const loading = ref(false)
 const saving = ref(false)
 const loadError = ref<string | null>(null)
 const initialized = ref(false)
+const workflowLoadRequests = useLatestRequest()
+const workflowSaveRequests = useLatestRequest()
+
+interface LoadedWorkflowIdentity {
+  groupId: string
+  workflowId: string
+  generation: number
+  isNew: boolean
+}
+
+const loadedWorkflowIdentity = ref<LoadedWorkflowIdentity | null>(null)
+
+const isAbortError = (error: unknown) => error instanceof DOMException && error.name === 'AbortError'
 
 /**
  * 是否存在尚未保存的画布改动。
@@ -59,18 +73,31 @@ const markDirty = () => {
  * 补上自动布局结果），保存成功后父组件也会把提交值写回；这些都不是用户编辑。
  * 用 nextTick 等回显走完再恢复追踪。
  */
-const withoutDirtyTracking = async (action: () => Promise<void> | void) => {
+const withoutDirtyTracking = async (
+  generation: number,
+  action: () => Promise<void> | void
+) => {
+  if (!workflowLoadRequests.isCurrent(generation)) return
   suppressDirtyTracking = true
   try {
     await action()
   } finally {
     await nextTick()
-    hasUnsavedChanges.value = false
-    suppressDirtyTracking = false
+    // 旧请求不能清除新工作流的脏状态，也不能提前恢复新请求的置脏追踪。
+    if (workflowLoadRequests.isCurrent(generation)) {
+      hasUnsavedChanges.value = false
+      suppressDirtyTracking = false
+    }
   }
 }
 
 const handleSave = async (workflowName: string, workflowDesc: string, newWorkflowId: string) => {
+  const target = loadedWorkflowIdentity.value
+  if (!target || !workflowLoadRequests.isCurrent(target.generation)) {
+    message.error('页面已切换，请等待当前工作流加载完成后再保存')
+    return
+  }
+
   const [group, workflow] = newWorkflowId.split(':')
   const data = {
     group_id: group,
@@ -82,10 +109,17 @@ const handleSave = async (workflowName: string, workflowDesc: string, newWorkflo
     config: config.value
   }
 
+  const saveRequest = workflowSaveRequests.begin()
   saving.value = true
   try {
-    if (route.params.id) {
-      await updateWorkflow(groupId.value, workflowId.value, data)
+    if (!target.isNew) {
+      await updateWorkflow(target.groupId, target.workflowId, data, saveRequest.signal)
+      if (
+        !workflowSaveRequests.isCurrent(saveRequest.generation) ||
+        !workflowLoadRequests.isCurrent(target.generation)
+      ) {
+        return
+      }
       // 保存成功即视为已落盘。必须在下面的 router.push 之前清零，
       // 否则改名跳转会被自己的路由守卫当成“带未保存改动离开”而弹确认。
       suppressDirtyTracking = true
@@ -93,7 +127,13 @@ const handleSave = async (workflowName: string, workflowDesc: string, newWorkflo
       if (groupId.value !== group || workflowId.value !== workflow) {
         groupId.value = group
         workflowId.value = workflow
-        router.push(`/workflow/editor/${data.group_id}:${data.workflow_id}`)
+        void router.push(`/workflow/editor/${data.group_id}:${data.workflow_id}`)
+      }
+      loadedWorkflowIdentity.value = {
+        groupId: group,
+        workflowId: workflow,
+        generation: target.generation,
+        isNew: false
       }
       name.value = data.name
       description.value = data.description
@@ -104,76 +144,44 @@ const handleSave = async (workflowName: string, workflowDesc: string, newWorkflo
       document.title = `工作流 - ${data.name}`
       message.success('保存成功')
     } else {
-      await createWorkflow(data.group_id, data.workflow_id, data)
+      await createWorkflow(data.group_id, data.workflow_id, data, saveRequest.signal)
+      if (
+        !workflowSaveRequests.isCurrent(saveRequest.generation) ||
+        !workflowLoadRequests.isCurrent(target.generation)
+      ) {
+        return
+      }
       suppressDirtyTracking = true
       hasUnsavedChanges.value = false
       groupId.value = data.group_id
       workflowId.value = data.workflow_id
       description.value = data.description
       name.value = data.name
+      loadedWorkflowIdentity.value = {
+        groupId: data.group_id,
+        workflowId: data.workflow_id,
+        generation: target.generation,
+        isNew: false
+      }
       document.title = `工作流 - ${data.name}`
       message.success('创建成功')
-      router.push(`/workflow/editor/${data.group_id}:${data.workflow_id}`)
+      void router.push(`/workflow/editor/${data.group_id}:${data.workflow_id}`)
     }
   } catch (caught: unknown) {
+    if (isAbortError(caught) || !workflowSaveRequests.isCurrent(saveRequest.generation)) return
     const errorMessage = caught instanceof Error ? caught.message : '保存失败'
     message.error(`保存失败：${errorMessage}`)
   } finally {
-    saving.value = false
-    // 等 props 回流带来的那一轮回显走完，再恢复置脏追踪，
-    // 避免把保存自身写回的值当成新的用户编辑。
-    await nextTick()
-    if (suppressDirtyTracking) {
-      hasUnsavedChanges.value = false
-      suppressDirtyTracking = false
+    if (workflowSaveRequests.isCurrent(saveRequest.generation)) {
+      saving.value = false
+      // 等 props 回流带来的那一轮回显走完，再恢复置脏追踪，
+      // 避免把保存自身写回的值当成新的用户编辑。
+      await nextTick()
+      if (suppressDirtyTracking) {
+        hasUnsavedChanges.value = false
+        suppressDirtyTracking = false
+      }
     }
-  }
-}
-
-const fetchWorkflow = async () => {
-  if (!route.params.id) {
-    // 同一路由组件会在“编辑现有工作流”与“新建工作流”之间复用；进入新建
-    // 地址时必须清空上一份定义，不能把旧节点、连线或运行配置带进新工作流。
-    groupId.value = ''
-    workflowId.value = ''
-    name.value = ''
-    description.value = ''
-    blocks.value = []
-    wires.value = []
-    config.value = { max_execution_time: 36000 }
-    return
-  }
-
-  const [group, workflow] = (route.params.id as string).split(':')
-  groupId.value = group
-  workflowId.value = workflow
-
-  loading.value = true
-  loadError.value = null
-  try {
-    const { workflow: data } = await getWorkflow(group, workflow)
-    name.value = data.name
-    description.value = data.description
-    blocks.value = data.blocks
-    wires.value = data.wires
-    config.value = mergeWorkflowConfig(data.config, config.value)
-    // 更新页面标题
-    document.title = `工作流 - ${data.name}`
-  } catch (caught: unknown) {
-    const errorMessage = caught instanceof Error ? caught.message : '获取工作流失败'
-    loadError.value = errorMessage
-    message.error(`获取工作流失败：${errorMessage}`)
-  } finally {
-    loading.value = false
-  }
-}
-
-const fetchBlockTypes = async () => {
-  try {
-    const { types } = await listBlockTypes()
-    blockTypes.value = types
-  } catch (error) {
-    message.error('获取区块类型失败')
   }
 }
 
@@ -193,12 +201,71 @@ const handleConfigChange = (newConfig: WorkflowConfig) => {
 }
 
 const initializeEditor = async () => {
-  await withoutDirtyTracking(async () => {
+  const routeId = typeof route.params.id === 'string' ? route.params.id : ''
+  const loadRequest = workflowLoadRequests.begin()
+  workflowSaveRequests.cancel()
+  saving.value = false
+
+  await withoutDirtyTracking(loadRequest.generation, async () => {
     initialized.value = false
+    loading.value = true
     loadError.value = null
-    await Promise.all([fetchWorkflow(), fetchBlockTypes()])
-    if (!loadError.value) {
+    loadedWorkflowIdentity.value = null
+
+    const [group = '', workflow = ''] = routeId.split(':')
+    try {
+      const [workflowResponse, blockTypesResponse] = await Promise.all([
+        routeId ? getWorkflow(group, workflow, loadRequest.signal) : Promise.resolve(null),
+        listBlockTypes(loadRequest.signal)
+      ])
+
+      if (!workflowLoadRequests.isCurrent(loadRequest.generation)) return
+
+      blockTypes.value = blockTypesResponse.types
+      if (workflowResponse) {
+        const data = workflowResponse.workflow
+        groupId.value = group
+        workflowId.value = workflow
+        name.value = data.name
+        description.value = data.description
+        blocks.value = data.blocks
+        wires.value = data.wires
+        config.value = mergeWorkflowConfig(data.config, config.value)
+        loadedWorkflowIdentity.value = {
+          groupId: group,
+          workflowId: workflow,
+          generation: loadRequest.generation,
+          isNew: false
+        }
+        // 更新页面标题
+        document.title = `工作流 - ${data.name}`
+      } else {
+        // 同一路由组件会在“编辑现有工作流”与“新建工作流”之间复用；进入新建
+        // 地址时必须清空上一份定义，不能把旧节点、连线或运行配置带进新工作流。
+        groupId.value = ''
+        workflowId.value = ''
+        name.value = ''
+        description.value = ''
+        blocks.value = []
+        wires.value = []
+        config.value = { max_execution_time: 36000 }
+        loadedWorkflowIdentity.value = {
+          groupId: '',
+          workflowId: '',
+          generation: loadRequest.generation,
+          isNew: true
+        }
+      }
       initialized.value = true
+    } catch (caught: unknown) {
+      if (isAbortError(caught) || !workflowLoadRequests.isCurrent(loadRequest.generation)) return
+      const errorMessage = caught instanceof Error ? caught.message : '获取工作流失败'
+      loadError.value = errorMessage
+      message.error(`获取工作流失败：${errorMessage}`)
+    } finally {
+      if (workflowLoadRequests.isCurrent(loadRequest.generation)) {
+        loading.value = false
+      }
     }
   })
 }
@@ -224,7 +291,11 @@ watch(
  * 这里只在确实有未保存改动时拦一次，其余情况不打扰用户。
  */
 onBeforeRouteLeave(() => {
-  if (!hasUnsavedChanges.value) return true
+  if (!hasUnsavedChanges.value) {
+    workflowLoadRequests.cancel()
+    workflowSaveRequests.cancel()
+    return true
+  }
 
   return new Promise<boolean>((resolve) => {
     dialog.warning({
@@ -237,12 +308,19 @@ onBeforeRouteLeave(() => {
       onPositiveClick: () => {
         // 用户已明确放弃，清零以免返回本页后又被拦一次
         hasUnsavedChanges.value = false
+        workflowLoadRequests.cancel()
+        workflowSaveRequests.cancel()
         resolve(true)
       },
       onNegativeClick: () => resolve(false),
       onClose: () => resolve(false)
     })
   })
+})
+
+onBeforeUnmount(() => {
+  workflowLoadRequests.cancel()
+  workflowSaveRequests.cancel()
 })
 </script>
 

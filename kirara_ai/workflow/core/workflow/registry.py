@@ -4,12 +4,18 @@ import re
 import shutil
 import json
 import threading
+from pathlib import Path
 from typing import Dict, Optional
 
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.logger import get_logger
 from kirara_ai.workflow.core.workflow.base import Workflow
 from kirara_ai.workflow.core.workflow.builder import WorkflowBuilder
+from kirara_ai.workflow.persistence import (
+    FileMutation,
+    FileTransaction,
+    atomic_write_text,
+)
 
 
 class WorkflowRegistry:
@@ -54,6 +60,153 @@ class WorkflowRegistry:
             os.makedirs(group_dir)
         return final_path
 
+    @staticmethod
+    def _resolve_workflow_path(
+        workflows_dir: str, group_id: str, workflow_id: str
+    ) -> str:
+        """Resolve a workflow path below an explicit registry data directory."""
+        for label, value in (("workflow", workflow_id), ("group", group_id)):
+            if not re.fullmatch(r"[a-zA-Z0-9_-]+", value):
+                invalid_chars = re.findall(r"[^a-zA-Z0-9_-]", value)
+                raise ValueError(
+                    f"Invalid symbols in {label} path: {''.join(invalid_chars)}"
+                )
+
+        root = Path(workflows_dir).resolve()
+        group_dir = root / group_id
+        final_path = (group_dir / f"{workflow_id}.yaml").resolve()
+        try:
+            final_path.relative_to(root)
+        except ValueError as error:
+            raise ValueError("Invalid workflow path") from error
+        group_dir.mkdir(parents=True, exist_ok=True)
+        return str(final_path)
+
+    def resolve_workflow_path(self, group_id: str, workflow_id: str) -> str:
+        """获取当前注册表数据目录中的工作流文件路径。"""
+        return self._resolve_workflow_path(
+            self.workflows_dir, group_id, workflow_id
+        )
+
+    def snapshot_builders(self) -> tuple[tuple[str, WorkflowBuilder], ...]:
+        """Return an immutable registry snapshot for lock-free consumers."""
+        with self._lock:
+            return tuple(self._workflows.items())
+
+    @staticmethod
+    def _workflow_name(group_id: str, workflow_id: str) -> str:
+        return f"{group_id}:{workflow_id}"
+
+    def _tombstone_mutation(
+        self, workflow_ids: set[str]
+    ) -> FileMutation:
+        file_path = Path(self._preset_tombstones_path()).resolve()
+
+        def write_tombstones(staged_path: Path) -> None:
+            with staged_path.open("w", encoding="utf-8") as file:
+                json.dump(sorted(workflow_ids), file, ensure_ascii=False, indent=2)
+
+        return FileMutation.replace(file_path, write_tombstones)
+
+    def persist_builder(
+        self,
+        group_id: str,
+        workflow_id: str,
+        workflow_builder: WorkflowBuilder,
+        *,
+        previous_group_id: Optional[str] = None,
+        previous_workflow_id: Optional[str] = None,
+        create_only: bool = False,
+    ) -> None:
+        """Persist and register one builder as a recoverable logical change."""
+        full_name = self._workflow_name(group_id, workflow_id)
+        has_previous_identity = (
+            previous_group_id is not None and previous_workflow_id is not None
+        )
+        previous_full_name = (
+            self._workflow_name(previous_group_id, previous_workflow_id)
+            if has_previous_identity
+            else full_name
+        )
+
+        with self._lock:
+            new_path = Path(
+                self.resolve_workflow_path(group_id, workflow_id)
+            ).resolve()
+            previous_path = Path(
+                self.resolve_workflow_path(
+                    previous_group_id or group_id,
+                    previous_workflow_id or workflow_id,
+                )
+            ).resolve()
+
+            if create_only and (
+                full_name in self._workflows or new_path.exists()
+            ):
+                raise FileExistsError(f"Workflow {full_name} already exists")
+            if previous_full_name != full_name and (
+                full_name in self._workflows or new_path.exists()
+            ):
+                raise FileExistsError(f"Workflow {full_name} already exists")
+            if has_previous_identity and previous_full_name not in self._workflows:
+                raise ValueError(f"Workflow {previous_full_name} not found")
+
+            next_tombstones = set(self.deleted_preset_workflow_ids)
+            next_tombstones.discard(full_name)
+            if (
+                previous_full_name != full_name
+                and previous_full_name in self.preset_workflow_ids
+            ):
+                next_tombstones.add(previous_full_name)
+
+            def write_builder(staged_path: Path) -> None:
+                workflow_builder.save_to_yaml(str(staged_path), self.container)
+
+            mutations = [
+                FileMutation.replace(new_path, write_builder),
+                self._tombstone_mutation(next_tombstones),
+            ]
+            if previous_path != new_path:
+                mutations.append(FileMutation.remove(previous_path))
+
+            def publish_registry() -> None:
+                if previous_full_name != full_name:
+                    self._workflows.pop(previous_full_name, None)
+                workflow_builder.id = full_name
+                self._workflows[full_name] = workflow_builder
+                self.deleted_preset_workflow_ids = next_tombstones
+
+            FileTransaction(self.workflows_dir, mutations).commit(
+                after_publish=publish_registry
+            )
+        self.logger.info(f"Registered workflow: {full_name}")
+
+    def delete_persisted(self, group_id: str, workflow_id: str) -> None:
+        """Delete YAML, preset tombstone, and registry entry together."""
+        full_name = self._workflow_name(group_id, workflow_id)
+        with self._lock:
+            if full_name not in self._workflows:
+                raise ValueError(f"Workflow {full_name} not found")
+            file_path = Path(
+                self.resolve_workflow_path(group_id, workflow_id)
+            ).resolve()
+            next_tombstones = set(self.deleted_preset_workflow_ids)
+            if full_name in self.preset_workflow_ids:
+                next_tombstones.add(full_name)
+
+            def publish_registry() -> None:
+                self._workflows.pop(full_name, None)
+                self.deleted_preset_workflow_ids = next_tombstones
+
+            FileTransaction(
+                self.workflows_dir,
+                [
+                    FileMutation.remove(file_path),
+                    self._tombstone_mutation(next_tombstones),
+                ],
+            ).commit(after_publish=publish_registry)
+        self.logger.info(f"Unregistered workflow: {full_name}")
+
     def unregister(self, group_id: str, workflow_id: str):
         """注销一个工作流"""
         full_name = f"{group_id}:{workflow_id}"
@@ -94,8 +247,10 @@ class WorkflowRegistry:
         full_name = f"{group_id}:{workflow_id}"
         with self._lock:
             if full_name in self.deleted_preset_workflow_ids:
-                self.deleted_preset_workflow_ids.discard(full_name)
-                self._save_preset_tombstones()
+                next_tombstones = set(self.deleted_preset_workflow_ids)
+                next_tombstones.discard(full_name)
+                self._write_preset_tombstones(next_tombstones)
+                self.deleted_preset_workflow_ids = next_tombstones
             if full_name in self._workflows:
                 self.logger.warning(f"Workflow {full_name} already registered, overwriting")
             workflow_builder.id = full_name
@@ -139,10 +294,12 @@ class WorkflowRegistry:
 
     def load_workflows(self, workflows_dir: Optional[str] = None):
         """从指定目录加载所有工作流定义"""
-        workflows_dir = workflows_dir or self.WORKFLOWS_DIR
+        workflows_dir = workflows_dir or self.workflows_dir
         self.workflows_dir = workflows_dir
         if not os.path.exists(workflows_dir):
             os.makedirs(workflows_dir)
+
+        FileTransaction.recover_directory(workflows_dir)
 
         self._load_preset_tombstones()
 
@@ -245,11 +402,15 @@ class WorkflowRegistry:
             self.logger.warning(f"Failed to load workflow preset tombstones: {error}")
 
     def _save_preset_tombstones(self):
+        with self._lock:
+            workflow_ids = set(self.deleted_preset_workflow_ids)
+        self._write_preset_tombstones(workflow_ids)
+
+    def _write_preset_tombstones(self, workflow_ids: set[str]):
         os.makedirs(self.workflows_dir, exist_ok=True)
         file_path = self._preset_tombstones_path()
-        temp_path = f"{file_path}.tmp"
-        with open(temp_path, "w", encoding="utf-8") as file:
-            json.dump(sorted(self.deleted_preset_workflow_ids), file, ensure_ascii=False, indent=2)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temp_path, file_path)
+
+        def write_tombstones(file):
+            json.dump(sorted(workflow_ids), file, ensure_ascii=False, indent=2)
+
+        atomic_write_text(file_path, write_tombstones)

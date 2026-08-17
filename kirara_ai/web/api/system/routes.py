@@ -347,7 +347,7 @@ async def get_system_status():
     loaded_plugins = len(plugin_loader.plugins)
 
     # 获取工作流数量
-    workflow_count = len(workflow_registry._workflows)
+    workflow_count = len(workflow_registry.snapshot_builders())
 
     # 获取系统资源使用情况
     memory_usage = get_memory_usage()
