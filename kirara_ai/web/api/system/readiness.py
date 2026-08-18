@@ -3,10 +3,14 @@
 import asyncio
 import os
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Optional
+
+from ruamel.yaml import YAML
 
 from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.im.manager import IMManager
@@ -14,7 +18,9 @@ from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.mcp_module.manager import MCPServerManager
 from kirara_ai.workflow.core.block.registry import BlockRegistry
 from kirara_ai.workflow.core.dispatch import DispatchRuleRegistry
+from kirara_ai.workflow.core.dispatch.models.dispatch_rules import CombinedDispatchRule
 from kirara_ai.workflow.core.workflow import WorkflowRegistry
+from kirara_ai.workflow.core.workflow.builder import WorkflowBuilder
 from kirara_ai.workflow.core.workflow.validation import validate_workflow_definition
 
 from .models import ReadinessCheck, ReadinessResponse
@@ -28,6 +34,12 @@ CHECK_IDS = (
     "llm_available",
     "mcp_health",
 )
+
+READINESS_WORKERS = 4
+_READINESS_EXECUTOR = ThreadPoolExecutor(
+    max_workers=READINESS_WORKERS, thread_name_prefix="readiness"
+)
+_READINESS_SLOTS = threading.BoundedSemaphore(READINESS_WORKERS)
 
 
 def _check(check_id: str, status: str, summary: str, remediation: str, **evidence):
@@ -66,12 +78,22 @@ def _writable_directories(data_path: Path, workflows_dir: str) -> ReadinessCheck
     )
 
 
-def _configuration_parseable(config: GlobalConfig) -> ReadinessCheck:
-    # Validate the already-loaded model without serializing configuration values.
-    GlobalConfig.model_validate(config)
+def _configuration_parseable(
+    config: GlobalConfig, config_path: Optional[Path]
+) -> ReadinessCheck:
+    # Parse user-owned source when present. Never serialize values into evidence.
+    if config_path is not None and config_path.is_file():
+        yaml = YAML(typ="safe")
+        with config_path.open("r", encoding="utf-8") as config_file:
+            raw_config = yaml.load(config_file)
+        GlobalConfig.model_validate(raw_config)
+        source = "disk"
+    else:
+        GlobalConfig.model_validate(config)
+        source = "loaded"
     return _check(
         CHECK_IDS[1], "pass", "配置结构可解析", "无需处理",
-        section_count=len(GlobalConfig.model_fields),
+        section_count=len(GlobalConfig.model_fields), source=source,
     )
 
 
@@ -108,12 +130,22 @@ def _workflow_validity(
             if errors:
                 invalid += 1
                 issue_count += len(errors)
+    disk_files = 0
+    workflow_root = Path(registry.workflows_dir)
+    if workflow_root.is_dir():
+        for path in workflow_root.glob("*/*.yaml"):
+            disk_files += 1
+            try:
+                WorkflowBuilder.load_from_yaml(str(path), registry.container)
+            except Exception:
+                invalid += 1
     status = "pass" if invalid == 0 else "fail"
     return _check(
         CHECK_IDS[2], status,
         "工作流结构有效" if invalid == 0 else "存在无效工作流",
         "无需处理" if invalid == 0 else "在工作流编辑器中修复无效节点或连线",
-        workflow_count=len(builders), invalid_workflow_count=invalid, issue_count=issue_count,
+        workflow_count=len(builders), invalid_workflow_count=invalid,
+        issue_count=issue_count, disk_file_count=disk_files,
     )
 
 
@@ -125,11 +157,39 @@ def _dispatch_targets(
         1 for rule in rules
         if rule.enabled and workflow_registry.get(rule.workflow_id) is None
     )
+    invalid_files = 0
+    disk_rule_count = 0
+    rules_root = Path(dispatch_registry.rules_dir)
+    if rules_root.is_dir():
+        yaml = YAML(typ="safe")
+        for path in rules_root.glob("*.yaml"):
+            try:
+                with path.open("r", encoding="utf-8") as rules_file:
+                    raw_rules = yaml.load(rules_file)
+                if not isinstance(raw_rules, list):
+                    raise ValueError("rules document must be a list")
+                for raw_rule in raw_rules:
+                    disk_rule_count += 1
+                    if not isinstance(raw_rule, dict):
+                        raise ValueError("rule must be a mapping")
+                    if "rule_groups" in raw_rule:
+                        disk_rule = CombinedDispatchRule.model_validate(raw_rule)
+                    else:
+                        disk_rule = dispatch_registry._convert_old_rule(raw_rule)
+                    if (
+                        disk_rule.enabled
+                        and workflow_registry.get(disk_rule.workflow_id) is None
+                    ):
+                        missing += 1
+            except Exception:
+                invalid_files += 1
+    failed = missing > 0 or invalid_files > 0
     return _check(
-        CHECK_IDS[3], "pass" if missing == 0 else "fail",
-        "调度目标存在" if missing == 0 else "调度规则引用了不存在的工作流",
-        "无需处理" if missing == 0 else "修复或禁用引用失效工作流的调度规则",
+        CHECK_IDS[3], "fail" if failed else "pass",
+        "调度目标和文件有效" if not failed else "调度规则文件或目标无效",
+        "无需处理" if not failed else "修复无效规则文件或失效工作流引用",
         rule_count=len(rules), missing_target_count=missing,
+        disk_rule_count=disk_rule_count, invalid_file_count=invalid_files,
     )
 
 
@@ -184,6 +244,7 @@ async def run_readiness_checks(
     mcp_manager: MCPServerManager,
     *,
     data_path: Path,
+    config_path: Optional[Path] = None,
     block_registry: Optional[BlockRegistry] = None,
     timeout_seconds: float = 1.0,
 ) -> ReadinessResponse:
@@ -191,7 +252,7 @@ async def run_readiness_checks(
 
     checks: tuple[tuple[str, Callable[[], ReadinessCheck]], ...] = (
         (CHECK_IDS[0], lambda: _writable_directories(Path(data_path), workflow_registry.workflows_dir)),
-        (CHECK_IDS[1], lambda: _configuration_parseable(config)),
+        (CHECK_IDS[1], lambda: _configuration_parseable(config, config_path)),
         (CHECK_IDS[2], lambda: _workflow_validity(workflow_registry, block_registry)),
         (CHECK_IDS[3], lambda: _dispatch_targets(workflow_registry, dispatch_registry)),
         (CHECK_IDS[4], lambda: _im_availability(config, im_manager)),
@@ -200,9 +261,32 @@ async def run_readiness_checks(
     )
     results = []
     for check_id, operation in checks:
+        if not _READINESS_SLOTS.acquire(blocking=False):
+            results.append(
+                _check(
+                    check_id, "fail", "诊断容量已满", "稍后重试诊断请求",
+                    capacity_exhausted=True,
+                )
+            )
+            continue
+
+        def run_and_release(operation=operation):
+            try:
+                return operation()
+            finally:
+                _READINESS_SLOTS.release()
+
         try:
+            future = asyncio.get_running_loop().run_in_executor(
+                _READINESS_EXECUTOR, run_and_release
+            )
+            future.add_done_callback(
+                lambda completed: completed.exception()
+                if not completed.cancelled()
+                else None
+            )
             result = await asyncio.wait_for(
-                asyncio.to_thread(operation), timeout=timeout_seconds
+                asyncio.shield(future), timeout=timeout_seconds
             )
         except asyncio.TimeoutError:
             result = _check(

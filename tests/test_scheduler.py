@@ -5,7 +5,15 @@ import pytest
 
 from kirara_ai.config.global_config import GlobalConfig, LLMBackendConfig, ModelConfig
 from kirara_ai.config.config_loader import ConfigLoader
+from kirara_ai.events.event_bus import EventBus
 from kirara_ai.llm.llm_manager import LLMManager
+from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
+from kirara_ai.plugin_manager.models import (
+    ExtensionCapabilities,
+    ExtensionManifest,
+    LifecycleHook,
+)
+from kirara_ai.plugin_manager.plugin_event_bus import PluginEventBus
 from kirara_ai.scheduler.scheduler import TaskScheduler
 
 
@@ -63,15 +71,21 @@ class _ReloadFailureManager:
 
 
 class _Container:
-    def __init__(self, manager, config):
+    def __init__(self, manager, config, extension_host=None):
         self.manager = manager
         self.config = config
+        self.extension_host = extension_host
+
+    def has(self, dependency):
+        return dependency is ExtensionLifecycleHost and self.extension_host is not None
 
     def resolve(self, dependency):
         if dependency is LLMManager:
             return self.manager
         if dependency is GlobalConfig:
             return self.config
+        if dependency is ExtensionLifecycleHost and self.extension_host is not None:
+            return self.extension_host
         raise LookupError(dependency)
 
 
@@ -180,6 +194,51 @@ async def test_auto_detect_updates_only_models_on_a_matching_backend(monkeypatch
     assert backend.model_dump(exclude={"models"}) == before
     assert [model.id for model in backend.models] == ["new-model"]
     assert manager.reload_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_detect_emits_sanitized_model_catalog_lifecycle(monkeypatch):
+    backend = LLMBackendConfig(
+        name="test-backend",
+        adapter="openai",
+        config={"endpoint": "https://example.test"},
+        models=[ModelConfig(id="private-old-model", ability=1)],
+    )
+    manager = _MutableManager(_AutoDetectAdapter())
+    received = []
+    host = ExtensionLifecycleHost()
+    plugin_bus = PluginEventBus(
+        EventBus(),
+        manifest=ExtensionManifest(
+            name="catalog-observer",
+            version="1",
+            capabilities=ExtensionCapabilities(lifecycle_hooks=True),
+            hooks=[LifecycleHook(name="model_catalog_refreshed")],
+        ),
+    )
+    plugin_bus.register_lifecycle_hook("model_catalog_refreshed", received.append)
+    host.register(plugin_bus)
+    scheduler = _scheduler(manager, backend)
+    scheduler.container.extension_host = host
+    monkeypatch.setattr(
+        ConfigLoader,
+        "save_config_with_backup",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert await scheduler._detect_backend("test-backend") is True
+    assert received == [
+        {
+            "component": "scheduler",
+            "backend": "test-backend",
+            "old_model_count": 1,
+            "new_model_count": 1,
+            "status": "updated",
+        }
+    ]
+    serialized = repr(received)
+    assert "private-old-model" not in serialized
+    assert "new-model" not in serialized
 
 
 @pytest.mark.asyncio

@@ -159,6 +159,26 @@ class TestWorkflow:
         assert workflow["name"] == TEST_WORKFLOW_NAME
 
     @pytest.mark.asyncio
+    async def test_list_workflows_loads_catalog_once_and_keeps_metadata_optional(
+        self, test_client, auth_headers, monkeypatch
+    ):
+        from kirara_ai.web.api.workflow import routes
+
+        calls = 0
+        original = routes.load_preset_catalog
+
+        def counting_loader():
+            nonlocal calls
+            calls += 1
+            return original()
+
+        monkeypatch.setattr(routes, "load_preset_catalog", counting_loader)
+        response = test_client.get("/backend-api/api/workflow", headers=auth_headers)
+        assert response.status_code == 200
+        assert calls == 1
+        assert response.json()["workflows"][0]["metadata"] is None
+
+    @pytest.mark.asyncio
     async def test_get_workflow(self, test_client, auth_headers):
         """测试获取单个工作流"""
         response = test_client.get(

@@ -8,3 +8,6 @@ recursive-include kirara_ai/web/static *
 # 启动时复制到 data/workflows，若不随 wheel 分发，pip 安装的用户只能拿到代码
 # 预设，多模态 / 分段回复 / 深度思考等增强工作流全部缺失。
 recursive-include kirara_ai/workflow/presets *
+
+recursive-exclude kirara_ai __pycache__
+recursive-exclude kirara_ai *.py[cod]

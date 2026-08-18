@@ -14,6 +14,7 @@ LifecycleName = Literal[
 ]
 CapabilityName = Literal[
     "lifecycle_hooks",
+    "events",
     "file",
     "network",
     "process",
@@ -35,7 +36,7 @@ LIFECYCLE_NAMES = frozenset(
     }
 )
 CAPABILITY_NAMES = frozenset(
-    {"lifecycle_hooks", "file", "network", "process", "config_write", "config-write", "secret"}
+    {"lifecycle_hooks", "events", "file", "network", "process", "config_write", "config-write", "secret"}
 )
 
 
@@ -43,6 +44,7 @@ class ExtensionCapabilities(BaseModel):
     """Explicit permissions available to a controlled extension."""
 
     lifecycle_hooks: bool = False
+    events: bool = False
     file: bool = False
     network: bool = False
     process: bool = False

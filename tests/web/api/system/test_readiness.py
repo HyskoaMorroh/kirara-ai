@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -55,6 +57,90 @@ async def test_readiness_checks_are_ordered_bounded_and_secret_free(tmp_path):
     serialized = result.model_dump_json()
     assert "do-not-return-this" not in serialized
     assert all(check.remediation for check in result.checks)
+
+
+@pytest.mark.asyncio
+async def test_readiness_fails_for_invalid_user_owned_files_without_values(tmp_path):
+    config, workflows, dispatch, im_manager, llm_manager, mcp_manager = (
+        _readiness_dependencies(tmp_path)
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("llms: not-a-mapping\n", encoding="utf-8")
+
+    workflow_dir = tmp_path / "workflows"
+    (workflow_dir / "chat").mkdir(parents=True)
+    (workflow_dir / "chat" / "broken.yaml").write_text("blocks: [\n", encoding="utf-8")
+    workflows.workflows_dir = str(workflow_dir)
+    workflows.container = DependencyContainer()
+
+    rules_dir = tmp_path / "dispatch_rules"
+    rules_dir.mkdir()
+    (rules_dir / "broken.yaml").write_text("- 17\n", encoding="utf-8")
+    dispatch.rules_dir = str(rules_dir)
+
+    result = await run_readiness_checks(
+        config,
+        workflows,
+        dispatch,
+        im_manager,
+        llm_manager,
+        mcp_manager,
+        data_path=tmp_path,
+        config_path=config_path,
+        timeout_seconds=0.5,
+    )
+
+    by_id = {check.id: check for check in result.checks}
+    assert by_id["configuration_parseable"].status == "fail"
+    assert by_id["workflows_valid"].status == "fail"
+    assert by_id["dispatch_targets_exist"].status == "fail"
+    assert "not-a-mapping" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_repeated_slow_readiness_requests_have_fixed_worker_capacity(
+    tmp_path, monkeypatch
+):
+    dependencies = _readiness_dependencies(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def slow_check(*args, **kwargs):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        entered.set()
+        release.wait(timeout=2)
+        with lock:
+            active -= 1
+        from kirara_ai.web.api.system.readiness import _check
+
+        return _check("data_directories_writable", "pass", "ok", "none")
+
+    monkeypatch.setattr(
+        "kirara_ai.web.api.system.readiness._writable_directories", slow_check
+    )
+    tasks = [
+        asyncio.create_task(
+            run_readiness_checks(*dependencies, data_path=tmp_path, timeout_seconds=0.01)
+        )
+        for _ in range(8)
+    ]
+    await asyncio.to_thread(entered.wait, 1)
+    await asyncio.gather(*tasks)
+    release.set()
+    await asyncio.sleep(0.05)
+
+    assert max_active <= 4
+    assert any(
+        check.evidence.get("capacity_exhausted")
+        for result in [task.result() for task in tasks]
+        for check in result.checks
+    )
 
 
 @pytest.fixture

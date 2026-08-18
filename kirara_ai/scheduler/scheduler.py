@@ -14,6 +14,7 @@ from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.llm.adapter import AutoDetectModelsProtocol
 from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.logger import get_logger
+from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
 from kirara_ai.scheduler.model_catalog import (
     backend_config_fingerprint,
     model_catalogs_equal,
@@ -107,6 +108,11 @@ class TaskScheduler:
 
         elapsed_days = (datetime.now() - last_time).total_seconds() / 86400
         return elapsed_days >= interval_days
+
+    def _emit_lifecycle(self, lifecycle: str, payload: Dict[str, Any]) -> None:
+        has_dependency = getattr(self.container, "has", None)
+        if callable(has_dependency) and has_dependency(ExtensionLifecycleHost):
+            self.container.resolve(ExtensionLifecycleHost).emit(lifecycle, payload)
 
     async def _detect_backend(self, backend_name: str) -> bool:
         """
@@ -229,6 +235,16 @@ class TaskScheduler:
             self.logger.info(
                 f"Backend {backend_name} model list updated: "
                 f"{old_model_count} -> {len(new_models)} models"
+            )
+            self._emit_lifecycle(
+                "model_catalog_refreshed",
+                {
+                    "component": "scheduler",
+                    "backend": backend_name,
+                    "old_model_count": old_model_count,
+                    "new_model_count": len(new_models),
+                    "status": "updated",
+                },
             )
 
         return True

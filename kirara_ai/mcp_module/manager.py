@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+from collections import deque
 from functools import partial
 import time
 from typing import Callable, Dict, NamedTuple, Optional, Tuple
@@ -12,6 +13,7 @@ from mcp.shared.session import RequestResponder
 from kirara_ai.config.global_config import GlobalConfig, MCPServerConfig
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.logger import get_logger
+from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
 from .models import MCPConnectionState
 from .server import MCPServer
 
@@ -38,7 +40,7 @@ class MCPServerManager:
         self.tools_cache: Dict[str, ToolCacheEntry] = {}
         self.prompts_cache: Dict[str, list[types.Prompt]] = {}
         self.resources_cache: Dict[str, list[types.Resource]] = {}
-        self.audit_records: list[dict] = []
+        self.audit_records = deque(maxlen=1000)
         self._audit_sink = audit_sink
 
     def _audit_operation(
@@ -62,6 +64,16 @@ class MCPServerManager:
             ),
         }
         self.audit_records.append(record)
+        if self.container.has(ExtensionLifecycleHost):
+            self.container.resolve(ExtensionLifecycleHost).emit(
+                "mcp_operation",
+                {
+                    "server_id": server,
+                    "operation": operation,
+                    "duration_ms": record["duration_ms"],
+                    "outcome": outcome,
+                },
+            )
         if self._audit_sink is not None:
             try:
                 self._audit_sink(record)

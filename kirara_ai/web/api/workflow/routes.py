@@ -8,7 +8,7 @@ from kirara_ai.workflow.core.block.registry import BlockRegistry
 from kirara_ai.workflow.core.workflow import WorkflowRegistry
 from kirara_ai.workflow.core.workflow.builder import WorkflowBuilder
 from kirara_ai.workflow.core.workflow.validation import validate_workflow_definition
-from kirara_ai.workflow.presets.catalog import catalog_metadata
+from kirara_ai.workflow.presets.catalog import catalog_metadata, load_preset_catalog
 
 from ...auth.middleware import require_auth
 from .models import (
@@ -46,6 +46,7 @@ async def validate_workflow():
 async def list_workflows():
     """获取所有工作流列表"""
     registry: WorkflowRegistry = g.container.resolve(WorkflowRegistry)
+    catalog = load_preset_catalog()
 
     workflows = []
     for workflow_id, builder in registry.snapshot_builders():
@@ -53,7 +54,7 @@ async def list_workflows():
         group_id, wf_id = workflow_id.split(":", 1)
 
         metadata = dict(getattr(builder, "metadata", None) or {})
-        preset_metadata = catalog_metadata(workflow_id)
+        preset_metadata = catalog_metadata(workflow_id, catalog)
         if preset_metadata is not None:
             metadata["catalog"] = preset_metadata
         workflows.append(

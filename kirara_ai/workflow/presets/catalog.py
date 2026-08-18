@@ -87,9 +87,11 @@ def load_preset_catalog(path: Path = CATALOG_PATH) -> PresetCatalog:
         return PresetCatalog.model_validate(json.load(catalog_file))
 
 
-def catalog_metadata(workflow_id: str) -> Optional[Dict[str, Any]]:
+def catalog_metadata(
+    workflow_id: str, catalog: Optional[PresetCatalog] = None
+) -> Optional[Dict[str, Any]]:
     entry = next(
-        (item for item in load_preset_catalog().presets if item.id == workflow_id),
+        (item for item in (catalog or load_preset_catalog()).presets if item.id == workflow_id),
         None,
     )
     return entry.model_dump(mode="json") if entry is not None else None

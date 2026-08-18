@@ -8,6 +8,16 @@ from kirara_ai.workflow.presets.catalog import (
 )
 
 
+def test_catalog_loads_from_installed_package_data_path(tmp_path):
+    installed_catalog = tmp_path / "catalog.json"
+    installed_catalog.write_bytes(
+        (Path(PRESETS_DIR) / "catalog.json").read_bytes()
+    )
+    catalog = load_preset_catalog(installed_catalog)
+    assert catalog.presets
+    assert catalog.presets[0].skill.workflow_id == catalog.presets[0].id
+
+
 def test_catalog_covers_every_bundled_yaml_with_discoverability_metadata():
     catalog = load_preset_catalog()
     yaml_ids = {

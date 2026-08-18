@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import os
 import sys
+from collections import deque
 from typing import Dict, List, Optional, Type
 
 from kirara_ai.config.global_config import GlobalConfig
@@ -11,6 +12,7 @@ from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.ioc.inject import Inject
 from kirara_ai.logger import get_logger
 from kirara_ai.plugin_manager.models import ExtensionManifest, PluginInfo
+from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
 from kirara_ai.plugin_manager.plugin import Plugin
 from kirara_ai.plugin_manager.plugin_event_bus import PluginEventBus
 
@@ -26,7 +28,12 @@ class PluginLoader:
         self.internal_plugins: List[str] = []
         self.config = self.container.resolve(GlobalConfig)
         self.event_bus = self.container.resolve(EventBus)
-        self.extension_audit_records: List[dict] = []
+        self.extension_audit_records = deque(maxlen=1000)
+        if self.container.has(ExtensionLifecycleHost):
+            self.extension_host = self.container.resolve(ExtensionLifecycleHost)
+        else:
+            self.extension_host = ExtensionLifecycleHost()
+            self.container.register(ExtensionLifecycleHost, self.extension_host)
 
     @staticmethod
     def _manifest_for(plugin_or_class) -> Optional[ExtensionManifest]:
@@ -160,16 +167,22 @@ class PluginLoader:
         """Instantiates a plugin class using dependency injection."""
         self.logger.debug(f"Instantiating plugin class: {plugin_class.__name__}")
         event_bus = self.container.resolve(EventBus)
+        manifest = self._manifest_for(plugin_class)
         with self.container.scoped() as scoped_container:
+            plugin_bus = PluginEventBus(
+                event_bus,
+                manifest=manifest,
+                audit_sink=self.extension_audit_records.append,
+            )
             scoped_container.register(
                 EventBus,
-                PluginEventBus(
-                    event_bus,
-                    manifest=self._manifest_for(plugin_class),
-                    audit_sink=self.extension_audit_records.append,
-                ),
+                plugin_bus,
             )
-            return Inject(scoped_container).create(plugin_class)()
+            scoped_container.register(PluginEventBus, plugin_bus)
+            plugin = Inject(scoped_container).create(plugin_class)()
+            if manifest is not None:
+                self.extension_host.register(plugin_bus)
+            return plugin
 
     def load_plugins(self):
         """Initializes all loaded plugins."""
@@ -206,6 +219,7 @@ class PluginLoader:
                 plugin.on_stop()
                 if isinstance(plugin.event_bus, PluginEventBus):
                     plugin.event_bus.unregister_all()
+                    self.extension_host.unregister(plugin.event_bus)
                 self.logger.info(f"Plugin {plugin.__class__.__name__} stopped")
                 self.event_bus.post(PluginStopped(plugin))
             except Exception as e:
@@ -384,6 +398,7 @@ class PluginLoader:
                 
                 if isinstance(plugin.event_bus, PluginEventBus):
                     plugin.event_bus.unregister_all()
+                    self.extension_host.unregister(plugin.event_bus)
                     
                 plugin.on_stop()
                 del self.plugins[plugin_name]

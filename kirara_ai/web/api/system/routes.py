@@ -401,6 +401,7 @@ async def get_system_readiness():
             g.container.resolve(LLMManager),
             g.container.resolve(MCPServerManager),
             data_path=Path(DATA_PATH),
+            config_path=Path(CONFIG_FILE),
             block_registry=g.container.resolve(BlockRegistry),
         )
     ).model_dump(mode="json")

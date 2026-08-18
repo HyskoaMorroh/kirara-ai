@@ -4,6 +4,7 @@ import pytest
 
 from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.events.event_bus import EventBus
+from kirara_ai.events.plugin import PluginLoaded, PluginStarted, PluginStopped
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.mcp_module.manager import MCPServerManager, ToolCacheEntry
 from kirara_ai.mcp_module.models import MCPConnectionState
@@ -13,6 +14,9 @@ from kirara_ai.plugin_manager.models import (
     LifecycleHook,
 )
 from kirara_ai.plugin_manager.plugin_event_bus import PluginEventBus
+from kirara_ai.plugin_manager.plugin import Plugin
+from kirara_ai.plugin_manager.plugin_loader import PluginLoader
+from kirara_ai.entry import notify_extension_lifecycle
 
 
 def test_no_manifest_keeps_legacy_event_registration():
@@ -26,6 +30,176 @@ def test_no_manifest_keeps_legacy_event_registration():
     plugin_bus.register(LegacyEvent, received.append)
     plugin_bus.post(LegacyEvent())
     assert len(received) == 1
+
+
+def _loader(tmp_path):
+    container = DependencyContainer()
+    container.register(GlobalConfig, GlobalConfig())
+    container.register(EventBus, EventBus())
+    return PluginLoader(container, str(tmp_path))
+
+
+def test_manifest_capabilities_are_enforced_through_real_loader_injection(tmp_path):
+    class ManifestedPlugin(Plugin):
+        event_bus: EventBus
+        manifest = ExtensionManifest(
+            name="manifested", version="1", capabilities=ExtensionCapabilities()
+        )
+
+        def __init__(self, event_bus: EventBus):
+            event_bus.register(object, lambda event: None)
+
+        def on_load(self):
+            pass
+
+        def on_start(self):
+            pass
+
+        def on_stop(self):
+            pass
+
+    with pytest.raises(PermissionError, match="events"):
+        _loader(tmp_path).register_plugin(ManifestedPlugin)
+
+
+def test_manifested_loader_preserves_existing_dependency_injection(tmp_path):
+    class ExistingDependency:
+        pass
+
+    dependency = ExistingDependency()
+
+    class ManifestedPlugin(Plugin):
+        event_bus: EventBus
+        manifest = ExtensionManifest(name="manifested", version="1")
+
+        def __init__(
+            self, existing_dependency: ExistingDependency, event_bus: EventBus
+        ):
+            self.existing_dependency = existing_dependency
+            self.injected_event_bus = event_bus
+
+        def on_load(self):
+            pass
+
+        def on_start(self):
+            pass
+
+        def on_stop(self):
+            pass
+
+    loader = _loader(tmp_path)
+    loader.container.register(ExistingDependency, dependency)
+
+    plugin = loader.register_plugin(ManifestedPlugin)
+
+    assert plugin.existing_dependency is dependency
+    assert isinstance(plugin.injected_event_bus, PluginEventBus)
+
+
+def test_manifestless_loader_path_preserves_event_registration(tmp_path):
+    received = []
+
+    class LegacyPlugin(Plugin):
+        event_bus: EventBus
+
+        def __init__(self, event_bus: EventBus):
+            event_type = type("LegacyEvent", (), {})
+            event_bus.register(event_type, received.append)
+
+        def on_load(self):
+            pass
+
+        def on_start(self):
+            pass
+
+        def on_stop(self):
+            pass
+
+    loader = _loader(tmp_path)
+    plugin = loader.register_plugin(LegacyPlugin)
+    event_type = next(iter(plugin.event_bus._event_bus._listeners))
+    plugin.event_bus.post(event_type())
+    assert len(received) == 1
+
+
+def test_manifested_host_operations_are_checked_at_loader_boundary(tmp_path):
+    class ManifestedPlugin(Plugin):
+        event_bus: EventBus
+        manifest = ExtensionManifest(
+            name="manifested", version="1", capabilities=ExtensionCapabilities()
+        )
+
+        def on_load(self):
+            pass
+
+        def on_start(self):
+            pass
+
+        def on_stop(self):
+            pass
+
+    plugin = _loader(tmp_path).register_plugin(ManifestedPlugin)
+    with pytest.raises(PermissionError):
+        plugin.event_bus.read_file(tmp_path / "config.yaml")
+    with pytest.raises(PermissionError):
+        plugin.event_bus.request("GET", "https://example.invalid")
+    with pytest.raises(PermissionError):
+        plugin.event_bus.run_process(["python", "-c", "pass"])
+    with pytest.raises(PermissionError):
+        plugin.event_bus.write_config(tmp_path / "config.json", {})
+    with pytest.raises(PermissionError):
+        plugin.event_bus.get_secret("example")
+
+
+def test_declared_lifecycle_registered_by_loader_is_produced_by_application(tmp_path):
+    received = []
+
+    class ManifestedPlugin(Plugin):
+        event_bus: EventBus
+        manifest = ExtensionManifest(
+            name="manifested",
+            version="1",
+            capabilities=ExtensionCapabilities(
+                lifecycle_hooks=True, events=True
+            ),
+            hooks=[
+                LifecycleHook(name="startup_completed"),
+                LifecycleHook(name="shutdown_requested"),
+            ],
+        )
+
+        def on_load(self):
+            self.event_bus.register_lifecycle_hook(
+                "startup_completed", lambda payload: received.append(("start", payload))
+            )
+            self.event_bus.register_lifecycle_hook(
+                "shutdown_requested", lambda payload: received.append(("stop", payload))
+            )
+
+        def on_start(self):
+            pass
+
+        def on_stop(self):
+            pass
+
+    loader = _loader(tmp_path)
+    legacy_events = []
+    for event_type in (PluginLoaded, PluginStarted, PluginStopped):
+        loader.event_bus.register(event_type, legacy_events.append)
+    loader.register_plugin(ManifestedPlugin)
+    loader.load_plugins()
+    loader.start_plugins()
+    notify_extension_lifecycle(loader.container, "startup_completed")
+    notify_extension_lifecycle(loader.container, "shutdown_requested")
+    loader.stop_plugins()
+
+    assert [kind for kind, _ in received] == ["start", "stop"]
+    assert received[0][1]["component"] == "application"
+    assert [type(event) for event in legacy_events] == [
+        PluginLoaded,
+        PluginStarted,
+        PluginStopped,
+    ]
 
 
 def test_manifest_checks_lifecycle_and_capabilities_with_structured_audit():
@@ -80,6 +254,22 @@ def test_config_write_capability_accepts_manifest_spelling():
 async def test_mcp_operations_emit_redacted_audit_events():
     container = DependencyContainer()
     container.register(GlobalConfig, GlobalConfig())
+    lifecycle = []
+    from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
+
+    host = ExtensionLifecycleHost()
+    container.register(ExtensionLifecycleHost, host)
+    lifecycle_bus = PluginEventBus(
+        EventBus(),
+        manifest=ExtensionManifest(
+            name="observer",
+            version="1",
+            capabilities=ExtensionCapabilities(lifecycle_hooks=True),
+            hooks=[LifecycleHook(name="mcp_operation")],
+        ),
+    )
+    lifecycle_bus.register_lifecycle_hook("mcp_operation", lifecycle.append)
+    host.register(lifecycle_bus)
     audit = []
     manager = MCPServerManager(container, audit_sink=audit.append)
 
@@ -108,3 +298,8 @@ async def test_mcp_operations_emit_redacted_audit_events():
         serialized = repr(record)
         assert "private-value" not in serialized
         assert "password" not in serialized
+    assert [item["operation"] for item in lifecycle] == [
+        "call_tool",
+        "get_prompt",
+        "get_resource",
+    ]

@@ -2,7 +2,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kirara_ai.config.global_config import GlobalConfig, WebConfig
+from kirara_ai.events.event_bus import EventBus
 from kirara_ai.ioc.container import DependencyContainer
+from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
+from kirara_ai.plugin_manager.models import (
+    ExtensionCapabilities,
+    ExtensionManifest,
+    LifecycleHook,
+)
+from kirara_ai.plugin_manager.plugin_event_bus import PluginEventBus
 from kirara_ai.web.app import WebServer
 from kirara_ai.workflow.core.dispatch import CombinedDispatchRule, DispatchRuleRegistry, RuleGroup, SimpleDispatchRule
 from kirara_ai.workflow.core.workflow import WorkflowRegistry
@@ -197,6 +205,44 @@ def test_rule_preview_explains_real_dispatch_order_without_changing_rules(test_c
 
     after = test_client.get("/backend-api/api/dispatch/rules", headers=auth_headers).json()["rules"]
     assert after == before
+
+
+def test_rule_preview_emits_sanitized_declared_lifecycle(
+    test_client, auth_headers, container
+):
+    received = []
+    host = ExtensionLifecycleHost()
+    plugin_bus = PluginEventBus(
+        EventBus(),
+        manifest=ExtensionManifest(
+            name="preview-observer",
+            version="1",
+            capabilities=ExtensionCapabilities(lifecycle_hooks=True),
+            hooks=[LifecycleHook(name="dispatch_preview")],
+        ),
+    )
+    plugin_bus.register_lifecycle_hook("dispatch_preview", received.append)
+    host.register(plugin_bus)
+    container.register(ExtensionLifecycleHost, host)
+
+    response = test_client.post(
+        "/backend-api/api/dispatch/preview",
+        headers=auth_headers,
+        json={
+            "content": "private preview content",
+            "chat_type": "私聊",
+            "sender_id": "private-sender",
+            "mentioned": False,
+        },
+    )
+
+    assert response.status_code == 200
+    assert received == [
+        {"component": "dispatch", "selected": False, "rule_count": 3}
+    ]
+    serialized = repr(received)
+    assert "private preview content" not in serialized
+    assert "private-sender" not in serialized
 
 
 def test_rule_preview_and_reachability_never_disagree_about_shadowing(

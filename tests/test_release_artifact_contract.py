@@ -27,6 +27,7 @@ REQUIRED_DISTRIBUTION_PATHS = (
     "kirara_ai/plugins/im_wecom_adapter/assets/wecom.png",
     "kirara_ai/workflow/presets/chat/plain_text.yaml",
     "kirara_ai/workflow/presets/chat/mcp_tools.yaml",
+    "kirara_ai/workflow/presets/catalog.json",
 )
 
 FORBIDDEN_DISTRIBUTION_PARTS = (
@@ -65,6 +66,11 @@ def test_release_versions_are_synchronized():
     assert _locked_project_version() == python_version
     assert webui_package["version"] == WEBUI_PACKAGE_VERSION
     assert (PROJECT_ROOT / "webui" / "yarn.lock").is_file()
+
+
+def test_catalog_is_declared_as_installed_package_data():
+    package_data = _project_metadata()["tool"]["setuptools"]["package-data"]
+    assert "catalog.json" in package_data["kirara_ai.workflow.presets"]
 
 
 def _archive_members(archive: Path) -> set[str]:

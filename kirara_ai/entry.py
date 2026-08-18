@@ -25,6 +25,7 @@ from kirara_ai.memory.composes import DefaultMemoryComposer, DefaultMemoryDecomp
 from kirara_ai.memory.memory_manager import MemoryManager
 from kirara_ai.memory.scopes import GlobalScope, GroupScope, MemberScope
 from kirara_ai.plugin_manager.plugin_loader import PluginLoader
+from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
 from kirara_ai.scheduler import TaskScheduler
 from kirara_ai.tracing import LLMTracer, TracingManager
 from kirara_ai.web.api.system.utils import get_installed_version, get_latest_pypi_version
@@ -74,6 +75,16 @@ def init_container() -> DependencyContainer:
     container = DependencyContainer()
     container.register(DependencyContainer, container)
     return container
+
+
+def notify_extension_lifecycle(container: DependencyContainer, lifecycle: str) -> None:
+    """Produce a sanitized application lifecycle notification when configured."""
+    if not container.has(ExtensionLifecycleHost):
+        return
+    status = "started" if lifecycle == "startup_completed" else "stopping"
+    container.resolve(ExtensionLifecycleHost).emit(
+        lifecycle, {"component": "application", "status": status}
+    )
 
 
 def init_memory_system(container: DependencyContainer):
@@ -300,9 +311,11 @@ def run_application(container: DependencyContainer):
         loop.create_task(check_update())
         event_bus = container.resolve(EventBus)
         event_bus.post(ApplicationStarted())
+        notify_extension_lifecycle(container, "startup_completed")
         loop.run_until_complete(shutdown_event.wait())
     finally:
         event_bus.post(ApplicationStopping())
+        notify_extension_lifecycle(container, "shutdown_requested")
 
         # 停止定时任务调度器
         try:
