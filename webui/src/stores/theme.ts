@@ -64,6 +64,13 @@ const applySeed = (seed: ThemeSeed, scheme: ThemeScheme) => {
   set('--node-header-bg', seed.nodeHeader)
   set('--node-border-color', seed.nodeBorder)
   set('--node-muted-bg', seed.nodeMuted)
+  set('--focus-color', seed.focus)
+  set('--overlay-bg-color', seed.overlay)
+  set('--selection-bg-color', seed.selection)
+  set('--muted-bg-color', seed.muted)
+  set('--minimap-bg-color', seed.minimap)
+  set('--node-accent-custom', seed.nodeAccents.custom)
+  set('--node-accent-code', seed.nodeAccents.code)
 
   set('--code-bg-color', seed.code)
   set('--code-text-color', seed.codeText)

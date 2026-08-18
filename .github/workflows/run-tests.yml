@@ -25,6 +25,7 @@ name: Run Tests
 # ---------------------------------------------------------------------------
 
 on:
+  workflow_call:
   pull_request:
     branches: [main, master]
   push:
@@ -34,7 +35,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-run-tests-${{ github.ref }}
   # PR 上被后续 push 取代的运行直接取消；默认分支与合并队列的每个 commit
   # 都要留下独立结论，因此不取消。
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -204,7 +205,7 @@ jobs:
           load: true
           tags: kirara-ai:ci
           build-args: |
-            VITE_APP_VERSION=v0.0.0-ci
+            VITE_APP_VERSION=${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -247,6 +248,125 @@ jobs:
             ls /app/web/assets/*.js >/dev/null &&
             echo "bundled WebUI OK"
           '
+
+      - name: Run HTTP smoke tests against an isolated container
+        env:
+          KIRARA_SMOKE_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}-ci-only
+        run: |
+          set -euo pipefail
+          volume="kirara-ai-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          container="kirara-ai-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            docker rm -f "$container" >/dev/null 2>&1 || true
+            docker volume rm "$volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker volume create "$volume" >/dev/null
+          docker run -d --name "$container" \
+            -p 127.0.0.1::8080 \
+            -v "$volume:/app/data" \
+            kirara-ai:ci >/dev/null
+          port="$(docker port "$container" 8080/tcp | sed 's/.*://')"
+          export KIRARA_SMOKE_BASE_URL="http://127.0.0.1:${port}"
+
+          python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+
+          base = os.environ["KIRARA_SMOKE_BASE_URL"]
+          password = os.environ["KIRARA_SMOKE_PASSWORD"]
+
+          def request(path, *, token=None, data=None):
+              headers = {}
+              body = None
+              if token:
+                  headers["Authorization"] = f"Bearer {token}"
+              if data is not None:
+                  headers["Content-Type"] = "application/json"
+                  body = json.dumps(data).encode()
+              with urllib.request.urlopen(
+                  urllib.request.Request(base + path, data=body, headers=headers), timeout=10
+              ) as response:
+                  raw = response.read()
+                  # Smoke 输出不得把测试密码或任何响应中的秘密带进 CI 日志。
+                  decoded = raw.decode("utf-8", errors="replace")
+                  assert password not in decoded, path
+                  payload = json.loads(raw) if raw else None
+                  assert password not in repr(payload), path
+                  return response.status, payload
+
+          deadline = time.monotonic() + 120
+          while True:
+              try:
+                  with urllib.request.urlopen(base + "/", timeout=3) as response:
+                      assert response.status == 200
+                  break
+              except (OSError, urllib.error.URLError):
+                  if time.monotonic() >= deadline:
+                      raise
+                  time.sleep(2)
+
+          status, first_time = request("/backend-api/api/auth/check-first-time")
+          assert status == 200 and first_time["is_first_time"] is True, first_time
+          status, login = request(
+              "/backend-api/api/auth/login", data={"password": password}
+          )
+          assert status == 200 and login["token_type"] == "bearer", "login failed"
+          token = login["access_token"]
+
+          status, readiness = request(
+              "/backend-api/api/system/readiness", token=token
+          )
+          assert status == 200, "readiness request failed"
+          assert readiness.get("ready") is True, "container readiness is not green"
+          checks = readiness.get("checks")
+          assert isinstance(checks, list) and all(
+              isinstance(item, dict)
+              and isinstance(item.get("id"), str)
+              and isinstance(item.get("status"), str)
+              for item in checks
+          ), "readiness checks contract failed"
+          print("read-only smoke OK: readiness")
+
+          for path, key in {
+              "/backend-api/api/workflow": "workflows",
+              "/backend-api/api/dispatch/rules": "rules",
+              "/backend-api/api/mcp/statistics": "total_servers",
+          }.items():
+              status, payload = request(path, token=token)
+              assert status == 200 and key in payload, path
+              print("read-only smoke OK:", path)
+
+          status, reachability = request(
+              "/backend-api/api/dispatch/reachability", token=token, data={}
+          )
+          assert status == 200 and isinstance(reachability.get("reachability"), list), (
+              "dispatch reachability contract failed"
+          )
+          print("read-only smoke OK: dispatch reachability")
+
+          status, preview = request(
+              "/backend-api/api/dispatch/preview",
+              token=token,
+              data={
+                  "content": "/ci-smoke",
+                  "chat_type": "私聊",
+                  "sender_id": "ci-smoke-user",
+                  "mentioned": False,
+              },
+          )
+          assert status == 200 and isinstance(preview.get("rules"), list), (
+              "dispatch preview contract failed"
+          )
+          print("read-only smoke OK: dispatch preview")
+
+          status, tools = request("/backend-api/api/mcp/tools", token=token)
+          assert status == 200 and isinstance(tools, list), "MCP tools contract failed"
+          print("read-only smoke OK: MCP tools listing")
+          PY
 
       - name: Run backend test suite inside the image
         # 仓库挂到 /src 而不是 /app：/app 下有镜像自带的 web/ 与 docker/，

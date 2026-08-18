@@ -35,6 +35,13 @@
   --node-header-bg: #f0f0f0;
   --node-border-color: rgba(0, 0, 0, 0.06);
   --node-muted-bg: #f9fafb;
+  --focus-color: #007aff;
+  --overlay-bg-color: rgba(255, 255, 255, 0.8);
+  --selection-bg-color: rgba(0, 122, 255, 0.18);
+  --muted-bg-color: #f9fafb;
+  --minimap-bg-color: #f0f0f0;
+  --node-accent-custom: #007aff;
+  --node-accent-code: #5c6ac4;
 
   /* 代码块 */
   --code-bg-color: #f3f4f6;
@@ -239,6 +246,13 @@
   --node-header-bg: #2b2e33;
   --node-border-color: rgba(255, 255, 255, 0.08);
   --node-muted-bg: #222427;
+  --focus-color: #5b8dff;
+  --overlay-bg-color: rgba(30, 32, 35, 0.86);
+  --selection-bg-color: rgba(91, 141, 255, 0.28);
+  --muted-bg-color: #222427;
+  --minimap-bg-color: #2b2e33;
+  --node-accent-custom: #5b8dff;
+  --node-accent-code: #8b95e0;
 
   /* 代码块 */
   --code-bg-color: #1a1c1f;
@@ -321,6 +335,13 @@
     --node-header-bg: #2b2e33;
     --node-border-color: rgba(255, 255, 255, 0.08);
     --node-muted-bg: #222427;
+    --focus-color: #5b8dff;
+    --overlay-bg-color: rgba(30, 32, 35, 0.86);
+    --selection-bg-color: rgba(91, 141, 255, 0.28);
+    --muted-bg-color: #222427;
+    --minimap-bg-color: #2b2e33;
+    --node-accent-custom: #5b8dff;
+    --node-accent-code: #8b95e0;
 
     --code-bg-color: #1a1c1f;
     --code-text-color: #d4d7dc;
@@ -359,6 +380,16 @@ body {
   transition: background-color var(--transition-duration) var(--transition-timing-function);
   margin: 0;
   padding: 0;
+}
+
+::selection {
+  background-color: var(--selection-bg-color);
+  color: var(--text-color);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-color);
+  outline-offset: 2px;
 }
 
 /*

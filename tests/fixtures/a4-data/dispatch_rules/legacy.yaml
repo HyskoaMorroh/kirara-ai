@@ -1,0 +1,10 @@
+- rule_id: legacy_fixture_chat
+  name: Legacy fixture chat rule
+  description: Legacy rule converted at load time.
+  workflow_id: custom:annotated
+  type: prefix
+  prefix: /legacy
+  priority: 42
+  enabled: true
+  metadata:
+    fixture: legacy-rule

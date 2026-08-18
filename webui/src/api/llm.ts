@@ -32,15 +32,15 @@ export const llmApi = {
   /**
    * 获取适配器类型列表
    */
-  getAdapterTypes() {
-    return http.get<{ types: string[] }>('/llm/types')
+  getAdapterTypes(signal?: AbortSignal) {
+    return http.get<{ types: string[] }>('/llm/types', { signal })
   },
 
   /**
    * 获取后端列表
    */
-  getBackends() {
-    return http.get<{ data: { backends: LLMBackend[] } }>('/llm/backends')
+  getBackends(signal?: AbortSignal) {
+    return http.get<{ data: { backends: LLMBackend[] } }>('/llm/backends', { signal })
   },
 
   /**
@@ -74,23 +74,28 @@ export const llmApi = {
   /**
    * 获取适配器配置模式
    */
-  getAdapterConfigSchema(adapterType: string) {
-    return http.get<{ configSchema: ConfigSchema }>(`/llm/types/${adapterType}/config-schema`)
+  getAdapterConfigSchema(adapterType: string, signal?: AbortSignal) {
+    return http.get<{ configSchema: ConfigSchema }>(`/llm/types/${adapterType}/config-schema`, {
+      signal
+    })
   },
 
   /**
    * 获取适配器支持自动检测模型
    */
-  getAdapterSupportsAutoDetectModels(adapterType: string) {
+  getAdapterSupportsAutoDetectModels(adapterType: string, signal?: AbortSignal) {
     return http.get<{ supportsAutoDetectModels: boolean }>(
-      `/llm/types/${adapterType}/supports-auto-detect-models`
+      `/llm/types/${adapterType}/supports-auto-detect-models`,
+      { signal }
     )
   },
 
   /**
    * 获取后端支持的模型列表
    */
-  getBackendModels(backendName: string) {
-    return http.get<{ models: ModelInfo[] }>(`/llm/backends/${backendName}/auto-detect-models`)
+  getBackendModels(backendName: string, signal?: AbortSignal) {
+    return http.get<{ models: ModelInfo[] }>(`/llm/backends/${backendName}/auto-detect-models`, {
+      signal
+    })
   }
 }

@@ -20,6 +20,9 @@ class BlockInstance(BaseModel):
     type_name: str
     name: str
     config: Dict[str, Any]
+    # Preserve the workflow builder's execution-group marker when a canvas
+    # workflow is round-tripped through the API.
+    parallel: bool = False
     # None represents a node that has never been laid out. {"x": 0, "y": 0}
     # remains a valid, user-chosen position.
     position: Optional[Dict[str, int]] = None  # x, y 坐标

@@ -225,7 +225,7 @@ registry.register(
 
 ```bash
 # 1. 确认注册成功、端口与配置项被正确反射出来
-.venv/Scripts/python.exe -c "
+.venv-win/Scripts/python.exe -c "
 from kirara_ai.workflow.core.block.registry import BlockRegistry
 import sys; sys.path.insert(0, 'data/plugins')
 from demo_plugin.blocks import GreetingBlock
@@ -532,7 +532,7 @@ loader.stop_plugins()
 ```
 
 ```bash
-.venv/Scripts/python.exe verify_plugin.py
+.venv-win/Scripts/python.exe verify_plugin.py
 ```
 
 预期：日志里出现 `Found plugin directory: demo_plugin`、`Internal plugin demo_plugin loaded successfully`、`Plugin DemoPlugin initialized`、`Plugin DemoPlugin started`，三个 `print` 都打出非 `None` 的对象，最后 `Plugin DemoPlugin stopped`。任何一行是 `None`，说明对应的注册没生效。
@@ -547,6 +547,8 @@ curl -H "Authorization: Bearer <token>" \
 ---
 
 ## 三、接入 MCP 服务器并让模型调用它的工具
+
+Agent、Skill、permissioned lifecycle Hook 和 MCP 的组合方式及安全边界另见 [Agents、Skills、Hooks 与 MCP 实用指南](AGENTS_SKILLS_HOOKS_MCP_GUIDE.md)。Agent/Skill 不引入第二套执行器；Hook 不是 Python sandbox；MCP 当前没有通用人工审批中心。
 
 MCP 相关代码在 `kirara_ai/mcp_module/`（**目录名是 `mcp_module`，不是 `mcp`**——`mcp` 是上游 SDK 的包名，重名会冲突）。
 
@@ -699,13 +701,13 @@ curl -H "Authorization: Bearer <token>" \
 curl -H "Authorization: Bearer <token>" \
   http://127.0.0.1:8080/backend-api/api/mcp/tools
 
-# 3. 不经过模型，直接试调一个工具
+# 3. 有副作用：不经过模型直接执行真实工具，只能在人工核对后运行
 curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
   -d '{"toolName":"read_file","params":{"path":"/tmp/a.txt"}}' \
   http://127.0.0.1:8080/backend-api/api/mcp/servers/filesystem/tools/call
 ```
 
-第 2 步返回空数组说明服务器虽然「在配置里」但没连上，回去看 `MCP` tag 的日志。三步都通过后，再去工作流里发一条需要工具的消息（例如「帮我读一下 /tmp/a.txt」），然后在「LLM 追踪」页看请求详情里有没有 `tool_calls`——这是确认工具真的送到模型手里的唯一直接证据（需要先在「设置 → 系统设置」里打开「LLM请求记录时包含完整内容」）。
+第 2 步返回空数组说明服务器虽然「在配置里」但没连上，回去看 `MCP` tag 的日志。第 3 步不是健康检查：它可能读写数据、执行命令、发送消息或产生费用，Kirara AI 也没有通用逐次审批中心。只有操作人员确认服务器、工具、参数和数据范围后才能执行。随后如需验证模型路径，在受控规则里发一条无敏感信息的消息，并在「LLM 追踪」页看请求详情里有没有 `tool_calls`（开启完整内容会把聊天正文写入数据库）。
 
 ---
 
@@ -892,7 +894,7 @@ JSON
 
 ```bash
 # 2. 确认 YAML 真的能被 WorkflowBuilder 载入（比预检更严格：会解析 type 与 params）
-.venv/Scripts/python.exe -c "
+.venv-win/Scripts/python.exe -c "
 from kirara_ai.events.event_bus import EventBus
 from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.ioc.container import DependencyContainer
@@ -909,7 +911,7 @@ print(b.name, '|', len(b.nodes_by_name), 'nodes |', len(b.wire_specs), 'wires')
 
 ```bash
 # 3. 新增随包预设后跑这套契约测试（会校验名称/说明/类型/端口/坐标不重叠/与 data 目录同步）
-.venv/Scripts/python.exe -m pytest tests/test_workflow_presets.py -q
+.venv-win/Scripts/python.exe -m pytest tests/test_workflow_presets.py -q
 ```
 
 4. 界面上打开编辑器，点工具栏「检查」按钮，应提示「检查通过，未发现问题」，且没有节点带角标。
@@ -1073,7 +1075,7 @@ curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/js
 不启动服务也能验证匹配逻辑：
 
 ```bash
-.venv/Scripts/python.exe -c "
+.venv-win/Scripts/python.exe -c "
 from kirara_ai.im.message import IMMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
 from kirara_ai.ioc.container import DependencyContainer
@@ -1188,7 +1190,9 @@ def on_started(event: ApplicationStarted):
 
 它从函数签名的**第一个参数的类型标注**推断事件类型，所以那个标注是必需的——没有参数会抛 `Listener function must have at least one parameter`，没有标注会抛 `Listener function must have an annotated first parameter`。装饰器需要在装饰时就拿到 `event_bus` 实例，在插件类里不太顺手（`self.event_bus` 要等实例化后才有），所以插件内一般用直接注册。
 
-### 6.4 想要「真钩子」得自己造
+### 6.4 事件监听与 permissioned lifecycle 的边界
+
+`3.3.0a7` 另提供 extension manifest lifecycle：`startup_completed`、`shutdown_requested`、`workflow_before`、`workflow_after`、`workflow_error`、`dispatch_preview`、`model_catalog_refreshed`、`mcp_operation`。插件必须声明 `lifecycle_hooks` capability 和具体 hook；未知或未声明注册会被拒绝并审计。它只约束框架注入的 host facade，不能把进程内 Python 变成 sandbox。
 
 如果你需要的是这些能力：
 
@@ -1200,12 +1204,12 @@ def on_started(event: ApplicationStarted):
 | LLM 请求前改写 prompt | 无中间件。只有 `@trace_llm_chat` 这个装饰器，且是内置的 | 在工作流里用「基础：替换文本」等节点处理，或自己写 Block |
 | 异步监听器 | `post()` 是同步的 | 监听器里 `loop.create_task(...)` |
 
-诚实的结论：**能不改源码就扩展的只有「加 Block」「加插件」「监听那 11 个事件」这三条路**。其余都需要改 `kirara_ai/` 下的代码。
+诚实的结论：可在不改核心源码的前提下增加 Block、插件、既有 EventBus 监听器和允许列表 lifecycle；消息改写、逐 Block 中间件、通用工具审批仍不是现成 primitive。
 
 ### 6.5 验证
 
 ```bash
-.venv/Scripts/python.exe -c "
+.venv-win/Scripts/python.exe -c "
 from kirara_ai.events import ApplicationStarted, ApplicationStopping
 from kirara_ai.events.event_bus import EventBus
 
@@ -1358,7 +1362,7 @@ curl -H "Authorization: Bearer <token>" \
 
 ```bash
 # 后端测试（注意用虚拟环境的 python，系统 python 没装 pytest）
-.venv/Scripts/python.exe -m pytest ./tests -q
+.venv-win/Scripts/python.exe -m pytest ./tests -q
 
 # 前端单元测试
 cd webui && npx vitest run --config vitest.config.ts
@@ -1388,7 +1392,5 @@ cd webui && npx vue-tsc --noEmit
 - 首次部署、配置 LLM 后端、选模型、外观设置：`docs/QUICKSTART.md`
 - 日志、LLM 追踪、预检 issue code、规则试运行、画布角标：`docs/OBSERVABILITY.md`
 - 部署到首条回复、模板选型、默认规则与画布排错：`docs/WORKFLOW_OPERATIONS_GUIDE.md`
-
-
 
 

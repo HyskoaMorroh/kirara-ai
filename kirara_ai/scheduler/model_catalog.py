@@ -1,6 +1,9 @@
+import hashlib
+import json
 from collections.abc import Iterable
+from typing import Any
 
-from kirara_ai.config.global_config import ModelConfig
+from kirara_ai.config.global_config import LLMBackendConfig, ModelConfig
 from kirara_ai.llm.model_types import LLMAbility, ModelType
 
 
@@ -47,3 +50,23 @@ def model_catalogs_equal(existing: Iterable[ModelConfig], detected: Iterable[Mod
     return [model.model_dump(mode="json") for model in existing] == [
         model.model_dump(mode="json") for model in detected
     ]
+
+
+def backend_config_fingerprint(config: LLMBackendConfig | Any) -> str:
+    """Fingerprint backend identity and settings while excluding its catalogue."""
+    if hasattr(config, "model_dump"):
+        payload = config.model_dump(mode="json", exclude={"models"})
+    else:
+        payload = {
+            key: value
+            for key, value in vars(config).items()
+            if key != "models"
+        }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

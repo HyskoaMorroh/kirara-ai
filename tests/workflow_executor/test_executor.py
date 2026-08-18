@@ -2,6 +2,9 @@ import pytest
 
 from kirara_ai.events.event_bus import EventBus
 from kirara_ai.ioc.container import DependencyContainer
+from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
+from kirara_ai.plugin_manager.models import ExtensionCapabilities, ExtensionManifest, LifecycleHook
+from kirara_ai.plugin_manager.plugin_event_bus import PluginEventBus
 from kirara_ai.workflow.core.block import Block, Input, Output
 from kirara_ai.workflow.core.block.registry import BlockRegistry
 from kirara_ai.workflow.core.execution.exceptions import BlockExecutionFailedException
@@ -126,6 +129,38 @@ async def test_executor_run():
     assert result["input1"]["output1"] == "test_input"
     assert result["process1"]["output1"] == "TEST_INPUT"
     assert result["output1"]["result"] == "TEST_INPUT"
+
+
+@pytest.mark.asyncio
+async def test_executor_produces_manifested_workflow_lifecycle_hooks():
+    container = DependencyContainer()
+    container.register(DependencyContainer, container)
+    event_bus = EventBus()
+    container.register(EventBus, event_bus)
+    container.register(BlockRegistry, test_registry)
+    container.register(Workflow, workflow)
+    host = ExtensionLifecycleHost()
+    container.register(ExtensionLifecycleHost, host)
+    received = []
+    manifest = ExtensionManifest(
+        name="observer",
+        version="1",
+        capabilities=ExtensionCapabilities(lifecycle_hooks=True),
+        hooks=[LifecycleHook(name="workflow_before"), LifecycleHook(name="workflow_after")],
+    )
+    plugin_bus = PluginEventBus(event_bus, manifest=manifest)
+    plugin_bus.register_lifecycle_hook(
+        "workflow_before", lambda payload: received.append(("before", payload))
+    )
+    plugin_bus.register_lifecycle_hook(
+        "workflow_after", lambda payload: received.append(("after", payload))
+    )
+    host.register(plugin_bus)
+
+    await WorkflowExecutor(container).run()
+
+    assert [name for name, _ in received] == ["before", "after"]
+    assert received[1][1]["status"] == "completed"
 
 
 @pytest.mark.asyncio

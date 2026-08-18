@@ -148,6 +148,16 @@ export interface ThemeSeed {
   nodeHeader: string
   nodeBorder: string
   nodeMuted: string
+  /** 交互与画布语义色，不依赖具体组件或明暗模式 */
+  focus: string
+  overlay: string
+  selection: string
+  muted: string
+  minimap: string
+  nodeAccents: {
+    custom: string
+    code: string
+  }
   /** 代码块 */
   code: string
   codeText: string
@@ -178,6 +188,22 @@ export interface ThemeSeed {
   /** 对应的 Monaco 编辑器内置主题 ID */
   monaco: string
 }
+
+const semanticTokens = (
+  focus: string,
+  overlay: string,
+  selection: string,
+  muted: string,
+  minimap: string,
+  codeAccent: string
+): Pick<ThemeSeed, 'focus' | 'overlay' | 'selection' | 'muted' | 'minimap' | 'nodeAccents'> => ({
+  focus,
+  overlay,
+  selection,
+  muted,
+  minimap,
+  nodeAccents: { custom: focus, code: codeAccent }
+})
 
 export interface Palette {
   key: string
@@ -261,6 +287,7 @@ const classic: Palette = {
   label: '经典蓝',
   description: '项目原生蓝白配色，主色与旧版 #007AFF 一致',
   light: {
+    ...semanticTokens('#007aff', 'rgba(255, 255, 255, 0.8)', 'rgba(0, 122, 255, 0.18)', '#f9fafb', '#f0f0f0', '#5c6ac4'),
     primary: '#007aff',
     primaryHover: '#3395ff',
     primaryPressed: '#0062cc',
@@ -300,6 +327,7 @@ const classic: Palette = {
     monaco: 'vs'
   },
   dark: {
+    ...semanticTokens('#5b8dff', 'rgba(30, 32, 35, 0.86)', 'rgba(91, 141, 255, 0.28)', '#222427', '#2b2e33', '#8b95e0'),
     primary: '#5b8dff',
     primaryHover: '#7ba4ff',
     primaryPressed: '#4275e0',
@@ -346,6 +374,7 @@ const graphite: Palette = {
   label: '石墨灰',
   description: 'GitHub 风格中性灰蓝，弱饱和、久看不累',
   light: {
+    ...semanticTokens('#0969da', 'rgba(255, 255, 255, 0.86)', 'rgba(9, 105, 218, 0.18)', '#f6f8fa', '#eaeef2', '#6639ba'),
     primary: '#0969da',
     primaryHover: '#218bff',
     primaryPressed: '#0757ba',
@@ -385,6 +414,7 @@ const graphite: Palette = {
     monaco: 'vs'
   },
   dark: {
+    ...semanticTokens('#4493f8', 'rgba(21, 27, 35, 0.88)', 'rgba(68, 147, 248, 0.28)', '#161b22', '#21262d', '#a371f7'),
     primary: '#4493f8',
     primaryHover: '#6cb0ff',
     primaryPressed: '#2f7ce0',
@@ -431,6 +461,7 @@ const midnight: Palette = {
   label: '午夜蓝',
   description: 'One Dark 风格深蓝紫，青色主调，节点辨识度高',
   light: {
+    ...semanticTokens('#2f7d95', 'rgba(255, 255, 255, 0.85)', 'rgba(47, 125, 149, 0.2)', '#f4f6fa', '#e6ebf2', '#6b62c4'),
     primary: '#2f7d95',
     primaryHover: '#3d97b2',
     primaryPressed: '#25667a',
@@ -470,6 +501,7 @@ const midnight: Palette = {
     monaco: 'vs'
   },
   dark: {
+    ...semanticTokens('#56b6c2', 'rgba(40, 44, 52, 0.88)', 'rgba(86, 182, 194, 0.26)', '#2c313a', '#3a4048', '#c678dd'),
     primary: '#56b6c2',
     primaryHover: '#74c9d4',
     primaryPressed: '#3f98a3',
@@ -516,6 +548,7 @@ const forest: Palette = {
   label: '松林绿',
   description: 'Solarized 风格暖调低蓝光，夜间护眼',
   light: {
+    ...semanticTokens('#268bd2', 'rgba(255, 253, 246, 0.88)', 'rgba(38, 139, 210, 0.2)', '#f7f0dd', '#f0e8d3', '#6c71c4'),
     primary: '#268bd2',
     primaryHover: '#3d9ee0',
     primaryPressed: '#1f72ac',
@@ -557,6 +590,7 @@ const forest: Palette = {
     monaco: 'vs'
   },
   dark: {
+    ...semanticTokens('#4aa3c9', 'rgba(7, 54, 66, 0.9)', 'rgba(74, 163, 201, 0.28)', '#063240', '#0f4c5c', '#7c81c9'),
     primary: '#4aa3c9',
     primaryHover: '#66b6d8',
     primaryPressed: '#3a86a8',
@@ -608,6 +642,7 @@ const contrast: Palette = {
   label: '高对比',
   description: '为低视力与强光环境准备，全部语义色满足 WCAG AA',
   light: {
+    ...semanticTokens('#0b4fbe', 'rgba(255, 255, 255, 0.96)', 'rgba(11, 79, 190, 0.22)', '#f2f2f2', '#e6e6e6', '#4b2ea6'),
     primary: '#0b4fbe',
     primaryHover: '#1160d8',
     primaryPressed: '#083c93',
@@ -647,6 +682,7 @@ const contrast: Palette = {
     monaco: 'hc-light'
   },
   dark: {
+    ...semanticTokens('#7ab8ff', 'rgba(16, 16, 16, 0.96)', 'rgba(122, 184, 255, 0.32)', '#141414', '#262626', '#b9a6ff'),
     primary: '#7ab8ff',
     primaryHover: '#a3ceff',
     primaryPressed: '#559fee',
@@ -698,6 +734,7 @@ const oled: Palette = {
   label: '纯黑',
   description: 'OLED 真黑省电配色，深色底为 #000000',
   light: {
+    ...semanticTokens('#0977b5', 'rgba(255, 255, 255, 0.9)', 'rgba(9, 119, 181, 0.2)', '#f5f5f6', '#eeeff1', '#6d4fd6'),
     primary: '#0977b5',
     primaryHover: '#1a8dcf',
     primaryPressed: '#075f92',
@@ -737,6 +774,7 @@ const oled: Palette = {
     monaco: 'vs'
   },
   dark: {
+    ...semanticTokens('#5ac8fa', 'rgba(11, 11, 13, 0.92)', 'rgba(90, 200, 250, 0.3)', '#101013', '#1f1f24', '#a78bfa'),
     primary: '#5ac8fa',
     primaryHover: '#7fd6fb',
     primaryPressed: '#3aa8d8',

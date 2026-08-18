@@ -1,0 +1,20 @@
+name: A4 custom positioned workflow
+description: User workflow with persisted canvas coordinates.
+blocks:
+  - type: internal:text_block
+    name: source_text
+    params:
+      text: fixture input
+    position:
+      x: 32
+      y: 64
+  - type: internal:text_block
+    name: result_text
+    params:
+      text: fixture result
+    position:
+      x: 480
+      y: 320
+config: {}
+metadata:
+  fixture: custom-workflow

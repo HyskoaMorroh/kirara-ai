@@ -44,6 +44,28 @@ Docker 部署会使用同一个 `uv.lock` 导出带哈希的运行依赖，并�
 
 另外还有帮助、清空记忆、骰子、抽卡、记录聊天内容等代码注册的内置工作流。YAML 模板首次启动会释放到 `data/workflows/`；已经保存过的同 ID YAML 优先，因此升级不会覆盖用户修改。
 
+### 内置 recipe 速查
+
+先用 `POST /backend-api/api/dispatch/preview` 验证规则命中；工作流定义用 `GET /backend-api/api/workflow/<group_id>/<workflow_id>` 读取后提交到 `POST /backend-api/api/workflow/validate`。这两个 POST 都不执行工作流或发送消息。
+
+| 能力 | 前置条件 | 示例触发 | 预期工作流 | 主要诊断 |
+| --- | --- | --- | --- | --- |
+| 帮助 | 对应规则启用 | `/help` | `system:help` | dispatch preview |
+| 清空记忆 | 管理员确认当前会话范围 | `/清空记忆` | `system:clear_memory` | dispatch preview；真实触发会删除会话记忆 |
+| 骰子 | 游戏规则启用 | `.roll 1d100` | `game:dice` | dispatch preview |
+| 抽卡 | 游戏规则启用 | `抽卡`、`十连`、`单抽` | `game:gacha` | dispatch preview |
+| 群聊 `/chat` | IM 与文本模型可用 | `/chat 你好` | `chat:normal` 或规则指定副本 | readiness + dispatch preview |
+| 提及/私聊/兜底记忆 | 群聊 mention、私聊规则与 fallback 启用 | `@机器人 你好`、私聊“你好”、普通群消息 | `chat:group_mention`/`chat:normal`/`chat:memory_store` | dispatch preview + reachability |
+| 多模态 | IM 能接收媒体，模型支持图片输入 | 图片 + “描述这张图” | `chat:normal_multimodal` | workflow validate + LLM trace |
+| 长回复拆分 | 模型按提示产生 `<break>` | “分三段回答” | `chat:long_reply_split` | workflow validate + 日志 |
+| 时间感知 | 文本模型可用 | “现在几点” | `chat:time_aware` | workflow validate + LLM trace |
+| function calling | 支持函数调用的模型；自行连接工具执行分支 | “查询一个受控工具” | `chat:function_calling` | workflow validate + LLM trace |
+| 自定义脚本 | 审核 `internal:code` 内容 | “统计这句话字数” | `chat:custom_script` | workflow validate + 日志 |
+| 敏感词替换 | 在用户副本配置替换词 | 含测试词的受控消息 | `chat:sensitive_word_filter` | workflow validate + 日志 |
+| MCP tools | 可信且已连接服务器、工具 allowlist、支持函数调用的模型 | 仅使用获批只读工具的受控问题 | `chat:mcp_tools` | `GET /backend-api/api/mcp/tools` + workflow validate |
+
+表中的 `chat:*` ID 以预设 catalog 为准；用户副本会有自己的 group/ID。function calling、自定义脚本、清空记忆和 MCP 真实调用都可能有副作用，不应作为无人值守 smoke。
+
 ## 4. 默认触发规则
 
 全新实例在不存在规则文件时会得到以下优先级：
@@ -78,7 +100,7 @@ Docker 部署会使用同一个 `uv.lock` 导出带哈希的运行依赖，并�
 
 现有稳定扩展点是 Block、插件、MCP、工作流预设、调度规则、事件总线和模型自动探测；具体做法见 [扩展开发指南](EXTENDING.md)。
 
-`agents`、`skills`、`hooks` 和通用 MCP 编排目前不是项目内置的抽象。不要把不受信任的 MCP 命令、环境变量或文件访问直接接到公开聊天规则上。下面的路线把真正可用的现有能力和下一步工程方案分开，避免把概念包装成未交付的功能。
+Agent/Skill 不是新的运行时：它们分别是工作流加策略元数据、catalog 支持的模板元数据。Hook 已有受 manifest capability 约束的 lifecycle allowlist，但不是 sandbox 或任意中间件。完整边界与示例见 [Agents、Skills、Hooks 与 MCP 实用指南](AGENTS_SKILLS_HOOKS_MCP_GUIDE.md)。不要把不受信任的 MCP 命令、环境变量或文件访问直接接到公开聊天规则上。
 
 ### 7.1 先交付一个有边界的插件
 
@@ -103,19 +125,17 @@ Docker 部署会使用同一个 `uv.lock` 导出带哈希的运行依赖，并�
 
 MCP 规范把工具、资源和提示词分别定义为可发现的能力；本项目的界面也应继续按这三类展示，而不是把所有内容混成一个不透明的“智能体”按钮。官方规范可作为实现和兼容性参考：[Tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)、[Resources](https://modelcontextprotocol.io/specification/2026-07-28/server/resources)、[Prompts](https://modelcontextprotocol.io/specification/2026-07-28/server/prompts)。
 
-### 7.3 Agents、Skills、Hooks 的两阶段方案
+### 7.3 Agents、Skills、Hooks 的真实组合方式
 
-第一阶段不新增通用运行时：使用现有 Block、模板、规则和 MCP 组合出单一职责流程。这样能沿用当前画布预检、导入导出、版本兼容和测试体系，风险最小。
-
-第二阶段在第一阶段有稳定数据后再实现轻量抽象：
+使用现有 Block、模板、规则和 MCP 组合出单一职责流程，沿用当前画布预检、导入导出、版本兼容和测试体系：
 
 | 概念 | 最小可交付物 | 必须的保护 |
 | --- | --- | --- |
 | Agent | 一个具名工作流加受限工具清单，而不是能任意执行的循环 | 最大步骤数、超时、会话作用域、工具白名单、人工确认 |
 | Skill | 插件 manifest 中声明的 Block 组、模板和示例输入 | 版本、能力说明、依赖检查、迁移说明、卸载前影响分析 |
-| Hook | `before_run`、`after_run`、`on_error` 三类只读事件 | 不允许阻断主链路；超时隔离；异常记录；禁止直接读取密钥 |
+| Hook | manifest 声明的 `workflow_before`、`workflow_after`、`workflow_error` 等允许列表 lifecycle | 只申请 `lifecycle_hooks` 等必需 capability；异常审计；插件代码必须可信 |
 
-每次只引入一种抽象，并为其新增配置模型、API 契约、画布节点、迁移策略、失败降级和测试。不要用字符串约定或任意 Python 回调伪造 Hook；那会绕过类型检查和权限边界。
+manifest 还支持 `startup_completed`、`shutdown_requested`、`dispatch_preview`、`model_catalog_refreshed`、`mcp_operation`。插件仍在主进程内执行，权限只约束注入的 host facade；不要用不可信 Python 回调，也不要把 Hook 当成安全边界或事务回滚。
 
 ### 7.4 可观测性与画布体验的下一批提升
 

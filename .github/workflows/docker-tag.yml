@@ -17,36 +17,12 @@ permissions:
 
 jobs:
   verify:
-    # 手动发版同样要过门禁：镜像 push 到 Docker Hub 之后无法收回，而这个
-    # workflow 从默认分支的当前状态构建，不保证正好是某个通过了 CI 的 commit。
+    # 手动发版同样必须走与正式 release 相同的完整可复用门禁。
     name: Pre-publish verification
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      # uv.lock 指向 USTC 镜像，GitHub runner 在境外访问不稳定；--frozen 仍按
-      # lock 里的 sha256 校验每个包，换索引不影响可复现性，只影响下载速度。
-      # 放在 job 级，sync 与 run 两步都能生效。
-      UV_DEFAULT_INDEX: https://pypi.org/simple
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-
-      - name: Install locked dependencies
-        run: uv sync --frozen --python 3.11
-
-      - name: Run backend suite and release contracts
-        run: uv run --frozen python -m pytest ./tests -q
+    uses: ./.github/workflows/release-preflight.yml
+    with:
+      run_backend_and_image: true
+    secrets: inherit
 
   docker:
     needs: verify
@@ -56,8 +32,16 @@ jobs:
         id: vars
         run: |
           TAG_NAME="${{ inputs.image_tag }}"
-          if [ -z "$TAG_NAME" ]; then
-            echo "Set image_tag before manually publishing a versioned image."
+           if [ -z "$TAG_NAME" ]; then
+             echo "Set image_tag before manually publishing a versioned image."
+             exit 1
+           fi
+           if [ "$GITHUB_REF_TYPE" != "tag" ] || [ "$GITHUB_REF_NAME" != "$TAG_NAME" ]; then
+             echo "Run this workflow from the matching Git tag, not a branch or another ref."
+             exit 1
+           fi
+           if [ "$TAG_NAME" != "v3.3.0a7" ]; then
+            echo "image_tag must be v3.3.0a7 for this release."
             exit 1
           fi
           echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT

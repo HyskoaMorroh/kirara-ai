@@ -1,0 +1,17 @@
+name: A4 edited plain text workflow
+description: User-owned edit that must survive preset extraction.
+blocks:
+  - type: internal:chat_completion
+    name: manual_chat
+    params:
+      model_name: manual-primary
+      fallback_model_1: manual-fallback
+      fallback_model_2: manual-third-choice
+      fallback_model_3: ''
+      fallback_model_4: ''
+    position:
+      x: 144
+      y: 288
+config: {}
+metadata:
+  fixture: edited-preset

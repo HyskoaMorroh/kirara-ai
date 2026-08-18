@@ -1,3 +1,4 @@
+import asyncio
 import os
 from typing import List
 
@@ -7,6 +8,7 @@ from kirara_ai.workflow.core.block.registry import BlockRegistry
 from kirara_ai.workflow.core.workflow import WorkflowRegistry
 from kirara_ai.workflow.core.workflow.builder import WorkflowBuilder
 from kirara_ai.workflow.core.workflow.validation import validate_workflow_definition
+from kirara_ai.workflow.presets.catalog import catalog_metadata, load_preset_catalog
 
 from ...auth.middleware import require_auth
 from .models import (
@@ -44,12 +46,17 @@ async def validate_workflow():
 async def list_workflows():
     """获取所有工作流列表"""
     registry: WorkflowRegistry = g.container.resolve(WorkflowRegistry)
+    catalog = load_preset_catalog()
 
     workflows = []
-    for workflow_id, builder in registry._workflows.items():
+    for workflow_id, builder in registry.snapshot_builders():
         # 从 workflow_id 解析 group_id
         group_id, wf_id = workflow_id.split(":", 1)
 
+        metadata = dict(getattr(builder, "metadata", None) or {})
+        preset_metadata = catalog_metadata(workflow_id, catalog)
+        if preset_metadata is not None:
+            metadata["catalog"] = preset_metadata
         workflows.append(
             WorkflowInfo(
                 group_id=group_id,
@@ -57,7 +64,7 @@ async def list_workflows():
                 name=builder.name,
                 description=builder.description,
                 block_count=len(builder.nodes_by_name),
-                metadata=getattr(builder, "metadata", None),
+                metadata=metadata or None,
             )
         )
     workflows.sort(key=lambda x: f"{x.group_id}:{x.workflow_id}")
@@ -85,6 +92,7 @@ async def get_workflow(group_id: str, workflow_id: str):
                 type_name=block_registry.get_block_type_name(node.spec.block_class),
                 name=node.name,
                 config=node.spec.kwargs,
+                parallel=node.is_parallel,
                 position=node.position,
             )
         )
@@ -131,7 +139,7 @@ async def create_workflow(group_id: str, workflow_id: str):
     full_id = f"{group_id}:{workflow_id}"
     if registry.get(full_id):
         return jsonify({"error": "Workflow already exists"}), 400
-    file_path = registry.get_workflow_path(group_id, workflow_id)
+    file_path = registry.resolve_workflow_path(group_id, workflow_id)
     if os.path.exists(file_path):
         return jsonify({"error": "Workflow file already exists"}), 409
 
@@ -155,6 +163,11 @@ async def create_workflow(group_id: str, workflow_id: str):
 
             if block_def.position is not None:
                 builder.update_position(block_def.name, block_def.position)
+
+            # Reapply the marker after building the linear API representation.
+            # Calling builder.parallel() here would alter current/parent links
+            # and can change the exact graph supplied by the canvas.
+            builder.nodes_by_name[block_def.name].is_parallel = block_def.parallel
         
         # 不要用自动连线，用我们的
         builder.wire_specs = []
@@ -169,10 +182,13 @@ async def create_workflow(group_id: str, workflow_id: str):
 
         # 保存工作流
         builder.set_config(workflow_def.config)
-        builder.save_to_yaml(file_path, g.container)
-
-        # 注册工作流
-        registry.register(group_id, workflow_id, builder)
+        await asyncio.to_thread(
+            registry.persist_builder,
+            group_id,
+            workflow_id,
+            builder,
+            create_only=True,
+        )
 
         return workflow_def.model_dump()
     except Exception as e:
@@ -202,13 +218,12 @@ async def update_workflow(group_id: str, workflow_id: str):
     # manually restored or invalid YAML can still occupy the target path
     # without an in-memory entry.  Never let a rename replace that file: it
     # may be the user's recoverable workflow source.
-    new_file_path = registry.get_workflow_path(
+    new_file_path = registry.resolve_workflow_path(
         workflow_def.group_id, workflow_def.workflow_id
     )
     if new_full_id != full_id and os.path.exists(new_file_path):
         return jsonify({"error": "Workflow file already exists"}), 409
 
-    temp_file_path = ""
     # 更新工作流
     try:
         # 创建新的工作流构建器
@@ -229,6 +244,10 @@ async def update_workflow(group_id: str, workflow_id: str):
 
             if block_def.position is not None:
                 builder.update_position(block_def.name, block_def.position)
+
+            # See the create route: preserve the marker without rebuilding the
+            # graph through the DSL's parallel() grouping operation.
+            builder.nodes_by_name[block_def.name].is_parallel = block_def.parallel
         
         # 不要用自动连线，用我们的
         builder.wire_specs = []
@@ -243,32 +262,19 @@ async def update_workflow(group_id: str, workflow_id: str):
             )
 
         # 保存工作流
-        file_path = registry.get_workflow_path(group_id, workflow_id)
-        temp_file_path = f"{new_file_path}.tmp"
         builder.set_config(workflow_def.config)
-        builder.save_to_yaml(temp_file_path, g.container)
-        os.replace(temp_file_path, new_file_path)
-        if file_path != new_file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except Exception:
-                if os.path.exists(new_file_path):
-                    os.remove(new_file_path)
-                raise
-
-        # 更新注册表
-        registry.unregister(group_id, workflow_id)
-        registry.register(workflow_def.group_id, workflow_def.workflow_id, builder)
+        await asyncio.to_thread(
+            registry.persist_builder,
+            workflow_def.group_id,
+            workflow_def.workflow_id,
+            builder,
+            previous_group_id=group_id,
+            previous_workflow_id=workflow_id,
+        )
 
         return workflow_def.model_dump()
     except Exception as e:
         return jsonify({"error": str(e)}), 400
-    finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-            try:
-                os.remove(temp_file_path)
-            except OSError:
-                pass
 
 
 @workflow_bp.route("/<group_id>/<workflow_id>", methods=["DELETE"])
@@ -283,20 +289,10 @@ async def delete_workflow(group_id: str, workflow_id: str):
         return jsonify({"error": "Workflow not found"}), 404
 
     try:
-        registry.mark_preset_deleted(full_id)
-
-        # 删除文件
-        file_path = registry.get_workflow_path(group_id, workflow_id)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-
-        # Filesystem state is authoritative: only unregister after deletion succeeds.
-        registry.unregister(group_id, workflow_id)
+        await asyncio.to_thread(
+            registry.delete_persisted, group_id, workflow_id
+        )
 
         return jsonify({"message": "Workflow deleted successfully"})
     except Exception as e:
-        try:
-            registry.restore_preset(full_id)
-        except Exception:
-            pass
         return jsonify({"error": str(e)}), 400

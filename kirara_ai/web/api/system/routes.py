@@ -20,16 +20,20 @@ from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.im.manager import IMManager
 from kirara_ai.internal import set_restart_flag, shutdown_event
 from kirara_ai.llm.llm_manager import LLMManager
+from kirara_ai.mcp_module.manager import MCPServerManager
 from kirara_ai.logger import WebSocketLogHandler, get_logger
 from kirara_ai.plugin_manager.plugin_loader import PluginLoader
 from kirara_ai.web.api.system.utils import (WEBUI_DIST_TAG, download_file, get_cpu_info, get_cpu_usage,
                                             get_installed_version, get_latest_npm_version, get_latest_pypi_version,
                                             get_memory_usage)
 from kirara_ai.web.auth.services import AuthService
+from kirara_ai.workflow.core.block.registry import BlockRegistry
+from kirara_ai.workflow.core.dispatch import DispatchRuleRegistry
 from kirara_ai.workflow.core.workflow import WorkflowRegistry
 
 from ...auth.middleware import require_auth
 from .models import SystemStatus, SystemStatusResponse, UpdateCheckResponse
+from .readiness import run_readiness_checks
 
 system_bp = Blueprint("system", __name__)
 
@@ -347,7 +351,7 @@ async def get_system_status():
     loaded_plugins = len(plugin_loader.plugins)
 
     # 获取工作流数量
-    workflow_count = len(workflow_registry._workflows)
+    workflow_count = len(workflow_registry.snapshot_builders())
 
     # 获取系统资源使用情况
     memory_usage = get_memory_usage()
@@ -382,6 +386,25 @@ async def get_system_status():
     )
 
     return SystemStatusResponse(status=status).model_dump()
+
+
+@system_bp.route("/readiness", methods=["GET"])
+@require_auth
+async def get_system_readiness():
+    """Return bounded local diagnostics without exposing configuration values."""
+    return (
+        await run_readiness_checks(
+            g.container.resolve(GlobalConfig),
+            g.container.resolve(WorkflowRegistry),
+            g.container.resolve(DispatchRuleRegistry),
+            g.container.resolve(IMManager),
+            g.container.resolve(LLMManager),
+            g.container.resolve(MCPServerManager),
+            data_path=Path(DATA_PATH),
+            config_path=Path(CONFIG_FILE),
+            block_registry=g.container.resolve(BlockRegistry),
+        )
+    ).model_dump(mode="json")
 
 
 @system_bp.route("/check-update", methods=["GET"])

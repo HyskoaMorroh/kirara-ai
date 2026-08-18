@@ -14,7 +14,7 @@ python -m kirara_ai
 
 启动日志里会打印本地访问地址（`kirara_ai/entry.py` 的 `run_application`）。
 
-首次打开 WebUI 时没有密码：在登录页直接输入你想用的密码即可完成设置——`POST /auth/login` 在 `auth_service.is_first_time()` 为真时会把这次输入的密码保存下来（`kirara_ai/web/auth/routes.py:16`）。`data/config.yaml` 里的 `web.secret_key` 若为空或仍是示例占位值，启动时会自动生成随机密钥并落盘（`kirara_ai/entry.py`），无需手工处理。
+首次打开 WebUI 时没有密码：在登录页直接输入你想用的密码即可完成设置——`POST /backend-api/api/auth/login` 在 `auth_service.is_first_time()` 为真时会把这次输入的密码保存下来（`kirara_ai/web/auth/routes.py:16`）。`data/config.yaml` 里的 `web.secret_key` 若为空或仍是示例占位值，启动时会自动生成随机密钥并落盘（`kirara_ai/entry.py`），无需手工处理。
 
 首次启动还会自动做三件事：
 
@@ -68,11 +68,11 @@ python -m kirara_ai
 
 - **名称**：后端标识，如 `deepseek-official`
 - **适配器类型**：`openai` / `deepseek` / `claude` / `gemini` / `ollama` 等（由 `kirara_ai/plugins/llm_preset_adapters/` 注册）
-- **配置**：`api_key`、`api_base` 等字段由适配器的配置类决定，界面根据 `GET /llm/types/<adapter_type>/config-schema` 动态渲染
+- **配置**：`api_key`、`api_base` 等字段由适配器的配置类决定，界面根据 `GET /backend-api/api/llm/types/<adapter_type>/config-schema` 动态渲染
 
 **模型不会自动出现在工作流里，这一点必须理解清楚：**
 
-1. 填好密钥后点「自动检测」。它调用 `GET /llm/backends/<backend_name>/auto-detect-models`，向供应商拉取当前可用的模型目录，经 `normalize_detected_models()`（`kirara_ai/scheduler/model_catalog.py`）去重、补全能力位后写入这个后端的 `models` 列表。适配器不支持自动检测时，界面会提示你手动添加模型。
+1. 填好密钥后点「自动检测」。它调用 `GET /backend-api/api/llm/backends/<backend_name>/auto-detect-models`，向供应商拉取当前可用的模型目录，经 `normalize_detected_models()`（`kirara_ai/scheduler/model_catalog.py`）去重、补全能力位后写入这个后端的 `models` 列表。适配器不支持自动检测时，界面会提示你手动添加模型。
 2. 自动检测**只刷新后端的模型目录**，它不会改写任何工作流里的模型选择。要让某个模型真正被调用，还得进工作流编辑器，在「LLM: 执行对话」节点的「模型 ID1」下拉框里**手动选**一个。
 3. 这个下拉框的候选项来自 `model_name_options_provider()`（`kirara_ai/workflow/implementations/blocks/llm/chat.py:24`），只列出类型为 LLM 且具备 `TextChat` 能力的模型，并按 ID 升序排列，所以顺序稳定，不会因为一次检测就抖动。
 4. 「LLM: 执行对话」最多可配 5 档模型（主模型 + 4 个备用），前一个失败时依次降级。若某个已配置的模型在新一轮检测后不再存在，编辑器里的对应槽位会显示为空，原配置保留，直到你主动改选——不会被静默替换。
@@ -88,7 +88,7 @@ python -m kirara_ai
 | 上次检测时间记录 | `data/auto_detect_state.json` |
 | 目录有变化时 | 写回 `data/config.yaml`（带备份），并重载该后端 |
 
-相关接口：`GET /llm/auto-detect-schedule` 查看各后端计划与上次执行时间，`PUT /llm/backends/<backend_name>/auto-detect-schedule` 改间隔天数，`POST /llm/auto-detect-schedule/run` 立刻强制跑一轮。
+相关接口：`GET /backend-api/api/llm/auto-detect-schedule` 查看各后端计划与上次执行时间，`PUT /backend-api/api/llm/backends/<backend_name>/auto-detect-schedule` 改间隔天数，`POST /backend-api/api/llm/auto-detect-schedule/run` 立刻强制跑一轮。后两项会写配置/状态，强制检测还会访问远端；不要把它们放进默认只读 smoke。
 
 > 注意：截至当前版本，这三个接口**没有对应的 WebUI 界面**，只能用 API 调用（下面第 6 步给了可直接复制的命令）。间隔天数也可以直接改 `data/config.yaml` 里后端的 `auto_detect_interval_days` 后重启。
 
@@ -108,7 +108,7 @@ python -m kirara_ai
 
 `chat_normal` 与 `chat_creative` 都指向 `chat:normal`。想换成第 1 步里的某个模板，编辑规则把 `workflow_id` 改过去即可；你在 WebUI 里改过的规则会写入 `data/dispatch_rules/rules.yaml`，之后启动都以你的版本为准（`register_system_dispatch_rules` 在检测到已有规则文件时直接返回，不再注入默认值）。
 
-改完先别急着发消息——用「试运行消息」按钮验证匹配结果，它调用 `POST /dispatch/preview`，按真实调度顺序解释每条规则会不会命中，但**不执行任何工作流**。详见 `docs/OBSERVABILITY.md`。
+改完先别急着发消息——用「试运行消息」按钮验证匹配结果，它调用 `POST /backend-api/api/dispatch/preview`，按真实调度顺序解释每条规则会不会命中，但**不执行任何工作流**。详见 `docs/OBSERVABILITY.md`。
 
 ---
 
@@ -132,7 +132,7 @@ curl -X POST http://127.0.0.1:8080/v1/chat \
 
 1. 「控制台」页看实时日志，或直接看 `logs/log_YYYY-MM-DD.log`
 2. 「LLM 追踪」页看这次请求有没有发出去、报了什么错
-3. 用 `POST /dispatch/preview` 确认消息到底命中了哪条规则
+3. 用 `POST /backend-api/api/dispatch/preview` 确认消息到底命中了哪条规则
 
 ---
 
@@ -162,6 +162,10 @@ curl -X POST http://127.0.0.1:8080/v1/chat \
 ## 常用校验命令
 
 ```bash
+# 本地 readiness（配置、工作流、规则目标、IM/LLM/MCP；不会回显密钥）
+curl -H "Authorization: Bearer <token>" \
+  http://127.0.0.1:8080/backend-api/api/system/readiness
+
 # 系统状态（运行时长、活跃适配器/后端数、已加载插件数、工作流数）
 curl -H "Authorization: Bearer <token>" \
   http://127.0.0.1:8080/backend-api/api/system/status
@@ -170,12 +174,12 @@ curl -H "Authorization: Bearer <token>" \
 curl -H "Authorization: Bearer <token>" \
   http://127.0.0.1:8080/backend-api/api/llm/auto-detect-schedule
 
-# 立刻强制跑一轮模型自动检测
+# 有副作用：访问远端并可能更新模型目录/状态，人工确认后才运行
 curl -X POST -H "Authorization: Bearer <token>" \
   http://127.0.0.1:8080/backend-api/api/llm/auto-detect-schedule/run
 ```
 
-`<token>` 是 `POST /auth/login` 返回的 `access_token`，有效期 1 天。
+`<token>` 是 `POST /backend-api/api/auth/login` 返回的 `access_token`，有效期 1 天。
 
 ---
 
@@ -183,3 +187,5 @@ curl -X POST -H "Authorization: Bearer <token>" \
 
 - 想加自己的节点、插件、MCP 服务器、工作流模板或调度规则：`docs/EXTENDING.md`
 - 想搞清楚系统在干什么、出错怎么定位：`docs/OBSERVABILITY.md`
+- 从旧实例升级或回滚：`docs/UPGRADING_TO_3.3.0a7.md`
+- 组合 Agent/Skill、声明 Hook 或接入 MCP：`docs/AGENTS_SKILLS_HOOKS_MCP_GUIDE.md`

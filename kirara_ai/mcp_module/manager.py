@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+from collections import deque
 from functools import partial
-from typing import Dict, NamedTuple, Optional, Tuple
+import time
+from typing import Callable, Dict, NamedTuple, Optional, Tuple
 
 from mcp import McpError, types
 from mcp.shared.session import RequestResponder
@@ -11,6 +13,7 @@ from mcp.shared.session import RequestResponder
 from kirara_ai.config.global_config import GlobalConfig, MCPServerConfig
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.logger import get_logger
+from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
 from .models import MCPConnectionState
 from .server import MCPServer
 
@@ -25,7 +28,11 @@ class ToolCacheEntry(NamedTuple):
 class MCPServerManager:
     """MCP服务器管理器，负责管理和控制MCP服务器进程"""
 
-    def __init__(self, container: DependencyContainer):
+    def __init__(
+        self,
+        container: DependencyContainer,
+        audit_sink: Optional[Callable[[dict], None]] = None,
+    ):
         """初始化MCP服务器管理器"""
         self.container = container
         self.config = container.resolve(GlobalConfig)
@@ -33,6 +40,45 @@ class MCPServerManager:
         self.tools_cache: Dict[str, ToolCacheEntry] = {}
         self.prompts_cache: Dict[str, list[types.Prompt]] = {}
         self.resources_cache: Dict[str, list[types.Resource]] = {}
+        self.audit_records = deque(maxlen=1000)
+        self._audit_sink = audit_sink
+
+    def _audit_operation(
+        self,
+        server: str,
+        operation: str,
+        started_at: float,
+        outcome: str,
+        error: Optional[BaseException] = None,
+    ) -> None:
+        record = {
+            "component": "mcp",
+            "server": server,
+            "operation": operation,
+            "duration_ms": round((time.monotonic() - started_at) * 1000, 3),
+            "outcome": outcome,
+            "error": (
+                {"type": type(error).__name__, "message": "operation failed"}
+                if error is not None
+                else None
+            ),
+        }
+        self.audit_records.append(record)
+        if self.container.has(ExtensionLifecycleHost):
+            self.container.resolve(ExtensionLifecycleHost).emit(
+                "mcp_operation",
+                {
+                    "server_id": server,
+                    "operation": operation,
+                    "duration_ms": record["duration_ms"],
+                    "outcome": outcome,
+                },
+            )
+        if self._audit_sink is not None:
+            try:
+                self._audit_sink(record)
+            except Exception:
+                logger.warning("MCP audit sink rejected an event")
             
     def load_servers(self):
         """从配置加载所有MCP服务器"""
@@ -290,23 +336,30 @@ class MCPServerManager:
         Returns:
             Optional[dict]: 工具调用结果，如果调用失败则返回None
         """
+        started_at = time.monotonic()
+        entry = self.tools_cache.get(tool_name)
+        server_id = entry.server_id if entry is not None else "unavailable"
         result = self.get_tool_server(tool_name)
         if not result:
             logger.error(f"Tool {tool_name} not found or server not available")
+            self._audit_operation(server_id, "call_tool", started_at, "not_found")
             return None
         
         server, original_name = result
         
         if server.state != MCPConnectionState.CONNECTED:
             logger.error(f"Server for tool {tool_name} is not connected")
+            self._audit_operation(server_id, "call_tool", started_at, "disconnected")
             return None
         
         try:
             # 使用原始工具名称调用
             call_tool_result = await server.call_tool(original_name, tool_args)
+            self._audit_operation(server_id, "call_tool", started_at, "success")
             return call_tool_result
         except Exception as e:
-            logger.opt(exception=e).error(f"Error occurred when calling tool {tool_name}")
+            logger.error(f"Error occurred when calling tool {tool_name}")
+            self._audit_operation(server_id, "call_tool", started_at, "error", e)
             return None
         
     async def _update_prompts_cache(self, server_id: str) -> bool:
@@ -363,11 +416,19 @@ class MCPServerManager:
         """
         获取指定服务器的prompt
         """
+        started_at = time.monotonic()
         server = self.servers.get(server_id)
         if not server or server.state != MCPConnectionState.CONNECTED:
+            outcome = "not_found" if server is None else "disconnected"
+            self._audit_operation(server_id, "get_prompt", started_at, outcome)
             return None
-        
-        return await server.get_prompt(prompt_name, prompt_args)
+        try:
+            result = await server.get_prompt(prompt_name, prompt_args)
+            self._audit_operation(server_id, "get_prompt", started_at, "success")
+            return result
+        except Exception as error:
+            self._audit_operation(server_id, "get_prompt", started_at, "error", error)
+            raise
     
     async def _update_resources_cache(self, server_id: str) -> bool:
         """
@@ -429,11 +490,19 @@ class MCPServerManager:
             types.ReadResourceResult: resource
         """
 
+        started_at = time.monotonic()
         server = self.servers.get(server_id)
         if not server or server.state != MCPConnectionState.CONNECTED:
+            outcome = "not_found" if server is None else "disconnected"
+            self._audit_operation(server_id, "get_resource", started_at, outcome)
             return None
-        
-        return await server.read_resource(uri)
+        try:
+            result = await server.read_resource(uri)
+            self._audit_operation(server_id, "get_resource", started_at, "success")
+            return result
+        except Exception as error:
+            self._audit_operation(server_id, "get_resource", started_at, "error", error)
+            raise
     
     async def _handle_server_message(self, server_id: str, message: RequestResponder[types.ServerRequest, types.ClientResult]
             | types.ServerNotification
@@ -449,4 +518,3 @@ class MCPServerManager:
             await self._update_resources_cache(server_id)
         else:
             logger.warning(f"Unknown notification from server {server_id}: {message}")
-

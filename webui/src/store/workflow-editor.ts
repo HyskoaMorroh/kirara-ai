@@ -41,7 +41,7 @@ export interface WorkflowEditorViewState {
 }
 
 // 定义模型（Model）
-interface HistoryState {
+export interface WorkflowGraphSnapshot {
   blocks: BlockInstance[]
   wires: Wire[]
   name: string
@@ -49,6 +49,8 @@ interface HistoryState {
   workflowId: string
   config: WorkflowConfig
 }
+
+type HistoryState = WorkflowGraphSnapshot
 
 /**
  * 工作流数据最终会被序列化为 JSON/YAML。历史记录必须拥有自己的副本，
@@ -60,6 +62,109 @@ interface HistoryState {
  */
 const cloneHistoryValue = <T>(value: T): T => deepClone(value)
 
+const stableSerialize = (value: unknown, seen = new Map<object, number>()): string => {
+  if (value === null) return 'null'
+  if (typeof value === 'number') {
+    if (Number.isNaN(value)) return 'number:NaN'
+    if (!Number.isFinite(value)) return `number:${String(value)}`
+    return `number:${value}`
+  }
+  if (typeof value !== 'object') return `${typeof value}:${String(value)}`
+  if (seen.has(value)) return `reference:${seen.get(value)}`
+  seen.set(value, seen.size)
+  if (Array.isArray(value)) return `[${value.map((item) => stableSerialize(item, seen)).join(',')}]`
+  if (value instanceof Date) return `date:${value.toISOString()}`
+  if (value instanceof RegExp) return `regexp:${value.source}/${value.flags}:${value.lastIndex}`
+  if (value instanceof Map) {
+    return `map:{${[...value.entries()]
+      .map(([key, item]) => `${stableSerialize(key, seen)}=${stableSerialize(item, seen)}`)
+      .sort()
+      .join(',')}}`
+  }
+  if (value instanceof Set) {
+    return `set:{${[...value].map((item) => stableSerialize(item, seen)).sort().join(',')}}`
+  }
+  const record = value as Record<string, unknown>
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableSerialize(record[key], seen)}`)
+    .join(',')}}`
+}
+
+const freezeSnapshotValue = <T>(value: T, seen = new WeakSet<object>()): T => {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return value
+  seen.add(value)
+  if (value instanceof Map || value instanceof Set) return Object.freeze(value)
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    freezeSnapshotValue(child, seen)
+  }
+  return Object.freeze(value)
+}
+
+const buildReusableRecords = <T>(records: T[], keyOf: (record: T) => string) => {
+  const reusable = new Map<string, T[]>()
+  for (const record of records) {
+    const key = `${keyOf(record)}\u0000${stableSerialize(record)}`
+    const matches = reusable.get(key) || []
+    matches.push(record)
+    reusable.set(key, matches)
+  }
+  return reusable
+}
+
+const cloneRecordsWithSharing = <T>(
+  records: T[],
+  previous: T[],
+  keyOf: (record: T) => string
+): T[] => {
+  const reusable = buildReusableRecords(previous, keyOf)
+  return records.map((record) => {
+    const key = `${keyOf(record)}\u0000${stableSerialize(record)}`
+    const match = reusable.get(key)?.shift()
+    return match || freezeSnapshotValue(cloneHistoryValue(record))
+  })
+}
+
+/** Build an immutable workflow snapshot while reusing unchanged records. */
+export function createWorkflowGraphSnapshot(
+  current: Omit<WorkflowGraphSnapshot, never>,
+  previous?: WorkflowGraphSnapshot
+): WorkflowGraphSnapshot {
+  const previousBlocks = previous?.blocks || []
+  const previousWires = previous?.wires || []
+  const blocks = cloneRecordsWithSharing(
+    current.blocks,
+    previousBlocks,
+    (block) => `${block.type_name}\u0000${block.name}`
+  )
+  const wires = cloneRecordsWithSharing(
+    current.wires,
+    previousWires,
+    (wire) =>
+      `${wire.source_block}\u0000${wire.source_output}\u0000${wire.target_block}\u0000${wire.target_input}`
+  )
+  const config =
+    previous && stableSerialize(current.config) === stableSerialize(previous.config)
+      ? previous.config
+      : freezeSnapshotValue(cloneHistoryValue(current.config))
+  return freezeSnapshotValue({
+    blocks,
+    wires,
+    name: current.name,
+    description: current.description,
+    workflowId: current.workflowId,
+    config
+  })
+}
+
+const snapshotsEqual = (left: WorkflowGraphSnapshot, right: WorkflowGraphSnapshot) =>
+  left.name === right.name &&
+  left.description === right.description &&
+  left.workflowId === right.workflowId &&
+  stableSerialize(left.blocks) === stableSerialize(right.blocks) &&
+  stableSerialize(left.wires) === stableSerialize(right.wires) &&
+  stableSerialize(left.config) === stableSerialize(right.config)
+
 /**
  * 撤销栈上限。
  *
@@ -67,7 +172,7 @@ const cloneHistoryValue = <T>(value: T): T => deepClone(value)
  * 就有几十 KB。编辑器是长驻页面，不设上限意味着内存只增不减，所以按
  * 先进先出丢弃最早的快照——用户实际用到的都是最近几十步。
  */
-const MAX_HISTORY_DEPTH = 50
+const MAX_HISTORY_DEPTH = 100
 
 class WorkflowEditorModel {
   private state = ref({
@@ -115,19 +220,22 @@ class WorkflowEditorModel {
 
   // 提取：保存当前状态到 undo 栈
   private createHistoryState(): HistoryState {
-    return {
-      blocks: cloneHistoryValue(this.state.value.blocks),
-      wires: cloneHistoryValue(this.state.value.wires),
+    return createWorkflowGraphSnapshot({
+      blocks: this.state.value.blocks,
+      wires: this.state.value.wires,
       name: this.state.value.name,
       description: this.state.value.description,
       workflowId: this.state.value.workflowId,
-      config: cloneHistoryValue(this.state.value.config)
-    }
+      config: this.state.value.config
+    }, this.state.value.undoStack.at(-1))
   }
 
   private pushToUndoStack(clearRedo = true) {
     const currentState = this.createHistoryState()
-    this.state.value.undoStack.push(currentState)
+    const previousState = this.state.value.undoStack.at(-1)
+    if (!previousState || !snapshotsEqual(previousState, currentState)) {
+      this.state.value.undoStack.push(currentState)
+    }
     // 超出上限时丢弃最早的快照，保证内存占用有界
     if (this.state.value.undoStack.length > MAX_HISTORY_DEPTH) {
       this.state.value.undoStack.splice(
@@ -143,7 +251,10 @@ class WorkflowEditorModel {
   // 提取：保存当前状态到 redo 栈
   private pushToRedoStack() {
     const currentState = this.createHistoryState()
-    this.state.value.redoStack.push(currentState)
+    const previousState = this.state.value.redoStack.at(-1)
+    if (!previousState || !snapshotsEqual(previousState, currentState)) {
+      this.state.value.redoStack.push(currentState)
+    }
     if (this.state.value.redoStack.length > MAX_HISTORY_DEPTH) {
       this.state.value.redoStack.splice(
         0,
@@ -214,6 +325,14 @@ class WorkflowEditorModel {
     undo: () => {
       if (this.state.value.undoStack.length === 0) return
 
+      const currentState = this.createHistoryState()
+      while (
+        this.state.value.undoStack.length > 0 &&
+        snapshotsEqual(this.state.value.undoStack.at(-1)!, currentState)
+      ) {
+        this.state.value.undoStack.pop()
+      }
+      if (this.state.value.undoStack.length === 0) return
       this.pushToRedoStack()
       const prevState = this.state.value.undoStack.pop()!
       this.restoreState(prevState)

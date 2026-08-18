@@ -1,4 +1,5 @@
-from typing import Dict, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -40,3 +41,21 @@ class UpdateCheckResponse(BaseModel):
     backend_download_url: Optional[str]
     latest_webui_version: str
     webui_download_url: Optional[str]
+
+
+class ReadinessCheck(BaseModel):
+    """One stable, non-secret first-run diagnostic."""
+
+    id: str
+    status: Literal["pass", "warn", "fail", "skip"]
+    summary: str
+    remediation: str
+    evidence: Dict[str, Any]
+
+
+class ReadinessResponse(BaseModel):
+    """Bounded readiness snapshot returned to authenticated administrators."""
+
+    ready: bool
+    timestamp: datetime
+    checks: List[ReadinessCheck]

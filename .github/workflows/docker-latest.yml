@@ -1,7 +1,6 @@
 name: Docker build latest
 
 on:
-  workflow_dispatch:
   release:
     types:
       - published
@@ -12,47 +11,19 @@ concurrency:
 
 jobs:
   verify:
-    # 发布门禁：镜像一旦 push 到 Docker Hub 就无法收回，因此在构建之前先跑
-    # 全量后端用例 + 发布契约测试。这些检查在 PR 阶段已经跑过，但 release 是
-    # 从 tag 构建的，tag 上的内容可能与当初通过 CI 的 commit 不同（例如手工
-    # 打错 tag、cherry-pick 漏带 commit），所以这里必须重跑一遍。
+    # 发布门禁必须在同一次 release 调用中重跑：支持版本的后端矩阵、前端
+    # type-check/unit/build、wheel/sdist、fresh-install 与 Docker readiness/API
+    # smoke 都通过后，才允许后续 job 登录并 push 镜像。
     name: Pre-publish verification
-    runs-on: ubuntu-latest
     # 草稿 release 不会发布任何镜像（下面 docker job 的资格检查会直接跳过），
     # 因此这里也不必花 runner 时间；其余情况（含预发布，它仍会推带版本号的
     # 镜像）都必须先过测试。verify 被跳过时 docker 因 needs 一并跳过，
     # 与今天「草稿不发布」的行为一致。
     if: github.event_name != 'release' || github.event.release.draft != true
-    timeout-minutes: 25
-    permissions:
-      contents: read
-    env:
-      # uv.lock 指向 USTC 镜像，GitHub runner 在境外访问不稳定；--frozen 仍按
-      # lock 里的 sha256 校验每个包，换索引不影响可复现性，只影响下载速度。
-      # 放在 job 级，sync 与 run 两步都能生效。
-      UV_DEFAULT_INDEX: https://pypi.org/simple
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.release.tag_name || github.sha }}
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-
-      - name: Install locked dependencies
-        run: uv sync --frozen --python 3.11
-
-      - name: Run backend suite and release contracts
-        run: uv run --frozen python -m pytest ./tests -q
+    uses: ./.github/workflows/release-preflight.yml
+    with:
+      run_backend_and_image: true
+    secrets: inherit
 
   docker:
     needs: verify
@@ -74,6 +45,11 @@ jobs:
             echo "publish_latest=true" >> $GITHUB_OUTPUT
             echo "Manual publish requested." >> $GITHUB_STEP_SUMMARY
             exit 0
+          fi
+
+          if [ "$RELEASE_TAG" != "v3.3.0a7" ]; then
+            echo "Only v3.3.0a7 is eligible for this release workflow; got $RELEASE_TAG."
+            exit 1
           fi
 
           if [ "$RELEASE_IS_DRAFT" = "true" ]; then

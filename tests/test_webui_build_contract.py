@@ -1,4 +1,5 @@
 import re
+import tomllib
 from pathlib import Path
 
 
@@ -146,12 +147,18 @@ def test_configuration_save_does_not_log_password_hash_settings():
 def test_wheel_declares_bundled_workflow_presets():
     """pip 安装包必须带上首次部署所需的进阶工作流 YAML。"""
     manifest = (PROJECT_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
-    pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    pyproject_text = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    pyproject = tomllib.loads(pyproject_text)
     presets_root = PROJECT_ROOT / "kirara_ai" / "workflow" / "presets" / "chat"
+    package_data = pyproject["tool"]["setuptools"]["package-data"]
 
     assert "recursive-include kirara_ai/workflow/presets *" in manifest
-    assert '"kirara_ai.workflow.presets" = ["*/*.yaml"]' in pyproject
-    assert '"*" = ["__pycache__/*", "*.py[cod]"]' in pyproject
+    assert {"*/*.yaml", "catalog.json"}.issubset(
+        package_data["kirara_ai.workflow.presets"]
+    )
+    assert {"__pycache__/*", "*.py[cod]"}.issubset(
+        pyproject["tool"]["setuptools"]["exclude-package-data"]["*"]
+    )
     assert {
         "dsr_thinking.yaml",
         "normal_multimodal.yaml",
@@ -184,3 +191,4 @@ def test_docker_default_data_starts_without_runtime_test_fixture():
     assert "COPY ./data /tmp/data" in dockerfile
     assert 'cp -r /tmp/data/. /app/data' in start_script
     assert "data/workflows/**/test-workflow-new.yaml" in dockerignore
+    assert "data/web/password.hash" in dockerignore

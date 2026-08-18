@@ -152,7 +152,7 @@ const isValidConnection = (connection: Connection) => {
       class="custom-node-header"
       :style="{
         backgroundColor: headerBackground,
-        borderLeft: `4px solid ${data.blockType.color || 'var(--primary-color, #4080ff)'}`
+        borderLeft: '4px solid var(--node-accent-custom, var(--primary-color, #4080ff))'
       }"
     >
       <div class="header-content">
@@ -314,6 +314,7 @@ const isValidConnection = (connection: Connection) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  min-width: 0;
 }
 
 .node-label {
@@ -321,6 +322,7 @@ const isValidConnection = (connection: Connection) => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 
 .node-id {

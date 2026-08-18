@@ -12,9 +12,9 @@ services:
     ports:
       - "8759:8080"
 
-    # 健康检查（可选，但推荐）
+    # 匿名 HTTP liveness；认证后的 readiness 由发布门禁单独验证。
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 8080), 2); s.close()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3).read(1)"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, watch, computed, onMounted } from 'vue'
+import { ref, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useMessage, NModal, NCard } from 'naive-ui'
 import { llmApi } from '@/api/llm'
 import type { LLMBackend, ConfigSchema } from '@/api/llm'
 import type { ModelInfo } from '@/components/form/types'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 
 // 导入组件
 import LLMAdapterList from '@/components/llm/LLMAdapterList.vue'
@@ -21,6 +22,12 @@ const adapters = ref<LLMBackend[]>([])
 const adapterTypes = ref<string[]>([])
 const configSchema = ref<ConfigSchema | null>(null)
 const loading = ref(false)
+const adapterListRequests = useLatestRequest()
+const schemaRequests = useLatestRequest()
+const autoDetectSupportRequests = useLatestRequest()
+const modelDetectionRequests = useLatestRequest()
+
+const isAbortError = (error: unknown) => error instanceof DOMException && error.name === 'AbortError'
 
 // 模型编辑相关
 const showModelModal = ref(false)
@@ -73,33 +80,53 @@ const showDeleteConfirmModal = ref(false)
 
 // 获取适配器类型和实例
 const fetchAdapters = async () => {
+  const request = adapterListRequests.begin()
   try {
-    const typesResponse = await llmApi.getAdapterTypes()
-    adapterTypes.value = Array.isArray(typesResponse) ? typesResponse : typesResponse.types
+    const [typesResponse, adaptersResponse] = await Promise.all([
+      llmApi.getAdapterTypes(request.signal),
+      llmApi.getBackends(request.signal)
+    ])
+    if (!adapterListRequests.isCurrent(request.generation)) return
 
-    const adaptersResponse = await llmApi.getBackends()
+    adapterTypes.value = Array.isArray(typesResponse) ? typesResponse : typesResponse.types
     adapters.value = Array.isArray(adaptersResponse)
       ? adaptersResponse
       : adaptersResponse.data.backends
-  } catch (error: any) {
-    $message.error(`加载适配器失败: ${error.message || error}`)
+  } catch (error: unknown) {
+    if (isAbortError(error) || !adapterListRequests.isCurrent(request.generation)) return
+    const errorMessage = error instanceof Error ? error.message : error
+    $message.error(`加载适配器失败: ${errorMessage}`)
   }
 }
 
 // 获取适配器配置模式
 const fetchAdapterConfigSchema = async (adapterType: string, overrideConfig: boolean = false) => {
+  const request = schemaRequests.begin()
   try {
     loading.value = true
-    const { configSchema: configSchemaData } = await llmApi.getAdapterConfigSchema(adapterType)
+    const { configSchema: configSchemaData } = await llmApi.getAdapterConfigSchema(
+      adapterType,
+      request.signal
+    )
+    if (
+      !schemaRequests.isCurrent(request.generation) ||
+      currentAdapter.value?.adapter !== adapterType
+    ) {
+      return
+    }
     if (currentAdapter.value && overrideConfig) {
       currentAdapter.value!!.config = {}
     }
     configSchema.value = configSchemaData
-  } catch (error: any) {
-    $message.error(`获取适配器配置模式失败: ${error.message || error}`)
+  } catch (error: unknown) {
+    if (isAbortError(error) || !schemaRequests.isCurrent(request.generation)) return
+    const errorMessage = error instanceof Error ? error.message : error
+    $message.error(`获取适配器配置模式失败: ${errorMessage}`)
     configSchema.value = null
   } finally {
-    loading.value = false
+    if (schemaRequests.isCurrent(request.generation)) {
+      loading.value = false
+    }
   }
 }
 
@@ -136,40 +163,47 @@ const isCreating = computed(() => {
 })
 
 // 保存配置
-const handleSave = async () => {
+const handleSave = async (
+  adapter: LLMBackend | null = currentAdapter.value,
+  persistedName: string = originalAdapterName.value
+) => {
   try {
-    if (!currentAdapter.value?.name || !currentAdapter.value?.adapter) {
+    if (!adapter?.name || !adapter?.adapter) {
       throw new Error('请输入完整的配置信息')
     }
 
-    if (isCreating.value) {
-      await llmApi.createBackend(currentAdapter.value)
+    const existingAdapter = adapters.value.find((item) => item.name === persistedName)
+    if (!existingAdapter) {
+      await llmApi.createBackend(adapter)
       $message.success('创建成功')
     } else {
-      await llmApi.updateBackend(originalAdapterName.value, currentAdapter.value)
+      await llmApi.updateBackend(persistedName, adapter)
       $message.success('保存成功')
     }
     await fetchAdapters()
-    // 更新原始名称为新名称
-    originalAdapterName.value = currentAdapter.value.name
+    // 保存期间切换到其他卡片时，旧请求不能改写新卡片的持久化身份。
+    if (currentAdapter.value === adapter) {
+      originalAdapterName.value = adapter.name
+    }
     return true
-  } catch (error: any) {
-    $message.error(`保存失败: ${error.message || '未知错误'}`)
+  } catch (error: unknown) {
+    if (isAbortError(error)) return false
+    const errorMessage = error instanceof Error ? error.message : '未知错误'
+    $message.error(`保存失败: ${errorMessage}`)
     return false
   }
 }
 
 // 切换启用状态
 const toggleEnable = async () => {
-  try {
-    if (!currentAdapter.value) {
-      throw new Error('当前配置为空')
-    }
-    currentAdapter.value.enable = !currentAdapter.value.enable
-    await handleSave()
-  } catch (error: any) {
-    currentAdapter.value!!.enable = !currentAdapter.value!!.enable // 恢复状态
-    throw error
+  const adapter = currentAdapter.value
+  if (!adapter) {
+    throw new Error('当前配置为空')
+  }
+
+  adapter.enable = !adapter.enable
+  if (!(await handleSave(adapter, originalAdapterName.value))) {
+    adapter.enable = !adapter.enable // 恢复状态
   }
 }
 
@@ -179,20 +213,41 @@ const handleAutoDetectModels = async () => {
 }
 
 const confirmAutoDetect = async () => {
+  const adapter = currentAdapter.value
+  const persistedName = originalAdapterName.value
+  const request = modelDetectionRequests.begin()
+  if (!adapter) return
+
   autoDetectLoading.value = true
   try {
-    if (await handleSave()) {
+    if (await handleSave(adapter, persistedName)) {
+      if (
+        !modelDetectionRequests.isCurrent(request.generation) ||
+        currentAdapter.value !== adapter
+      ) {
+        return
+      }
       // 后端已经与定时任务共用模型目录规范化逻辑。这里仅替换当前后端的
       // 最新可发现模型；工作流中的主模型和四个备用模型从未参与本次请求。
-      currentAdapter.value!!.models = (await llmApi.getBackendModels(currentAdapter.value!!.name))
-        .models as ModelInfo[]
-      await handleSave() // 保存检测到的模型列表
+      const detected = await llmApi.getBackendModels(adapter.name, request.signal)
+      if (
+        !modelDetectionRequests.isCurrent(request.generation) ||
+        currentAdapter.value !== adapter
+      ) {
+        return
+      }
+      adapter.models = detected.models as ModelInfo[]
+      await handleSave(adapter, adapter.name) // 保存检测到的模型列表
     }
-  } catch (error: any) {
-    $message.error(`自动检测模型失败: ${error.message || error}`)
+  } catch (error: unknown) {
+    if (isAbortError(error) || !modelDetectionRequests.isCurrent(request.generation)) return
+    const errorMessage = error instanceof Error ? error.message : error
+    $message.error(`自动检测模型失败: ${errorMessage}`)
   } finally {
-    autoDetectLoading.value = false
-    showConfirmModal.value = false
+    if (modelDetectionRequests.isCurrent(request.generation)) {
+      autoDetectLoading.value = false
+      showConfirmModal.value = false
+    }
   }
 }
 
@@ -247,15 +302,19 @@ const handleDelete = () => {
 }
 
 const confirmDelete = async () => {
+  const adapter = currentAdapter.value
   try {
-    if (!currentAdapter.value?.name) {
+    if (!adapter?.name) {
       throw new Error('当前配置为空')
     }
-    await llmApi.deleteBackend(currentAdapter.value.name)
+    await llmApi.deleteBackend(adapter.name)
     $message.success('删除成功')
-    currentAdapter.value = null
-  } catch (error: any) {
-    $message.error(`删除失败: ${error.message || '未知错误'}`)
+    if (currentAdapter.value === adapter) {
+      currentAdapter.value = null
+    }
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : '未知错误'
+    $message.error(`删除失败: ${errorMessage}`)
   } finally {
     await fetchAdapters()
     showDeleteConfirmModal.value = false
@@ -272,28 +331,38 @@ watch(
   async (newAdapter) => {
     if (newAdapter) {
       await fetchAdapterConfigSchema(newAdapter)
+    } else {
+      schemaRequests.cancel()
+      configSchema.value = null
+      loading.value = false
     }
   }
 )
 
-let autoDetectSupportRequest = 0
 watch(
   () => currentAdapter.value?.adapter,
   async (adapterType) => {
-    const requestId = ++autoDetectSupportRequest
+    const request = autoDetectSupportRequests.begin()
     if (!adapterType) {
       isAutoDetectModelsSupported.value = true
       return
     }
     try {
       const { supportsAutoDetectModels } =
-        await llmApi.getAdapterSupportsAutoDetectModels(adapterType)
+        await llmApi.getAdapterSupportsAutoDetectModels(adapterType, request.signal)
       // 切换后端时，忽略较慢旧请求的返回，避免错误覆盖当前卡片状态。
-      if (requestId === autoDetectSupportRequest) {
+      if (
+        autoDetectSupportRequests.isCurrent(request.generation) &&
+        currentAdapter.value?.adapter === adapterType
+      ) {
         isAutoDetectModelsSupported.value = supportsAutoDetectModels
       }
-    } catch {
-      if (requestId === autoDetectSupportRequest) {
+    } catch (error: unknown) {
+      if (
+        !isAbortError(error) &&
+        autoDetectSupportRequests.isCurrent(request.generation) &&
+        currentAdapter.value?.adapter === adapterType
+      ) {
         isAutoDetectModelsSupported.value = false
       }
     }
@@ -302,7 +371,14 @@ watch(
 
 // 初始化加载
 onMounted(() => {
-  fetchAdapters()
+  void fetchAdapters()
+})
+
+onBeforeUnmount(() => {
+  adapterListRequests.cancel()
+  schemaRequests.cancel()
+  autoDetectSupportRequests.cancel()
+  modelDetectionRequests.cancel()
 })
 </script>
 

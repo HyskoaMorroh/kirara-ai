@@ -1,6 +1,10 @@
-from kirara_ai.config.global_config import ModelConfig
+from kirara_ai.config.global_config import LLMBackendConfig, ModelConfig
 from kirara_ai.llm.model_types import LLMAbility
-from kirara_ai.scheduler.model_catalog import model_catalogs_equal, normalize_detected_models
+from kirara_ai.scheduler.model_catalog import (
+    backend_config_fingerprint,
+    model_catalogs_equal,
+    normalize_detected_models,
+)
 
 
 def test_detected_catalog_replaces_stale_entries_and_keeps_provider_order():
@@ -75,3 +79,20 @@ def test_plain_string_models_are_normalized_into_text_chat_models():
     assert refreshed[0].type == "llm"
     assert refreshed[0].ability == LLMAbility.TextChat.value
     assert model_catalogs_equal(refreshed, normalize_detected_models(["gpt-mini"]))
+
+
+def test_backend_fingerprint_ignores_only_the_detected_catalog():
+    backend = LLMBackendConfig(
+        name="primary",
+        adapter="openai",
+        config={"endpoint": "https://example.test", "api_key": "secret"},
+        models=[ModelConfig(id="old", ability=1)],
+        auto_detect_interval_days=5,
+    )
+    original = backend_config_fingerprint(backend)
+
+    backend.models = [ModelConfig(id="new", ability=3)]
+    assert backend_config_fingerprint(backend) == original
+
+    backend.config["endpoint"] = "https://new.example.test"
+    assert backend_config_fingerprint(backend) != original

@@ -5,11 +5,13 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List
 
 import requests
+import time
 
 from kirara_ai.events.event_bus import EventBus
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.ioc.inject import Inject
 from kirara_ai.logger import get_logger
+from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
 from kirara_ai.workflow.core.block import Block, ConditionBlock, LoopBlock
 from kirara_ai.workflow.core.block.registry import BlockRegistry
 from kirara_ai.workflow.core.execution.exceptions import (BlockExecutionFailedException,
@@ -77,6 +79,17 @@ class WorkflowExecutor:
         """
         from kirara_ai.events import WorkflowExecutionBegin, WorkflowExecutionEnd
         self.event_bus.post(WorkflowExecutionBegin(self.workflow, self))
+        started_at = time.monotonic()
+        extension_host = (
+            self.container.resolve(ExtensionLifecycleHost)
+            if self.container.has(ExtensionLifecycleHost)
+            else None
+        )
+        workflow_id = getattr(self.workflow, "id", None) or self.workflow.name
+        if extension_host is not None:
+            extension_host.emit(
+                "workflow_before", {"workflow_id": workflow_id, "status": "running"}
+            )
         self.logger.info("Starting workflow execution")
         loop = asyncio.get_event_loop()
         max_timeout = self.workflow.config.max_execution_time
@@ -94,10 +107,41 @@ class WorkflowExecutor:
                 )
             except asyncio.TimeoutError as e:
                 self.event_bus.post(WorkflowExecutionEnd(self.workflow, self, self.results))
+                if extension_host is not None:
+                    extension_host.emit(
+                        "workflow_error",
+                        {
+                            "workflow_id": workflow_id,
+                            "status": "timeout",
+                            "duration_ms": round((time.monotonic() - started_at) * 1000, 3),
+                            "error_type": type(e).__name__,
+                        },
+                    )
                 raise WorkflowExecutionTimeoutException(f"Workflow execution timed out after {max_timeout} seconds") from e
+            except Exception as error:
+                if extension_host is not None:
+                    extension_host.emit(
+                        "workflow_error",
+                        {
+                            "workflow_id": workflow_id,
+                            "status": "error",
+                            "duration_ms": round((time.monotonic() - started_at) * 1000, 3),
+                            "error_type": type(error).__name__,
+                        },
+                    )
+                raise
 
         self.logger.info("Workflow execution completed")
         self.event_bus.post(WorkflowExecutionEnd(self.workflow, self, self.results))
+        if extension_host is not None:
+            extension_host.emit(
+                "workflow_after",
+                {
+                    "workflow_id": workflow_id,
+                    "status": "completed",
+                    "duration_ms": round((time.monotonic() - started_at) * 1000, 3),
+                },
+            )
         return self.results
 
     async def _execute_nodes(self, blocks: List[Block], executor, loop):

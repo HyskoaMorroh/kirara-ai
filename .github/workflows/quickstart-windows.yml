@@ -18,8 +18,16 @@ env:
   PACKAGE_NAME: "quickstart-windows-kirara-ai-amd64"
 
 jobs:
+  preflight:
+    name: Release preflight
+    uses: ./.github/workflows/release-preflight.yml
+    with:
+      run_backend_and_image: true
+    secrets: inherit
+
   release:
     name: Verify latest release eligibility
+    needs: preflight
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -64,7 +72,7 @@ jobs:
   build:
     name: Windows Quickstart
     runs-on: windows-latest
-    needs: release
+    needs: [preflight, release]
     if: needs.release.outputs.build == 'true'
     permissions:
       contents: write
@@ -179,11 +187,27 @@ jobs:
         New-Item -ItemType Directory -Force -Path "${{ env.DIST_DIR }}/web"
         Copy-Item -Path "webui/dist/*" -Destination "${{ env.DIST_DIR }}/web" -Force -Recurse
 
+    - name: Verify bundled Web UI release identity
+      env:
+        EXPECTED_UI_VERSION: ${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}
+      run: |
+        $uiFiles = Get-ChildItem -Path "${{ env.DIST_DIR }}/web" -File -Recurse
+        if ($uiFiles.Count -eq 0) {
+          throw "Bundled Web UI is empty."
+        }
+        $uiText = ($uiFiles | ForEach-Object {
+          Get-Content -LiteralPath $_.FullName -Raw -ErrorAction Stop
+        }) -join "`n"
+        if (-not $uiText.Contains($env:EXPECTED_UI_VERSION)) {
+          throw "Bundled Web UI does not contain $env:EXPECTED_UI_VERSION."
+        }
+        if ($uiText -match '0\.0\.0-ci' -or $uiText -match '(?i)dev-[0-9a-f]{7,40}') {
+          throw "Bundled Web UI contains a placeholder release version."
+        }
+
     - name: Copy startup scripts
       run: |
         Copy-Item ".github/quickstarts/windows/scripts/*" -Destination "${{ env.DIST_DIR }}/" -Recurse
-        # 拷贝 data 文件夹
-        Copy-Item -Path "${{ github.workspace }}/data" -Destination "${{ env.DIST_DIR }}/" -Recurse
 
     - name: Upload workflow artifacts
       uses: actions/upload-artifact@v5
@@ -194,7 +218,74 @@ jobs:
     - name: Create release archive
       if: needs.release.outputs.publish == 'true'
       run: |
+        Get-ChildItem -Path "${{ env.DIST_DIR }}" -Recurse -Force -File |
+          Where-Object { $_.Name -match '\.(pyc|pyo)$' } |
+          Remove-Item -Force
+        Get-ChildItem -Path "${{ env.DIST_DIR }}" -Recurse -Force -Directory |
+          Where-Object { $_.Name -in @('__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache') } |
+          Sort-Object FullName -Descending |
+          Remove-Item -Force -Recurse
         Compress-Archive -Path "${{ env.DIST_DIR }}/*" -DestinationPath "${{ env.BUILD_DIR }}/${{ env.PACKAGE_NAME }}.zip"
+
+    - name: Verify final release archive contents
+      if: needs.release.outputs.publish == 'true'
+      env:
+        ARCHIVE_PATH: ${{ env.BUILD_DIR }}/${{ env.PACKAGE_NAME }}.zip
+      run: |
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($env:ARCHIVE_PATH)
+          try {
+          $entries = @($archive.Entries |
+            Where-Object { -not $_.FullName.EndsWith('/') } |
+            ForEach-Object {
+              $name = $_.FullName.Replace('\', '/')
+              while ($name.StartsWith('./')) { $name = $name.Substring(2) }
+              $name = $name.TrimStart('/')
+              $name
+            })
+          $lower = @($entries | ForEach-Object { $_.ToLowerInvariant() })
+
+          $allowedTopLevel = @(
+            'wpy64-31320',
+            'ffmpeg',
+            'web',
+            '启动.cmd',
+            '【语音功能依赖】vc_redist.x64.exe'
+          )
+          $topLevel = @($lower | ForEach-Object { ($_ -split '/', 2)[0] } | Sort-Object -Unique)
+          $unexpectedTopLevel = @($topLevel | Where-Object { $_ -notin $allowedTopLevel })
+          if ($unexpectedTopLevel.Count -gt 0) {
+            throw "Final ZIP contains unexpected top-level content: $($unexpectedTopLevel -join ', ')"
+          }
+
+          $required = @(
+            'web/index.html',
+            '启动.cmd',
+            'wpy64-31320/python/python.exe',
+            'wpy64-31320/python/lib/site-packages/kirara_ai/workflow/presets/catalog.json'
+          )
+          foreach ($path in $required) {
+            if ($lower -notcontains $path) {
+              throw "Final ZIP is missing required content: $path"
+            }
+          }
+
+          $forbidden = @($lower | Where-Object {
+            $_ -match '(^|/)\.env($|/)' -or
+            $_ -match '(^|/)\.venv($|/)' -or
+            $_ -match '(^|/)(\.git|\.github|docs|tests|data|build|dist|node_modules|patches|fsdownload)($|/)' -or
+            $_ -match '(^|/)(__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache)($|/)' -or
+            $_ -match '(^|/)config\.yaml($|/)' -or
+            $_ -match '\.(pyc|pyo)$'
+          })
+          if ($forbidden.Count -gt 0) {
+            throw "Final ZIP contains forbidden content: $($forbidden[0..([Math]::Min(9, $forbidden.Count - 1))] -join ', ')"
+          }
+          Write-Host "Final ZIP allow/deny checks passed for $($entries.Count) entries."
+        }
+        finally {
+          $archive.Dispose()
+        }
 
     - name: Upload release archive
       if: needs.release.outputs.publish == 'true'

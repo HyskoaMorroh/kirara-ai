@@ -5,6 +5,7 @@ from quart import Blueprint, g, jsonify, request
 
 from kirara_ai.im.message import IMMessage, MentionElement, TextMessage
 from kirara_ai.im.sender import ChatSender
+from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
 from kirara_ai.workflow.core.dispatch import (
     CombinedDispatchRule,
     DispatchRule,
@@ -159,11 +160,21 @@ async def preview_rules():
                 )
             )
 
-    return DispatchPreviewResponse(
+    response = DispatchPreviewResponse(
         selected_rule_id=selected_rule_id,
         selected_workflow_id=selected_workflow_id,
         rules=results,
-    ).model_dump()
+    )
+    if g.container.has(ExtensionLifecycleHost):
+        g.container.resolve(ExtensionLifecycleHost).emit(
+            "dispatch_preview",
+            {
+                "component": "dispatch",
+                "selected": selected_rule_id is not None,
+                "rule_count": len(results),
+            },
+        )
+    return response.model_dump()
 
 
 @dispatch_bp.route("/rules", methods=["GET"])
