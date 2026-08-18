@@ -1,6 +1,6 @@
 # 可观测性：怎么看清系统在干什么
 
-本文只写**当前版本真实存在**的观测手段，并明确标出哪些东西现在看不到。所有 API 路径都要加统一前缀 `/backend-api/api`（`kirara_ai/web/app.py:285`），除 `POST /auth/login` 外都需要 `Authorization: Bearer <token>`（`kirara_ai/web/auth/middleware.py` 的 `require_auth`）。
+本文只写**当前版本真实存在**的观测手段，并明确标出哪些东西现在看不到。所有 API 路径都使用统一前缀 `/backend-api/api`（`kirara_ai/web/app.py:285`），除 `POST /backend-api/api/auth/login` 外都需要 `Authorization: Bearer <token>`（`kirara_ai/web/auth/middleware.py` 的 `require_auth`）。
 
 ---
 
@@ -34,6 +34,12 @@
 
 注意：WebSocket 与内存缓冲的门槛都是 `INFO`，**`DEBUG` 日志只在控制台和文件里能看到**。排查区块级细节（例如 `_can_execute` 判断某个输入未满足）必须去翻 `logs/` 下的文件。
 
+### 启动 readiness
+
+`GET /backend-api/api/system/readiness` 是鉴权后的本地、有界、密钥安全诊断。响应包含 `ready`、`timestamp` 和按固定顺序排列的 `checks`：`data_directories_writable`、`configuration_parseable`、`workflows_valid`、`dispatch_targets_exist`、`im_available`、`llm_available`、`mcp_health`。每项给出 `status`、摘要、修复建议和不含敏感值的 evidence。
+
+它不主动调用远端 LLM 来证明模型可回答，也不保证 MCP 远端持续可用。未配置 MCP 为 `skip`，部分 MCP 不可用通常为 `warn`。它需要 Bearer 鉴权，因此不能直接替代容器的匿名 TCP healthcheck。
+
 ---
 
 ## 2. LLM 请求追踪
@@ -50,7 +56,7 @@
 
 `trace_id`、`model_id`、`backend_name`、`request_time` / `response_time` / `duration`、`prompt_tokens` / `completion_tokens` / `total_tokens` / `cached_tokens`、`status`（`pending` / `success` / `failed`）、`error`，以及可选的 `request_json` / `response_json`。
 
-**请求与响应正文默认不记录。** `LLMTracer` 三个事件处理器都会先检查 `config.tracing.llm_tracing_content`（默认 `False`，见 `kirara_ai/config/global_config.py:152`）。要看完整 prompt 和回复，去「设置 → 系统设置 → LLM请求记录时包含完整内容」打开（`TracingCard.vue`，写入接口 `POST /system/config/tracing`）。这是隐私与磁盘占用的权衡，打开后聊天正文会进数据库。
+**请求与响应正文默认不记录。** `LLMTracer` 三个事件处理器都会先检查 `config.tracing.llm_tracing_content`（默认 `False`，见 `kirara_ai/config/global_config.py:152`）。要看完整 prompt 和回复，去「设置 → 系统设置 → LLM请求记录时包含完整内容」打开（`TracingCard.vue`，写入接口 `POST /backend-api/api/system/config/tracing`）。这是隐私与磁盘占用的权衡，打开后聊天正文会进数据库。
 
 ### 界面
 
@@ -72,10 +78,10 @@
 
 | 接口 | 用途 |
 | --- | --- |
-| `GET /tracing/types` | 列出已注册的追踪器类型（当前只有 `llm`） |
-| `POST /tracing/llm/traces` | 分页查询，body 支持 `page`、`page_size`、`model_id`、`backend_name`、`status` |
-| `GET /tracing/llm/detail/<trace_id>` | 单条详情 |
-| `GET /tracing/llm/statistics` | 总览 + 近 30 天每日统计 + 按模型分组统计 |
+| `GET /backend-api/api/tracing/types` | 列出已注册的追踪器类型（当前只有 `llm`） |
+| `POST /backend-api/api/tracing/llm/traces` | 分页查询，body 支持 `page`、`page_size`、`model_id`、`backend_name`、`status` |
+| `GET /backend-api/api/tracing/llm/detail/<trace_id>` | 单条详情 |
+| `GET /backend-api/api/tracing/llm/statistics` | 总览 + 近 30 天每日统计 + 按模型分组统计 |
 | `WS /tracing/ws` | 实时推送新的追踪事件 |
 
 ```bash
@@ -90,7 +96,7 @@ curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/js
 
 ---
 
-## 3. 工作流结构预检：`POST /workflow/validate`
+## 3. 工作流结构预检：`POST /backend-api/api/workflow/validate`
 
 `kirara_ai/workflow/core/workflow/validation.py` 的 `validate_workflow_definition()` 是一次**完全无副作用**的静态检查：不实例化任何 Block、不写文件、不改注册表。路由在 `kirara_ai/web/api/workflow/routes.py:26`。
 
@@ -149,7 +155,7 @@ curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/js
 
 `webui/src/components/workflow/WorkflowCanvas.vue` 把三个来源的问题合并成同一份列表：
 
-1. **服务端预检结果**（`serverValidationIssues`，点「检查」按钮时调 `POST /workflow/validate`）
+1. **服务端预检结果**（`serverValidationIssues`，点「检查」按钮时调 `POST /backend-api/api/workflow/validate`）
 2. **本地即时检查**（`localValidationIssues`）：`missing_required_input`、`isolated_node`、`no_entry_node` 三类，编辑时实时算，不用等网络
 3. **重叠检查**（`overlapValidationIssues`）：按真实渲染尺寸做两两相交，code 为 `node_overlap`，warning 级，提示「建议点击自动排布」
 
@@ -165,7 +171,7 @@ curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/js
 
 ---
 
-## 4. 调度规则试运行：`POST /dispatch/preview`
+## 4. 调度规则试运行：`POST /backend-api/api/dispatch/preview`
 
 路由在 `kirara_ai/web/api/dispatch/routes.py:88`，界面入口是「工作流 → 调度规则」页的「试运行消息」按钮（草稿态另有「试运行当前草稿」）。
 
@@ -223,9 +229,9 @@ curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/js
 
 `explanation.groups` 会逐组、逐条给出 `matched` 与失败原因，这是排查「为什么我的规则不生效」最直接的工具——规则组之间是 AND，组内按 `operator` 决定 AND 还是 OR。
 
-### 不需要示例消息的静态可达性分析：`POST /dispatch/reachability`
+### 不需要示例消息的静态可达性分析：`POST /backend-api/api/dispatch/reachability`
 
-如果你只想知道「规则顺序有没有配错」，不必构造示例消息。`POST /dispatch/reachability`（`kirara_ai/web/api/dispatch/routes.py:70`）只做静态分析：不创建条件实例、不取样随机概率、不访问 IM 实例，因此完全无副作用。
+如果你只想知道「规则顺序有没有配错」，不必构造示例消息。`POST /backend-api/api/dispatch/reachability`（`kirara_ai/web/api/dispatch/routes.py:70`）只做静态分析：不创建条件实例、不取样随机概率、不访问 IM 实例，因此完全无副作用。
 
 请求体只有一个可选字段：
 
@@ -237,7 +243,7 @@ curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/js
 
 响应是 `reachability` 数组，每项即上表那几个字段（`DispatchRuleReachability`，定义在 `kirara_ai/workflow/core/dispatch/reachability.py:62`）。判定逻辑集中在 `analyze_dispatch_reachability()`，**已禁用的规则既不会遮蔽后续规则，也不会被标记为不可达**（它本来就不参与匹配）。
 
-`GET /dispatch/rules` 的响应里也直接带上了同一份 `reachability` 字段，所以规则列表页不用额外发请求就能标出「永远不会触发」的规则。这套语义只在 `reachability.py` 里定义一次，界面不再自己推导，避免界面与调度器对同一件事给出不同判断。
+`GET /backend-api/api/dispatch/rules` 的响应里也直接带上了同一份 `reachability` 字段，所以规则列表页不用额外发请求就能标出「永远不会触发」的规则。这套语义只在 `reachability.py` 里定义一次，界面不再自己推导，避免界面与调度器对同一件事给出不同判断。
 
 ### 试运行的两个诚实的「不确定」
 
@@ -262,14 +268,15 @@ curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/js
 
 | 接口 | 能看到什么 |
 | --- | --- |
-| `GET /system/status` | 运行时长、活跃适配器数、活跃 LLM 后端数、已加载插件数、工作流数、内存/CPU 占用、版本、Python 版本、是否设置了代理 |
-| `GET /mcp/statistics` | MCP 服务器总数、stdio/sse 各多少、已连接/已断开/错误各多少、工具总数 |
-| `GET /mcp/servers` | 每台服务器的连接状态（`disconnected`/`connecting`/`connected`/`disconnecting`/`error`） |
-| `GET /mcp/tools` | 当前所有可用工具及其 JSON Schema |
-| `GET /llm/auto-detect-schedule` | 各后端的检测间隔、上次执行时间、当前模型数 |
-| `GET /plugin/plugins` | 每个插件的名称、包名、版本、是否内置、是否启用、是否需要重启 |
-| `GET /block/types` | 全部区块类型及其端口、配置项、颜色、说明（下拉框候选项在这里被求值） |
-| `GET /dispatch/types` | 全部可用的规则类型名 |
+| `GET /backend-api/api/system/status` | 运行时长、活跃适配器数、活跃 LLM 后端数、已加载插件数、工作流数、内存/CPU 占用、版本、Python 版本、是否设置了代理 |
+| `GET /backend-api/api/system/readiness` | 有界本地检查：数据目录、配置、工作流、调度目标、IM、LLM、可选 MCP；不返回密钥 |
+| `GET /backend-api/api/mcp/statistics` | MCP 服务器总数、stdio/sse 各多少、已连接/已断开/错误各多少、工具总数 |
+| `GET /backend-api/api/mcp/servers` | 每台服务器的连接状态（`disconnected`/`connecting`/`connected`/`disconnecting`/`error`） |
+| `GET /backend-api/api/mcp/tools` | 当前所有可用工具及其 JSON Schema |
+| `GET /backend-api/api/llm/auto-detect-schedule` | 各后端的检测间隔、上次执行时间、当前模型数 |
+| `GET /backend-api/api/plugin/plugins` | 每个插件的名称、包名、版本、是否内置、是否启用、是否需要重启 |
+| `GET /backend-api/api/block/types` | 全部区块类型及其端口、配置项、颜色、说明（下拉框候选项在这里被求值） |
+| `GET /backend-api/api/dispatch/types` | 全部可用的规则类型名 |
 
 ---
 
@@ -277,7 +284,7 @@ curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/js
 
 写清楚边界比含糊其辞有用：
 
-- **没有指标/监控端点**：没有 Prometheus `/metrics`，没有健康检查专用端点（`GET /system/status` 需要鉴权，不适合直接给探针用）。
+- **没有匿名指标/监控端点**：没有 Prometheus `/metrics`；readiness 与 `GET /backend-api/api/system/status` 都需要鉴权，不适合直接作为匿名容器探针。
 - **没有工作流执行历史**：跑过哪些工作流、每个节点花了多久、中间值是什么，都没有持久化。只有 LLM 请求那一层有记录。
 - **没有分布式追踪**：`trace_id` 只在 LLM 请求内部有意义，不会串起「一条消息 → 一次调度 → 一次工作流 → 多次 LLM 调用」的完整链路。
 - **没有告警**：日志和追踪都只是被动记录，框架不会主动通知。

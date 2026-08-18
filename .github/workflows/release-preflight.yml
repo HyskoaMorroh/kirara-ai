@@ -16,6 +16,13 @@ name: Release Preflight
 # ---------------------------------------------------------------------------
 
 on:
+  workflow_call:
+    inputs:
+      run_backend_and_image:
+        description: "Run the reusable backend matrix and Docker image smoke gate."
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main, master]
   pull_request:
@@ -25,13 +32,19 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-release-preflight-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
+  backend-and-image:
+    name: Backend matrix and Docker smoke
+    if: ${{ inputs.run_backend_and_image }}
+    uses: ./.github/workflows/run-tests.yml
+    secrets: inherit
+
   contracts:
     name: Release contracts
     runs-on: ubuntu-latest
@@ -53,7 +66,13 @@ jobs:
           import os
           from pathlib import Path
 
-          archives = sorted(Path("dist-release-check").glob("*"))
+          # uv may place a helper .gitignore in the output directory. Only
+          # distribution archives belong to this release gate.
+          archives = sorted(
+              path
+              for path in Path("dist-release-check").glob("*")
+              if path.suffix == ".whl" or path.name.endswith(".tar.gz")
+          )
           wheel = [path for path in archives if path.suffix == ".whl"]
           sdist = [path for path in archives if path.name.endswith(".tar.gz")]
           if len(wheel) != 1 or len(sdist) != 1 or len(archives) != 2:
@@ -70,10 +89,40 @@ jobs:
 
       - name: Inspect release archives and contracts
         run: |
+          python -m pip install --no-cache-dir dist-release-check/*.whl
+          python -m pytest tests/test_a4_upgrade_contract.py -q
           python -m pytest \
             tests/test_release_artifact_contract.py \
             tests/test_release_workflow_contract.py \
             tests/test_webui_build_contract.py -q
+
+      - name: Smoke-test a fresh wheel installation
+        run: |
+          python -m venv "$RUNNER_TEMP/kirara-wheel-smoke"
+          "$RUNNER_TEMP/kirara-wheel-smoke/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/kirara-wheel-smoke/bin/python" -m pip install --no-cache-dir dist-release-check/*.whl
+          "$RUNNER_TEMP/kirara-wheel-smoke/bin/kirara_ai" --help >/dev/null
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/kirara-wheel-smoke/bin/python" - <<'PY'
+          import importlib.metadata
+          import importlib.util
+          import pathlib
+
+          import kirara_ai
+
+          root = pathlib.Path(next(iter(importlib.util.find_spec("kirara_ai").submodule_search_locations)))
+          assert pathlib.Path.cwd() != root.parent, (pathlib.Path.cwd(), root)
+          assert importlib.metadata.version("kirara-ai") == "3.3.0a7"
+          assert (root / "workflow" / "presets" / "catalog.json").is_file()
+          assert (root / "workflow" / "presets" / "chat" / "mcp_tools.yaml").is_file()
+          assert (root / "web" / "static" / "backup.html").is_file()
+          assert (root / "plugins" / "im_qqbot_adapter" / "assets" / "qqbot.png").is_file()
+          assert (root / "plugins" / "im_telegram_adapter" / "assets" / "telegram.png").is_file()
+          assert (root / "plugins" / "im_wecom_adapter" / "assets" / "wecom.png").is_file()
+          assert (root / "alembic" / "env.py").is_file()
+          import kirara_ai.web.api.system.readiness
+          print("fresh wheel smoke OK:", kirara_ai.__file__)
+          PY
 
   webui:
     name: WebUI type check, unit tests and production build
@@ -109,12 +158,39 @@ jobs:
       - name: Build production WebUI
         working-directory: webui
         env:
-          VITE_APP_VERSION: v0.0.0-ci
+          # 发布事件使用 release tag；PR、push 与手动门禁使用可追溯的 commit 标识。
+          VITE_APP_VERSION: ${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}
         # 这里刻意跑 `yarn build`（= run-p type-check build-only）而不是
         # `build-only`：Dockerfile 与 Windows 快速启动包用的就是 `yarn build`，
         # 门禁必须验证那条真实命令能跑通。代价是 type-check 跑了两遍（约 30s），
         # 换来的是「发布用的命令」被真正覆盖，值得。
         run: yarn build
+
+      - name: Verify built WebUI release identity and asset manifest
+        working-directory: webui
+        env:
+          EXPECTED_UI_VERSION: ${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}
+        run: |
+          python - <<'PY'
+          import re
+          import os
+          from pathlib import Path
+
+          root = Path("dist")
+          index = root / "index.html"
+          assert index.is_file(), "missing production index.html"
+          files = [index, *sorted((root / "assets").glob("*"))]
+          text = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in files)
+          expected = os.environ["EXPECTED_UI_VERSION"]
+          assert expected in text, f"production build is missing {expected}"
+          assert "0.0.0-ci" not in text, "production build contains 0.0.0-ci"
+          assert re.search(r"dev-[0-9a-f]{7,40}", text, re.IGNORECASE) is None, (
+              "production build contains a placeholder dev version"
+          )
+          for asset in re.findall(r'(?:src|href)="/?(assets/[^"?#]+)', index.read_text(encoding="utf-8")):
+              assert (root / asset).is_file(), f"index references missing asset: {asset}"
+          print("WebUI release identity and asset manifest OK")
+          PY
 
       - name: Upload WebUI build output
         if: always()

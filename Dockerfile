@@ -30,8 +30,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 COPY ./data/fonts/sarasa-mono-sc-regular.ttf /usr/share/fonts/
 
 # 安装系统依赖
-RUN apt-get -yqq update && \
-    apt-get -yqq install --no-install-recommends \
+RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources; \
+    fi && \
+    if [ -f /etc/apt/sources.list ]; then \
+        sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list; \
+    fi && \
+    apt-get -o Acquire::Retries=5 -yqq update && \
+    apt-get -o Acquire::Retries=5 -yqq install --no-install-recommends \
         ffmpeg \
         libmagic1 && \
     apt-get -yq clean && \
@@ -56,5 +62,8 @@ COPY --from=frontend-builder /webui/dist /app/web
 COPY ./docker/start.sh /app/docker/
 COPY ./data /tmp/data
 EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3).read(1)" || exit 1
 
 CMD ["/bin/bash", "/app/docker/start.sh"]

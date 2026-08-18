@@ -48,7 +48,7 @@
 
 - [x] **Step 3: Regenerate authoritative lock and WebUI package metadata**
 
-  Run `uv lock`, then set both WebUI package version fields to `3.3.0-a7` because npm semver does not accept PEP 440's compact prerelease form. Keep displayed release identity supplied by `VITE_APP_VERSION=v3.3.0a7`.
+  Run `uv lock`, then set both WebUI package version fields to `3.3.0-a7` because npm semver does not accept PEP 440's compact prerelease form. Keep displayed release identity supplied by the triggering release tag or a traceable commit-derived `VITE_APP_VERSION`; never hard-code a fixed release string in a CI or Docker build path.
 
 - [x] **Step 4: Add clean archive assertions**
 
@@ -384,31 +384,31 @@
 - Produces: copy-paste deployment and upgrade procedures, readiness troubleshooting, backup/rollback steps, extension tutorial, and CI release gates.
 - Consumes: implemented endpoints, catalog schema, transaction recovery, build arguments, and existing backup APIs.
 
-- [ ] **Step 1: Document exact upgrade and rollback sequence**
+- [x] **Step 1: Document exact upgrade and rollback sequence**
 
   Include pre-upgrade backup, A data-directory copy, `3.3.0a7` install, readiness checks, workflow/dispatch verification, model dropdown/manual selection check, periodic refresh observation, rollback, and backup restoration.
 
-- [ ] **Step 2: Document built-in workflow and trigger recipes**
+- [x] **Step 2: Document built-in workflow and trigger recipes**
 
   Cover `/help`, memory clearing, dice, gacha, group `/chat`, mention/private/fallback memory, multimodal, long reply splitting, time-aware chat, function calling, custom script, sensitive-word filter, and MCP tools. Each recipe names prerequisites, sample trigger, expected workflow, and diagnostic endpoint.
 
-- [ ] **Step 3: Write the practical Agents/Skills/Hooks/MCP guide**
+- [x] **Step 3: Write the practical Agents/Skills/Hooks/MCP guide**
 
   Show one workflow-backed Agent, one catalog-backed Skill, one permissioned lifecycle hook, and one MCP tool integration. Include manifest fields, least-privilege choices, audit output, failure behavior, and removal steps.
 
-- [ ] **Step 4: Synchronize changelog and deployment surfaces**
+- [x] **Step 4: Synchronize changelog and deployment surfaces**
 
   Record fixed races, transaction recovery, preserved behavior, canvas improvements, readiness, extension controls, migration notes, and known limits. Inject `VITE_APP_VERSION` in all Docker and Windows build paths.
 
-- [ ] **Step 5: Add CI gates**
+- [x] **Step 5: Add CI gates**
 
   Run backend suites on supported Python versions, frontend type/test/build, clean package build, archive inspection, Docker build, readiness smoke test, and A-data upgrade fixture. No publish job runs when a gate fails.
 
-- [ ] **Step 6: Validate documentation references**
+- [x] **Step 6: Validate documentation references**
 
   Run repository link/reference checks and `rg` for stale `3.3.0a5`, contradictory endpoint names, placeholder markers, and commands that no longer exist. Expected: only historical comparison references remain.
 
-- [ ] **Step 7: Commit delivery documentation**
+- [x] **Step 7: Commit delivery documentation**
 
   Commit with message `docs: complete 3.3.0a7 operations guide`.
 
@@ -424,11 +424,11 @@
 - Produces: reproducible evidence that B `3.3.0a7` loads an anonymized A-format data fixture and preserves required behavior.
 - Consumes: all previous tasks.
 
-- [ ] **Step 1: Build a minimal anonymized A-format fixture**
+- [x] **Step 1: Build a minimal anonymized A-format fixture**
 
   Include legacy rules, edited preset, deleted-preset tombstone, manual model choices, fallback slots, custom workflow positions, and plugin/MCP configuration with inert local endpoints. No user secrets or personal data.
 
-- [ ] **Step 2: Test A-to-B upgrade behavior**
+- [x] **Step 2: Test A-to-B upgrade behavior**
 
   Copy the fixture to a temporary data directory, start registries, run recovery, and assert all required built-ins and custom records load; edited presets stay edited; deleted presets stay deleted; manual model slots remain unchanged; rules dispatch to the same workflow IDs.
 
@@ -448,30 +448,74 @@
 
   Expected: TypeScript, all Vitest tests, and production build pass.
 
-- [ ] **Step 5: Build and inspect clean distributions**
+- [x] **Step 5: Build and inspect clean distributions**
 
   Run: `uv build --out-dir dist-release-check`
 
   Run the artifact contract against wheel and sdist. Install the wheel into a fresh isolated environment and run import, CLI help, workflow preset, plugin asset, Alembic, backup, and readiness smoke checks.
 
-- [ ] **Step 6: Build and smoke-test Docker**
+- [x] **Step 6: Build and smoke-test Docker**
 
-  Build with `--build-arg VITE_APP_VERSION=v3.3.0a7`, start with a temporary volume, wait for health/readiness, inspect the UI version, and stop without publishing or deleting user volumes.
+  Build with `--build-arg VITE_APP_VERSION=<release-tag-or-dev-commit>`, where the value is derived from the triggering release tag or commit (for example, `${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}` in GitHub Actions), start with a temporary volume, wait for health/readiness, inspect the UI version, and stop without publishing or deleting user volumes. Never replace this with a fixed version injection.
 
-- [ ] **Step 7: Refresh the project graph**
+- [x] **Step 7: Refresh the project graph**
 
   Run: `graphify update .`
 
   Expected: incremental AST update completes and graph queries resolve all new transaction, readiness, catalog, and extension symbols.
 
-- [ ] **Step 8: Run five-axis review and diff hygiene**
+- [x] **Step 8: Run five-axis review and diff hygiene**
 
   Review correctness, readability, architecture, security, and performance. Run `git diff --check`, confirm `docs/LOGO.jpg` remains untracked and unchanged, and confirm no cache/build artifact is staged.
 
-- [ ] **Step 9: Record evidence and replacement decision**
+- [x] **Step 9: Record evidence and replacement decision**
 
   Mark completed plan steps, add exact test totals and artifact names, and state whether project B meets the replacement gate. A positive decision requires every mandatory Task 9 check to pass; unavailable Docker execution must be reported as an unresolved release risk rather than silently accepted.
 
-- [ ] **Step 10: Commit final proof**
+- [x] **Step 10: Commit final proof**
 
   Commit tracked tests and plan evidence with message `test: prove project a upgrade compatibility`.
+
+## Completion Evidence (2026-08-19, HEAD `959a93e`)
+
+- Task 8 steps 1-6 are implemented in the upgrade, operations, observability,
+  extension, Docker, compose, and GitHub Actions documentation/surfaces. The
+  documentation reference scan found no stale `3.3.0a5` operational reference,
+  contradictory readiness endpoint, or invalid local test command. Historical
+  comparison text in `CHANGELOG.md` is intentionally retained.
+- Task 8 CI gates cover the supported backend matrix, WebUI type-check/unit
+  test/build, clean wheel/sdist inspection, fresh-wheel smoke, Docker readiness
+  and read-only API smoke, and the A4 upgrade contract. Docker and Windows UI
+  builds retain dynamic identity injection: release tag or
+  `${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}`;
+  no fixed release value is used as the UI build argument.
+- Task 9 fixture and contract evidence are in
+  `tests/fixtures/a4-data/` and `tests/test_a4_upgrade_contract.py`. The
+  contract verifies legacy dispatch conversion, edited workflow preservation,
+  tombstone preservation, manual model and fallback slots, persisted canvas
+  positions, inert plugin/MCP configuration, write/reload persistence, and no
+  network access.
+- Fresh targeted release and upgrade contracts: `40 passed` with
+  `KIRARA_RELEASE_ARCHIVES` set to the newly built wheel and sdist. The clean
+  artifacts are
+  `dist-final-check-current/kirara_ai-3.3.0a7-py3-none-any.whl` (263 members,
+  SHA-256 `2328fc610983e39e6a1799ab895ca66acc3a06dd530adfd7304f135554461559`)
+  and `dist-final-check-current/kirara_ai-3.3.0a7.tar.gz` (370 members,
+  SHA-256 `e9b2b49663f7f9c73e6d44033ea42f6a6ac4aa56da4685b254c86fe7ff5e43f7`).
+  The archive inspection covered 633 members, excluded `docs/LOGO.jpg`, and a
+  repository-external fresh environment passed CLI, import, preset, plugin
+  asset, Alembic, backup, and readiness smoke checks.
+- Full backend verification: `484 passed, 1 skipped`. Full WebUI verification:
+  15 files and 88 tests passed, type-check passed, and production build passed.
+  The graph was refreshed with `graphify update .` and contained 5,594 nodes,
+  13,069 edges, and 297 communities.
+- Docker evidence: image `kirara-ai:ci-local-959a93e`, built with
+  `VITE_APP_VERSION=dev-959a93e`, digest
+  `sha256:c68c3c491ea3d462256b67260a78832628c81bb6a543f31da899445727137d16`.
+  Readiness, workflow API, dispatch rules, MCP statistics/tools, reachability,
+  preview, package isolation, and password redaction smoke checks passed.
+- Replacement decision: **positive for every mandatory Task 9 check**. The
+  final fresh verification run passed, and the verified delivery was committed
+  after explicit user authorization without pushing. The manually created Docker volume
+  `kirara-ai-local-volume-959a93e-resume` is left untouched pending explicit
+  user approval for deletion.

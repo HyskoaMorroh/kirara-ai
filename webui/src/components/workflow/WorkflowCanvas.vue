@@ -60,7 +60,7 @@ import { VueFlow, useVueFlow, Panel, connectionExists } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls, ControlButton } from '@vue-flow/controls'
 import { MiniMap } from '@vue-flow/minimap'
-import CustomNode from './nodes/CustomNode.vue'
+import WorkflowNode from './WorkflowNode.vue'
 import CodeNode from './nodes/CodeNode.vue'
 import NodeConfigPanel from './NodeConfigPanel.vue'
 import NodeListPanel from './NodeListPanel.vue'
@@ -403,6 +403,7 @@ const convertCustomNodeToVueFlowNode = (block: BlockInstance, blockType: BlockTy
       label: blockType.label,
       blockType: blockType,
       config: block.config || {},
+      parallel: block.parallel === true,
       inputs: blockType.inputs,
       outputs: blockType.outputs
     }
@@ -418,6 +419,7 @@ const convertCodeNodeToVueFlowNode = (block: BlockInstance, blockType: BlockType
       label: blockType.label,
       blockType: blockType,
       config: block.config || {},
+      parallel: block.parallel === true,
       inputs: block.config?.inputs || [],
       outputs: block.config?.outputs || []
     }
@@ -461,6 +463,7 @@ const convertNodesToBlocks = (sourceNodes = nodes.value): BlockInstance[] => {
       type_name: node.data?.blockType?.type_name,
       name: node.id,
       config: node.data?.config || {},
+      parallel: node.data?.parallel === true,
       position: {
         x: Math.round(node.position.x),
         y: Math.round(node.position.y)
@@ -1588,7 +1591,7 @@ const onDrop = (event: DragEvent) => {
       @dragover.prevent
     >
       <template #node-custom="customNodeProps">
-        <CustomNode v-bind="customNodeProps" :isValidConnection="isValidConnection" />
+        <WorkflowNode v-bind="customNodeProps" :isValidConnection="isValidConnection" />
       </template>
       <template #node-code="codeNdoeProps">
         <CodeNode v-bind="codeNdoeProps" :isValidConnection="isValidConnection" />

@@ -1,4 +1,7 @@
+from pathlib import Path
+
 import pytest
+from ruamel.yaml import YAML
 from fastapi.testclient import TestClient
 
 from kirara_ai.config.global_config import GlobalConfig, WebConfig
@@ -194,6 +197,80 @@ class TestWorkflow:
         assert workflow["name"] == TEST_WORKFLOW_NAME
         assert len(workflow["wires"]) == 1
         assert workflow["blocks"][0]["position"] is None
+
+    @pytest.mark.asyncio
+    async def test_workflow_api_preserves_parallel_markers_on_round_trip(
+        self, test_client, auth_headers
+    ):
+        """Canvas saves must not silently turn parallel nodes into serial ones."""
+        workflow_data = {
+            "workflow_id": TEST_WORKFLOW_ID_NEW,
+            "group_id": TEST_GROUP_ID,
+            "name": "Parallel Workflow",
+            "description": TEST_WORKFLOW_DESC,
+            "blocks": [
+                {
+                    "type_name": "test:message",
+                    "name": "source",
+                    "config": {"text": "Hello"},
+                    "parallel": True,
+                },
+                {
+                    "type_name": "test:message",
+                    "name": "serial",
+                    "config": {"text": "Later"},
+                },
+            ],
+            "wires": [],
+        }
+
+        response = test_client.post(
+            f"/backend-api/api/workflow/{TEST_GROUP_ID}/{TEST_WORKFLOW_ID_NEW}",
+            headers=auth_headers,
+            json=workflow_data,
+        )
+        assert response.status_code == 200
+
+        stored = test_client.get(
+            f"/backend-api/api/workflow/{TEST_GROUP_ID}/{TEST_WORKFLOW_ID_NEW}",
+            headers=auth_headers,
+        )
+        assert stored.status_code == 200
+        assert [block["parallel"] for block in stored.json()["workflow"]["blocks"]] == [
+            True,
+            False,
+        ]
+
+        workflow_path = (
+            Path(WorkflowRegistry.WORKFLOWS_DIR)
+            / TEST_GROUP_ID
+            / f"{TEST_WORKFLOW_ID_NEW}.yaml"
+        )
+        yaml = YAML(typ="safe")
+        persisted = yaml.load(workflow_path.read_text(encoding="utf-8"))
+        assert persisted["blocks"][0]["parallel"] is True
+        assert "parallel" not in persisted["blocks"][1]
+
+        update = {**workflow_data, "name": "Parallel Workflow Updated"}
+        update_response = test_client.put(
+            f"/backend-api/api/workflow/{TEST_GROUP_ID}/{TEST_WORKFLOW_ID_NEW}",
+            headers=auth_headers,
+            json=update,
+        )
+        assert update_response.status_code == 200
+
+        updated = test_client.get(
+            f"/backend-api/api/workflow/{TEST_GROUP_ID}/{TEST_WORKFLOW_ID_NEW}",
+            headers=auth_headers,
+        )
+        assert updated.status_code == 200
+        assert [block["parallel"] for block in updated.json()["workflow"]["blocks"]] == [
+            True,
+            False,
+        ]
+
+        persisted_after_update = yaml.load(workflow_path.read_text(encoding="utf-8"))
+        assert persisted_after_update["blocks"][0]["parallel"] is True
 
     @pytest.mark.asyncio
     async def test_create_workflow(self, test_client, auth_headers):

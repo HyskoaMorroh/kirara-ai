@@ -27,6 +27,15 @@ dist
 .pytest-tmp
 *.tsbuildinfo
 
+# 本地开发环境与前端依赖/产物由 Dockerfile 在构建阶段重新生成
+.venv
+.venv-win
+webui/node_modules
+webui/dist
+graphify-out
+dist-release-check*
+logs
+
 # 测试代码不参与运行时
 tests
 pytest.ini
@@ -40,6 +49,7 @@ data/db
 data/venv
 data/config.yaml
 data/config.yaml.bak
+data/web/password.hash
 data/auto_detect_state.json
 data/memory/*.json
 data/media/metadata
@@ -53,3 +63,7 @@ web/index.html
 # 部署辅助文件
 docker-compose.yml
 docker-compose.yml.example
+
+# 用户私有文件：即使 Dockerfile 未来改为使用更宽的构建上下文，也不得上传
+docs/LOGO.jpg
+docs/logo.jpg

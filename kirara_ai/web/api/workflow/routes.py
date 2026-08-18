@@ -92,6 +92,7 @@ async def get_workflow(group_id: str, workflow_id: str):
                 type_name=block_registry.get_block_type_name(node.spec.block_class),
                 name=node.name,
                 config=node.spec.kwargs,
+                parallel=node.is_parallel,
                 position=node.position,
             )
         )
@@ -162,6 +163,11 @@ async def create_workflow(group_id: str, workflow_id: str):
 
             if block_def.position is not None:
                 builder.update_position(block_def.name, block_def.position)
+
+            # Reapply the marker after building the linear API representation.
+            # Calling builder.parallel() here would alter current/parent links
+            # and can change the exact graph supplied by the canvas.
+            builder.nodes_by_name[block_def.name].is_parallel = block_def.parallel
         
         # 不要用自动连线，用我们的
         builder.wire_specs = []
@@ -238,6 +244,10 @@ async def update_workflow(group_id: str, workflow_id: str):
 
             if block_def.position is not None:
                 builder.update_position(block_def.name, block_def.position)
+
+            # See the create route: preserve the marker without rebuilding the
+            # graph through the DSL's parallel() grouping operation.
+            builder.nodes_by_name[block_def.name].is_parallel = block_def.parallel
         
         # 不要用自动连线，用我们的
         builder.wire_specs = []

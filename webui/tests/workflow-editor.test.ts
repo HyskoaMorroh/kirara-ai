@@ -112,6 +112,63 @@ describe('workflow editor history', () => {
     expect(viewState.value.name).toBe('replacement edit')
   })
 
+  it('does not create a checkpoint while history saving is suppressed', () => {
+    const intent = workflowEditorModel.getIntent()
+    const viewState = workflowEditorModel.getViewState()
+    intent.initialize({
+      blocks: [],
+      wires: [],
+      blockTypes: [],
+      name: 'before',
+      workflowId: 'user:suppressed-history',
+      config: { max_execution_time: 0 }
+    })
+
+    workflowEditorModel.performActionWithoutHistory(() => {
+      intent.saveToHistory()
+      intent.updateName('after')
+    })
+
+    expect(viewState.value.canUndo).toBe(false)
+    intent.undo()
+    expect(viewState.value.name).toBe('after')
+  })
+
+  it('restores history saving after a suppressed action throws', () => {
+    const viewState = workflowEditorModel.getViewState()
+
+    expect(() =>
+      workflowEditorModel.performActionWithoutHistory(() => {
+        throw new Error('expected failure')
+      })
+    ).toThrow('expected failure')
+    expect(viewState.value.skipSavingHistory).toBe(false)
+  })
+
+  it('records and undoes normal edits after a suppressed action throws', () => {
+    const intent = workflowEditorModel.getIntent()
+    const viewState = workflowEditorModel.getViewState()
+    intent.initialize({
+      blocks: [],
+      wires: [],
+      blockTypes: [],
+      name: 'before',
+      workflowId: 'user:history-after-error',
+      config: { max_execution_time: 0 }
+    })
+
+    expect(() =>
+      workflowEditorModel.performActionWithoutHistory(() => {
+        throw new Error('expected failure')
+      })
+    ).toThrow('expected failure')
+    intent.saveToHistory()
+    intent.updateName('after')
+    intent.undo()
+
+    expect(viewState.value.name).toBe('before')
+  })
+
   it('reuses unchanged records between immutable snapshots and clones changed records only', () => {
     const initial = {
       blocks: [

@@ -30,6 +30,10 @@ REQUIRED_DISTRIBUTION_PATHS = (
     "kirara_ai/workflow/presets/catalog.json",
 )
 
+# Python distribution archive names normalize the project name's hyphens to
+# underscores, matching the root emitted by ``uv build``/setuptools.
+SDIST_ROOT = f"kirara_ai-{PYTHON_VERSION}"
+
 FORBIDDEN_DISTRIBUTION_PARTS = (
     "__pycache__",
     ".pyc",
@@ -83,23 +87,66 @@ def _archive_members(archive: Path) -> set[str]:
     raise AssertionError(f"Unsupported distribution archive: {archive.name}")
 
 
+def _runtime_members(archive: Path) -> set[str]:
+    """Return package-relative members with the archive layout validated."""
+    members = set()
+    for raw_name in _archive_members(archive):
+        name = raw_name.replace("\\", "/")
+        while name.startswith("./"):
+            name = name[2:]
+        name = name.lstrip("/")
+        if name:
+            members.add(name)
+    if archive.name.endswith(".tar.gz"):
+        roots = {name.split("/", 1)[0] for name in members if name}
+        assert roots == {SDIST_ROOT}, (
+            f"{archive.name} must have exactly one {SDIST_ROOT}/ root, found {sorted(roots)}"
+        )
+        prefix = f"{SDIST_ROOT}/"
+        members = {
+            name[len(prefix) :]
+            for name in members
+            if name.startswith(prefix) and name != SDIST_ROOT
+        }
+    return {name.lower() for name in members if name}
+
+
 def assert_distribution_contents(archive: Path) -> None:
     """Require runtime assets and reject local/generated files in wheel or sdist."""
-    members = _archive_members(archive)
-    normalized = {name.lower() for name in members}
+    normalized = _runtime_members(archive)
 
     for required in REQUIRED_DISTRIBUTION_PATHS:
-        assert any(name.endswith(required.lower()) for name in normalized), (
+        assert required.lower() in normalized, (
             f"{archive.name} is missing {required}"
         )
 
     forbidden = [
         name
         for name in normalized
-        if any(part in name for part in FORBIDDEN_DISTRIBUTION_PARTS)
-        or re.search(r"(^|/)data/", name)
+        if any(part in name.split("/") for part in FORBIDDEN_DISTRIBUTION_PARTS)
+        or name == "docs/logo.jpg"
+        or "data" in name.split("/")
+        or name.endswith((".pyc", ".pyo"))
     ]
     assert not forbidden, f"{archive.name} contains forbidden files: {forbidden[:10]}"
+
+
+def test_distribution_contract_rejects_prefixed_runtime_paths(tmp_path):
+    """A plausible-looking nested prefix must not satisfy an exact package path."""
+    wheel = tmp_path / "prefixed.whl"
+    with zipfile.ZipFile(wheel, mode="w") as archive:
+        archive.writestr("unexpected/kirara_ai/backup/service.py", "")
+
+    sdist = tmp_path / "prefixed.tar.gz"
+    with tarfile.open(sdist, mode="w:gz") as archive:
+        member = tarfile.TarInfo(f"{SDIST_ROOT}/unexpected/kirara_ai/backup/service.py")
+        member.size = 0
+        archive.addfile(member)
+
+    with pytest.raises(AssertionError, match="missing kirara_ai/backup/service.py"):
+        assert_distribution_contents(wheel)
+    with pytest.raises(AssertionError, match="missing kirara_ai/backup/service.py"):
+        assert_distribution_contents(sdist)
 
 
 def test_built_distributions_when_archive_paths_are_supplied():

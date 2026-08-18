@@ -126,7 +126,7 @@ def test_docker_workflows_share_a_cross_release_registry_cache():
 
 
 def test_release_builds_inject_their_version_into_the_bundled_webui():
-    """Published artifacts must expose the release tag instead of an unknown UI version."""
+    """Builds must use the triggering release/tag or a traceable commit identity."""
     docker_release_workflow = (
         PROJECT_ROOT / ".github" / "workflows" / "docker-latest.yml"
     ).read_text(encoding="utf-8")
@@ -137,9 +137,13 @@ def test_release_builds_inject_their_version_into_the_bundled_webui():
         PROJECT_ROOT / ".github" / "workflows" / "quickstart-windows.yml"
     ).read_text(encoding="utf-8")
 
-    assert "VITE_APP_VERSION=${{ github.event.release.tag_name" in docker_release_workflow
+    dynamic_version = "${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}"
+    assert f"VITE_APP_VERSION={dynamic_version}" in docker_release_workflow
     assert "VITE_APP_VERSION=${{ steps.vars.outputs.tag }}" in docker_tag_workflow
-    assert "VITE_APP_VERSION: ${{ github.event.release.tag_name" in windows_workflow
+    assert f"VITE_APP_VERSION: {dynamic_version}" in windows_workflow
+    assert "VITE_APP_VERSION=v3.3.0a7" not in docker_release_workflow
+    assert "VITE_APP_VERSION=v3.3.0a7" not in docker_tag_workflow
+    assert "VITE_APP_VERSION: v3.3.0a7" not in windows_workflow
 
 
 def test_release_preflight_checks_contracts_and_the_versioned_webui_build():
@@ -159,7 +163,8 @@ def test_release_preflight_checks_contracts_and_the_versioned_webui_build():
     )
     assert contract_command in workflow
     assert "yarn type-check" in workflow
-    assert "VITE_APP_VERSION: v0.0.0-ci" in workflow
+    dynamic_version = "${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}"
+    assert f"VITE_APP_VERSION: {dynamic_version}" in workflow
     assert "yarn build" in workflow
     # vitest 与 vue-tsc 都必须是门禁的一部分，否则前端回归只能靠人工发现
     assert "yarn test:unit" in workflow
@@ -187,16 +192,131 @@ def test_the_backend_suite_gates_every_pull_request():
 
 
 def test_publishing_a_docker_image_requires_a_green_test_run():
-    """镜像 push 到 Docker Hub 后无法收回，因此发布前必须重跑全量用例。"""
+    """Docker publish must depend on the complete reusable release gate."""
     for filename in ("docker-latest.yml", "docker-tag.yml"):
         workflow = (PROJECT_ROOT / ".github" / "workflows" / filename).read_text(
             encoding="utf-8"
         )
 
-        assert "uv sync --frozen" in workflow, filename
-        assert "python -m pytest ./tests -q" in workflow, filename
-        # 构建/推送作业必须依赖验证作业，否则测试红了镜像照样发出去
+        assert "uses: ./.github/workflows/release-preflight.yml" in workflow, filename
+        assert "run_backend_and_image: true" in workflow, filename
         assert "needs: verify" in workflow, filename
+        assert "push: true" in workflow, filename
+
+    preflight = (PROJECT_ROOT / ".github" / "workflows" / "release-preflight.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "uses: ./.github/workflows/run-tests.yml" in preflight
+    assert "secrets: inherit" in preflight
+    assert "tests/test_a4_upgrade_contract.py" in preflight
+    assert "yarn type-check" in preflight
+    assert "yarn test:unit" in preflight
+    assert "uv build --out-dir dist-release-check" in preflight
+    assert 'if path.suffix == ".whl" or path.name.endswith(".tar.gz")' in preflight
+    assert "Smoke-test a fresh wheel installation" in preflight
+
+
+def test_windows_release_archive_uses_exact_paths_and_excludes_private_data():
+    """The final Windows ZIP gate must inspect normalized exact members."""
+    dynamic_version = "${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}"
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "quickstart-windows.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "$lower -notcontains $path" in workflow
+    assert "EndsWith(\"/$path\")" not in workflow
+    assert "docs/logo" not in workflow.lower()
+    assert "allowedTopLevel" in workflow
+    assert "docs/LOGO.jpg" in (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
+    assert f"EXPECTED_UI_VERSION: {dynamic_version}" in workflow
+    assert "Bundled Web UI does not contain" in workflow
+    assert "uses: ./.github/workflows/release-preflight.yml" in workflow
+    assert "run_backend_and_image: true" in workflow
+    assert "Get-ChildItem -Path \"${{ env.DIST_DIR }}\" -Recurse -Force -File" in workflow
+    assert "Where-Object { $_.Name -match '\\.(pyc|pyo)$' }" in workflow
+    assert "Where-Object { $_.Name -in @('__pycache__'" in workflow
+
+
+def test_release_workflows_reject_unexpected_manual_version_tags():
+    """Manual release entry points cannot bypass the checked release identity."""
+    latest = (PROJECT_ROOT / ".github" / "workflows" / "docker-latest.yml").read_text(
+        encoding="utf-8"
+    )
+    tagged = (PROJECT_ROOT / ".github" / "workflows" / "docker-tag.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'RELEASE_TAG" != "v3.3.0a7"' in latest
+    assert 'TAG_NAME" != "v3.3.0a7"' in tagged
+    assert "workflow_dispatch:" not in latest.split("release:", maxsplit=1)[0]
+    assert 'GITHUB_REF_TYPE" != "tag"' in tagged
+    assert 'GITHUB_REF_NAME" != "$TAG_NAME"' in tagged
+
+
+def test_release_documentation_keeps_ui_version_injection_dynamic():
+    """Operational examples must not teach a fixed UI version build argument."""
+    upgrade = (PROJECT_ROOT / "docs" / "UPGRADING_TO_3.3.0a7.md").read_text(
+        encoding="utf-8"
+    )
+    plan = (
+        PROJECT_ROOT
+        / "docs"
+        / "superpowers"
+        / "plans"
+        / "2026-08-17-kirara-ai-excellence-overhaul.md"
+    ).read_text(encoding="utf-8")
+
+    assert "VITE_APP_VERSION=v3.3.0a7" not in upgrade
+    assert "VITE_APP_VERSION=v3.3.0a7" not in plan
+    dynamic_version = "${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}"
+    assert dynamic_version in upgrade
+    assert dynamic_version in plan
+
+
+def test_workflow_call_release_gates_include_the_frozen_index_override():
+    """The reusable release gate must retain the network/lock contract."""
+    run_tests = (PROJECT_ROOT / ".github" / "workflows" / "run-tests.yml").read_text(
+        encoding="utf-8"
+    )
+    preflight = (PROJECT_ROOT / ".github" / "workflows" / "release-preflight.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "workflow_call:" in run_tests
+    assert "workflow_call:" in preflight
+    assert "UV_DEFAULT_INDEX: https://pypi.org/simple" in run_tests
+
+
+def test_release_gates_use_distinct_reusable_workflow_concurrency_groups():
+    """Nested workflow calls must not cancel one another through a shared group."""
+    run_tests = (PROJECT_ROOT / ".github" / "workflows" / "run-tests.yml").read_text(
+        encoding="utf-8"
+    )
+    preflight = (PROJECT_ROOT / ".github" / "workflows" / "release-preflight.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "group: ${{ github.workflow }}-run-tests-${{ github.ref }}" in run_tests
+    assert "group: ${{ github.workflow }}-release-preflight-${{ github.ref }}" in preflight
+
+
+def test_release_smoke_checks_are_read_only_and_secret_safe():
+    """The image gate must exercise diagnostics without calling external tools."""
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "run-tests.yml").read_text(
+        encoding="utf-8"
+    )
+
+    dynamic_version = "${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}"
+    assert f"VITE_APP_VERSION={dynamic_version}" in workflow
+    assert 'readiness.get("ready") is True' in workflow
+    assert 'isinstance(checks, list)' in workflow
+    assert '"/backend-api/api/dispatch/reachability"' in workflow
+    assert '"/backend-api/api/dispatch/preview"' in workflow
+    assert '"/backend-api/api/mcp/tools"' in workflow
+    assert '"/backend-api/api/mcp/servers/' not in workflow
+    assert '"/call"' not in workflow
+    assert 'assert password not in decoded' in workflow
+    assert 'assert password not in repr(payload)' in workflow
 
 
 def test_the_uv_lockfile_is_committed_instead_of_being_gitignored():
@@ -266,11 +386,9 @@ def test_every_frozen_uv_sync_workflow_pins_the_default_index():
         if "uv sync --frozen" in contents:
             frozen_workflows[workflow_path.name] = contents
 
-    # 现状：run-tests.yml（workflow 级 env）、docker-latest.yml 与
-    # docker-tag.yml（verify job 级 env）三个工作流跑 `uv sync --frozen`。
+    # 现状：run-tests.yml（workflow 级 env）是唯一直接跑 `uv sync --frozen`
+    # 的工作流；Docker 发布通过 reusable release-preflight 间接调用它。
     assert set(frozen_workflows) == {
-        "docker-latest.yml",
-        "docker-tag.yml",
         "run-tests.yml",
     }, sorted(frozen_workflows)
 

@@ -36,6 +36,8 @@ export interface BlockInstance {
   type_name: string
   name: string
   config: Record<string, any>
+  /** Whether this node belongs to the workflow's parallel execution group. */
+  parallel?: boolean
   position?: {
     x: number
     y: number
