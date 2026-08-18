@@ -23,7 +23,7 @@ from kirara_ai.workflow.core.workflow import WorkflowRegistry
 from kirara_ai.workflow.core.workflow.builder import WorkflowBuilder
 from kirara_ai.workflow.core.workflow.validation import validate_workflow_definition
 
-from .models import ReadinessCheck, ReadinessResponse
+from .models import ReadinessCheck, ReadinessResponse, ReadinessStatus
 
 CHECK_IDS = (
     "data_directories_writable",
@@ -42,7 +42,13 @@ _READINESS_EXECUTOR = ThreadPoolExecutor(
 _READINESS_SLOTS = threading.BoundedSemaphore(READINESS_WORKERS)
 
 
-def _check(check_id: str, status: str, summary: str, remediation: str, **evidence):
+def _check(
+    check_id: str,
+    status: ReadinessStatus,
+    summary: str,
+    remediation: str,
+    **evidence,
+) -> ReadinessCheck:
     return ReadinessCheck(
         id=check_id,
         status=status,
@@ -139,7 +145,7 @@ def _workflow_validity(
                 WorkflowBuilder.load_from_yaml(str(path), registry.container)
             except Exception:
                 invalid += 1
-    status = "pass" if invalid == 0 else "fail"
+    status: ReadinessStatus = "pass" if invalid == 0 else "fail"
     return _check(
         CHECK_IDS[2], status,
         "工作流结构有效" if invalid == 0 else "存在无效工作流",
@@ -196,7 +202,9 @@ def _dispatch_targets(
 def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck:
     enabled = [item.name for item in config.ims if item.enable]
     available = sum(bool(manager.is_adapter_running(name)) for name in enabled)
-    status = "pass" if not enabled or available == len(enabled) else "warn"
+    status: ReadinessStatus = (
+        "pass" if not enabled or available == len(enabled) else "warn"
+    )
     return _check(
         CHECK_IDS[4], status,
         "IM 适配器可用" if status == "pass" else "部分已配置 IM 适配器未运行",
@@ -208,7 +216,9 @@ def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck
 def _llm_availability(config: GlobalConfig, manager: LLMManager) -> ReadinessCheck:
     enabled = [item.name for item in config.llms.api_backends if item.enable]
     available = sum(bool(manager.is_backend_available(name)) for name in enabled)
-    status = "pass" if not enabled or available == len(enabled) else "warn"
+    status: ReadinessStatus = (
+        "pass" if not enabled or available == len(enabled) else "warn"
+    )
     return _check(
         CHECK_IDS[5], status,
         "LLM 后端可用" if status == "pass" else "部分已配置 LLM 后端不可用",
@@ -226,7 +236,7 @@ def _mcp_health(config: GlobalConfig, manager: MCPServerManager) -> ReadinessChe
         )
     statistics = manager.get_statistics()
     connected = int(statistics.get("connected", 0))
-    status = "pass" if connected == len(configured) else "warn"
+    status: ReadinessStatus = "pass" if connected == len(configured) else "warn"
     return _check(
         CHECK_IDS[6], status,
         "MCP 服务已连接" if status == "pass" else "部分可选 MCP 服务未连接",

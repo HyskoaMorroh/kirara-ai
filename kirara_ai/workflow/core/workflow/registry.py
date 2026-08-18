@@ -120,14 +120,14 @@ class WorkflowRegistry:
     ) -> None:
         """Persist and register one builder as a recoverable logical change."""
         full_name = self._workflow_name(group_id, workflow_id)
-        has_previous_identity = (
-            previous_group_id is not None and previous_workflow_id is not None
-        )
-        previous_full_name = (
-            self._workflow_name(previous_group_id, previous_workflow_id)
-            if has_previous_identity
-            else full_name
-        )
+        if previous_group_id is not None and previous_workflow_id is not None:
+            has_previous_identity = True
+            previous_full_name = self._workflow_name(
+                previous_group_id, previous_workflow_id
+            )
+        else:
+            has_previous_identity = False
+            previous_full_name = full_name
 
         with self._lock:
             new_path = Path(

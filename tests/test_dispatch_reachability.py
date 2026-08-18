@@ -4,6 +4,8 @@ WebUI 曾经在浏览器里复刻过一份「无条件规则会遮蔽后续规�
 漂移。现在界面只渲染这里定义的结论，因此本测试就是该语义的契约。
 """
 
+from typing import Literal
+
 import pytest
 
 from kirara_ai.workflow.core.dispatch import (
@@ -36,7 +38,9 @@ def make_rule(rule_id: str, priority: int, rule_groups=None, enabled: bool = Tru
     )
 
 
-def fallback_groups(operator: str = "or", extra_types: tuple = ()):
+def fallback_groups(
+    operator: Literal["and", "or"] = "or", extra_types: tuple = ()
+):
     rules = [SimpleDispatchRule(type="fallback", config={})]
     rules.extend(SimpleDispatchRule(type=extra, config={}) for extra in extra_types)
     return [RuleGroup(operator=operator, rules=rules)]

@@ -40,7 +40,7 @@ class MCPServerManager:
         self.tools_cache: Dict[str, ToolCacheEntry] = {}
         self.prompts_cache: Dict[str, list[types.Prompt]] = {}
         self.resources_cache: Dict[str, list[types.Resource]] = {}
-        self.audit_records = deque(maxlen=1000)
+        self.audit_records: deque[dict[str, object]] = deque(maxlen=1000)
         self._audit_sink = audit_sink
 
     def _audit_operation(

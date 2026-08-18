@@ -3,7 +3,7 @@ from functools import wraps
 
 from quart import Blueprint, g, jsonify, request
 
-from kirara_ai.im.message import IMMessage, MentionElement, TextMessage
+from kirara_ai.im.message import IMMessage, MentionElement, MessageElement, TextMessage
 from kirara_ai.im.sender import ChatSender
 from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
 from kirara_ai.workflow.core.dispatch import (
@@ -76,7 +76,7 @@ def _build_preview_message(preview: DispatchPreviewRequest) -> IMMessage:
     else:
         sender = ChatSender.from_c2c_chat(preview.sender_id, "试运行用户")
 
-    elements = [TextMessage(preview.content)]
+    elements: list[MessageElement] = [TextMessage(preview.content)]
     if preview.mentioned:
         elements.insert(0, MentionElement(ChatSender.get_bot_sender()))
     return IMMessage(sender=sender, message_elements=elements)

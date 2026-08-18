@@ -1,5 +1,5 @@
 from base64 import b64decode
-from typing import Annotated, Any, Dict, List
+from typing import Annotated, Any, Dict, List, Sequence
 
 from mcp import types
 
@@ -40,15 +40,22 @@ class MCPToolProvider(Block):
         """提供MCP工具调用执行回调"""
         mcp_manager = self.container.resolve(MCPServerManager)
 
-        server_info = mcp_manager.get_tool_server(tool_call.function.name)
+        function = tool_call.function
+        if function is None or not function.name:
+            raise ValueError("MCP工具调用缺少工具名称")
+        if not tool_call.id:
+            raise ValueError("MCP工具调用缺少调用 ID")
+        tool_name = function.name
+
+        server_info = mcp_manager.get_tool_server(tool_name)
         if not server_info:
-            raise ValueError(f"找不到工具: {tool_call.function.name}")
+            raise ValueError(f"找不到工具: {tool_name}")
         server, original_name = server_info
         
-        result = await server.call_tool(original_name, tool_call.function.arguments)
+        result = await server.call_tool(original_name, function.arguments)
         
         tool_result = await self._create_tool_result(
-            tool_call.id, tool_call.function.name, result.content
+            tool_call.id, tool_name, result.content
         )
 
         tool_result.isError = result.isError
@@ -79,7 +86,9 @@ class MCPToolProvider(Block):
             "tools": built_tools
         }
 
-    async def _create_tool_result(self, tool_id: str, tool_name: str, content: list[types.TextContent | types.ImageContent | types.EmbeddedResource]) -> LLMToolResultContent:
+    async def _create_tool_result(
+        self, tool_id: str, tool_name: str, content: Sequence[object]
+    ) -> LLMToolResultContent:
         """创建工具调用结果"""
         converted_content: List[tool.TextContent | tool.MediaContent] = []
         for item in content:

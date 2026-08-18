@@ -201,8 +201,19 @@ jobs:
         if (-not $uiText.Contains($env:EXPECTED_UI_VERSION)) {
           throw "Bundled Web UI does not contain $env:EXPECTED_UI_VERSION."
         }
-        if ($uiText -match '0\.0\.0-ci' -or $uiText -match '(?i)dev-[0-9a-f]{7,40}') {
-          throw "Bundled Web UI contains a placeholder release version."
+        if ($uiText -match '0\.0\.0-ci') {
+          throw "Bundled Web UI contains the CI fallback version."
+        }
+        $devVersions = [regex]::Matches($uiText, '(?i)dev-[0-9a-f]{7,40}') |
+          ForEach-Object { $_.Value } |
+          Select-Object -Unique
+        $unexpectedDevVersions = if ($env:EXPECTED_UI_VERSION -match '^(?i:dev-)') {
+          $devVersions | Where-Object { $_ -ne $env:EXPECTED_UI_VERSION }
+        } else {
+          $devVersions
+        }
+        if ($unexpectedDevVersions) {
+          throw "Bundled Web UI contains unexpected dev versions: $($unexpectedDevVersions -join ', ')."
         }
 
     - name: Copy startup scripts

@@ -26,6 +26,7 @@ from kirara_ai.memory.memory_manager import MemoryManager
 from kirara_ai.memory.scopes import GlobalScope, GroupScope, MemberScope
 from kirara_ai.plugin_manager.plugin_loader import PluginLoader
 from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
+from kirara_ai.plugin_manager.models import LifecycleName
 from kirara_ai.scheduler import TaskScheduler
 from kirara_ai.tracing import LLMTracer, TracingManager
 from kirara_ai.web.api.system.utils import get_installed_version, get_latest_pypi_version
@@ -77,7 +78,9 @@ def init_container() -> DependencyContainer:
     return container
 
 
-def notify_extension_lifecycle(container: DependencyContainer, lifecycle: str) -> None:
+def notify_extension_lifecycle(
+    container: DependencyContainer, lifecycle: LifecycleName
+) -> None:
     """Produce a sanitized application lifecycle notification when configured."""
     if not container.has(ExtensionLifecycleHost):
         return

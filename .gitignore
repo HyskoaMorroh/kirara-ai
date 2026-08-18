@@ -13,6 +13,7 @@ config.yaml
 config.yaml.bak
 data/config.yaml
 data/config.yaml.bak
+!tests/fixtures/a4-data/config.yaml
 logs/
 **/password.hash
 dist/

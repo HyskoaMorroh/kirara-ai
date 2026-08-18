@@ -8,11 +8,11 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 from ruamel.yaml import YAML
 
-from kirara_ai.im.message import IMMessage, MentionElement, TextMessage
+from kirara_ai.im.message import IMMessage, MentionElement, MessageElement, TextMessage
 from kirara_ai.im.sender import ChatSender
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.workflow.core.block.registry import BlockRegistry
-from kirara_ai.workflow.core.dispatch import CombinedDispatchRule
+from kirara_ai.workflow.core.dispatch import CombinedDispatchRule, RuleGroup
 from kirara_ai.workflow.core.workflow.builder import WorkflowBuilder
 from kirara_ai.workflow.core.workflow.registry import WorkflowRegistry
 from kirara_ai.workflow.core.workflow.validation import validate_workflow_definition
@@ -27,7 +27,7 @@ class DispatchTriggerExample(BaseModel):
     content: str = Field(max_length=2000)
     chat_type: Literal["私聊", "群聊"] = "私聊"
     mentioned: bool = False
-    rule_groups: List[Dict[str, Any]] = Field(default_factory=list)
+    rule_groups: List[RuleGroup] = Field(default_factory=list)
 
 
 class SkillMetadata(BaseModel):
@@ -103,7 +103,7 @@ def _preview_message(example: DispatchTriggerExample) -> IMMessage:
         if example.chat_type == "群聊"
         else ChatSender.from_c2c_chat("catalog-user", "目录示例")
     )
-    elements = [TextMessage(example.content)]
+    elements: List[MessageElement] = [TextMessage(example.content)]
     if example.mentioned:
         elements.insert(0, MentionElement(ChatSender.get_bot_sender()))
     return IMMessage(sender=sender, message_elements=elements)

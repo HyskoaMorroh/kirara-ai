@@ -647,10 +647,13 @@ class ChatCompletionWithTools(Block):
                 iteration_msgs.append(response.message)
                 self.logger.debug("Tool calls found, attempt to invoke tools")
                 for tool_call in response.message.tool_calls:
-                    actual_tool = tools_mapping.get(tool_call.function.name)
+                    function = tool_call.function
+                    if function is None or not function.name:
+                        raise ValueError("LLM工具调用缺少工具名称")
+                    actual_tool = tools_mapping.get(function.name)
                     if actual_tool:
                         self.logger.debug(
-                            f"Invoking tool: {actual_tool.name}({tool_call.function.arguments})")
+                            f"Invoking tool: {actual_tool.name}({function.arguments})")
                         resp_future = asyncio.run_coroutine_threadsafe(
                             actual_tool.invokeFunc(tool_call), loop
                         )

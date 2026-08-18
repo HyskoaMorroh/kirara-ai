@@ -1,0 +1,18 @@
+llms:
+  api_backends:
+    - name: fixture-backend
+      adapter: fixture
+      enable: false
+      models:
+        - manual-primary
+        - manual-fallback
+plugins:
+  enable:
+    - fixture.plugin
+mcp:
+  servers:
+    - id: fixture-disabled
+      description: Inert MCP fixture for offline upgrade tests.
+      url: http://127.0.0.1:9/mcp
+      connection_type: sse
+      enable: false
