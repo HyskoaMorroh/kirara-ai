@@ -10,7 +10,7 @@ from kirara_ai.events.plugin import PluginLoaded, PluginStarted, PluginStopped
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.ioc.inject import Inject
 from kirara_ai.logger import get_logger
-from kirara_ai.plugin_manager.models import PluginInfo
+from kirara_ai.plugin_manager.models import ExtensionManifest, PluginInfo
 from kirara_ai.plugin_manager.plugin import Plugin
 from kirara_ai.plugin_manager.plugin_event_bus import PluginEventBus
 
@@ -26,6 +26,12 @@ class PluginLoader:
         self.internal_plugins: List[str] = []
         self.config = self.container.resolve(GlobalConfig)
         self.event_bus = self.container.resolve(EventBus)
+        self.extension_audit_records: List[dict] = []
+
+    @staticmethod
+    def _manifest_for(plugin_or_class) -> Optional[ExtensionManifest]:
+        manifest = getattr(plugin_or_class, "manifest", None)
+        return ExtensionManifest.model_validate(manifest) if manifest is not None else None
 
     def register_plugin(self, plugin_class: Type[Plugin], plugin_name: Optional[str] = None):
         """注册一个插件类，主要用于测试"""
@@ -43,6 +49,7 @@ class PluginLoader:
             is_internal=True,
             is_enabled=True,
             metadata=getattr(plugin, "metadata", None),
+            manifest=self._manifest_for(plugin),
         )
         self.plugin_infos[key] = plugin_info
         self.logger.info(f"Registered test plugin: {key}")
@@ -102,6 +109,7 @@ class PluginLoader:
             is_internal=True,
             is_enabled=True,
             metadata=getattr(plugin, "metadata", None),
+            manifest=self._manifest_for(plugin),
         )
         self.plugin_infos[plugin_name] = plugin_info
         self.logger.info(f"Internal plugin {plugin_name} loaded successfully")
@@ -153,7 +161,14 @@ class PluginLoader:
         self.logger.debug(f"Instantiating plugin class: {plugin_class.__name__}")
         event_bus = self.container.resolve(EventBus)
         with self.container.scoped() as scoped_container:
-            scoped_container.register(EventBus, PluginEventBus(event_bus))
+            scoped_container.register(
+                EventBus,
+                PluginEventBus(
+                    event_bus,
+                    manifest=self._manifest_for(plugin_class),
+                    audit_sink=self.extension_audit_records.append,
+                ),
+            )
             return Inject(scoped_container).create(plugin_class)()
 
     def load_plugins(self):

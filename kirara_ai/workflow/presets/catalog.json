@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "presets": [
+    {
+      "id": "chat:custom_script", "name_zh": "自定义脚本", "purpose": "用本地 Python 逻辑处理并回复消息。", "prerequisites": ["了解基础 Python"], "trigger_examples": [{"content": "统计这条消息", "rule_groups": [{"operator": "or", "rules": [{"type": "fallback", "config": {}}]}]}], "capabilities": ["消息处理", "本地脚本"], "difficulty": "intermediate",
+      "skill": {"version": "1.0.0", "workflow_id": "chat:custom_script", "inputs": ["IM 消息"], "outputs": ["IM 回复"], "prerequisites": ["了解基础 Python"], "examples": ["关键词回复与文本转换"]},
+      "agent": {"workflow_id": "chat:custom_script", "model_policy": {"required": false}, "tool_policy": {"local_code": true}, "memory_policy": {"enabled": false}}
+    },
+    {
+      "id": "chat:dsr_thinking", "name_zh": "深度思考", "purpose": "隐藏思考标签并输出最终回答。", "prerequisites": ["配置支持思考输出的模型"], "trigger_examples": [{"content": "请分析这个问题", "rule_groups": [{"operator": "or", "rules": [{"type": "fallback", "config": {}}]}]}], "capabilities": ["大模型对话", "思考内容提取", "记忆"], "difficulty": "intermediate",
+      "skill": {"version": "1.0.0", "workflow_id": "chat:dsr_thinking", "inputs": ["IM 消息"], "outputs": ["隐藏思考过程的回复"], "prerequisites": ["思考模型"], "examples": ["复杂问题分析"]},
+      "agent": {"workflow_id": "chat:dsr_thinking", "model_policy": {"reasoning": true}, "tool_policy": {}, "memory_policy": {"enabled": true}}
+    },
+    {
+      "id": "chat:function_calling", "name_zh": "函数调用", "purpose": "展示可扩展的函数调用分支。", "prerequisites": ["配置支持函数调用的模型", "自行连接工具执行节点"], "trigger_examples": [{"content": "调用一个已声明函数", "rule_groups": [{"operator": "or", "rules": [{"type": "fallback", "config": {}}]}]}], "capabilities": ["函数调用", "分支处理", "大模型对话"], "difficulty": "advanced",
+      "skill": {"version": "1.0.0", "workflow_id": "chat:function_calling", "inputs": ["IM 消息", "工具定义"], "outputs": ["函数请求或文本回复"], "prerequisites": ["函数调用模型"], "examples": ["自定义业务函数路由"]},
+      "agent": {"workflow_id": "chat:function_calling", "model_policy": {"function_calling": true}, "tool_policy": {"execution": "user_wired"}, "memory_policy": {"enabled": true}}
+    },
+    {
+      "id": "chat:group_mention", "name_zh": "群聊提及触发", "purpose": "在群聊被提及时清理提及标记后回答。", "prerequisites": ["配置群聊 IM 适配器", "调度规则使用提及条件"], "trigger_examples": [{"content": "帮我解释一下", "chat_type": "群聊", "mentioned": true, "rule_groups": [{"operator": "or", "rules": [{"type": "fallback", "config": {}}]}]}], "capabilities": ["群聊", "提及处理", "记忆"], "difficulty": "beginner",
+      "skill": {"version": "1.0.0", "workflow_id": "chat:group_mention", "inputs": ["群聊提及消息"], "outputs": ["群聊回复"], "prerequisites": ["群聊适配器"], "examples": ["仅在被提及时回答"]},
+      "agent": {"workflow_id": "chat:group_mention", "model_policy": {"chat": true}, "tool_policy": {}, "memory_policy": {"enabled": true}}
+    },
+    {
+      "id": "chat:long_reply_split", "name_zh": "长回复分条", "purpose": "将长回答拆成多条消息发送。", "prerequisites": ["配置对话模型"], "trigger_examples": [{"content": "写一篇较长的说明", "rule_groups": [{"operator": "or", "rules": [{"type": "fallback", "config": {}}]}]}], "capabilities": ["大模型对话", "消息分条", "记忆"], "difficulty": "intermediate",
+      "skill": {"version": "1.0.0", "workflow_id": "chat:long_reply_split", "inputs": ["IM 消息"], "outputs": ["多条 IM 回复"], "prerequisites": ["对话模型"], "examples": ["长文分条发送"]},
+      "agent": {"workflow_id": "chat:long_reply_split", "model_policy": {"chat": true}, "tool_policy": {}, "memory_policy": {"enabled": true}}
+    },
+    {
+      "id": "chat:mcp_tools", "name_zh": "MCP 工具调用", "purpose": "让模型调用明确开放的 MCP 工具。", "prerequisites": ["配置并连接 MCP 服务", "配置支持函数调用的模型"], "trigger_examples": [{"content": "使用工具查询信息", "rule_groups": [{"operator": "or", "rules": [{"type": "fallback", "config": {}}]}]}], "capabilities": ["MCP 工具", "函数调用", "记忆"], "difficulty": "advanced",
+      "skill": {"version": "1.0.0", "workflow_id": "chat:mcp_tools", "inputs": ["IM 消息", "MCP 工具列表"], "outputs": ["工具增强回复"], "prerequisites": ["MCP 服务", "函数调用模型"], "examples": ["搜索与受控资源访问"]},
+      "agent": {"workflow_id": "chat:mcp_tools", "model_policy": {"function_calling": true}, "tool_policy": {"source": "mcp", "allowlisted": true}, "memory_policy": {"enabled": true}}
+    },
+    {
+      "id": "chat:normal_multimodal", "name_zh": "原生多模态对话", "purpose": "保留图片等媒体内容进行对话。", "prerequisites": ["配置支持图片输入的模型"], "trigger_examples": [{"content": "描述这张图片", "rule_groups": [{"operator": "or", "rules": [{"type": "fallback", "config": {}}]}]}], "capabilities": ["多模态输入", "大模型对话", "媒体记忆"], "difficulty": "intermediate",
+      "skill": {"version": "1.0.0", "workflow_id": "chat:normal_multimodal", "inputs": ["图文 IM 消息"], "outputs": ["IM 回复"], "prerequisites": ["多模态模型"], "examples": ["看图问答"]},
+      "agent": {"workflow_id": "chat:normal_multimodal", "model_policy": {"image_input": true}, "tool_policy": {}, "memory_policy": {"enabled": true, "media": true}}
+    },
+    {
+      "id": "chat:plain_text", "name_zh": "纯文本输出", "purpose": "清理 Markdown 后输出纯文本。", "prerequisites": ["配置对话模型"], "trigger_examples": [{"content": "用纯文本回答", "rule_groups": [{"operator": "or", "rules": [{"type": "fallback", "config": {}}]}]}], "capabilities": ["大模型对话", "Markdown 清理", "记忆"], "difficulty": "beginner",
+      "skill": {"version": "1.0.0", "workflow_id": "chat:plain_text", "inputs": ["IM 消息"], "outputs": ["纯文本回复"], "prerequisites": ["对话模型"], "examples": ["语音播报前文本清理"]},
+      "agent": {"workflow_id": "chat:plain_text", "model_policy": {"chat": true}, "tool_policy": {}, "memory_policy": {"enabled": true}}
+    },
+    {
+      "id": "chat:sensitive_word_filter", "name_zh": "敏感词替换", "purpose": "发送前替换指定文本。", "prerequisites": ["配置对话模型", "填写替换词与安全表述"], "trigger_examples": [{"content": "生成公开群聊回复", "rule_groups": [{"operator": "or", "rules": [{"type": "fallback", "config": {}}]}]}], "capabilities": ["大模型对话", "文本替换", "记忆"], "difficulty": "intermediate",
+      "skill": {"version": "1.0.0", "workflow_id": "chat:sensitive_word_filter", "inputs": ["IM 消息", "替换规则"], "outputs": ["过滤后回复"], "prerequisites": ["对话模型"], "examples": ["公开群聊表述替换"]},
+      "agent": {"workflow_id": "chat:sensitive_word_filter", "model_policy": {"chat": true}, "tool_policy": {}, "memory_policy": {"enabled": true}}
+    },
+    {
+      "id": "chat:talk_break", "name_zh": "自定义分段", "purpose": "按约定分隔符生成分段回复。", "prerequisites": ["配置对话模型"], "trigger_examples": [{"content": "分段回答这个问题", "rule_groups": [{"operator": "or", "rules": [{"type": "fallback", "config": {}}]}]}], "capabilities": ["大模型对话", "时间注入", "分段发送", "记忆"], "difficulty": "intermediate",
+      "skill": {"version": "1.0.0", "workflow_id": "chat:talk_break", "inputs": ["IM 消息"], "outputs": ["分段 IM 回复"], "prerequisites": ["对话模型"], "examples": ["角色对话分段"]},
+      "agent": {"workflow_id": "chat:talk_break", "model_policy": {"chat": true}, "tool_policy": {}, "memory_policy": {"enabled": true}}
+    },
+    {
+      "id": "chat:time_aware", "name_zh": "时间感知", "purpose": "向模型提示词注入本地当前时间。", "prerequisites": ["配置对话模型", "设置正确时区"], "trigger_examples": [{"content": "今天是什么日期", "rule_groups": [{"operator": "or", "rules": [{"type": "fallback", "config": {}}]}]}], "capabilities": ["大模型对话", "本地时间", "记忆"], "difficulty": "beginner",
+      "skill": {"version": "1.0.0", "workflow_id": "chat:time_aware", "inputs": ["IM 消息", "系统时间"], "outputs": ["时间感知回复"], "prerequisites": ["对话模型"], "examples": ["日期与排期问答"]},
+      "agent": {"workflow_id": "chat:time_aware", "model_policy": {"chat": true}, "tool_policy": {"local_time": true}, "memory_policy": {"enabled": true}}
+    }
+  ]
+}

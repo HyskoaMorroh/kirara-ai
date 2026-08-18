@@ -8,6 +8,7 @@ from kirara_ai.workflow.core.block.registry import BlockRegistry
 from kirara_ai.workflow.core.workflow import WorkflowRegistry
 from kirara_ai.workflow.core.workflow.builder import WorkflowBuilder
 from kirara_ai.workflow.core.workflow.validation import validate_workflow_definition
+from kirara_ai.workflow.presets.catalog import catalog_metadata
 
 from ...auth.middleware import require_auth
 from .models import (
@@ -51,6 +52,10 @@ async def list_workflows():
         # 从 workflow_id 解析 group_id
         group_id, wf_id = workflow_id.split(":", 1)
 
+        metadata = dict(getattr(builder, "metadata", None) or {})
+        preset_metadata = catalog_metadata(workflow_id)
+        if preset_metadata is not None:
+            metadata["catalog"] = preset_metadata
         workflows.append(
             WorkflowInfo(
                 group_id=group_id,
@@ -58,7 +63,7 @@ async def list_workflows():
                 name=builder.name,
                 description=builder.description,
                 block_count=len(builder.nodes_by_name),
-                metadata=getattr(builder, "metadata", None),
+                metadata=metadata or None,
             )
         )
     workflows.sort(key=lambda x: f"{x.group_id}:{x.workflow_id}")
