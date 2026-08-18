@@ -1105,13 +1105,13 @@ const getTypeOptions = () => {
 
 <style scoped>
 .node-config-panel {
-  width: min(500px, 100vw);
+  width: min(500px, calc(100vw - 16px));
   max-width: 100%;
   background-color: var(--panel-bg-color);
   backdrop-filter: blur(10px);
   /* 例外：该面板贴着画布右缘满高铺满，任何圆角都会露出画布底色，故保持直角 */
   border-radius: 0;
-  transition: all 0.3s ease;
+  transition: width 0.3s ease, background-color 0.3s ease;
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -1121,6 +1121,7 @@ const getTypeOptions = () => {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .header-icon {
@@ -1134,10 +1135,6 @@ const getTypeOptions = () => {
 }
 
 @media (max-width: 640px) {
-  .node-config-panel {
-    width: 100vw;
-  }
-
   .header-title {
     min-width: 0;
     overflow: hidden;
@@ -1150,6 +1147,7 @@ const getTypeOptions = () => {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .close-button:hover {
@@ -1172,6 +1170,7 @@ const getTypeOptions = () => {
   background-color: var(--node-muted-bg);
   border-radius: var(--radius-sm);
   margin-bottom: 8px;
+  min-width: 0;
 }
 
 .node-id-label {
@@ -1186,6 +1185,8 @@ const getTypeOptions = () => {
   color: var(--primary-color);
   background-color: rgba(var(--primary-color-rgb), 0.1);
   border-radius: var(--radius-xs);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .node-description {
@@ -1224,7 +1225,7 @@ const getTypeOptions = () => {
 .custom-select,
 .custom-input-number {
   border-radius: var(--radius-sm);
-  transition: all 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s;
   width: 100%;
   margin-top: 4px;
 }
@@ -1236,7 +1237,7 @@ const getTypeOptions = () => {
 }
 
 .custom-switch {
-  transition: all 0.2s;
+  transition: background-color 0.2s, box-shadow 0.2s;
   margin-top: 4px;
 }
 
@@ -1287,12 +1288,15 @@ const getTypeOptions = () => {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .connection-point-name {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-color);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .connection-type-badge {
@@ -1371,6 +1375,8 @@ const getTypeOptions = () => {
   font-size: 13px;
   color: var(--text-color);
   font-weight: 500;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .connection-handle {
@@ -1379,11 +1385,13 @@ const getTypeOptions = () => {
   background-color: var(--code-bg-color);
   padding: 1px 6px;
   border-radius: var(--radius-xs);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .navigate-button {
   color: var(--text-color-secondary);
-  transition: all 0.2s;
+  transition: color 0.2s, background-color 0.2s;
 }
 
 .navigate-button:hover {
@@ -1470,12 +1478,15 @@ const getTypeOptions = () => {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .port-name {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-color);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .port-details {
@@ -1510,7 +1521,7 @@ const getTypeOptions = () => {
 
 .remove-port-button {
   color: var(--text-color-secondary);
-  transition: all 0.2s;
+  transition: color 0.2s, background-color 0.2s;
 }
 
 .remove-port-button:hover {
@@ -1541,7 +1552,7 @@ const getTypeOptions = () => {
 .editor-action-button {
   background-color: var(--elevated-bg-color);
   border: 1px solid var(--border-color);
-  transition: all 0.2s;
+  transition: background-color 0.2s, border-color 0.2s;
 }
 
 .editor-action-button:hover {

@@ -68,7 +68,7 @@ const codePreview = computed(() => {
 
 <template>
   <div class="code-node">
-    <div class="code-node-header" :style="{ backgroundColor: data.blockType.color || '#4b5563' }">
+    <div class="code-node-header">
       <div class="header-content">
         <span class="node-label">{{ data.label }}</span>
         <span class="node-id" :title="id">#{{ shortId }}</span>
@@ -147,8 +147,9 @@ const codePreview = computed(() => {
 .code-node-header {
   padding: 10px 14px;
   font-weight: 500;
-  /* 标题栏底色由 blockType.color 内联指定，始终为饱和色，故文字保持浅色 */
-  color: #f9fafb;
+  color: var(--text-color, #333);
+  background-color: var(--node-header-bg, #f0f0f0);
+  border-left: 4px solid var(--node-accent-code, var(--info-color, #5c6ac4));
   border-bottom: 1px solid var(--node-border-color, rgba(0, 0, 0, 0.04));
   font-size: var(--font-size-base, 14px);
 }
@@ -157,6 +158,7 @@ const codePreview = computed(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  min-width: 0;
 }
 
 .node-label {
@@ -164,13 +166,13 @@ const codePreview = computed(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 
 .node-id {
   font-size: var(--font-size-xs, 11px);
-  /* 该角标位于饱和色标题栏上，两种主题下都保持浅字 + 深底才可读 */
-  color: rgba(255, 255, 255, 0.75);
-  background-color: rgba(0, 0, 0, 0.2);
+  color: var(--text-color-tertiary, #666);
+  background-color: var(--node-muted-bg, rgba(0, 0, 0, 0.08));
   padding: 2px 5px;
   border-radius: var(--radius-xs);
   margin-left: 6px;

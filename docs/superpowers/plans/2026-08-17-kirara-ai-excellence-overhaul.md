@@ -273,35 +273,35 @@
 - Produces: semantic tokens for canvas, panel, border, focus, success, warning, error, muted text, overlay, selection, and node type accents.
 - Consumes: current palette IDs and persisted theme preference; existing palette IDs remain valid.
 
-- [ ] **Step 1: Add token contrast and keyboard tests**
+- [x] **Step 1: Add token contrast and keyboard tests**
 
   Assert every palette defines all semantic tokens, text/background combinations meet WCAG AA for normal text, icon buttons expose accessible names/tooltips, focus is visible, and canvas actions are reachable by keyboard.
 
-- [ ] **Step 2: Add responsive layout tests**
+- [x] **Step 2: Add responsive layout tests**
 
   Mount at 360 px, 768 px, and 1440 px widths. Assert toolbar commands do not overlap, labels wrap or collapse into icon tooltips, and the config panel remains reachable without covering the full canvas unexpectedly.
 
-- [ ] **Step 3: Run visual-contract tests**
+- [x] **Step 3: Run visual-contract tests**
 
   Run: `npm --prefix webui test -- --run webui/tests/theme-boot-table.test.ts webui/tests/workflow-accessibility.test.ts`
 
-- [ ] **Step 4: Introduce semantic tokens without changing palette identity**
+- [x] **Step 4: Introduce semantic tokens without changing palette identity**
 
   Map existing palette colors into neutral surfaces plus restrained functional accents. Remove one-hue dominance, preserve dark/light behavior, and set `color-scheme`, focus rings, selection, grid dots, minimap, and overlays from tokens.
 
-- [ ] **Step 5: Refine the canvas toolbar and inspector**
+- [x] **Step 5: Refine the canvas toolbar and inspector**
 
   Use the installed icon set for undo, redo, zoom, fit, layout, validation, minimap, and save. Keep text only for primary commands where ambiguity remains. Add tooltips, stable 36 px controls, segmented layout direction, and a responsive overflow menu.
 
-- [ ] **Step 6: Prevent text and panel collisions**
+- [x] **Step 6: Prevent text and panel collisions**
 
   Apply min/max panel tracks, `min-width: 0`, overflow wrapping for IDs/model names, stable node widths, line clamps only where full text remains available by tooltip, and reduced-motion transitions.
 
-- [ ] **Step 7: Verify tests and browser screenshots**
+- [x] **Step 7: Verify tests and browser screenshots**
 
   Run the Task 6 tests, then capture light/dark screenshots at 360x800, 768x1024, and 1440x900. Assert no clipping, toolbar collision, nested cards, blank canvas, or low-contrast controls.
 
-- [ ] **Step 8: Commit visual refinements**
+- [x] **Step 8: Commit visual refinements**
 
   Commit with message `feat: refine workflow canvas experience`.
 

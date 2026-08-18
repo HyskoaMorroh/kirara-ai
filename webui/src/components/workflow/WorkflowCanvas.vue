@@ -19,8 +19,11 @@ import {
   NTag,
   NText,
   NInputNumber,
-  NSelect
+  NSelect,
+  NDropdown,
+  NButtonGroup
 } from 'naive-ui'
+import type { DropdownOption } from 'naive-ui'
 import {
   SaveOutline,
   RefreshOutline,
@@ -37,7 +40,8 @@ import {
   TrashOutline,
   WarningOutline,
   SearchOutline,
-  LocateOutline
+  LocateOutline,
+  EllipsisHorizontalOutline
 } from '@vicons/ionicons5'
 import { getTypeCompatibility, type BlockOutput, type BlockType } from '@/api/block'
 import {
@@ -112,10 +116,8 @@ const viewState = workflowEditorModel.getViewState()
 const themeStore = useThemeStore()
 const canvasDotColor = computed(() => themeStore.seed.canvasDot)
 // 缩略图同理：它把颜色直接写进 SVG 属性，无法解析 CSS 变量
-const minimapNodeColor = computed(() => themeStore.seed.nodeHeader)
-const minimapMaskColor = computed(() =>
-  themeStore.isDark ? 'rgba(0, 0, 0, 0.55)' : 'rgba(240, 243, 248, 0.7)'
-)
+const minimapNodeColor = computed(() => themeStore.seed.minimap)
+const minimapMaskColor = computed(() => themeStore.seed.overlay)
 
 // 快捷键说明弹窗
 const showShortcutsModal = ref(false)
@@ -212,6 +214,7 @@ const {
 } = useVueFlow()
 
 const { layout } = useLayout()
+const layoutDirection = ref<'LR' | 'TB'>('LR')
 const selectedNode = computed(() =>
   getSelectedNodes.value.length > 0 ? getSelectedNodes.value[0] : null
 )
@@ -661,7 +664,7 @@ const handleTidyLayout = () => {
     recordHistoryBeforeCanvasMutation()
     // 这里的节点全部已经渲染过，DOM 实测尺寸永远比估算值准；
     // measured 模式强制优先采用实测值，避免按估算留错空隙。
-    setNodes(layout(nodes.value, edges.value, 'LR', { measured: true }))
+    setNodes(layout(nodes.value, edges.value, layoutDirection.value, { measured: true }))
     updateBlocks()
     nextTick(() => {
       fitView()
@@ -1246,6 +1249,43 @@ const handleEditInfo = () => {
   showSettingsModal.value = true
 }
 
+const setLayoutDirection = (direction: 'LR' | 'TB') => {
+  if (layoutDirection.value === direction) return
+  layoutDirection.value = direction
+  handleTidyLayout()
+}
+
+const overflowOptions = computed<DropdownOption[]>(() => [
+  { label: '从左到右布局', key: 'layout-lr', disabled: layoutDirection.value === 'LR' },
+  { label: '从上到下布局', key: 'layout-tb', disabled: layoutDirection.value === 'TB' },
+  { type: 'divider', key: 'layout-divider' },
+  { label: '整理布局', key: 'tidy', disabled: tidying.value },
+  { label: '适应画布', key: 'fit' },
+  { label: '从 JSON 导入', key: 'import', disabled: importing.value },
+  { label: '导出为 JSON', key: 'export' },
+  { label: '重置工作流', key: 'reset', disabled: resetting.value },
+  { type: 'divider', key: 'settings-divider' },
+  { label: '编辑工作流信息', key: 'settings' },
+  { label: '快捷键说明', key: 'shortcuts' }
+])
+
+const handleOverflowSelect = (key: string | number) => {
+  const actions: Record<string, () => void> = {
+    'layout-lr': () => setLayoutDirection('LR'),
+    'layout-tb': () => setLayoutDirection('TB'),
+    tidy: handleTidyLayout,
+    fit: handleFitView,
+    import: () => void handleImport(),
+    export: handleExport,
+    reset: handleReset,
+    settings: handleEditInfo,
+    shortcuts: () => {
+      showShortcutsModal.value = true
+    }
+  }
+  actions[String(key)]?.()
+}
+
 // ==================== 初始化函数 ====================
 // 初始化图形数据
 let _graphDataInitialized = false
@@ -1653,6 +1693,24 @@ const onDrop = (event: DragEvent) => {
             </template>
             <span>重做（Ctrl+Shift+Z）</span>
           </NTooltip>
+          <NButtonGroup class="toolbar-secondary layout-direction" aria-label="布局方向">
+            <NButton
+              size="small"
+              :type="layoutDirection === 'LR' ? 'primary' : 'default'"
+              @click="setLayoutDirection('LR')"
+              aria-label="从左到右布局"
+            >
+              横向
+            </NButton>
+            <NButton
+              size="small"
+              :type="layoutDirection === 'TB' ? 'primary' : 'default'"
+              @click="setLayoutDirection('TB')"
+              aria-label="从上到下布局"
+            >
+              纵向
+            </NButton>
+          </NButtonGroup>
 
           <NDivider vertical class="toolbar-divider" />
 
@@ -1720,104 +1778,143 @@ const onDrop = (event: DragEvent) => {
 
           <NDivider vertical class="toolbar-divider" />
 
-          <NTooltip placement="bottom" trigger="hover">
-            <template #trigger>
-              <NButton
-                quaternary
-                circle
-                :loading="importing"
-                @click="handleImport"
-                class="toolbar-button"
-                aria-label="导入工作流"
-              >
-                <template #icon>
-                  <NIcon>
-                    <DownloadOutline />
-                  </NIcon>
-                </template>
-              </NButton>
-            </template>
-            <span>从 JSON 文件导入</span>
-          </NTooltip>
-          <NTooltip placement="bottom" trigger="hover">
-            <template #trigger>
-              <NButton
-                quaternary
-                circle
-                @click="handleExport"
-                class="toolbar-button"
-                aria-label="导出工作流"
-              >
-                <template #icon>
-                  <NIcon>
-                    <CloudUploadOutline />
-                  </NIcon>
-                </template>
-              </NButton>
-            </template>
-            <span>导出为 JSON 文件</span>
-          </NTooltip>
-          <NTooltip placement="bottom" trigger="hover">
-            <template #trigger>
-              <NButton
-                quaternary
-                circle
-                :loading="resetting"
-                @click="handleReset"
-                class="toolbar-button"
-                aria-label="重置工作流"
-              >
-                <template #icon>
-                  <NIcon>
-                    <RefreshOutline />
-                  </NIcon>
-                </template>
-              </NButton>
-            </template>
-            <span>重置：放弃未保存的修改并重新加载</span>
-          </NTooltip>
+          <span class="toolbar-secondary">
+            <NTooltip placement="bottom" trigger="hover">
+              <template #trigger>
+                <NButton
+                  quaternary
+                  circle
+                  :loading="importing"
+                  @click="handleImport"
+                  class="toolbar-button"
+                  aria-label="导入工作流"
+                >
+                  <template #icon>
+                    <NIcon>
+                      <DownloadOutline />
+                    </NIcon>
+                  </template>
+                </NButton>
+              </template>
+              <span>从 JSON 文件导入</span>
+            </NTooltip>
+          </span>
+          <span class="toolbar-secondary">
+            <NTooltip placement="bottom" trigger="hover">
+              <template #trigger>
+                <NButton
+                  quaternary
+                  circle
+                  @click="handleExport"
+                  class="toolbar-button"
+                  aria-label="导出工作流"
+                >
+                  <template #icon>
+                    <NIcon>
+                      <CloudUploadOutline />
+                    </NIcon>
+                  </template>
+                </NButton>
+              </template>
+              <span>导出为 JSON 文件</span>
+            </NTooltip>
+          </span>
+          <span class="toolbar-secondary">
+            <NTooltip placement="bottom" trigger="hover">
+              <template #trigger>
+                <NButton
+                  quaternary
+                  circle
+                  :loading="resetting"
+                  @click="handleReset"
+                  class="toolbar-button"
+                  aria-label="重置工作流"
+                >
+                  <template #icon>
+                    <NIcon>
+                      <RefreshOutline />
+                    </NIcon>
+                  </template>
+                </NButton>
+              </template>
+              <span>重置：放弃未保存的修改并重新加载</span>
+            </NTooltip>
+          </span>
 
           <NDivider vertical class="toolbar-divider" />
 
-          <NTooltip placement="bottom" trigger="hover">
-            <template #trigger>
-              <NButton
-                quaternary
-                circle
-                @click="handleEditInfo"
-                class="toolbar-button"
-                aria-label="编辑工作流信息"
-              >
-                <template #icon>
-                  <NIcon>
-                    <SettingsOutline />
-                  </NIcon>
-                </template>
-              </NButton>
-            </template>
-            <span>编辑工作流信息</span>
-          </NTooltip>
-          <NTooltip placement="bottom" trigger="hover">
-            <template #trigger>
-              <NButton
-                quaternary
-                circle
-                @click="showShortcutsModal = true"
-                class="toolbar-button"
-                aria-label="快捷键说明"
-              >
-                <template #icon>
-                  <NIcon>
-                    <HelpCircleOutline />
-                  </NIcon>
-                </template>
-              </NButton>
-            </template>
-            <span>快捷键说明</span>
-          </NTooltip>
+          <span class="toolbar-secondary">
+            <NTooltip placement="bottom" trigger="hover">
+              <template #trigger>
+                <NButton
+                  quaternary
+                  circle
+                  @click="handleEditInfo"
+                  class="toolbar-button"
+                  aria-label="编辑工作流信息"
+                >
+                  <template #icon>
+                    <NIcon>
+                      <SettingsOutline />
+                    </NIcon>
+                  </template>
+                </NButton>
+              </template>
+              <span>编辑工作流信息</span>
+            </NTooltip>
+          </span>
+          <span class="toolbar-secondary">
+            <NTooltip placement="bottom" trigger="hover">
+              <template #trigger>
+                <NButton
+                  quaternary
+                  circle
+                  @click="showShortcutsModal = true"
+                  class="toolbar-button"
+                  aria-label="快捷键说明"
+                >
+                  <template #icon>
+                    <NIcon>
+                      <HelpCircleOutline />
+                    </NIcon>
+                  </template>
+                </NButton>
+              </template>
+              <span>快捷键说明</span>
+            </NTooltip>
+          </span>
+
+          <span class="toolbar-overflow">
+            <NDropdown
+              :options="overflowOptions"
+              trigger="click"
+              @select="handleOverflowSelect"
+              placement="bottom-end"
+            >
+              <span class="toolbar-dropdown-trigger">
+                <NButton
+                  quaternary
+                  circle
+                  class="toolbar-button"
+                  aria-label="更多画布操作"
+                  title="更多画布操作"
+                >
+                  <template #icon>
+                    <NIcon>
+                      <EllipsisHorizontalOutline />
+                    </NIcon>
+                  </template>
+                </NButton>
+              </span>
+            </NDropdown>
+          </span>
         </NSpace>
       </Panel>
-      <Panel position="top-right" style="margin: 0; height: 100%">
+      <Panel
+        position="top-right"
+        class="node-config-panel-wrapper"
+        style="margin: 0; height: 100%"
+      >
         <NodeConfigPanel
           v-if="selectedNode"
           :selected-node="selectedNode"
@@ -1827,7 +1924,7 @@ const onDrop = (event: DragEvent) => {
           :type-compatibility="typeCompatibility"
         />
       </Panel>
-      <Panel position="top-left" style="margin: 0; height: 100%">
+      <Panel position="top-left" class="node-list-panel-wrapper" style="margin: 0; height: 100%">
         <NodeListPanel :block-types="props.blockTypes"></NodeListPanel>
       </Panel>
       <!-- 画布内节点搜索：由左下角控件里的放大镜切换显示 -->
@@ -2041,6 +2138,15 @@ const onDrop = (event: DragEvent) => {
   max-width: calc(100vw - 600px);
 }
 
+/* Panel 父层各自形成层叠上下文，显式保证配置抽屉可以覆盖节点列表。 */
+.vue-flow__panel.node-list-panel-wrapper {
+  z-index: 90;
+}
+
+.vue-flow__panel.node-config-panel-wrapper {
+  z-index: 120;
+}
+
 .toolbar > * {
   margin: 0 0.5rem;
 }
@@ -2059,7 +2165,7 @@ const onDrop = (event: DragEvent) => {
   border-radius: var(--radius-sm);
   overflow: hidden;
   box-shadow: var(--box-shadow, 0 4px 12px rgba(0, 0, 0, 0.1));
-  background: var(--elevated-bg-color, #ffffff);
+  background: var(--minimap-bg-color, var(--elevated-bg-color, #ffffff));
   border: 1px solid var(--border-color, #e5e7eb);
 }
 
@@ -2179,6 +2285,7 @@ const onDrop = (event: DragEvent) => {
 @media (max-width: 640px) {
   .toolbar {
     padding: 0.375rem;
+    justify-content: flex-start;
   }
 
   .toolbar > * {
@@ -2187,6 +2294,14 @@ const onDrop = (event: DragEvent) => {
 
   .toolbar-divider {
     display: none;
+  }
+
+  .toolbar-secondary {
+    display: none;
+  }
+
+  .toolbar-overflow {
+    display: inline-flex;
   }
 
   .validation-badge {
@@ -2198,7 +2313,16 @@ const onDrop = (event: DragEvent) => {
 }
 
 .toolbar-button {
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+    background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+    color 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.toolbar-dropdown-trigger {
+  display: inline-flex;
 }
 
 .toolbar-button:hover {
@@ -2261,7 +2385,7 @@ const onDrop = (event: DragEvent) => {
 
 /* 添加边缘选中样式 */
 .workflow-edge {
-  transition: all 0.2s ease;
+  transition: stroke-width 0.2s ease, opacity 0.2s ease, filter 0.2s ease;
 }
 
 .workflow-edge.selected {
