@@ -326,39 +326,39 @@
 - Produces: `GET /api/system/readiness`, additive workflow catalog metadata, `ExtensionCapabilities`, permission-checked lifecycle hook registration, and MCP audit events.
 - Consumes: existing workflow validation, dispatch preview/reachability, PluginLoader, PluginEventBus, MCPServerManager, and bundled presets.
 
-- [ ] **Step 1: Test readiness diagnostics**
+- [x] **Step 1: Test readiness diagnostics**
 
   Assert stable check IDs for writable data directories, configuration parseability, workflow validity, dispatch target existence, configured IM/LLM availability, and optional MCP health. Secret values must never appear in responses or logs.
 
-- [ ] **Step 2: Test preset catalog completeness**
+- [x] **Step 2: Test preset catalog completeness**
 
   Require every bundled YAML to have a stable ID, Chinese name, concise purpose, prerequisites, trigger examples, capabilities, and difficulty. Validate all referenced workflows and example dispatch previews.
 
-- [ ] **Step 3: Test extension manifests and permissions**
+- [x] **Step 3: Test extension manifests and permissions**
 
   A plugin with no manifest retains current behavior. A declared hook requires a known lifecycle name and capability. Undeclared file, network, process, config-write, or secret access is rejected and audited. MCP tool/resource/prompt calls include server, operation, duration, outcome, and redacted error metadata.
 
-- [ ] **Step 4: Implement additive readiness API**
+- [x] **Step 4: Implement additive readiness API**
 
   Return `ready`, timestamp, and ordered checks with `id`, `status`, `summary`, `remediation`, and non-secret evidence. Checks are local and bounded by per-check timeouts.
 
-- [ ] **Step 5: Implement preset catalog without changing YAML semantics**
+- [x] **Step 5: Implement preset catalog without changing YAML semantics**
 
   Catalog metadata is separate from workflow YAML. Existing IDs and trigger behavior remain unchanged. API responses add optional metadata fields so older clients continue working.
 
-- [ ] **Step 6: Add concrete extension capability manifests**
+- [x] **Step 6: Add concrete extension capability manifests**
 
   Define lifecycle names around current events: startup completed, shutdown requested, workflow before/after/error, dispatch preview, model catalog refreshed, and MCP operation. Implement registration through PluginEventBus with allowlisted capabilities and structured audit records.
 
-- [ ] **Step 7: Model Agents and Skills as compositions, not new runtimes**
+- [x] **Step 7: Model Agents and Skills as compositions, not new runtimes**
 
   Document and validate an Agent as a workflow plus model/tool/memory policy metadata; model a Skill as a versioned workflow template with inputs, outputs, prerequisites, and examples. Do not introduce a second executor or bypass Block validation.
 
-- [ ] **Step 8: Verify first-run and extension tests**
+- [x] **Step 8: Verify first-run and extension tests**
 
   Run: `uv run --isolated --frozen --python 3.11 python -m pytest tests/web/api/system/test_readiness.py tests/test_preset_catalog.py tests/test_extension_manifest.py tests/test_mcp_server.py -q`
 
-- [ ] **Step 9: Commit readiness and extension controls**
+- [x] **Step 9: Commit readiness and extension controls**
 
   Commit with message `feat: add readiness and extension contracts`.
 
