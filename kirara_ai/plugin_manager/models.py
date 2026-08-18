@@ -67,7 +67,7 @@ class ExtensionManifest(BaseModel):
     name: str
     version: str
     capabilities: ExtensionCapabilities = Field(
-        default_factory=lambda: ExtensionCapabilities()
+        default_factory=ExtensionCapabilities.model_construct
     )
     hooks: List[LifecycleHook] = Field(default_factory=list)
 
