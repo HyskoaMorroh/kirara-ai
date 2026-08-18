@@ -28,7 +28,7 @@ class PluginLoader:
         self.internal_plugins: List[str] = []
         self.config = self.container.resolve(GlobalConfig)
         self.event_bus = self.container.resolve(EventBus)
-        self.extension_audit_records = deque(maxlen=1000)
+        self.extension_audit_records: deque[dict[str, object]] = deque(maxlen=1000)
         if self.container.has(ExtensionLifecycleHost):
             self.extension_host = self.container.resolve(ExtensionLifecycleHost)
         else:

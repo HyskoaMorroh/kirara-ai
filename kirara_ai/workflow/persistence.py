@@ -127,8 +127,7 @@ class FileTransaction:
         pattern = f"{cls.JOURNAL_PREFIX}*{cls.JOURNAL_SUFFIX}"
         for journal_path in sorted(root.glob(pattern)):
             journal = cls._read_journal(journal_path)
-            entries = journal["entries"]
-            cls._validate_recovery_entries(root, entries)
+            entries = cls._validate_recovery_entries(root, journal["entries"])
 
             if journal.get("state") == "rolling_back":
                 if not cls._rollback_entries(entries):
@@ -249,9 +248,10 @@ class FileTransaction:
     @classmethod
     def _validate_recovery_entries(
         cls, root: Path, entries: object
-    ) -> None:
+    ) -> list[dict[str, object]]:
         if not isinstance(entries, list) or not entries:
             raise ValueError("Invalid file transaction journal entries")
+        validated_entries: list[dict[str, object]] = []
         for entry in entries:
             if not isinstance(entry, dict):
                 raise ValueError("Invalid file transaction journal entry")
@@ -287,6 +287,8 @@ class FileTransaction:
                 entry.get("had_target"), bool
             ):
                 raise ValueError("Invalid transaction operation flags")
+            validated_entries.append(entry)
+        return validated_entries
 
     @classmethod
     def _read_journal(cls, journal_path: Path) -> dict[str, object]:

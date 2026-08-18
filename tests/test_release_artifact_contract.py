@@ -9,12 +9,6 @@ from pathlib import Path
 
 import pytest
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_VERSION = "3.3.0a7"
 WEBUI_PACKAGE_VERSION = "3.3.0-a7"
@@ -44,9 +38,20 @@ FORBIDDEN_DISTRIBUTION_PARTS = (
 )
 
 
+def _load_toml(file) -> dict:
+    try:
+        import tomllib
+
+        return tomllib.load(file)
+    except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+        import tomli
+
+        return tomli.load(file)
+
+
 def _project_metadata() -> dict:
     with (PROJECT_ROOT / "pyproject.toml").open("rb") as file:
-        return tomllib.load(file)
+        return _load_toml(file)
 
 
 def _locked_project_version() -> str:

@@ -15,6 +15,7 @@ from kirara_ai.llm.adapter import AutoDetectModelsProtocol
 from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.logger import get_logger
 from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
+from kirara_ai.plugin_manager.models import LifecycleName
 from kirara_ai.scheduler.model_catalog import (
     backend_config_fingerprint,
     model_catalogs_equal,
@@ -109,7 +110,9 @@ class TaskScheduler:
         elapsed_days = (datetime.now() - last_time).total_seconds() / 86400
         return elapsed_days >= interval_days
 
-    def _emit_lifecycle(self, lifecycle: str, payload: Dict[str, Any]) -> None:
+    def _emit_lifecycle(
+        self, lifecycle: LifecycleName, payload: Dict[str, Any]
+    ) -> None:
         has_dependency = getattr(self.container, "has", None)
         if callable(has_dependency) and has_dependency(ExtensionLifecycleHost):
             self.container.resolve(ExtensionLifecycleHost).emit(lifecycle, payload)

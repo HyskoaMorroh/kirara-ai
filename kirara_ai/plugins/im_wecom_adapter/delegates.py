@@ -192,8 +192,8 @@ def split_long_message(text: str, max_length: int = 1800) -> list[str]:
     if len(text.encode('utf-8')) <= max_length:
         return [text]
 
-    chunks = []
-    current_chunk = []
+    chunks: list[str] = []
+    current_chunk: list[str] = []
     current_size = 0
 
     # 按段落分割（保留双换行分隔的结构）
@@ -220,7 +220,7 @@ def split_long_message(text: str, max_length: int = 1800) -> list[str]:
             elif lines and lines[0].startswith("［代码"):
                 sub_chunks = _split_code_block(lines, max_length)
             else:
-                line_chunk = []
+                line_chunk: list[str] = []
                 line_size = 0
 
                 for line in lines:

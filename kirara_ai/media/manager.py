@@ -5,7 +5,7 @@ import json
 import shutil
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, ClassVar, Dict, List, Optional
 
 import aiofiles
 
@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
 class MediaManager:
     """媒体管理器，负责媒体文件的注册、引用计数和生命周期管理"""
+
+    _instance: ClassVar[Optional["MediaManager"]] = None
     
     def __init__(self, media_dir: str = "data/media"):
         self.media_dir = Path(media_dir)
@@ -622,7 +624,7 @@ class MediaManager:
         return Media(media_id=media_id, media_manager=self)
     
     def __new__(cls, *args, **kwargs) -> "MediaManager":
-        if not hasattr(cls, "_instance"):
+        if not hasattr(cls, "_instance") or cls._instance is None:
             print("new MediaManager")
             cls._instance = super(MediaManager, cls).__new__(cls)
         return cls._instance

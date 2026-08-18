@@ -43,11 +43,14 @@ class UpdateCheckResponse(BaseModel):
     webui_download_url: Optional[str]
 
 
+ReadinessStatus = Literal["pass", "warn", "fail", "skip"]
+
+
 class ReadinessCheck(BaseModel):
     """One stable, non-secret first-run diagnostic."""
 
     id: str
-    status: Literal["pass", "warn", "fail", "skip"]
+    status: ReadinessStatus
     summary: str
     remediation: str
     evidence: Dict[str, Any]
