@@ -242,7 +242,7 @@ def test_windows_release_archive_uses_exact_paths_and_excludes_private_data():
 
 
 def test_release_workflows_reject_unexpected_manual_version_tags():
-    """Manual release entry points cannot bypass the checked release identity."""
+    """Release entry points derive the accepted tag from the checked source."""
     latest = (PROJECT_ROOT / ".github" / "workflows" / "docker-latest.yml").read_text(
         encoding="utf-8"
     )
@@ -250,8 +250,16 @@ def test_release_workflows_reject_unexpected_manual_version_tags():
         encoding="utf-8"
     )
 
-    assert 'RELEASE_TAG" != "v3.3.0a7"' in latest
-    assert 'TAG_NAME" != "v3.3.0a7"' in tagged
+    for workflow in (latest, tagged):
+        assert "pyproject.toml" in workflow
+        assert 'PROJECT_VERSION="$(python3 - <<' in workflow
+        assert 'EXPECTED_TAG="v${PROJECT_VERSION}"' in workflow
+        assert 'if [ "$TAG_NAME" != "$EXPECTED_TAG" ]; then' in workflow or (
+            'if [ "$RELEASE_TAG" != "$EXPECTED_TAG" ]; then' in workflow
+        )
+        assert "v3.3.0a7" not in workflow
+    assert 'if [ "$RELEASE_TAG" != "$EXPECTED_TAG" ]; then' in latest
+    assert 'if [ "$TAG_NAME" != "$EXPECTED_TAG" ]; then' in tagged
     assert "workflow_dispatch:" not in latest.split("release:", maxsplit=1)[0]
     assert 'GITHUB_REF_TYPE" != "tag"' in tagged
     assert 'GITHUB_REF_NAME" != "$TAG_NAME"' in tagged

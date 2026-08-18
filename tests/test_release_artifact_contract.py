@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PYTHON_VERSION = "3.3.0a7"
-WEBUI_PACKAGE_VERSION = "3.3.0-a7"
+PYTHON_VERSION = "3.3.0b7"
+WEBUI_PACKAGE_VERSION = "3.3.0-b7"
 
 REQUIRED_DISTRIBUTION_PATHS = (
     "kirara_ai/backup/service.py",

@@ -102,17 +102,25 @@ jobs:
           "$RUNNER_TEMP/kirara-wheel-smoke/bin/python" -m pip install --upgrade pip
           "$RUNNER_TEMP/kirara-wheel-smoke/bin/python" -m pip install --no-cache-dir dist-release-check/*.whl
           "$RUNNER_TEMP/kirara-wheel-smoke/bin/kirara_ai" --help >/dev/null
+          expected_version="$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          print(tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])
+          PY
+          )"
           cd "$RUNNER_TEMP"
-          "$RUNNER_TEMP/kirara-wheel-smoke/bin/python" - <<'PY'
+          EXPECTED_RELEASE_VERSION="$expected_version" "$RUNNER_TEMP/kirara-wheel-smoke/bin/python" - <<'PY'
           import importlib.metadata
           import importlib.util
+          import os
           import pathlib
 
           import kirara_ai
 
           root = pathlib.Path(next(iter(importlib.util.find_spec("kirara_ai").submodule_search_locations)))
           assert pathlib.Path.cwd() != root.parent, (pathlib.Path.cwd(), root)
-          assert importlib.metadata.version("kirara-ai") == "3.3.0a7"
+          assert importlib.metadata.version("kirara-ai") == os.environ["EXPECTED_RELEASE_VERSION"]
           assert (root / "workflow" / "presets" / "catalog.json").is_file()
           assert (root / "workflow" / "presets" / "chat" / "mcp_tools.yaml").is_file()
           assert (root / "web" / "static" / "backup.html").is_file()

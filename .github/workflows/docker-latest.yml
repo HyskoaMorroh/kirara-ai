@@ -32,6 +32,11 @@ jobs:
       contents: read
     steps:
       -
+        name: Checkout release source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || github.sha }}
+      -
         name: Verify publish eligibility
         id: release
         env:
@@ -47,8 +52,16 @@ jobs:
             exit 0
           fi
 
-          if [ "$RELEASE_TAG" != "v3.3.0a7" ]; then
-            echo "Only v3.3.0a7 is eligible for this release workflow; got $RELEASE_TAG."
+          PROJECT_VERSION="$(python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          print(tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])
+          PY
+          )"
+          EXPECTED_TAG="v${PROJECT_VERSION}"
+          if [ "$RELEASE_TAG" != "$EXPECTED_TAG" ]; then
+            echo "Only $EXPECTED_TAG is eligible for this release workflow; got $RELEASE_TAG."
             exit 1
           fi
 
@@ -76,12 +89,6 @@ jobs:
           echo "publish=true" >> $GITHUB_OUTPUT
           echo "publish_latest=true" >> $GITHUB_OUTPUT
           echo "Published release $RELEASE_TAG is the current Latest release; Docker Hub publish approved." >> $GITHUB_STEP_SUMMARY
-      -
-        name: Checkout
-        uses: actions/checkout@v6
-        if: steps.release.outputs.publish == 'true'
-        with:
-          ref: ${{ github.event.release.tag_name || github.sha }}
       -
         name: Resolve image name
         id: image

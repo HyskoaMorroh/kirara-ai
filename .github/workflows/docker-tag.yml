@@ -28,20 +28,33 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
+      -
+        name: Checkout tagged source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
       - name: Set output
         id: vars
         run: |
           TAG_NAME="${{ inputs.image_tag }}"
-           if [ -z "$TAG_NAME" ]; then
-             echo "Set image_tag before manually publishing a versioned image."
-             exit 1
-           fi
-           if [ "$GITHUB_REF_TYPE" != "tag" ] || [ "$GITHUB_REF_NAME" != "$TAG_NAME" ]; then
-             echo "Run this workflow from the matching Git tag, not a branch or another ref."
-             exit 1
-           fi
-           if [ "$TAG_NAME" != "v3.3.0a7" ]; then
-            echo "image_tag must be v3.3.0a7 for this release."
+          if [ -z "$TAG_NAME" ]; then
+            echo "Set image_tag before manually publishing a versioned image."
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" != "tag" ] || [ "$GITHUB_REF_NAME" != "$TAG_NAME" ]; then
+            echo "Run this workflow from the matching Git tag, not a branch or another ref."
+            exit 1
+          fi
+          PROJECT_VERSION="$(python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          print(tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])
+          PY
+          )"
+          EXPECTED_TAG="v${PROJECT_VERSION}"
+          if [ "$TAG_NAME" != "$EXPECTED_TAG" ]; then
+            echo "image_tag must match project version ($EXPECTED_TAG); got $TAG_NAME."
             exit 1
           fi
           echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
@@ -51,9 +64,6 @@ jobs:
         run: |
           echo $RELEASE_VERSION
           echo ${{ steps.vars.outputs.tag }}
-      -
-        name: Checkout
-        uses: actions/checkout@v6
       -
         name: Resolve image name
         id: image
