@@ -168,6 +168,9 @@ def test_release_preflight_checks_contracts_and_the_versioned_webui_build():
     assert "yarn build" in workflow
     # vitest 与 vue-tsc 都必须是门禁的一部分，否则前端回归只能靠人工发现
     assert "yarn test:unit" in workflow
+    assert '(root / "assets").rglob("*")' in workflow
+    assert 'if path.is_file()' in workflow
+    assert 'unexpected_dev_versions' in workflow
 
 
 def test_the_backend_suite_gates_every_pull_request():
@@ -230,6 +233,7 @@ def test_windows_release_archive_uses_exact_paths_and_excludes_private_data():
     assert "docs/LOGO.jpg" in (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
     assert f"EXPECTED_UI_VERSION: {dynamic_version}" in workflow
     assert "Bundled Web UI does not contain" in workflow
+    assert "unexpectedDevVersions" in workflow
     assert "uses: ./.github/workflows/release-preflight.yml" in workflow
     assert "run_backend_and_image: true" in workflow
     assert "Get-ChildItem -Path \"${{ env.DIST_DIR }}\" -Recurse -Force -File" in workflow
