@@ -4,12 +4,10 @@ import os
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 from pathlib import Path
 
-from packaging import version
 from quart import Blueprint, current_app, g, request, send_file, websocket
 
 from kirara_ai.backup import BackupService, BackupValidationError
@@ -25,8 +23,9 @@ from kirara_ai.logger import WebSocketLogHandler, get_logger
 from kirara_ai.plugin_manager.plugin_loader import PluginLoader
 from kirara_ai.web.api.system.utils import (WEBUI_DIST_TAG, download_file, get_cpu_info, get_cpu_usage,
                                             get_installed_version, get_latest_npm_version, get_latest_pypi_version,
-                                            get_memory_usage)
+                                            get_memory_usage, is_newer_release, parse_release_version)
 from kirara_ai.web.auth.services import AuthService
+from kirara_ai.web.utils import get_installed_webui_version, install_webui_archive
 from kirara_ai.workflow.core.block.registry import BlockRegistry
 from kirara_ai.workflow.core.dispatch import DispatchRuleRegistry
 from kirara_ai.workflow.core.workflow import WorkflowRegistry
@@ -413,9 +412,12 @@ async def check_update():
     """检查系统更新"""
     config: GlobalConfig = g.container.resolve(GlobalConfig)
     npm_registry = config.update.npm_registry
+    pypi_registry = config.update.pypi_registry
     
     current_backend_version = get_installed_version()
-    latest_backend_version, backend_download_url = await get_latest_pypi_version("kirara-ai")
+    latest_backend_version, backend_download_url = await get_latest_pypi_version(
+        "kirara-ai", pypi_registry
+    )
     
     # 获取前端最新版本信息，但不判断是否需要更新
     # 与自动安装保持一致，取 beta 标签：npm 的 latest (0.1.0) 不兼容 3.3 的
@@ -423,9 +425,31 @@ async def check_update():
     latest_webui_version, webui_download_url = await get_latest_npm_version(
         "kirara-ai-webui", npm_registry, dist_tag=WEBUI_DIST_TAG
     )
-    
-    # 只判断后端是否需要更新
-    backend_update_available = version.parse(latest_backend_version) > version.parse(current_backend_version)
+
+    backend_update_available = is_newer_release(
+        latest_backend_version, current_backend_version
+    )
+    if not backend_update_available:
+        # Registry mirrors can lag behind prereleases. Returning that stale value as
+        # "latest" makes the shared update dialog look like a downgrade even though
+        # installation is blocked below.
+        latest_backend_version = current_backend_version
+        backend_download_url = None
+
+    static_dir = Path(current_app.static_folder or "web")
+    current_webui_version = get_installed_webui_version(static_dir)
+    latest_webui_is_valid = parse_release_version(latest_webui_version) is not None
+    if not latest_webui_is_valid:
+        latest_webui_version = (
+            current_webui_version if current_webui_version != "unknown" else "unknown"
+        )
+        webui_download_url = None
+    elif (
+        current_webui_version not in {"unknown", "0.0.0", ""}
+        and not is_newer_release(latest_webui_version, current_webui_version)
+    ):
+        latest_webui_version = current_webui_version
+        webui_download_url = None
     
     return UpdateCheckResponse(
         current_backend_version=current_backend_version,
@@ -433,7 +457,7 @@ async def check_update():
         backend_update_available=backend_update_available,
         backend_download_url=backend_download_url,
         latest_webui_version=latest_webui_version,
-        webui_download_url=webui_download_url
+        webui_download_url=webui_download_url,
     ).model_dump()
 
 
@@ -441,31 +465,72 @@ async def check_update():
 @require_auth
 async def perform_update():
     """执行更新操作"""
-    data = await request.get_json()
+    data = await request.get_json() or {}
     update_backend = data.get("update_backend", False)
     update_webui = data.get("update_webui", False)
-    temp_dir = tempfile.mkdtemp()
-    
+    if not update_backend and not update_webui:
+        return {"status": "error", "message": "Select at least one component to update"}, 400
+
+    config: GlobalConfig = g.container.resolve(GlobalConfig)
+    backend_target = None
+    webui_target = None
+
     try:
+        # Resolve all targets from trusted server configuration before downloading anything.
         if update_backend:
-            backend_url = data["backend_download_url"]
+            latest, trusted_url = await get_latest_pypi_version(
+                "kirara-ai", config.update.pypi_registry
+            )
+            if not is_newer_release(latest, get_installed_version()):
+                return {
+                    "status": "error",
+                    "message": "Registry does not provide a newer backend version",
+                }, 409
+            if not trusted_url:
+                return {"status": "error", "message": "Backend download URL is unavailable"}, 502
+            backend_target = (latest, trusted_url)
+
+        if update_webui:
+            latest, trusted_url = await get_latest_npm_version(
+                "kirara-ai-webui",
+                config.update.npm_registry,
+                dist_tag=WEBUI_DIST_TAG,
+            )
+            static_dir = Path(current_app.static_folder or "web")
+            installed = get_installed_webui_version(static_dir)
+            if installed in {"unknown", "0.0.0", ""}:
+                return {
+                    "status": "error",
+                    "message": "Installed WebUI version is unknown; automatic update is unsafe",
+                }, 409
+            if not is_newer_release(latest, installed):
+                return {
+                    "status": "error",
+                    "message": "Registry does not provide a newer WebUI version",
+                }, 409
+            if not trusted_url:
+                return {"status": "error", "message": "WebUI download URL is unavailable"}, 502
+            webui_target = (latest, trusted_url, static_dir)
+    except Exception as error:
+        return {"status": "error", "message": f"Unable to resolve update: {error}"}, 502
+
+    temp_dir = tempfile.mkdtemp()
+
+    try:
+        if backend_target:
+            _, backend_url = backend_target
             backend_file, backend_hash = await download_file(backend_url, temp_dir)
+            if not backend_file:
+                raise RuntimeError("Backend download failed")
             # 安装后端
             subprocess.run([sys.executable, "-m", "pip", "install", backend_file], check=True)
-        
-        if update_webui:
-            webui_url = data["webui_download_url"]
+
+        if webui_target:
+            latest_webui_version, webui_url, static_dir = webui_target
             webui_file, webui_hash = await download_file(webui_url, temp_dir)
-            # 解压并安装前端
-            static_dir = current_app.static_folder or "web"
-            with tarfile.open(webui_file, "r:gz") as tar:
-                # 解压 package/dist 里的所有文件到 web 目录
-                for member in tar.getmembers():
-                    if member.name.startswith("package/dist/"):
-                        # 去掉 "package/dist/" 前缀
-                        member.name = member.name[len("package/dist/"):]
-                        # 解压到 static 目录
-                        tar.extract(member, path=static_dir)
+            if not webui_file:
+                raise RuntimeError("WebUI download failed")
+            install_webui_archive(webui_file, static_dir, latest_webui_version)
         
         return {"status": "success", "message": "更新完成"}
     
@@ -473,7 +538,7 @@ async def perform_update():
         return {"status": "error", "message": str(e)}, 500
     
     finally:
-        shutil.rmtree(temp_dir)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @system_bp.route("/restart", methods=["POST"])

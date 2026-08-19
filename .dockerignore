@@ -24,6 +24,7 @@ dist
 # 本机构建/测试缓存（vue-tsc、node、pytest 的临时目录），不参与镜像构建
 .build-tmp
 .npm-cache
+node_modules
 .pytest-tmp
 *.tsbuildinfo
 

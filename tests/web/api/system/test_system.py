@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -141,3 +141,192 @@ class TestSystemStatus:
         assert data["backend_update_available"] == False
         assert data["latest_webui_version"] != "0.0.0"
         assert data["webui_download_url"] != ""
+
+    def test_check_update_never_displays_registry_downgrades(
+        self, test_client, auth_headers
+    ):
+        with patch(
+            "kirara_ai.web.api.system.routes.get_installed_version",
+            return_value="3.3.0b8",
+        ), patch(
+            "kirara_ai.web.api.system.routes.get_installed_webui_version",
+            return_value="3.3.0-b8",
+        ), patch(
+            "kirara_ai.web.api.system.routes.get_latest_pypi_version",
+            AsyncMock(
+                return_value=(
+                    "3.2.0",
+                    "https://files.pythonhosted.org/kirara_ai-3.2.0.whl",
+                )
+            ),
+        ), patch(
+            "kirara_ai.web.api.system.routes.get_latest_npm_version",
+            AsyncMock(
+                return_value=(
+                    "0.1.1-beta.3",
+                    "https://registry.npmjs.org/kirara-ai-webui/-/kirara-ai-webui-0.1.1-beta.3.tgz",
+                )
+            ),
+        ):
+            response = test_client.get(
+                "/backend-api/api/system/check-update", headers=auth_headers
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["latest_backend_version"] == data["current_backend_version"]
+        assert data["backend_update_available"] is False
+        assert data["backend_download_url"] is None
+        assert data["latest_webui_version"] == "3.3.0-b8"
+        assert data["webui_download_url"] is None
+
+    @pytest.mark.parametrize("invalid_version", ["", "unknown", "not-a-version", None])
+    def test_check_update_treats_invalid_registry_versions_as_unavailable(
+        self, test_client, auth_headers, invalid_version
+    ):
+        with patch(
+            "kirara_ai.web.api.system.routes.get_latest_pypi_version",
+            AsyncMock(return_value=(invalid_version, "https://invalid.example/file.whl")),
+        ), patch(
+            "kirara_ai.web.api.system.routes.get_latest_npm_version",
+            AsyncMock(return_value=(invalid_version, "https://invalid.example/file.tgz")),
+        ):
+            response = test_client.get(
+                "/backend-api/api/system/check-update", headers=auth_headers
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["backend_update_available"] is False
+        assert data["backend_download_url"] is None
+        assert data["webui_download_url"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_version", ["", "unknown", "not-a-version", None])
+    async def test_startup_update_check_ignores_invalid_registry_versions(
+        self, invalid_version, caplog
+    ):
+        from kirara_ai import entry
+
+        config = GlobalConfig()
+        with patch(
+            "kirara_ai.entry.get_installed_version", return_value="3.3.0b8"
+        ), patch(
+            "kirara_ai.entry.get_latest_pypi_version",
+            AsyncMock(return_value=(invalid_version, "")),
+        ):
+            await entry.check_update(config)
+
+        assert "available" not in caplog.text.lower()
+
+
+class TestSystemUpdate:
+    def test_backend_update_ignores_client_download_url(
+        self, test_client, auth_headers
+    ):
+        trusted_url = "https://files.pythonhosted.org/kirara_ai-3.3.0b8.whl"
+        download = AsyncMock(return_value=("trusted.whl", "sha256"))
+
+        with patch(
+            "kirara_ai.web.api.system.routes.get_installed_version",
+            return_value="3.3.0b7",
+        ), patch(
+            "kirara_ai.web.api.system.routes.get_latest_pypi_version",
+            AsyncMock(return_value=("3.3.0b8", trusted_url)),
+        ) as lookup, patch(
+            "kirara_ai.web.api.system.routes.download_file", download
+        ), patch("kirara_ai.web.api.system.routes.subprocess.run") as install:
+            response = test_client.post(
+                "/backend-api/api/system/update",
+                headers=auth_headers,
+                json={
+                    "update_backend": True,
+                    "update_webui": False,
+                    "backend_download_url": "https://attacker.invalid/old.whl",
+                },
+            )
+
+        assert response.status_code == 200
+        assert download.await_args.args[0] == trusted_url
+        assert "attacker.invalid" not in download.await_args.args[0]
+        assert lookup.await_args.args == (
+            "kirara-ai",
+            "https://pypi.org/simple",
+        )
+        install.assert_called_once()
+
+    def test_backend_update_rejects_same_or_older_version_before_download(
+        self, test_client, auth_headers
+    ):
+        download = AsyncMock()
+
+        with patch(
+            "kirara_ai.web.api.system.routes.get_installed_version",
+            return_value="3.3.0b8",
+        ), patch(
+            "kirara_ai.web.api.system.routes.get_latest_pypi_version",
+            AsyncMock(
+                return_value=(
+                    "3.3.0b7",
+                    "https://files.pythonhosted.org/kirara_ai-3.3.0b7.whl",
+                )
+            ),
+        ), patch(
+            "kirara_ai.web.api.system.routes.download_file", download
+        ), patch("kirara_ai.web.api.system.routes.subprocess.run") as install:
+            response = test_client.post(
+                "/backend-api/api/system/update",
+                headers=auth_headers,
+                json={
+                    "update_backend": True,
+                    "backend_download_url": "https://attacker.invalid/old.whl",
+                },
+            )
+
+        assert response.status_code == 409
+        assert "newer" in response.json()["message"].lower()
+        download.assert_not_awaited()
+        install.assert_not_called()
+
+    def test_webui_update_uses_registry_url_and_rejects_downgrade(
+        self, test_client, auth_headers
+    ):
+        trusted_url = "https://registry.npmjs.org/kirara-ai-webui/-/kirara-ai-webui-3.3.0-b7.tgz"
+        download = AsyncMock()
+
+        with patch(
+            "kirara_ai.web.api.system.routes.get_installed_webui_version",
+            return_value="3.3.0-b8",
+            create=True,
+        ), patch(
+            "kirara_ai.web.api.system.routes.get_latest_npm_version",
+            AsyncMock(return_value=("3.3.0-b7", trusted_url)),
+        ) as lookup, patch(
+            "kirara_ai.web.api.system.routes.download_file", download
+        ):
+            response = test_client.post(
+                "/backend-api/api/system/update",
+                headers=auth_headers,
+                json={
+                    "update_webui": True,
+                    "webui_download_url": "https://attacker.invalid/old.tgz",
+                },
+            )
+
+        assert response.status_code == 409
+        assert "newer" in response.json()["message"].lower()
+        lookup.assert_awaited_once_with(
+            "kirara-ai-webui",
+            "https://registry.npmjs.org",
+            dist_tag="beta",
+        )
+        download.assert_not_awaited()
+
+    def test_update_requires_at_least_one_component(self, test_client, auth_headers):
+        response = test_client.post(
+            "/backend-api/api/system/update",
+            headers=auth_headers,
+            json={"update_backend": False, "update_webui": False},
+        )
+
+        assert response.status_code == 400

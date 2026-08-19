@@ -39,14 +39,32 @@ permissions:
   contents: read
 
 jobs:
+  version:
+    name: Version synchronization
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Verify synchronized versions
+        run: python scripts/version.py check
+
   backend-and-image:
     name: Backend matrix and Docker smoke
+    needs: version
     if: ${{ inputs.run_backend_and_image }}
     uses: ./.github/workflows/run-tests.yml
     secrets: inherit
 
   contracts:
     name: Release contracts
+    needs: version
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -61,6 +79,7 @@ jobs:
       - name: Run release contract checks
         run: |
           python -m pip install --upgrade pip pytest uv
+          python scripts/version.py check
           uv build --out-dir dist-release-check
           python - <<'PY'
           import os
@@ -102,13 +121,7 @@ jobs:
           "$RUNNER_TEMP/kirara-wheel-smoke/bin/python" -m pip install --upgrade pip
           "$RUNNER_TEMP/kirara-wheel-smoke/bin/python" -m pip install --no-cache-dir dist-release-check/*.whl
           "$RUNNER_TEMP/kirara-wheel-smoke/bin/kirara_ai" --help >/dev/null
-          expected_version="$(python - <<'PY'
-          import tomllib
-          from pathlib import Path
-
-          print(tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])
-          PY
-          )"
+          expected_version="$(python scripts/version.py get)"
           cd "$RUNNER_TEMP"
           EXPECTED_RELEASE_VERSION="$expected_version" "$RUNNER_TEMP/kirara-wheel-smoke/bin/python" - <<'PY'
           import importlib.metadata
@@ -134,6 +147,7 @@ jobs:
 
   webui:
     name: WebUI type check, unit tests and production build
+    needs: version
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -147,11 +161,18 @@ jobs:
           cache: yarn
           cache-dependency-path: webui/yarn.lock
 
+      - name: Verify synchronized versions
+        run: python scripts/version.py check
+
       - name: Install WebUI dependencies
         working-directory: webui
         run: |
           corepack enable
           yarn install --frozen-lockfile
+
+      - name: Resolve project release identity
+        id: version
+        run: echo "tag=$(python scripts/version.py tag)" >> "$GITHUB_OUTPUT"
 
       # 三步拆成独立 step：日志里能直接看出是类型、测试还是打包炸了，
       # 不必翻一大段合并输出。顺序保持「最便宜的先跑」。
@@ -166,8 +187,7 @@ jobs:
       - name: Build production WebUI
         working-directory: webui
         env:
-          # 发布事件使用 release tag；PR、push 与手动门禁使用可追溯的 commit 标识。
-          VITE_APP_VERSION: ${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}
+          VITE_APP_VERSION: ${{ steps.version.outputs.tag }}
         # 这里刻意跑 `yarn build`（= run-p type-check build-only）而不是
         # `build-only`：Dockerfile 与 Windows 快速启动包用的就是 `yarn build`，
         # 门禁必须验证那条真实命令能跑通。代价是 type-check 跑了两遍（约 30s），
@@ -177,38 +197,25 @@ jobs:
       - name: Verify built WebUI release identity and asset manifest
         working-directory: webui
         env:
-          EXPECTED_UI_VERSION: ${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}
+          EXPECTED_UI_VERSION: ${{ steps.version.outputs.tag }}
         run: |
           python - <<'PY'
-          import re
+          import json
           import os
+          import re
+          import subprocess
           from pathlib import Path
 
           root = Path("dist")
           index = root / "index.html"
           assert index.is_file(), "missing production index.html"
-          files = [
-              index,
-              *sorted(
-                  path
-                  for path in (root / "assets").rglob("*")
-                  if path.is_file()
-              ),
-          ]
-          text = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in files)
+          metadata = json.loads((root / "version.json").read_text(encoding="utf-8"))
           expected = os.environ["EXPECTED_UI_VERSION"]
-          assert expected in text, f"production build is missing {expected}"
-          assert "0.0.0-ci" not in text, "production build contains 0.0.0-ci"
-          dev_versions = set(re.findall(r"dev-[0-9a-f]{7,40}", text, re.IGNORECASE))
-          unexpected_dev_versions = (
-              dev_versions - {expected}
-              if expected.lower().startswith("dev-")
-              else dev_versions
-          )
-          assert not unexpected_dev_versions, (
-              "production build contains unexpected dev versions: "
-              f"{sorted(unexpected_dev_versions)}"
-          )
+          package_version = subprocess.check_output(
+              ["python", "../scripts/version.py", "npm"], text=True
+          ).strip()
+          assert metadata["version"] == expected, metadata
+          assert metadata["packageVersion"] == package_version, metadata
           for asset in re.findall(r'(?:src|href)="/?(assets/[^"?#]+)', index.read_text(encoding="utf-8")):
               assert (root / asset).is_file(), f"index references missing asset: {asset}"
           print("WebUI release identity and asset manifest OK")
@@ -225,6 +232,7 @@ jobs:
 
   webui-lint:
     name: WebUI lint report (non-blocking)
+    needs: version
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

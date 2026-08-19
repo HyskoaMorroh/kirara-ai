@@ -50,37 +50,42 @@ jobs:
       - name: Set output
         id: vars
         run: |
-          TAG_NAME="${{ inputs.image_tag }}"
-          if [ -z "$TAG_NAME" ]; then
+          INPUT_TAG="${{ inputs.image_tag }}"
+          if [ -z "$INPUT_TAG" ]; then
             echo "Set image_tag before manually publishing a versioned image."
             exit 1
           fi
-          PROJECT_VERSION="$(python3 - <<'PY'
-          import tomllib
-          from pathlib import Path
-
-          print(tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])
-          PY
-          )"
-          EXPECTED_TAG="v${PROJECT_VERSION}"
-          if [ "$TAG_NAME" != "$EXPECTED_TAG" ]; then
-            echo "image_tag must match project version ($EXPECTED_TAG); got $TAG_NAME."
+          git_tag="$(python3 scripts/version.py tag)"
+          image_version="$(python3 scripts/version.py get)"
+          if [ "$INPUT_TAG" != "$git_tag" ]; then
+            echo "image_tag must match the source Git tag ($git_tag); got $INPUT_TAG."
             exit 1
           fi
-          echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
+          python3 scripts/version.py check --tag "$git_tag"
+          echo "git_tag=$git_tag" >> "$GITHUB_OUTPUT"
+          echo "image_version=$image_version" >> "$GITHUB_OUTPUT"
       - name: Check output
         env:
-          RELEASE_VERSION: ${{ steps.vars.outputs.tag }}
+          RELEASE_GIT_TAG: ${{ steps.vars.outputs.git_tag }}
+          RELEASE_VERSION: ${{ steps.vars.outputs.image_version }}
         run: |
-          echo $RELEASE_VERSION
-          echo ${{ steps.vars.outputs.tag }}
+          echo "Git tag: $RELEASE_GIT_TAG"
+          echo "Image version: $RELEASE_VERSION"
       -
         name: Resolve image name
         id: image
+        env:
+          IMAGE_NAME_VARIABLE: ${{ vars.DOCKERHUB_IMAGE }}
+          IMAGE_NAME_SECRET: ${{ secrets.DOCKERHUB_IMAGE }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
-          IMAGE_NAME="${{ vars.DOCKERHUB_IMAGE }}"
+          IMAGE_NAME="${IMAGE_NAME_VARIABLE:-$IMAGE_NAME_SECRET}"
           if [ -z "$IMAGE_NAME" ]; then
-            IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/kirara-agent-framework"
+            IMAGE_NAME="${DOCKERHUB_USERNAME}/kirara-agent-framework"
+          fi
+          if [ -z "$IMAGE_NAME" ]; then
+            echo "Set DOCKERHUB_IMAGE as a repository variable or secret, or set DOCKERHUB_USERNAME before publishing."
+            exit 1
           fi
           echo "name=$IMAGE_NAME" >> $GITHUB_OUTPUT
           echo "Resolved image name: $IMAGE_NAME"
@@ -106,8 +111,8 @@ jobs:
           context: .
           push: true
           platforms: 'linux/amd64,linux/arm64'
-          tags: ${{ steps.image.outputs.name }}:${{ steps.vars.outputs.tag }}
+          tags: ${{ steps.image.outputs.name }}:${{ steps.vars.outputs.image_version }}
           build-args: |
-            VITE_APP_VERSION=${{ steps.vars.outputs.tag }}
+            VITE_APP_VERSION=${{ steps.vars.outputs.git_tag }}
           cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
           cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true

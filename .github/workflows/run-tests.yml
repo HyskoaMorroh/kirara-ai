@@ -50,8 +50,20 @@ env:
   UV_DEFAULT_INDEX: https://pypi.org/simple
 
 jobs:
+  version:
+    name: Version synchronization
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Verify synchronized versions
+        run: python scripts/version.py check
+
   static:
     name: Static checks
+    needs: version
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -87,6 +99,7 @@ jobs:
 
   backend:
     name: Backend suite (ubuntu, py3.11)
+    needs: version
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -141,6 +154,7 @@ jobs:
 
   backend-matrix:
     name: Backend suite (${{ matrix.os }}, py${{ matrix.python-version }})
+    needs: version
     if: >-
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'ci:full')
@@ -185,7 +199,7 @@ jobs:
   docker-image:
     name: Docker image validation
     # 便宜的原生测试先过，才值得花时间做多阶段镜像构建。
-    needs: backend
+    needs: [version, backend]
     if: >-
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'ci:full')
@@ -198,6 +212,10 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Resolve project release identity
+        id: version
+        run: echo "tag=$(python scripts/version.py tag)" >> "$GITHUB_OUTPUT"
+
       - name: Build runtime image
         uses: docker/build-push-action@v6
         with:
@@ -205,7 +223,7 @@ jobs:
           load: true
           tags: kirara-ai:ci
           build-args: |
-            VITE_APP_VERSION=${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}
+            VITE_APP_VERSION=${{ steps.version.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -245,6 +263,7 @@ jobs:
         run: |
           docker run --rm kirara-ai:ci sh -c '
             test -f /app/web/index.html &&
+            test -f /app/web/version.json &&
             ls /app/web/assets/*.js >/dev/null &&
             echo "bundled WebUI OK"
           '

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kirara-ai"
-version = "3.3.0b7"
+version = "3.3.0b8"
 authors = [
     { name="Lss233", email="i@lss233.com" },
 ]
@@ -21,6 +21,7 @@ license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 
 dependencies = [
+    "packaging>=23.0",
     "pydantic>=2.0.0",
     "pydantic-core>=2.27.2",
     "ruamel.yaml",

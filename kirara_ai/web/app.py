@@ -16,7 +16,11 @@ from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.logger import HypercornLoggerWrapper, get_logger
 from kirara_ai.web.auth.services import AuthService, FileBasedAuthService
-from kirara_ai.web.utils import create_no_cache_response, install_webui
+from kirara_ai.web.utils import (
+    create_no_cache_response,
+    get_installed_webui_version,
+    install_webui,
+)
 
 from .api.block import block_bp
 from .api.dispatch import dispatch_bp
@@ -347,10 +351,11 @@ class WebServer:
         custom_static_assets[url_path] = local_path
 
     def _check_and_install_webui(self):
-        """检查WebUI是否存在，如果不存在则尝试自动安装"""
+        """Install a missing WebUI or migrate legacy builds without metadata."""
         index_path = Path(STATIC_FOLDER) / "index.html"
-        if not index_path.exists():
-            logger.info("检测到WebUI不存在，将在服务器启动后自动安装...")
+        installed_version = get_installed_webui_version(Path(STATIC_FOLDER))
+        if not index_path.is_file() or installed_version == "unknown":
+            logger.info("检测到WebUI缺失或版本元数据无效，将在服务器启动后自动安装...")
             # 创建异步任务，但不等待完成
             self._webui_install_task = asyncio.create_task(self._install_webui())
         

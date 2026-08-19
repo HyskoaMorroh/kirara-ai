@@ -1,6 +1,6 @@
 {
   "name": "kirara-ai-webui",
-  "version": "3.3.0-b7",
+  "version": "3.3.0-b8",
   "author": "lss233",
   "license": "MIT",
   "publishConfig": {
@@ -74,6 +74,10 @@
     "vue-tsc": "^1.6.4"
   },
   "resolutions": {
-    "monaco-editor": "npm:@codingame/monaco-vscode-editor-api@~15.0.3"
+    "monaco-editor": "npm:@codingame/monaco-vscode-editor-api@~15.0.3",
+    "lodash": "4.18.1",
+    "lodash-es": "4.18.1",
+    "postcss": "8.5.26",
+    "nanoid": "3.3.18"
   }
 }

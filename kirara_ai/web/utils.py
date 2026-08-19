@@ -1,9 +1,12 @@
 import asyncio
+import json
 import os
+import shutil
 import tarfile
 import tempfile
 import time
-from pathlib import Path
+import uuid
+from pathlib import Path, PurePosixPath
 
 import aiohttp
 from fastapi import HTTPException, Request
@@ -13,6 +16,119 @@ from kirara_ai.logger import get_logger
 from kirara_ai.web.api.system.utils import WEBUI_DIST_TAG, download_file, get_latest_npm_version
 
 logger = get_logger("WebUtils")
+MAX_WEBUI_ARCHIVE_FILES = 20_000
+MAX_WEBUI_ARCHIVE_BYTES = 512 * 1024 * 1024
+
+
+def get_installed_webui_version(install_path: Path) -> str:
+    """Read the immutable npm package version emitted with the WebUI build."""
+    try:
+        metadata = json.loads(
+            (Path(install_path) / "version.json").read_text(encoding="utf-8")
+        )
+        if not isinstance(metadata, dict):
+            return "unknown"
+        package_version = metadata.get("packageVersion")
+        if isinstance(package_version, str) and package_version.strip():
+            return package_version.strip()
+        return "unknown"
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+
+
+def _safe_webui_member_path(member: tarfile.TarInfo) -> PurePosixPath | None:
+    prefix = PurePosixPath("package/dist")
+    if "\\" in member.name:
+        raise ValueError(f"unsafe WebUI archive member: {member.name}")
+    path = PurePosixPath(member.name)
+    if path.is_absolute() or ".." in path.parts or path.parts[:2] != prefix.parts:
+        if path.parts[:2] == prefix.parts or path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"unsafe WebUI archive member: {member.name}")
+        return None
+    relative = PurePosixPath(*path.parts[2:])
+    return relative if relative.parts else None
+
+
+def _extract_webui_archive(archive_path: Path, destination: Path) -> None:
+    extracted_files = 0
+    extracted_bytes = 0
+    destination = destination.resolve()
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive.getmembers():
+            relative = _safe_webui_member_path(member)
+            if relative is None:
+                continue
+            if member.issym() or member.islnk() or not (member.isdir() or member.isfile()):
+                raise ValueError(f"unsupported WebUI archive member: {member.name}")
+            if member.size < 0:
+                raise ValueError(f"invalid WebUI archive member size: {member.name}")
+            target = destination.joinpath(*relative.parts).resolve()
+            if not target.is_relative_to(destination):
+                raise ValueError(f"unsafe WebUI archive member: {member.name}")
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            extracted_files += 1
+            extracted_bytes += member.size
+            if extracted_files > MAX_WEBUI_ARCHIVE_FILES:
+                raise ValueError("WebUI archive contains too many files")
+            if extracted_bytes > MAX_WEBUI_ARCHIVE_BYTES:
+                raise ValueError("WebUI archive is too large")
+            source = archive.extractfile(member)
+            if source is None:
+                raise ValueError(f"cannot read WebUI archive member: {member.name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with source, target.open("wb") as output:
+                shutil.copyfileobj(source, output)
+    if not extracted_files or not (destination / "index.html").is_file():
+        raise ValueError("WebUI archive does not contain package/dist/index.html")
+
+
+def install_webui_archive(
+    archive_path: Path, install_path: Path, package_version: str
+) -> None:
+    """Validate and atomically replace a WebUI installation from an npm tarball."""
+    install_path = Path(install_path).resolve()
+    install_path.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{install_path.name}-stage-", dir=install_path.parent)
+    )
+    backup = install_path.parent / f".{install_path.name}-backup-{uuid.uuid4().hex}"
+    moved_existing = False
+    try:
+        _extract_webui_archive(Path(archive_path), staging)
+        metadata_path = staging / "version.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        current_version = metadata.get("version")
+        metadata["version"] = (
+            current_version.strip()
+            if isinstance(current_version, str) and current_version.strip()
+            else package_version
+        )
+        metadata["packageVersion"] = package_version
+        metadata_path.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+
+        if install_path.exists():
+            os.replace(install_path, backup)
+            moved_existing = True
+        os.replace(staging, install_path)
+        if moved_existing:
+            shutil.rmtree(backup)
+    except Exception:
+        if moved_existing and not install_path.exists() and backup.exists():
+            os.replace(backup, install_path)
+        raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        if backup.exists() and install_path.exists():
+            shutil.rmtree(backup, ignore_errors=True)
 
 async def create_no_cache_response(file_path: Path, request: Request) -> Response:
     if not file_path.exists():
@@ -117,20 +233,9 @@ async def install_webui(install_path: Path) -> tuple[bool, str]:
         if not webui_file:
             return False, "WebUI下载失败"
             
-        # 确保安装目录存在
-        os.makedirs(install_path, exist_ok=True)
-        
-        # 解压并安装前端
+        # 先在同一文件系统安全解压，再原子替换现有前端。
         logger.info(f"开始解压WebUI到 {install_path}")
-        with tarfile.open(webui_file, "r:gz") as tar:
-            # 解压 package/dist 里的所有文件到安装目录
-            for member in tar.getmembers():
-                if member.name.startswith("package/dist/"):
-                    # 去掉 "package/dist/" 前缀
-                    extracted_name = member.name[len("package/dist/"):]
-                    if extracted_name:  # 跳过空路径
-                        member.name = extracted_name
-                        tar.extract(member, path=str(install_path))
+        install_webui_archive(webui_file, install_path, latest_webui_version)
                     
         return True, f"WebUI v{latest_webui_version} 安装成功"
     except Exception as e:
@@ -138,5 +243,4 @@ async def install_webui(install_path: Path) -> tuple[bool, str]:
         return False, f"WebUI安装失败: {str(e)}"
     finally:
         if 'temp_dir' in locals():
-            import shutil
             shutil.rmtree(temp_dir)

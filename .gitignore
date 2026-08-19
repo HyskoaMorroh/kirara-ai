@@ -41,6 +41,7 @@ data/db
 # 本机构建/测试缓存，不属于版本库
 .build-tmp/
 .npm-cache/
+node_modules/
 .pytest-tmp/
 .pytest_cache/
 *.tsbuildinfo

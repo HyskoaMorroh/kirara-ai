@@ -187,5 +187,5 @@ curl -X POST -H "Authorization: Bearer <token>" \
 
 - 想加自己的节点、插件、MCP 服务器、工作流模板或调度规则：`docs/EXTENDING.md`
 - 想搞清楚系统在干什么、出错怎么定位：`docs/OBSERVABILITY.md`
-- 从旧实例升级或回滚：`docs/UPGRADING_TO_3.3.0a7.md`
+- 从旧实例升级或回滚：`docs/UPGRADING.md`
 - 组合 Agent/Skill、声明 Hook 或接入 MCP：`docs/AGENTS_SKILLS_HOOKS_MCP_GUIDE.md`

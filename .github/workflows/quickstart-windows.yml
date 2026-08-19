@@ -89,6 +89,18 @@ jobs:
         python-version: '3.11'
         cache: 'pip'
 
+    - name: Verify synchronized release version
+      id: version
+      env:
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
+      run: |
+        python scripts/version.py check
+        if ($env:GITHUB_EVENT_NAME -eq "release") {
+          python scripts/version.py check --tag $env:RELEASE_TAG
+        }
+        $tag = (python scripts/version.py tag).Trim()
+        "tag=$tag" >> $env:GITHUB_OUTPUT
+
     - name: Build wheel package
       run: |
         python -m pip install build
@@ -174,7 +186,7 @@ jobs:
     - name: Build bundled Web UI
       working-directory: webui
       env:
-        VITE_APP_VERSION: ${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}
+        VITE_APP_VERSION: ${{ steps.version.outputs.tag }}
       run: |
         corepack enable
         yarn install --frozen-lockfile
@@ -189,31 +201,16 @@ jobs:
 
     - name: Verify bundled Web UI release identity
       env:
-        EXPECTED_UI_VERSION: ${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}
+        EXPECTED_UI_VERSION: ${{ steps.version.outputs.tag }}
       run: |
-        $uiFiles = Get-ChildItem -Path "${{ env.DIST_DIR }}/web" -File -Recurse
-        if ($uiFiles.Count -eq 0) {
-          throw "Bundled Web UI is empty."
+        $metadata = Get-Content -LiteralPath "${{ env.DIST_DIR }}/web/version.json" -Raw |
+          ConvertFrom-Json
+        if ($metadata.version -ne $env:EXPECTED_UI_VERSION) {
+          throw "Bundled Web UI version is $($metadata.version), expected $env:EXPECTED_UI_VERSION."
         }
-        $uiText = ($uiFiles | ForEach-Object {
-          Get-Content -LiteralPath $_.FullName -Raw -ErrorAction Stop
-        }) -join "`n"
-        if (-not $uiText.Contains($env:EXPECTED_UI_VERSION)) {
-          throw "Bundled Web UI does not contain $env:EXPECTED_UI_VERSION."
-        }
-        if ($uiText -match '0\.0\.0-ci') {
-          throw "Bundled Web UI contains the CI fallback version."
-        }
-        $devVersions = [regex]::Matches($uiText, '(?i)dev-[0-9a-f]{7,40}') |
-          ForEach-Object { $_.Value } |
-          Select-Object -Unique
-        $unexpectedDevVersions = if ($env:EXPECTED_UI_VERSION -match '^(?i:dev-)') {
-          $devVersions | Where-Object { $_ -ne $env:EXPECTED_UI_VERSION }
-        } else {
-          $devVersions
-        }
-        if ($unexpectedDevVersions) {
-          throw "Bundled Web UI contains unexpected dev versions: $($unexpectedDevVersions -join ', ')."
+        $expectedPackageVersion = (python scripts/version.py npm).Trim()
+        if ($metadata.packageVersion -ne $expectedPackageVersion) {
+          throw "Bundled Web UI package version is $($metadata.packageVersion), expected $expectedPackageVersion."
         }
 
     - name: Copy startup scripts

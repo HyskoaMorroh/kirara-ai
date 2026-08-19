@@ -1290,7 +1290,7 @@ wheels = [
 
 [[package]]
 name = "kirara-ai"
-version = "3.3.0b7"
+version = "3.3.0b8"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -1302,6 +1302,7 @@ dependencies = [
     { name = "jedi" },
     { name = "loguru" },
     { name = "mcp" },
+    { name = "packaging" },
     { name = "pillow" },
     { name = "pre-commit" },
     { name = "psutil" },
@@ -1342,6 +1343,7 @@ requires-dist = [
     { name = "jedi" },
     { name = "loguru" },
     { name = "mcp", specifier = ">=1.6,<2" },
+    { name = "packaging", specifier = ">=23.0" },
     { name = "pillow" },
     { name = "pre-commit" },
     { name = "psutil", specifier = ">=5.9.0" },

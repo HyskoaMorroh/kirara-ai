@@ -2,14 +2,20 @@
 
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的分类方式，记录**源代码、默认配置、部署文件、文档与测试**变化。
 
-比较基线为`3.2.0`，比较目标为当前工作区的 `3.3.0a7`。本文件是源码变更说明，不代表已经创建 GitHub Release、推送镜像或发布版本。
+比较基线为 `3.2.0`，比较目标为 `3.3.0b8`。本文件记录源码与发布行为的对应关系；实际发布状态以 GitHub 和镜像仓库为准。
 
 > 不纳入比较：`.git/`、编辑器缓存、测试缓存、运行日志、`data/db/`、记忆/媒体/插件运行数据、虚拟环境和任何本地密钥或密码文件。这些内容会随机器和使用状态变化，不属于可复现的产品功能。
 
-## [Unreleased] - 本地增强
+## [Unreleased]
+
+## [3.3.0b8] - 2026-08-19
 
 ### Fixed
 
+- 修复 WebUI 传递依赖中的 6 个高危安全告警；约束 `lodash`/`lodash-es`、`postcss` 和 `nanoid` 使用已修复版本，并由锁文件固定可复现依赖树。
+- 修复更新弹窗把落后镜像源中的 `3.2.0` 显示成“最新版本”的问题；检查接口会把不高于当前安装版本的候选归一为当前版本并清空下载地址，执行接口继续拒绝相同版本与降级。
+- 修复 PyPI 预发布发现、npm `beta` 标签选择、WebUI 未知构建版本和在线更新信任边界；后端只接受服务端可信 registry 解析出的下载地址，WebUI 归档采用受限解包、暂存和原子替换。
+- 修复 PR 审查工作流在 `pull_request_target` 可写令牌上下文中安装并执行外部 PR 代码的高危链路；类型检查改用只读 `pull_request` 权限。
 - 修复工作流与调度多文件写入中断后可能留下半完成状态的问题；启动恢复现在保证旧逻辑状态或新逻辑状态之一，并保留已编辑预设和删除 tombstone。
 - 修复异步工作流/模型请求乱序覆盖新状态，以及模型目录检测结果在后端适配器或配置已变化后仍被应用的竞态；目录刷新仍不修改工作流主模型和备用槽位。
 - 修复工作流画布卸载或切换时遗留的防抖写入，避免旧工作流状态回写到新工作流。
@@ -20,7 +26,9 @@
 
 ### Added
 
-- **3.3.0a7 升级与回滚手册**：新增 `docs/UPGRADING_TO_3.3.0a7.md`，覆盖独立 A 数据副本、备份检查、鉴权、readiness、工作流/调度/模型验证、停止放量条件和恢复后重启。
+- **动态版本唯一源**：以 `pyproject.toml` 的项目版本为唯一源，`scripts/version.py set/check/discover` 自动发现并同步 Python、`uv.lock`、npm、Docker、CI 与 Windows 发布载体；发布工作流按 tag 反向校验，遗漏或漂移立即失败。
+- **发布门禁**：Docker、GitHub tag、WebUI 构建元数据、wheel/sdist 和 Windows 快速启动包统一使用动态版本，并增加版本契约、产物元数据、全量测试和镜像 smoke test。
+- **升级与回滚手册**：新增 `docs/UPGRADING.md`，覆盖独立 A 数据副本、备份检查、鉴权、readiness、工作流/调度/模型验证、停止放量条件和恢复后重启。
 - **受控扩展实用指南**：新增 `docs/AGENTS_SKILLS_HOOKS_MCP_GUIDE.md`，明确 Agent/Skill 是现有工作流与目录元数据的组合、Hook 不是 Python sandbox、MCP 没有通用人工审批中心，并给出真实 manifest、lifecycle、审计和移除边界。
 - **本地 readiness 诊断**：新增鉴权接口 `GET /backend-api/api/system/readiness`，以稳定检查 ID 汇总数据目录、配置、工作流、调度目标、IM、LLM 与可选 MCP 状态；检查有超时上限且不返回密钥。
 - **预设目录与受控 extension manifest**：随包工作流增加独立 catalog 元数据；插件可声明 capability 和 lifecycle allowlist，框架 host facade 拒绝并审计未声明访问，MCP 操作记录脱敏结果与耗时元数据。

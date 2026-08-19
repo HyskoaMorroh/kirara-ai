@@ -4,16 +4,6 @@ import { useAppStore } from '@/stores/app'
 import { http } from '@/utils/http'
 import { version } from '@/utils/version'
 
-export interface PypiResponse {
-  info: {
-    version: string
-  }
-  urls: {
-    url: string
-    packagetype: string
-  }[]
-}
-
 export interface UpdateResponse {
   current_backend_version: string
   latest_backend_version: string
@@ -62,34 +52,14 @@ export function useUpdateViewModel() {
     }
   }
 
-  const getLatestBackendVersion = async () => {
-    return await http.get<PypiResponse>('https://pypi.org/pypi/kirara-ai/json')
-  }
-
   // 检查更新
   const checkUpdate = async () => {
     try {
       const data = await http.get<UpdateResponse>('/system/check-update')
 
       if (data.latest_backend_version == '0.0.0') {
-        console.log('无法获取后端最新版本号，尝试本地获取')
-        // 已知最新后端版本
-        try {
-          const pypiData = await getLatestBackendVersion()
-          data.latest_backend_version = pypiData.info.version
-          data.backend_download_url =
-            pypiData.urls.find((url) => url.packagetype === 'bdist_wheel')?.url ?? null
-          console.log('已知最新后端版本', data.latest_backend_version)
-        } catch (error) {
-          message.error('无法获取后端最新版本号，请检查网络连接')
-          console.error(error)
-        }
-        try {
-          data.backend_update_available =
-            version.compare(data.latest_backend_version, data.current_backend_version) > 0
-        } catch (error) {
-          data.backend_update_available = false
-        }
+        message.error('无法从服务端配置的更新源获取后端版本')
+        data.backend_update_available = false
       }
 
       // 获取当前前端版本
@@ -125,9 +95,7 @@ export function useUpdateViewModel() {
 
       await http.post('/system/update', {
         update_backend: appStore.updateInfo?.backend_update_available ?? false,
-        update_webui: appStore.updateInfo?.webui_update_available ?? false,
-        backend_download_url: appStore.updateInfo?.backend_download_url,
-        webui_download_url: appStore.updateInfo?.webui_download_url
+        update_webui: appStore.updateInfo?.webui_update_available ?? false
       })
 
       updateProgress.value = { step: '安装更新...', percentage: 70 }

@@ -58,7 +58,11 @@ def test_docker_runtime_dependencies_are_exported_from_the_committed_uv_lock():
 
     assert "COPY pyproject.toml README.md LICENSE MANIFEST.in uv.lock ./" in dockerfile
     assert "uv export --frozen --no-dev --no-emit-project" in dockerfile
-    assert "pip install --no-cache-dir --require-hashes -r requirements.txt" in dockerfile
+    assert "RUN --mount=type=cache,target=/root/.cache/pip" in dockerfile
+    assert "pip install --require-hashes" in dockerfile
+    assert "--timeout 120 --retries 10 -r requirements.txt" in dockerfile
+    assert "PyPI dependency download failed; retrying install" in dockerfile
+    assert "for attempt in 1 2 3; do" in dockerfile
     assert "pip install --no-cache-dir --no-deps *.whl" in dockerfile
 
 
@@ -126,7 +130,7 @@ def test_webui_build_uses_content_hashed_assets_for_safe_proxy_caching():
 
 
 def test_webui_build_accepts_an_explicit_release_version_without_git_metadata():
-    """Container builds must display their release tag even when .git is excluded."""
+    """Every build derives its release identity from synchronized package metadata."""
     dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
     vite_config = (WEBUI_ROOT / "vite.config.ts").read_text(encoding="utf-8")
     version_utility = (WEBUI_ROOT / "src" / "utils" / "version.ts").read_text(
@@ -135,10 +139,26 @@ def test_webui_build_accepts_an_explicit_release_version_without_git_metadata():
 
     assert "ARG VITE_APP_VERSION" in dockerfile
     assert "ENV VITE_APP_VERSION=${VITE_APP_VERSION}" in dockerfile
+    assert 'expected_version="$(cat /release-tag)"' in dockerfile
+    assert '"${VITE_APP_VERSION}" != "${expected_version}"' in dockerfile
     assert "const configuredVersion = process.env.VITE_APP_VERSION?.trim()" in vite_config
-    assert "return configuredVersion" in vite_config
+    assert "configuredVersion !== expectedVersion" in vite_config
+    assert "return expectedVersion" in vite_config
+    assert "execSync" not in vite_config
     assert "valid as semverValid" in version_utility
-    assert "replace(/^(\\d+\\.\\d+\\.\\d+)a(\\d+)$/, '$1-a$2')" in version_utility
+    assert "PEP_440_PRERELEASE" in version_utility
+    assert "normalizeAppVersion" in version_utility
+
+
+def test_webui_build_emits_machine_readable_version_metadata():
+    """Runtime update checks need the package version even without Git metadata."""
+    vite_config = (WEBUI_ROOT / "vite.config.ts").read_text(encoding="utf-8")
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "version.json" in vite_config
+    assert "packageVersion: packageJson.version" in vite_config
+    assert "version: appVersion" in vite_config
+    assert "dist/version.json" in dockerfile
 
 
 def test_non_editor_routes_do_not_eagerly_load_the_monaco_runtime():

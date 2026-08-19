@@ -52,18 +52,11 @@ jobs:
             exit 0
           fi
 
-          PROJECT_VERSION="$(python3 - <<'PY'
-          import tomllib
-          from pathlib import Path
-
-          print(tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])
-          PY
-          )"
-          EXPECTED_TAG="v${PROJECT_VERSION}"
-          if [ "$RELEASE_TAG" != "$EXPECTED_TAG" ]; then
-            echo "Only $EXPECTED_TAG is eligible for this release workflow; got $RELEASE_TAG."
-            exit 1
-          fi
+          python3 scripts/version.py check --tag "$RELEASE_TAG"
+          EXPECTED_TAG="$(python3 scripts/version.py tag)"
+          PROJECT_VERSION="$(python3 scripts/version.py get)"
+          echo "tag=$EXPECTED_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$PROJECT_VERSION" >> "$GITHUB_OUTPUT"
 
           if [ "$RELEASE_IS_DRAFT" = "true" ]; then
             echo "publish=false" >> $GITHUB_OUTPUT
@@ -114,12 +107,12 @@ jobs:
         if: steps.release.outputs.publish == 'true'
         env:
           IMAGE_NAME: ${{ steps.image.outputs.name }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          IMAGE_VERSION: ${{ steps.release.outputs.version }}
         run: |
           {
             echo "tags<<EOF"
             if [ "$GITHUB_EVENT_NAME" = "release" ]; then
-              echo "$IMAGE_NAME:$RELEASE_TAG"
+              echo "$IMAGE_NAME:$IMAGE_VERSION"
             fi
             if [ "${{ steps.release.outputs.publish_latest }}" = "true" ]; then
               echo "$IMAGE_NAME:latest"
@@ -155,6 +148,6 @@ jobs:
           platforms: 'linux/amd64,linux/arm64'
           tags: ${{ steps.tags.outputs.tags }}
           build-args: |
-            VITE_APP_VERSION=${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}
+            VITE_APP_VERSION=${{ steps.release.outputs.tag }}
           cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
           cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true

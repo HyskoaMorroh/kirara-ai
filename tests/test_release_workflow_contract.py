@@ -126,7 +126,7 @@ def test_docker_workflows_share_a_cross_release_registry_cache():
 
 
 def test_release_builds_inject_their_version_into_the_bundled_webui():
-    """Builds must use the triggering release/tag or a traceable commit identity."""
+    """Every build derives the WebUI identity from the single version command."""
     docker_release_workflow = (
         PROJECT_ROOT / ".github" / "workflows" / "docker-latest.yml"
     ).read_text(encoding="utf-8")
@@ -137,10 +137,12 @@ def test_release_builds_inject_their_version_into_the_bundled_webui():
         PROJECT_ROOT / ".github" / "workflows" / "quickstart-windows.yml"
     ).read_text(encoding="utf-8")
 
-    dynamic_version = "${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}"
-    assert f"VITE_APP_VERSION={dynamic_version}" in docker_release_workflow
-    assert "VITE_APP_VERSION=${{ steps.vars.outputs.tag }}" in docker_tag_workflow
-    assert f"VITE_APP_VERSION: {dynamic_version}" in windows_workflow
+    assert "VITE_APP_VERSION=${{ steps.release.outputs.tag }}" in docker_release_workflow
+    assert "VITE_APP_VERSION=${{ steps.vars.outputs.git_tag }}" in docker_tag_workflow
+    assert "tags: ${{ steps.image.outputs.name }}:${{ steps.vars.outputs.image_version }}" in docker_tag_workflow
+    assert "steps.vars.outputs.tag" not in docker_tag_workflow
+    assert "VITE_APP_VERSION: ${{ steps.version.outputs.tag }}" in windows_workflow
+    assert "python scripts/version.py tag" in windows_workflow
     assert "VITE_APP_VERSION=v3.3.0a7" not in docker_release_workflow
     assert "VITE_APP_VERSION=v3.3.0a7" not in docker_tag_workflow
     assert "VITE_APP_VERSION: v3.3.0a7" not in windows_workflow
@@ -163,14 +165,14 @@ def test_release_preflight_checks_contracts_and_the_versioned_webui_build():
     )
     assert contract_command in workflow
     assert "yarn type-check" in workflow
-    dynamic_version = "${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}"
-    assert f"VITE_APP_VERSION: {dynamic_version}" in workflow
+    assert "VITE_APP_VERSION: ${{ steps.version.outputs.tag }}" in workflow
+    assert "python scripts/version.py tag" in workflow
     assert "yarn build" in workflow
     # vitest 与 vue-tsc 都必须是门禁的一部分，否则前端回归只能靠人工发现
     assert "yarn test:unit" in workflow
-    assert '(root / "assets").rglob("*")' in workflow
-    assert 'if path.is_file()' in workflow
-    assert 'unexpected_dev_versions' in workflow
+    assert '(root / "version.json").read_text' in workflow
+    assert 'metadata["version"] == expected' in workflow
+    assert 'metadata["packageVersion"] == package_version' in workflow
 
 
 def test_the_backend_suite_gates_every_pull_request():
@@ -221,7 +223,6 @@ def test_publishing_a_docker_image_requires_a_green_test_run():
 
 def test_windows_release_archive_uses_exact_paths_and_excludes_private_data():
     """The final Windows ZIP gate must inspect normalized exact members."""
-    dynamic_version = "${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}"
     workflow = (PROJECT_ROOT / ".github" / "workflows" / "quickstart-windows.yml").read_text(
         encoding="utf-8"
     )
@@ -231,9 +232,10 @@ def test_windows_release_archive_uses_exact_paths_and_excludes_private_data():
     assert "docs/logo" not in workflow.lower()
     assert "allowedTopLevel" in workflow
     assert "docs/LOGO.jpg" in (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
-    assert f"EXPECTED_UI_VERSION: {dynamic_version}" in workflow
-    assert "Bundled Web UI does not contain" in workflow
-    assert "unexpectedDevVersions" in workflow
+    assert "EXPECTED_UI_VERSION: ${{ steps.version.outputs.tag }}" in workflow
+    assert 'web/version.json" -Raw' in workflow
+    assert "$metadata.version -ne $env:EXPECTED_UI_VERSION" in workflow
+    assert "$metadata.packageVersion -ne $expectedPackageVersion" in workflow
     assert "uses: ./.github/workflows/release-preflight.yml" in workflow
     assert "run_backend_and_image: true" in workflow
     assert "Get-ChildItem -Path \"${{ env.DIST_DIR }}\" -Recurse -Force -File" in workflow
@@ -251,16 +253,38 @@ def test_release_workflows_reject_unexpected_manual_version_tags():
     )
 
     for workflow in (latest, tagged):
-        assert "pyproject.toml" in workflow
-        assert 'PROJECT_VERSION="$(python3 - <<' in workflow
-        assert 'EXPECTED_TAG="v${PROJECT_VERSION}"' in workflow
-        assert 'if [ "$TAG_NAME" != "$EXPECTED_TAG" ]; then' in workflow or (
-            'if [ "$RELEASE_TAG" != "$EXPECTED_TAG" ]; then' in workflow
-        )
+        assert "python3 scripts/version.py check --tag" in workflow
         assert "v3.3.0a7" not in workflow
-    assert 'if [ "$RELEASE_TAG" != "$EXPECTED_TAG" ]; then' in latest
-    assert 'if [ "$TAG_NAME" != "$EXPECTED_TAG" ]; then' in tagged
+    assert 'python3 scripts/version.py check --tag "$RELEASE_TAG"' in latest
+    assert 'EXPECTED_TAG="$(python3 scripts/version.py tag)"' in latest
+    assert 'git_tag="$(python3 scripts/version.py tag)"' in tagged
+    assert 'image_version="$(python3 scripts/version.py get)"' in tagged
+    assert 'python3 scripts/version.py check --tag "$git_tag"' in tagged
+    assert 'echo "git_tag=$git_tag" >> "$GITHUB_OUTPUT"' in tagged
+    assert 'echo "image_version=$image_version" >> "$GITHUB_OUTPUT"' in tagged
     assert "workflow_dispatch:" not in latest.split("release:", maxsplit=1)[0]
+
+
+def test_every_build_and_release_entry_point_uses_the_version_command():
+    """Adding a new version carrier must not silently bypass the single source."""
+    workflows = PROJECT_ROOT / ".github" / "workflows"
+    required = {
+        "release-preflight.yml": "python scripts/version.py check",
+        "run-tests.yml": "python scripts/version.py check",
+        "project_check.yml": "python scripts/version.py check",
+        "docker-latest.yml": "scripts/version.py check --tag",
+        "docker-tag.yml": "scripts/version.py check --tag",
+        "quickstart-windows.yml": "python scripts/version.py check",
+    }
+    for filename, command in required.items():
+        contents = (workflows / filename).read_text(encoding="utf-8")
+        assert command in contents, filename
+
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY scripts/version.py ./scripts/version.py" in dockerfile
+    assert "RUN python scripts/version.py check" in dockerfile
+    assert "python scripts/version.py tag > /release-tag" in dockerfile
+    assert "python scripts/version.py npm > /npm-version" in dockerfile
 
 
 def test_manual_docker_publish_uses_the_dispatch_commit_source():
@@ -282,24 +306,28 @@ def test_manual_docker_publish_uses_the_dispatch_commit_source():
     assert 'GITHUB_REF_NAME" != "$TAG_NAME"' not in workflow
 
 
-def test_release_documentation_keeps_ui_version_injection_dynamic():
-    """Operational examples must not teach a fixed UI version build argument."""
-    upgrade = (PROJECT_ROOT / "docs" / "UPGRADING_TO_3.3.0a7.md").read_text(
+def test_manual_docker_publish_separates_git_tag_from_image_version():
+    """Git tags keep their v prefix while registry tags use the package version."""
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "docker-tag.yml").read_text(
         encoding="utf-8"
     )
-    plan = (
-        PROJECT_ROOT
-        / "docs"
-        / "superpowers"
-        / "plans"
-        / "2026-08-17-kirara-ai-excellence-overhaul.md"
-    ).read_text(encoding="utf-8")
+
+    assert 'INPUT_TAG="${{ inputs.image_tag }}"' in workflow
+    assert 'if [ "$INPUT_TAG" != "$git_tag" ]; then' in workflow
+    assert 'tags: ${{ steps.image.outputs.name }}:${{ steps.vars.outputs.image_version }}' in workflow
+    assert 'VITE_APP_VERSION=${{ steps.vars.outputs.git_tag }}' in workflow
+    assert 'tags: ${{ steps.image.outputs.name }}:v' not in workflow
+
+
+def test_release_documentation_keeps_ui_version_injection_dynamic():
+    """Operational examples must not teach a fixed UI version build argument."""
+    upgrade = (PROJECT_ROOT / "docs" / "UPGRADING.md").read_text(
+        encoding="utf-8"
+    )
 
     assert "VITE_APP_VERSION=v3.3.0a7" not in upgrade
-    assert "VITE_APP_VERSION=v3.3.0a7" not in plan
-    dynamic_version = "${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}"
-    assert dynamic_version in upgrade
-    assert dynamic_version in plan
+    assert "python scripts/version.py tag" in upgrade
+    assert "python scripts/version.py check --tag $releaseTag" in upgrade
 
 
 def test_workflow_call_release_gates_include_the_frozen_index_override():
@@ -335,8 +363,8 @@ def test_release_smoke_checks_are_read_only_and_secret_safe():
         encoding="utf-8"
     )
 
-    dynamic_version = "${{ github.event.release.tag_name || format('dev-{0}', github.sha) }}"
-    assert f"VITE_APP_VERSION={dynamic_version}" in workflow
+    assert "VITE_APP_VERSION=${{ steps.version.outputs.tag }}" in workflow
+    assert "python scripts/version.py tag" in workflow
     assert 'readiness.get("ready") is True' in workflow
     assert 'isinstance(checks, list)' in workflow
     assert '"/backend-api/api/dispatch/reachability"' in workflow
@@ -423,3 +451,20 @@ def test_every_frozen_uv_sync_workflow_pins_the_default_index():
 
     for filename, contents in frozen_workflows.items():
         assert "UV_DEFAULT_INDEX: https://pypi.org/simple" in contents, filename
+
+
+def test_pr_type_check_cannot_execute_fork_code_with_a_write_token():
+    """Untrusted pull-request code must only run with a read-only token and no secrets."""
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "pr_review.yml").read_text(
+        encoding="utf-8"
+    )
+    triggers = workflow.split("permissions:", maxsplit=1)[0]
+
+    assert "pull_request:" in triggers
+    assert "pull_request_target:" not in workflow
+    assert "contents: read" in workflow
+    assert "pull-requests: write" not in workflow
+    assert "issues: write" not in workflow
+    assert "actions/github-script" not in workflow
+    assert "secrets.GITHUB_TOKEN" not in workflow
+    assert "python -m mypy" in workflow

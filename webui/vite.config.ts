@@ -4,37 +4,45 @@ import importMetaUrlPlugin from '@codingame/esbuild-import-meta-url-plugin'
 import { defineConfig, normalizePath } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import path from 'path'
-import { execSync } from 'child_process'
+import packageJson from './package.json'
 
-// 获取 Git 信息
-function getGitVersion(): string {
+const NPM_PRERELEASE = /^(\d+\.\d+\.\d+)-(a|b|rc)(\d+)$/
+
+function getReleaseVersion(): string {
+  const packageVersion = packageJson.version.trim()
+  const pep440Version = packageVersion.replace(NPM_PRERELEASE, '$1$2$3')
+  const expectedVersion = `v${pep440Version}`
   const configuredVersion = process.env.VITE_APP_VERSION?.trim()
-  if (configuredVersion) {
-    return configuredVersion
+  if (configuredVersion && configuredVersion !== expectedVersion) {
+    throw new Error(
+      `VITE_APP_VERSION ${configuredVersion} does not match package.json ${expectedVersion}`
+    )
   }
+  return expectedVersion
+}
 
-  try {
-    let tag = '';
-    try {
-      tag = execSync('git describe --tags --exact-match').toString().trim();
-    } catch (e) {
-      // 如果没有找到 tag，则忽略错误
+const appVersion = getReleaseVersion()
+
+function versionMetadataPlugin() {
+  return {
+    name: 'kirara-version-metadata',
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'version.json',
+        source: JSON.stringify(
+          { version: appVersion, packageVersion: packageJson.version },
+          null,
+          2
+        ) + '\n'
+      })
     }
-
-    if (tag) {
-      return tag;
-    }
-
-    const commitHash = execSync('git rev-parse --short HEAD').toString().trim();
-    return `dev-${commitHash}`;
-  } catch (e) {
-    return 'unknown';
   }
 }
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [vue(), versionMetadataPlugin()],
   // Added proxy configuration
   server: { 
     proxy: {
@@ -91,7 +99,7 @@ export default defineConfig({
     }
   },
   define: {
-    'import.meta.env.VITE_APP_VERSION': JSON.stringify(getGitVersion())
+    'import.meta.env.VITE_APP_VERSION': JSON.stringify(appVersion)
   },
   optimizeDeps: {
     esbuildOptions: {

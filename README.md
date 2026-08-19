@@ -85,7 +85,7 @@
 | [`docs/EXTENDING.md`](docs/EXTENDING.md) | 扩展开发：自定义 Block、插件、MCP 接入、预设 YAML、调度规则、事件总线、定时任务，并逐条写明当前**没有**的扩展点 |
 | [`docs/WORKFLOW_OPERATIONS_GUIDE.md`](docs/WORKFLOW_OPERATIONS_GUIDE.md) | 从部署到首条回复：模板选型、手动选模型、自动探测边界、默认规则、画布操作、排错顺序与扩展边界 |
 | [`docs/EXCELLENCE_DEPLOYMENT_GUIDE.md`](docs/EXCELLENCE_DEPLOYMENT_GUIDE.md) | 面向生产部署的品质路线图：现有能力的正确使用、画布体验基线、可靠性门禁，以及 Agents、Skills、Hooks、MCP 与可观测性的分阶段接入方式 |
-| [`docs/UPGRADING_TO_3.3.0a7.md`](docs/UPGRADING_TO_3.3.0a7.md) | 从旧实例升级到 `3.3.0a7`：独立数据副本、readiness、工作流/调度/模型核对、回滚和备份恢复 |
+| [`docs/UPGRADING.md`](docs/UPGRADING.md) | 从旧实例升级：独立数据副本、readiness、工作流/调度/模型核对、回滚和备份恢复 |
 | [`docs/AGENTS_SKILLS_HOOKS_MCP_GUIDE.md`](docs/AGENTS_SKILLS_HOOKS_MCP_GUIDE.md) | 基于真实 Workflow、catalog、extension manifest、lifecycle 和 MCP allowlist 的扩展指南与安全边界 |
 
 ## 🎨 主题与外观

@@ -10,8 +10,6 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PYTHON_VERSION = "3.3.0b7"
-WEBUI_PACKAGE_VERSION = "3.3.0-b7"
 
 REQUIRED_DISTRIBUTION_PATHS = (
     "kirara_ai/backup/service.py",
@@ -23,10 +21,6 @@ REQUIRED_DISTRIBUTION_PATHS = (
     "kirara_ai/workflow/presets/chat/mcp_tools.yaml",
     "kirara_ai/workflow/presets/catalog.json",
 )
-
-# Python distribution archive names normalize the project name's hyphens to
-# underscores, matching the root emitted by ``uv build``/setuptools.
-SDIST_ROOT = f"kirara_ai-{PYTHON_VERSION}"
 
 FORBIDDEN_DISTRIBUTION_PARTS = (
     "__pycache__",
@@ -54,6 +48,23 @@ def _project_metadata() -> dict:
         return _load_toml(file)
 
 
+PYTHON_VERSION = _project_metadata()["project"]["version"]
+
+# Python distribution archive names normalize the project name's hyphens to
+# underscores, matching the root emitted by ``uv build``/setuptools.
+SDIST_ROOT = f"kirara_ai-{PYTHON_VERSION}"
+
+
+def _npm_version(python_version: str) -> str:
+    match = re.fullmatch(r"(\d+\.\d+\.\d+)(?:(a|b|rc)(\d+))?", python_version)
+    assert match is not None, f"unsupported release version: {python_version}"
+    release, prerelease, number = match.groups()
+    return release if prerelease is None else f"{release}-{prerelease}{number}"
+
+
+WEBUI_PACKAGE_VERSION = _npm_version(PYTHON_VERSION)
+
+
 def _locked_project_version() -> str:
     lock = (PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8")
     match = re.search(
@@ -71,7 +82,6 @@ def test_release_versions_are_synchronized():
         (PROJECT_ROOT / "webui" / "package.json").read_text(encoding="utf-8")
     )
 
-    assert python_version == PYTHON_VERSION
     assert _locked_project_version() == python_version
     assert webui_package["version"] == WEBUI_PACKAGE_VERSION
     assert (PROJECT_ROOT / "webui" / "yarn.lock").is_file()

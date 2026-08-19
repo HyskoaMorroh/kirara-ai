@@ -1,0 +1,55 @@
+{
+  "artifacts": [
+    {
+      "path": "docs/AGENTS_SKILLS_HOOKS_MCP_GUIDE.md",
+      "tokens": [
+        "3.3.0b8",
+        "1.0.0"
+      ]
+    },
+    {
+      "path": "docs/EXCELLENCE_DEPLOYMENT_GUIDE.md",
+      "tokens": [
+        "3.3.0b8"
+      ]
+    },
+    {
+      "path": "docs/EXTENDING.md",
+      "tokens": [
+        "127.0.0",
+        "1.0.0",
+        "127.0.0",
+        "127.0.0",
+        "127.0.0",
+        "127.0.0",
+        "127.0.0",
+        "127.0.0",
+        "127.0.0",
+        "3.3.0b8",
+        "127.0.0",
+        "127.0.0"
+      ]
+    },
+    {
+      "path": "docs/UPGRADING.md",
+      "tokens": [
+        "3.3.0b8",
+        "3.3.0b8",
+        "3.3.0b8",
+        "127.0.0",
+        "127.0.0",
+        "3.3.0b8"
+      ]
+    },
+    {
+      "path": "docs/WORKFLOW_OPERATIONS_GUIDE.md",
+      "tokens": [
+        "3.3.0b8"
+      ]
+    }
+  ],
+  "known_versions": [
+    "3.3.0b8"
+  ],
+  "schema": 1
+}

@@ -276,9 +276,9 @@ const oledShape: Partial<ThemeShape> = {
 }
 
 /**
- * 经典：保留 3.3.0a5 原有的蓝白配色，作为默认色板。
+ * 经典：保留项目早期默认的蓝白配色。
  *
- * 主色沿用旧版 naive-ui themeOverrides 的 #007AFF（Apple 系统蓝）：a5 之前的
+ * 主色沿用旧版 naive-ui themeOverrides 的 #007AFF（Apple 系统蓝）：早期
  * 版本一直是这个值，中途被改成 #4080ff 后所有 naive-ui 控件的色相都偏移了，
  * 这里恢复回来。其余浅色层级（背景、文本、描边）与旧版逐项一致。
  */

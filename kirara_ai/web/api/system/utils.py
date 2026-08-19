@@ -3,9 +3,20 @@ import os
 import subprocess
 import sys
 from functools import lru_cache
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 import psutil
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.tags import sys_tags
+from packaging.utils import (
+    InvalidSdistFilename,
+    InvalidWheelFilename,
+    canonicalize_name,
+    parse_sdist_filename,
+    parse_wheel_filename,
+)
+from packaging.version import InvalidVersion, Version
 
 # kirara-ai-webui 在 npm 上的 latest 标签仍指向 0.1.0，该版本把 backend.models
 # 当作字符串数组渲染（对每一项调用 charAt/charCodeAt 取首字母和配色）。3.3 起
@@ -13,6 +24,37 @@ import psutil
 # beta 标签（0.1.1-beta.3 起）才按 model.id / model.type / model.ability 渲染，
 # 因此 WebUI 的安装与更新检查统一走 beta 标签。
 WEBUI_DIST_TAG = "beta"
+
+
+def parse_release_version(raw_version: object) -> Version | None:
+    """Parse a release version from an external or installed value.
+
+    Registry responses are untrusted input.  A missing, placeholder, or malformed
+    value must mean "no update", rather than turning an update check into a 500.
+    ``packaging`` also understands the PEP 440 and npm-style spellings used by
+    the backend and WebUI release metadata.
+    """
+    if not isinstance(raw_version, str):
+        return None
+    value = raw_version.strip()
+    if not value or value.lower() == "unknown":
+        return None
+    value = value.removeprefix("v")
+    try:
+        return Version(value)
+    except InvalidVersion:
+        return None
+
+
+def is_newer_release(candidate: object, current: object) -> bool:
+    """Return whether two valid release values prove a forward upgrade."""
+    candidate_version = parse_release_version(candidate)
+    current_version = parse_release_version(current)
+    return (
+        candidate_version is not None
+        and current_version is not None
+        and candidate_version > current_version
+    )
 
 
 def get_installed_version() -> str:
@@ -30,19 +72,94 @@ def get_installed_version() -> str:
         return "0.0.0"  # 如果所有方法都失败，返回默认版本号
 
 
-async def get_latest_pypi_version(package_name: str) -> tuple[str, str]:
-    """获取包的最新版本和下载URL"""
+PYPI_SIMPLE_JSON = "application/vnd.pypi.simple.v1+json"
+
+
+def _pypi_simple_url(package_name: str, registry: str) -> str:
+    """Build a PEP 503/691 project URL from the configured simple index."""
+    parsed = urlparse(registry.rstrip("/"))
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("PyPI registry must be an HTTP(S) URL")
+    return f"{registry.rstrip('/')}/{canonicalize_name(package_name)}/"
+
+
+def _python_version_matches(requires_python: object) -> bool:
+    if not requires_python:
+        return True
+    if not isinstance(requires_python, str):
+        return False
     try:
+        current_python = Version(".".join(map(str, sys.version_info[:3])))
+        return SpecifierSet(requires_python).contains(
+            current_python,
+            prereleases=True,
+        )
+    except InvalidSpecifier:
+        return False
+
+
+def _pypi_artifact(
+    package_name: str,
+    file_info: object,
+    compatible_tags: set,
+) -> tuple[Version, int, str] | None:
+    """Return sortable release metadata for an installable Simple API file."""
+    if not isinstance(file_info, dict) or file_info.get("yanked"):
+        return None
+    if not _python_version_matches(file_info.get("requires-python")):
+        return None
+    filename = file_info.get("filename")
+    download_url = file_info.get("url")
+    if not isinstance(filename, str) or not isinstance(download_url, str):
+        return None
+
+    expected_name = canonicalize_name(package_name)
+    try:
+        distribution, release, _, wheel_tags = parse_wheel_filename(filename)
+        if distribution != expected_name or not compatible_tags.intersection(wheel_tags):
+            return None
+        return release, 1, download_url
+    except InvalidWheelFilename:
+        pass
+
+    try:
+        distribution, release = parse_sdist_filename(filename)
+        if distribution != expected_name:
+            return None
+        return release, 0, download_url
+    except InvalidSdistFilename:
+        return None
+
+
+async def get_latest_pypi_version(
+    package_name: str, registry: str = "https://pypi.org/simple"
+) -> tuple[str, str]:
+    """Return the newest installable release exposed by a PEP 691 index."""
+    try:
+        project_url = _pypi_simple_url(package_name, registry)
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://pypi.org/pypi/{package_name}/json") as response:
+            async with session.get(
+                project_url,
+                headers={"Accept": PYPI_SIMPLE_JSON},
+            ) as response:
                 response.raise_for_status()
                 data = await response.json()
-                latest_version = data["info"]["version"]
-                # 获取最新版本的wheel包下载URL
-                for url_info in data["urls"]:
-                    if url_info["packagetype"] == "bdist_wheel":
-                        return latest_version, url_info["url"]
-        return latest_version, ""
+        compatible_tags = set(sys_tags())
+        candidates = [
+            artifact
+            for file_info in data.get("files", [])
+            if (
+                artifact := _pypi_artifact(
+                    package_name,
+                    file_info,
+                    compatible_tags,
+                )
+            )
+        ]
+        if not candidates:
+            return "0.0.0", ""
+        release, _, download_url = max(candidates, key=lambda item: item[:2])
+        return str(release), urljoin(project_url, download_url)
     except Exception:
         return "0.0.0", ""
     

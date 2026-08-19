@@ -1,4 +1,15 @@
-# 第一阶段：WebUI 产物与目标 CPU 架构无关，始终在原生构建平台生成
+# 第一阶段：所有派生版本必须与 pyproject.toml 的唯一版本源一致
+FROM python:3.11-slim AS version-check
+
+WORKDIR /source
+COPY . /source
+# Keep the version tool explicit so the release gate remains visible in the Dockerfile.
+COPY scripts/version.py ./scripts/version.py
+RUN python scripts/version.py check && \
+    python scripts/version.py tag > /release-tag && \
+    python scripts/version.py npm > /npm-version
+
+# 第二阶段：WebUI 产物与目标 CPU 架构无关，始终在原生构建平台生成
 FROM --platform=$BUILDPLATFORM node:20-bookworm-slim AS frontend-builder
 
 ENV NODE_OPTIONS=--max-old-space-size=3072
@@ -13,11 +24,20 @@ RUN corepack enable && \
         sleep $((attempt * 10)); \
     done
 COPY webui/ ./
+COPY --from=version-check /release-tag /release-tag
+COPY --from=version-check /npm-version /npm-version
 ARG VITE_APP_VERSION
 ENV VITE_APP_VERSION=${VITE_APP_VERSION}
-RUN yarn build
+RUN expected_version="$(cat /release-tag)" && \
+    if [ -n "${VITE_APP_VERSION}" ] && [ "${VITE_APP_VERSION}" != "${expected_version}" ]; then \
+        echo "VITE_APP_VERSION ${VITE_APP_VERSION} does not match ${expected_version}" >&2; \
+        exit 1; \
+    fi && \
+    export VITE_APP_VERSION="${expected_version}" && \
+    yarn build && \
+    node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('dist/version.json','utf8'));const p=fs.readFileSync('/npm-version','utf8').trim();if(m.version!==process.env.VITE_APP_VERSION||m.packageVersion!==p)throw new Error(JSON.stringify(m))"
 
-# 第二阶段：构建wheel包
+# 第三阶段：构建wheel包
 FROM python:3.11-slim AS builder
 
 WORKDIR /build
@@ -27,7 +47,7 @@ RUN python -m pip install --no-cache-dir uv build && \
     uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file requirements.txt && \
     python -m build
 
-# 第三阶段：运行环境
+# 第四阶段：运行环境
 FROM python:3.11-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -58,9 +78,14 @@ COPY --from=builder /build/dist/*.whl /app/
 COPY --from=builder /build/requirements.txt /app/
 
 # 安装后端并复制由固定前端源码构建的 WebUI
-RUN pip install --no-cache-dir --require-hashes -r requirements.txt && \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    for attempt in 1 2 3; do \
+        pip install --require-hashes --timeout 120 --retries 10 -r requirements.txt && break; \
+        if [ "$attempt" = 3 ]; then exit 1; fi; \
+        echo "PyPI dependency download failed; retrying install ($attempt/3)..."; \
+        sleep $((attempt * 10)); \
+    done && \
     pip install --no-cache-dir --no-deps *.whl && \
-    pip cache purge && \
     rm *.whl requirements.txt
 COPY --from=frontend-builder /webui/dist /app/web
 

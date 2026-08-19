@@ -4,8 +4,6 @@ import secrets
 import signal
 import time
 
-from packaging import version
-
 from kirara_ai.config.config_loader import ConfigLoader
 from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.database import DatabaseManager
@@ -29,7 +27,11 @@ from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
 from kirara_ai.plugin_manager.models import LifecycleName
 from kirara_ai.scheduler import TaskScheduler
 from kirara_ai.tracing import LLMTracer, TracingManager
-from kirara_ai.web.api.system.utils import get_installed_version, get_latest_pypi_version
+from kirara_ai.web.api.system.utils import (
+    get_installed_version,
+    get_latest_pypi_version,
+    is_newer_release,
+)
 from kirara_ai.web.app import WebServer
 from kirara_ai.workflow.core.block import BlockRegistry
 from kirara_ai.workflow.core.dispatch import DispatchRuleRegistry, WorkflowDispatcher
@@ -45,13 +47,15 @@ PLACEHOLDER_SECRET_KEY = "please-change-this-to-a-secure-secret-key"
 
 _interrupt_count = 0  # 添加计数器
 
-async def check_update():
+async def check_update(config: GlobalConfig):
     """检查更新"""
     running_version = get_installed_version()
     logger.info("Checking for updates...")
-    latest_version, _ = await get_latest_pypi_version("kirara-ai")
+    latest_version, _ = await get_latest_pypi_version(
+        "kirara-ai", config.update.pypi_registry
+    )
     logger.info(f"Running version: {running_version}, Latest version: {latest_version}")
-    backend_update_available = version.parse(latest_version) > version.parse(running_version)
+    backend_update_available = is_newer_release(latest_version, running_version)
     if backend_update_available:
         logger.warning(f"New version {latest_version} is available. Please update to the latest version.")
         logger.warning(f"You can download the latest version from WebUI")
@@ -311,7 +315,7 @@ def run_application(container: DependencyContainer):
             f"WebUI 管理平台本地访问地址：http://127.0.0.1:{web_server.listen_port}/"
         )
         logger.success("Application started. Waiting for events...")
-        loop.create_task(check_update())
+        loop.create_task(check_update(container.resolve(GlobalConfig)))
         event_bus = container.resolve(EventBus)
         event_bus.post(ApplicationStarted())
         notify_extension_lifecycle(container, "startup_completed")
