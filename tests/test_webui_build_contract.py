@@ -34,6 +34,15 @@ def test_dockerfile_builds_the_bundled_webui_instead_of_an_unpinned_npm_tag():
     assert 'registry.npmjs.org/kirara-ai-webui' not in dockerfile
 
 
+def test_frontend_builder_is_architecture_independent_and_retries_registry_downloads():
+    """多架构镜像不应在 QEMU 下重复构建 WebUI 并被短暂网络抖动卡死。"""
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "FROM --platform=$BUILDPLATFORM node:20-bookworm-slim AS frontend-builder" in dockerfile
+    assert "yarn install --frozen-lockfile --network-timeout 120000" in dockerfile
+    assert "for attempt in 1 2 3; do" in dockerfile
+
+
 def test_wheel_builder_copies_only_package_build_inputs():
     """Unrelated workflow and runtime data changes must not invalidate the wheel layer."""
     dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")

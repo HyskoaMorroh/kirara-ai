@@ -45,6 +45,9 @@ data/db
 .pytest_cache/
 *.tsbuildinfo
 
+# 用户私有文件：保留在本机，但不得进入 Git、发行包或 Docker 构建上下文
+docs/LOGO.jpg
+
 # graphify 知识图谱产物（本地分析用，不随项目分发）
 graphify-out/
 .graphify/

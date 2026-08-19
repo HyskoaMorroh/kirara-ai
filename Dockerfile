@@ -1,11 +1,17 @@
-# 第一阶段：构建固定版本的 WebUI
-FROM node:20-bookworm-slim AS frontend-builder
+# 第一阶段：WebUI 产物与目标 CPU 架构无关，始终在原生构建平台生成
+FROM --platform=$BUILDPLATFORM node:20-bookworm-slim AS frontend-builder
 
 ENV NODE_OPTIONS=--max-old-space-size=3072
 
 WORKDIR /webui
 COPY webui/package.json webui/yarn.lock ./
-RUN corepack enable && yarn install --frozen-lockfile
+RUN corepack enable && \
+    for attempt in 1 2 3; do \
+        yarn install --frozen-lockfile --network-timeout 120000 && break; \
+        if [ "$attempt" = 3 ]; then exit 1; fi; \
+        echo "Yarn registry download failed; retrying install ($attempt/3)..."; \
+        sleep $((attempt * 10)); \
+    done
 COPY webui/ ./
 ARG VITE_APP_VERSION
 ENV VITE_APP_VERSION=${VITE_APP_VERSION}
