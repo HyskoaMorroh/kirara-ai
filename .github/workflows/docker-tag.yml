@@ -16,9 +16,23 @@ permissions:
   contents: read
 
 jobs:
+  validate-source:
+    name: Validate default branch source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the repository default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "branch" ] || [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "Run this workflow from the repository default branch ($DEFAULT_BRANCH), not a tag or another branch."
+            exit 1
+          fi
+
   verify:
     # 手动发版同样必须走与正式 release 相同的完整可复用门禁。
     name: Pre-publish verification
+    needs: validate-source
     uses: ./.github/workflows/release-preflight.yml
     with:
       run_backend_and_image: true
@@ -29,20 +43,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       -
-        name: Checkout tagged source
+        name: Checkout dispatch commit
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
       - name: Set output
         id: vars
         run: |
           TAG_NAME="${{ inputs.image_tag }}"
           if [ -z "$TAG_NAME" ]; then
             echo "Set image_tag before manually publishing a versioned image."
-            exit 1
-          fi
-          if [ "$GITHUB_REF_TYPE" != "tag" ] || [ "$GITHUB_REF_NAME" != "$TAG_NAME" ]; then
-            echo "Run this workflow from the matching Git tag, not a branch or another ref."
             exit 1
           fi
           PROJECT_VERSION="$(python3 - <<'PY'

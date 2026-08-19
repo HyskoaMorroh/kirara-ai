@@ -261,8 +261,25 @@ def test_release_workflows_reject_unexpected_manual_version_tags():
     assert 'if [ "$RELEASE_TAG" != "$EXPECTED_TAG" ]; then' in latest
     assert 'if [ "$TAG_NAME" != "$EXPECTED_TAG" ]; then' in tagged
     assert "workflow_dispatch:" not in latest.split("release:", maxsplit=1)[0]
-    assert 'GITHUB_REF_TYPE" != "tag"' in tagged
-    assert 'GITHUB_REF_NAME" != "$TAG_NAME"' in tagged
+
+
+def test_manual_docker_publish_uses_the_dispatch_commit_source():
+    """A rebuild of an existing tag must use the exact commit that passed verification."""
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "docker-tag.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "name: Validate default branch source" in workflow
+    assert "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}" in workflow
+    assert 'GITHUB_REF_TYPE" != "branch"' in workflow
+    assert 'GITHUB_REF_NAME" != "$DEFAULT_BRANCH"' in workflow
+    assert "needs: validate-source" in workflow
+    assert "name: Checkout dispatch commit" in workflow
+    assert "ref: ${{ github.sha }}" in workflow
+    assert "Checkout tagged source" not in workflow
+    assert "ref: ${{ github.ref }}" not in workflow
+    assert 'GITHUB_REF_TYPE" != "tag"' not in workflow
+    assert 'GITHUB_REF_NAME" != "$TAG_NAME"' not in workflow
 
 
 def test_release_documentation_keeps_ui_version_injection_dynamic():
