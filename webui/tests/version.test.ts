@@ -30,4 +30,3 @@ describe('version.compare', () => {
     expect(version.compare('3.3.0-b8', 'dev-abc1234')).toBe(0)
   })
 })
-
