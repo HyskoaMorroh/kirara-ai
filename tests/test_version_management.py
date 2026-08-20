@@ -62,6 +62,7 @@ def test_set_version_updates_every_generated_version_file_and_refreshes_uv_lock(
     tmp_path, monkeypatch
 ):
     version_script = _load_version_module()
+    monkeypatch.setattr(version_script, "_uv_command", lambda: ["uv"])
     (tmp_path / "webui").mkdir()
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "kirara-ai"\nversion = "3.3.0b7"\n',
@@ -210,6 +211,7 @@ def test_check_reports_each_stale_generated_version(tmp_path):
 
 def test_set_scans_active_text_carriers_and_preserves_history(tmp_path, monkeypatch):
     version_script = _load_version_module()
+    monkeypatch.setattr(version_script, "_uv_command", lambda: ["uv"])
     for directory in ("webui", ".github/workflows", "webui/src", "tests", "build"):
         (tmp_path / directory).mkdir(parents=True, exist_ok=True)
     (tmp_path / "pyproject.toml").write_text(
@@ -291,6 +293,7 @@ def test_artifact_index_catches_stale_carrier_after_release_base_changes(
     tmp_path, monkeypatch
 ):
     version_script = _load_version_module()
+    monkeypatch.setattr(version_script, "_uv_command", lambda: ["uv"])
     (tmp_path / "webui").mkdir()
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "kirara-ai"\nversion = "3.3.0b8"\n', encoding="utf-8"
@@ -321,6 +324,7 @@ def test_artifact_index_catches_stale_carrier_after_release_base_changes(
 
 def test_artifact_index_catches_new_current_version_carrier(tmp_path, monkeypatch):
     version_script = _load_version_module()
+    monkeypatch.setattr(version_script, "_uv_command", lambda: ["uv"])
     (tmp_path / "webui").mkdir()
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "kirara-ai"\nversion = "3.3.0b8"\n', encoding="utf-8"
@@ -385,6 +389,7 @@ def test_discover_records_active_and_excluded_carriers_with_reasons(tmp_path):
 
 def test_set_rolls_back_every_touched_file_when_uv_lock_fails(tmp_path, monkeypatch):
     version_script = _load_version_module()
+    monkeypatch.setattr(version_script, "_uv_command", lambda: ["uv"])
     (tmp_path / "webui").mkdir()
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "kirara-ai"\nversion = "3.3.0b7"\n', encoding="utf-8"

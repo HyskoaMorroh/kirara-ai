@@ -2,11 +2,11 @@
 
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的分类方式，记录**源代码、默认配置、部署文件、文档与测试**变化。
 
-比较基线为 `3.2.0`，比较目标为 `3.3.0b8`。本文件记录源码与发布行为的对应关系；实际发布状态以 GitHub 和镜像仓库为准。
+比较基线为 `3.2.0`，比较目标为 `3.3.0b9`。本文件记录源码与发布行为的对应关系；实际发布状态以 GitHub 和镜像仓库为准。
 
 > 不纳入比较：`.git/`、编辑器缓存、测试缓存、运行日志、`data/db/`、记忆/媒体/插件运行数据、虚拟环境和任何本地密钥或密码文件。这些内容会随机器和使用状态变化，不属于可复现的产品功能。
 
-## [Unreleased]
+## [3.3.0b9] - 2026-08-21
 
 ### Added
 
@@ -20,11 +20,13 @@
 
 ### Changed
 
+- **发布版本保持一致**：远端已有不可移动的 `v3.3.0b8` tag，当前代码顺延为 `3.3.0b9`，让 GitHub tag、源码版本与 Docker 镜像继续指向同一份代码。
 - **仓库自身链接指向本仓库**：`pyproject.toml` 的 `Homepage`、`Bug Tracker`，以及 README 的 star / license / CI / codecov 徽章、问题列表与 star-history 均改指 `HyskoaMorroh/kirara-ai`。发布身份与外部资源保持上游不变：PyPI 包名 `kirara-ai`（`entry.py`、`system/routes.py`、`system/utils.py` 依赖它做自更新与版本读取）、npm 包名 `kirara-ai-webui`、文档站 `kirara-docs.app.lss233.com`、插件市场 API、Docker Hub 拉取徽章、作者署名与贡献者名单。
 - **社区入口统一为 Telegram**：README 的 6 个 QQ 交流群、机器人调试群与开发者交流群链接（多数已标注「已满」）替换为单一入口 <https://t.me/kirara_ai>。
 
 ### Tests
 
+- **Python 3.10 与运行时镜像回归**：测试在 Python 3.10 下通过 `tomli` 兼容路径；版本管理测试在不安装开发工具 `uv` 的运行时镜像中通过，避免把 `uv` 引入生产镜像。
 - **`FunctionCalling` 区块补测试**：该区块在 `blocks/llm/chat.py` 有实现却无任何测试引用（`ChatCompletionWithTools` 是另一个区块，其测试不覆盖它）。新增 3 个用例覆盖「模型请求工具走 `tool_call`、不请求走 `resp`」的二选一输出契约、未选模型时的报错须指名节点、主模型不可用时降级到备用模型。
 - **人设防回归守卫**：新增用例断言默认工作流的提示词确实取自 `persona.py`，以及 `normal.yaml` / `normal_multimodal.yaml` / `talk_break.yaml` 三个角色扮演预设的两份副本都仍带人设主体、互动规则与记忆占位符。时间信息允许由 `{current_date_time}` 占位符或 `internal:current_time_block` 节点任一提供（`talk_break.yaml` 走后者）。
 
