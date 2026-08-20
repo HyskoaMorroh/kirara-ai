@@ -85,6 +85,7 @@ EXCLUDED_DIRECTORY_REASONS = {
 }
 EXCLUDED_FILE_REASONS = {
     "CHANGELOG.md": "historical changelog",
+    "docs/UPGRADING_TO_3.3.0a7.md": "historical upgrade guide",
     "webui/UPSTREAM.md": "upstream version record",
     "scripts/version.py": "version synchronization implementation",
     ARTIFACT_INDEX_NAME: "version synchronization index",

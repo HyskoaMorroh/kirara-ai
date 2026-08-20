@@ -5,6 +5,26 @@ import {
 } from '../src/store/workflow-editor'
 
 describe('workflow editor history', () => {
+  it('exposes model-level undo and redo methods matching the intent contract', () => {
+    const intent = workflowEditorModel.getIntent()
+    const viewState = workflowEditorModel.getViewState()
+    intent.initialize({
+      blocks: [],
+      wires: [],
+      blockTypes: [],
+      name: 'before',
+      workflowId: 'user:model-history',
+      config: { max_execution_time: 0 }
+    })
+    intent.saveToHistory()
+    intent.updateName('after')
+
+    workflowEditorModel.undo()
+    expect(viewState.value.name).toBe('before')
+    workflowEditorModel.redo()
+    expect(viewState.value.name).toBe('after')
+  })
+
   it('restores deeply cloned node data and workflow config, then supports redo', () => {
     const intent = workflowEditorModel.getIntent()
     const viewState = workflowEditorModel.getViewState()

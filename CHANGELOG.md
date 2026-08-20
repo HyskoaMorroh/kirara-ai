@@ -48,6 +48,7 @@
 - **动态版本唯一源**：以 `pyproject.toml` 的项目版本为唯一源，`scripts/version.py set/check/discover` 自动发现并同步 Python、`uv.lock`、npm、Docker、CI 与 Windows 发布载体；发布工作流按 tag 反向校验，遗漏或漂移立即失败。
 - **发布门禁**：Docker、GitHub tag、WebUI 构建元数据、wheel/sdist 和 Windows 快速启动包统一使用动态版本，并增加版本契约、产物元数据、全量测试和镜像 smoke test。
 - **升级与回滚手册**：新增 `docs/UPGRADING.md`，覆盖独立 A 数据副本、备份检查、鉴权、readiness、工作流/调度/模型验证、停止放量条件和恢复后重启。
+- **历史升级清单**：补充 `docs/UPGRADING_TO_3.3.0a7.md`，冻结记录 `3.3.0a7` 发布周期的备份、readiness、工作流/调度、模型选择、周期刷新观察和回滚核对项；当前升级以 `docs/UPGRADING.md` 为准。
 - **受控扩展实用指南**：新增 `docs/AGENTS_SKILLS_HOOKS_MCP_GUIDE.md`，明确 Agent/Skill 是现有工作流与目录元数据的组合、Hook 不是 Python sandbox、MCP 没有通用人工审批中心，并给出真实 manifest、lifecycle、审计和移除边界。
 - **本地 readiness 诊断**：新增鉴权接口 `GET /backend-api/api/system/readiness`，以稳定检查 ID 汇总数据目录、配置、工作流、调度目标、IM、LLM 与可选 MCP 状态；检查有超时上限且不返回密钥。
 - **预设目录与受控 extension manifest**：随包工作流增加独立 catalog 元数据；插件可声明 capability 和 lifecycle allowlist，框架 host facade 拒绝并审计未声明访问，MCP 操作记录脱敏结果与耗时元数据。

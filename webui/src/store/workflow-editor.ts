@@ -275,6 +275,31 @@ class WorkflowEditorModel {
     })
   }
 
+  undo() {
+    if (this.state.value.undoStack.length === 0) return
+
+    const currentState = this.createHistoryState()
+    while (
+      this.state.value.undoStack.length > 0 &&
+      snapshotsEqual(this.state.value.undoStack.at(-1)!, currentState)
+    ) {
+      this.state.value.undoStack.pop()
+    }
+    if (this.state.value.undoStack.length === 0) return
+    this.pushToRedoStack()
+    const prevState = this.state.value.undoStack.pop()!
+    this.restoreState(prevState)
+  }
+
+  redo() {
+    if (this.state.value.redoStack.length === 0) return
+
+    const nextState = this.state.value.redoStack.pop()!
+    // 重做时要保留剩余的 redo 历史；普通编辑才会清空 redo 栈。
+    this.pushToUndoStack(false)
+    this.restoreState(nextState)
+  }
+
   // Intent 处理方法
   private readonly intent: WorkflowEditorIntent = {
     initialize: (data) => {
@@ -322,30 +347,9 @@ class WorkflowEditorModel {
       this.pushToUndoStack()
     },
 
-    undo: () => {
-      if (this.state.value.undoStack.length === 0) return
+    undo: () => this.undo(),
 
-      const currentState = this.createHistoryState()
-      while (
-        this.state.value.undoStack.length > 0 &&
-        snapshotsEqual(this.state.value.undoStack.at(-1)!, currentState)
-      ) {
-        this.state.value.undoStack.pop()
-      }
-      if (this.state.value.undoStack.length === 0) return
-      this.pushToRedoStack()
-      const prevState = this.state.value.undoStack.pop()!
-      this.restoreState(prevState)
-    },
-
-    redo: () => {
-      if (this.state.value.redoStack.length === 0) return
-
-      const nextState = this.state.value.redoStack.pop()!
-      // 重做时要保留剩余的 redo 历史；普通编辑才会清空 redo 栈。
-      this.pushToUndoStack(false)
-      this.restoreState(nextState)
-    },
+    redo: () => this.redo(),
 
     reset: () => {
       this.intent.saveToHistory()
