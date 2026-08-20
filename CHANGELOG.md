@@ -16,6 +16,7 @@
 
 - **正文对比度达到 WCAG AA**：12 处正文说明文字读的是 `--text-color-tertiary`（浅色 `#909399`，对比度仅 2.87:1）或 `--n-text-color-3`（同色值），均低于 AA 要求的 4.5:1。现按 `main.css` 既有规则「background / border 用原键，color 用 `-text` 键」改读 `--text-color-tertiary-text`（浅色 4.62:1、深色 5.66:1）。该达标令牌此前定义了却无人使用。作为填充与描边使用的 3 处（状态标签底色、滚动条滑块）保持原键不变。
 - **body 行高读排版令牌**：`base.css` 的 `body` 写死 `line-height: 1.6`，与 `--line-height-normal: 1.5` 长期不一致，使「用了令牌的文字」与「继承来的文字」行距对不齐。现改读令牌并保留原字面量作回退。`font-size` 保持 15px 不动——令牌 `--font-size-base` 是 14px，改读令牌会让全站继承文本整体缩小一档。
+- **本地审计目录不进入版本库或镜像**：根目录 `work/` 用于保存 CI 调试与构建留痕，现由 `.gitignore` 和 `.dockerignore` 同步排除；`scripts/version.py` 已跳过该目录，三处规则保持一致，避免本地证据文件进入提交或 Docker 构建上下文。
 
 ### Changed
 

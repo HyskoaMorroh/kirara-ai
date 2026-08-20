@@ -52,3 +52,6 @@ docs/LOGO.jpg
 # graphify 知识图谱产物（本地分析用，不随项目分发）
 graphify-out/
 .graphify/
+
+# CI 调试与构建留痕（本地审计用，不随项目分发）
+/work/

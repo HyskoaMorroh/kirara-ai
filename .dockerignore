@@ -36,6 +36,7 @@ webui/dist
 graphify-out
 dist-release-check*
 logs
+work
 
 # 测试代码不参与运行时
 tests

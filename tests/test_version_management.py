@@ -21,6 +21,18 @@ def _load_version_module():
     return module
 
 
+def test_local_work_directory_is_excluded_from_source_docker_and_version_scans():
+    version_script = _load_version_module()
+    gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(
+        encoding="utf-8"
+    ).splitlines()
+
+    assert "/work/" in gitignore
+    assert "work" in dockerignore
+    assert "work" in version_script.SKIP_SCAN_DIRECTORIES
+
+
 @pytest.mark.parametrize(
     ("python_version", "npm_version"),
     [
