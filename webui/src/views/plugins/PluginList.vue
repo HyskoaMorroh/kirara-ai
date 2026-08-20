@@ -41,7 +41,7 @@ const createColumns = (): DataTableColumns<PluginInfo> => {
       render(row) {
         return h('div', {}, [
           h('div', {}, row.name),
-          h('div', { style: 'font-size: 12px; color: var(--n-text-color-3);' }, row.package_name)
+          h('div', { style: 'font-size: 12px; color: var(--text-color-tertiary-text, #6d7077);' }, row.package_name)
         ])
       }
     },

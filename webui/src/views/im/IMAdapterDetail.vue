@@ -605,7 +605,7 @@ defineExpose({
 
 .form-hint {
   font-size: 0.85rem;
-  color: var(--text-color-tertiary);
+  color: var(--text-color-tertiary-text);
 }
 
 .input {

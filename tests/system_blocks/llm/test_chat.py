@@ -16,7 +16,8 @@ from kirara_ai.workflow.core.dispatch.models.dispatch_rules import CombinedDispa
 from kirara_ai.workflow.core.dispatch.rules.base import DispatchRule
 from kirara_ai.workflow.core.execution.executor import WorkflowExecutor
 from kirara_ai.workflow.implementations.blocks.llm.chat import (ChatCompletion, ChatCompletionWithTools,
-                                                                ChatMessageConstructor, ChatResponseConverter)
+                                                                ChatMessageConstructor, ChatResponseConverter,
+                                                                FunctionCalling)
 
 
 def get_tools() -> list[Tool]:
@@ -418,6 +419,132 @@ def test_chat_completion_with_tools_no_tool_calls(container):
     assert isinstance(result["resp"], LLMChatResponse)
     assert isinstance(result["iteration_msgs"], list)
     assert len(result["iteration_msgs"]) == 0  # 无消息，因为没有工具调用
+
+
+# ---- function_calling：只联系模型、不执行工具的低层区块 ----
+#
+# FunctionCalling 与 ChatCompletionWithTools 是两个不同的区块：后者内部自动完成
+# 「模型请求工具 → 执行 → 回传结果」的循环，前者只把请求发给模型，然后按模型是否
+# 请求了工具，二选一地输出 tool_call 或 resp，工具的实际执行交给用户自己的节点。
+# 这个二选一的输出契约是下游节点连线的依据，必须有测试守住。
+
+
+class MockLLMFunctionCalling:
+    """总是返回带 tool_calls 的响应，模拟模型决定调用工具。"""
+
+    def chat(self, request):
+        return LLMChatResponse(
+            message=Message(
+                role="assistant",
+                content=[LLMChatTextContent(text="这是 AI 的回复")],
+                tool_calls=get_llm_tool_calls()
+            ),
+            model="gpt-3.5-turbo",
+            usage=Usage(
+                prompt_tokens=10,
+                completion_tokens=20,
+                total_tokens=30
+            )
+        )
+
+
+class MockLLMManagerFunctionCalling(LLMManager):
+    def __init__(self):
+        self.mock_llm = MockLLMFunctionCalling()
+
+    def get_llm_id_by_ability(self, ability):
+        return "gpt-3.5-turbo"
+
+    def get_llm(self, model_id):
+        return self.mock_llm
+
+
+def test_chat_function_calling():
+    """测试函数调用块：模型请求工具时走 tool_call，否则走 resp。"""
+    chat_request = LLMChatRequest(
+        model="gpt-3.5-turbo",
+        tools=get_tools(),
+        messages=[LLMChatMessage(role="user", content=[LLMChatTextContent(text="今天天气如何？")])]
+    )
+
+    container = DependencyContainer()
+    container.register(LLMManager, MockLLMManagerFunctionCalling())
+
+    block = FunctionCalling(model_name="gpt-3.5-turbo")
+    block.container = container
+
+    # step 1：模型请求调用工具，只输出 tool_call
+    result = block.execute(request_body=chat_request)
+
+    assert "tool_call" in result
+    assert "resp" not in result
+    assert isinstance(result["tool_call"], LLMChatResponse)
+    assert result["tool_call"].message.content[0].text == "这是 AI 的回复"
+    assert result["tool_call"].message.tool_calls == get_llm_tool_calls()
+
+    # step 2：换成不请求工具的模型，只输出 resp
+    container.register(LLMManager, MockLLMManager())
+    result = block.execute(request_body=chat_request)
+
+    assert "resp" in result
+    assert "tool_call" not in result
+    assert isinstance(result["resp"], LLMChatResponse)
+    assert result["resp"].message.content[0].text == "这是 AI 的回复"
+    assert result["resp"].message.tool_calls is None
+
+
+def test_chat_function_calling_requires_a_model_name():
+    """预设里 model_name 故意留空，报错必须指名是哪个节点没选模型。"""
+    block = FunctionCalling(model_name="")
+    block.container = DependencyContainer()
+
+    with pytest.raises(ValueError) as error:
+        block.execute(request_body=LLMChatRequest(
+            model="",
+            tools=get_tools(),
+            messages=[LLMChatMessage(role="user", content=[LLMChatTextContent(text="今天天气如何？")])]
+        ))
+
+    assert "function_calling" in str(error.value)
+
+
+def test_chat_function_calling_falls_back_to_the_next_model():
+    """主模型不可用时应换用备用模型，而不是直接失败。"""
+
+    class OnlyFallbackAvailableManager(LLMManager):
+        def __init__(self):
+            self.mock_llm = MockLLM()
+            self.requested = []
+
+        def get_llm_id_by_ability(self, ability):
+            return "gpt-3.5-turbo"
+
+        def get_llm(self, model_id):
+            self.requested.append(model_id)
+            # 主模型查不到，备用模型可用
+            return None if model_id == "missing-primary" else self.mock_llm
+
+    manager = OnlyFallbackAvailableManager()
+    container = DependencyContainer()
+    container.register(LLMManager, manager)
+
+    block = FunctionCalling(
+        model_name="missing-primary",
+        fallback_model_1="gpt-3.5-turbo",
+        max_retries=1,
+        retry_delay=0,
+    )
+    block.container = container
+
+    result = block.execute(request_body=LLMChatRequest(
+        model="missing-primary",
+        tools=get_tools(),
+        messages=[LLMChatMessage(role="user", content=[LLMChatTextContent(text="今天天气如何？")])]
+    ))
+
+    assert manager.requested == ["missing-primary", "gpt-3.5-turbo"]
+    assert "resp" in result
+    assert result["resp"].message.content[0].text == "这是 AI 的回复"
 
 
 # ---- 采样温度：类型放宽 + 调度规则 metadata 生效 ----

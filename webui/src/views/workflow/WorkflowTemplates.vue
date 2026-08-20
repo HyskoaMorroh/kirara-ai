@@ -428,7 +428,7 @@ onMounted(() => {
 
 .group-description {
   font-size: 12px;
-  color: var(--text-color-tertiary);
+  color: var(--text-color-tertiary-text);
 }
 
 .template-grid {

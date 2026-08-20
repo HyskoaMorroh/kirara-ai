@@ -175,7 +175,7 @@ onMounted(() => {
 
 .adapter-hint {
   margin: 0;
-  color: var(--text-color-tertiary);
+  color: var(--text-color-tertiary-text);
   font-style: italic;
 }
 

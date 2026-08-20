@@ -557,12 +557,12 @@ onMounted(() => {
 .plugin-meta {
   margin-top: auto;
   padding-top: 16px;
-  color: var(--text-color-tertiary);
+  color: var(--text-color-tertiary-text);
   font-size: 12px;
 }
 
 .separator {
-  color: var(--text-color-tertiary);
+  color: var(--text-color-tertiary-text);
 }
 
 .plugin-actions {

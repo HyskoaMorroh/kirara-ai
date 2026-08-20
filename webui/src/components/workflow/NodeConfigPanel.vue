@@ -1262,12 +1262,12 @@ const getTypeOptions = () => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: var(--text-color-tertiary);
+  color: var(--text-color-tertiary-text);
   height: 100%;
 }
 
 .empty-icon {
-  color: var(--text-color-tertiary);
+  color: var(--text-color-tertiary-text);
 }
 
 .connection-group {
@@ -1354,7 +1354,7 @@ const getTypeOptions = () => {
 }
 
 .connection-icon {
-  color: var(--text-color-tertiary);
+  color: var(--text-color-tertiary-text);
   flex-shrink: 0;
 }
 
@@ -1404,7 +1404,7 @@ const getTypeOptions = () => {
   align-items: center;
   gap: 8px;
   padding: 12px;
-  color: var(--text-color-tertiary);
+  color: var(--text-color-tertiary-text);
   font-size: 12px;
   font-style: italic;
 }
@@ -1589,7 +1589,7 @@ const getTypeOptions = () => {
 .empty-params {
   padding: 12px;
   text-align: center;
-  color: var(--text-color-tertiary);
+  color: var(--text-color-tertiary-text);
   font-size: 12px;
 }
 

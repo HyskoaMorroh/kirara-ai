@@ -204,7 +204,7 @@ const renderArrayField = (key: string, property: SchemaProperty, formItemProps: 
       [
         h(
           'span',
-          { style: { minWidth: '32px', color: 'var(--n-text-color-3)' } },
+          { style: { minWidth: '32px', color: 'var(--text-color-tertiary-text, #6d7077)' } },
           `[${index + 1}]`
         ),
         h('div', { style: { flex: 1 } }, [
@@ -242,7 +242,7 @@ const renderArrayField = (key: string, property: SchemaProperty, formItemProps: 
                 'div',
                 {
                   style: {
-                    color: 'var(--n-text-color-3)',
+                    color: 'var(--text-color-tertiary-text, #6d7077)',
                     fontStyle: 'italic',
                     padding: '4px 0'
                   }

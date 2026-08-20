@@ -8,6 +8,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- **多模态模板恢复角色扮演人设**：`chat/normal_multimodal.yaml` 的 `system_prompt` 此前只剩 `# Information` / `# Memories` 骨架，模型因此不再扮演角色。现补回与 `factories/persona.py` 的 `DEFAULT_PERSONA_SYSTEM_PROMPT` 一致的人设正文（1044 字符逐字节核对）。随包预设与 `data/workflows` 两份副本同步修改，`model_name` 继续留空由用户在下拉框选择。`chat/dsr_thinking.yaml` 不在此列：它针对思维链模型专门重写为 `# Rules` 指令集（控制标记不可见、代词记忆关联、拒绝客套、专家视角），是有意的差异，保持不变。
+
+### Fixed
+
+- **正文对比度达到 WCAG AA**：12 处正文说明文字读的是 `--text-color-tertiary`（浅色 `#909399`，对比度仅 2.87:1）或 `--n-text-color-3`（同色值），均低于 AA 要求的 4.5:1。现按 `main.css` 既有规则「background / border 用原键，color 用 `-text` 键」改读 `--text-color-tertiary-text`（浅色 4.62:1、深色 5.66:1）。该达标令牌此前定义了却无人使用。作为填充与描边使用的 3 处（状态标签底色、滚动条滑块）保持原键不变。
+- **body 行高读排版令牌**：`base.css` 的 `body` 写死 `line-height: 1.6`，与 `--line-height-normal: 1.5` 长期不一致，使「用了令牌的文字」与「继承来的文字」行距对不齐。现改读令牌并保留原字面量作回退。`font-size` 保持 15px 不动——令牌 `--font-size-base` 是 14px，改读令牌会让全站继承文本整体缩小一档。
+
+### Changed
+
+- **仓库自身链接指向本仓库**：`pyproject.toml` 的 `Homepage`、`Bug Tracker`，以及 README 的 star / license / CI / codecov 徽章、问题列表与 star-history 均改指 `HyskoaMorroh/kirara-ai`。发布身份与外部资源保持上游不变：PyPI 包名 `kirara-ai`（`entry.py`、`system/routes.py`、`system/utils.py` 依赖它做自更新与版本读取）、npm 包名 `kirara-ai-webui`、文档站 `kirara-docs.app.lss233.com`、插件市场 API、Docker Hub 拉取徽章、作者署名与贡献者名单。
+- **社区入口统一为 Telegram**：README 的 6 个 QQ 交流群、机器人调试群与开发者交流群链接（多数已标注「已满」）替换为单一入口 <https://t.me/kirara_ai>。
+
+### Tests
+
+- **`FunctionCalling` 区块补测试**：该区块在 `blocks/llm/chat.py` 有实现却无任何测试引用（`ChatCompletionWithTools` 是另一个区块，其测试不覆盖它）。新增 3 个用例覆盖「模型请求工具走 `tool_call`、不请求走 `resp`」的二选一输出契约、未选模型时的报错须指名节点、主模型不可用时降级到备用模型。
+- **人设防回归守卫**：新增用例断言默认工作流的提示词确实取自 `persona.py`，以及 `normal.yaml` / `normal_multimodal.yaml` / `talk_break.yaml` 三个角色扮演预设的两份副本都仍带人设主体、互动规则与记忆占位符。时间信息允许由 `{current_date_time}` 占位符或 `internal:current_time_block` 节点任一提供（`talk_break.yaml` 走后者）。
+
 ## [3.3.0b8] - 2026-08-19
 
 ### Fixed
@@ -274,7 +293,7 @@
 下列范围覆盖本次相对所有可复现功能差异；同一目录内列出的文件均为实现、配置或测试的一部分。
 
 - **构建与部署**：`.env.example`、`.gitignore`、`pyproject.toml`、`docker-compose.yml`、`docker-compose.yml.example`、`.github/workflows/docker-latest.yml`、`.github/workflows/pr_review.yml`、`.github/quickstarts/windows/scripts/启动.cmd`、`README.md`。
-- **默认数据**：`data/dispatch_rules/rules.yaml`、`data/workflows/chat/dsr_thinking.yaml`、`data/workflows/chat/normal.yaml`；测试工作流位于 `data/workflows/test-group/`。
+- **默认数据**：`data/dispatch_rules/rules.yaml`、`data/workflows/chat/dsr_thinking.yaml`、`data/workflows/chat/normal.yaml`、`data/workflows/chat/normal_multimodal.yaml`、`kirara_ai/workflow/presets/chat/normal_multimodal.yaml`；测试工作流位于 `data/workflows/test-group/`。
 - **应用、配置与调度**：`kirara_ai/entry.py`、`kirara_ai/config/`、`kirara_ai/scheduler/scheduler.py`、`kirara_ai/web/app.py`。
 - **LLM 与预置适配器**：`kirara_ai/llm/`、`kirara_ai/plugins/llm_preset_adapters/`，包括新增的模型类型、Embedding/Rerank/Tool 格式与 Voyage 适配器。
 - **MCP 与工作流能力**：`kirara_ai/mcp_module/`、`kirara_ai/web/api/mcp/`、`kirara_ai/workflow/core/`、`kirara_ai/workflow/implementations/blocks/mcp/`、`kirara_ai/workflow/implementations/blocks/llm/chat.py`、`kirara_ai/workflow/implementations/blocks/system_blocks.py`。
@@ -285,3 +304,4 @@
 - **圆角与主题形状**：`webui/src/assets/main.css`、`webui/src/theme/palettes.ts`、`webui/src/stores/theme.ts`、`webui/src/App.vue`、`webui/src/views/settings/components/AppearanceCard.vue`。
 - **CI 门禁**：`.github/workflows/run-tests.yml`、`release-preflight.yml`、`project_check.yml`、`docker-latest.yml`、`docker-tag.yml`、`quickstart-windows.yml`、`stale.yml`、`pr_review.yml`、`tests/test_release_workflow_contract.py`。
 - **文档**：`docs/QUICKSTART.md`、`docs/OBSERVABILITY.md`、`docs/EXTENDING.md`。
+- **人设单一来源与可访问色**：`kirara_ai/workflow/implementations/factories/persona.py`、`kirara_ai/workflow/implementations/factories/default_factory.py`、`tests/test_workflow_factories.py`、`tests/system_blocks/llm/test_chat.py`、`webui/src/assets/base.css`、`webui/src/components/workflow/NodeConfigPanel.vue`、`webui/src/components/form/DynamicConfigForm.vue`、`webui/src/views/im/IMView.vue`、`webui/src/views/im/IMAdapterDetail.vue`、`webui/src/views/mcp/MCPList.vue`、`webui/src/views/plugins/PluginList.vue`、`webui/src/views/plugins/PluginMarket.vue`、`webui/src/views/workflow/WorkflowTemplates.vue`。

@@ -65,8 +65,10 @@ dependencies = [
 kirara_ai = "kirara_ai.__main__:main"
 
 [project.urls]
-"Homepage" = "https://github.com/lss233/chatgpt-mirai-qq-bot"
-"Bug Tracker" = "https://github.com/lss233/chatgpt-mirai-qq-bot/issues"
+# Homepage / Bug Tracker 指向本仓库：issues 收的是本仓库的 bug 报告。
+# Documentation 仍指上游文档站——本仓库没有自建文档站，改成 fork 地址只会变死链。
+"Homepage" = "https://github.com/HyskoaMorroh/kirara-ai"
+"Bug Tracker" = "https://github.com/HyskoaMorroh/kirara-ai/issues"
 "Documentation" = "https://kirara-docs.app.lss233.com"
 
 [tool.setuptools.packages.find]

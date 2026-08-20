@@ -967,14 +967,16 @@ onMounted(async () => {
 }
 
 .operator {
-  color: var(--n-text-color-3);
+  /* 原先读 --n-text-color-3（浅色 #909399，对比度 2.87:1，不足 WCAG AA）。
+     改用文本专用变体：浅色 4.62:1、深色 5.66:1，同样是 naive-ui 主题联动的令牌。 */
+  color: var(--text-color-tertiary-text, #6d7077);
   font-weight: 500;
   padding: 0 8px;
 }
 
 .group-operator {
   margin-top: 16px;
-  color: var(--n-text-color-3);
+  color: var(--text-color-tertiary-text, #6d7077);
   font-weight: 500;
 }
 
@@ -992,7 +994,7 @@ onMounted(async () => {
 
 .preview-description {
   margin: 0 0 16px;
-  color: var(--n-text-color-3);
+  color: var(--text-color-tertiary-text, #6d7077);
   line-height: 1.6;
 }
 
@@ -1025,7 +1027,7 @@ onMounted(async () => {
 
 .preview-rule-main span,
 .preview-rule-main small {
-  color: var(--n-text-color-3);
+  color: var(--text-color-tertiary-text, #6d7077);
   overflow-wrap: anywhere;
 }
 

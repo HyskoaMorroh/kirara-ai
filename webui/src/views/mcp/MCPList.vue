@@ -671,7 +671,9 @@ onMounted(() => {
 }
 
 .mcp-description {
-  color: var(--n-text-color-3);
+  /* 原先读 --n-text-color-3（浅色 #909399，正文对比度仅 2.87:1，不足 WCAG AA
+     的 4.5:1）。这里是正文说明文字，改用文本专用变体：浅色 4.62:1、深色 5.66:1。 */
+  color: var(--text-color-tertiary-text, #6d7077);
   font-size: 14px;
 }
 
@@ -730,7 +732,7 @@ onMounted(() => {
 
 .stat-label {
   font-size: 14px;
-  color: var(--n-text-color-3);
+  color: var(--text-color-tertiary-text, #6d7077);
 }
 
 .mcp-toolbar {
@@ -871,7 +873,7 @@ onMounted(() => {
 
 .info-label {
   width: 90px;
-  color: var(--n-text-color-3);
+  color: var(--text-color-tertiary-text, #6d7077);
   flex-shrink: 0;
   display: flex;
   align-items: center;
