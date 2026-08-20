@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-import tomllib
 from typing import Any
 from pathlib import Path
 
 import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+    import tomli as tomllib
 
 from kirara_ai.web.api.system import utils
 
