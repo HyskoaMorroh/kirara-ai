@@ -79,8 +79,11 @@ import {
 } from './useLayout'
 import {
   filterWiresForBlocks,
+  getCanvasBlockPorts,
+  getCanvasBlockType,
   getUnknownBlockTypes,
   getRenderableNodePosition,
+  getWorkflowGraphIssues,
   mergeWorkflowConfig,
   parseWorkflowTransferPayload,
   WORKFLOW_TRANSFER_SCHEMA_VERSION
@@ -362,31 +365,27 @@ const handleEdgeUpdate = ({ edge, connection }: EdgeUpdateEvent) => {
   }
 }
 
-const buildEdge = (params: Connection, blocks = viewState.value.blocks): Edge | null => {
+const buildEdge = (
+  params: Connection,
+  blocks = viewState.value.blocks,
+  allowUnresolved = false
+): Edge | null => {
   // 获取源节点类型和输出类型
   const sourceBlock = blocks.find((block) => block.name === params.source)
-  if (!sourceBlock) return null
+  const targetBlock = blocks.find((block) => block.name === params.target)
+  if (!sourceBlock || !targetBlock) return null
 
-  const blockType = props.blockTypes.find((type) => type.type_name === sourceBlock.type_name)
-  if (!blockType) return null
-
-  let type = null
-  if (blockType.type_name == 'internal:code') {
-    type = sourceBlock.config.outputs.find(
-      (output: any) => output.name === params.sourceHandle
-    )?.type
-  } else {
-    type = blockType.outputs.find(
-      (output: BlockOutput) => output.name === params.sourceHandle
-    )?.type
-  }
-  if (!type) return null
+  const blockType = getCanvasBlockType(sourceBlock, props.blockTypes)
+  const type = getCanvasBlockPorts(sourceBlock, blockType).outputs.find(
+    (output: BlockOutput) => output.name === params.sourceHandle
+  )?.type
+  if (!type && !allowUnresolved) return null
 
   return {
     ...params,
     id: `${params.source}-${params.sourceHandle}-${params.target}-${params.targetHandle}`,
     markerEnd: MarkerType.ArrowClosed,
-    style: { stroke: getTypeColor(type).color_on, strokeWidth: 2 },
+    style: { stroke: getTypeColor(type || 'unknown').color_on, strokeWidth: 2 },
     class: 'workflow-edge',
     updatable: true
   }
@@ -394,7 +393,12 @@ const buildEdge = (params: Connection, blocks = viewState.value.blocks): Edge | 
 
 // ==================== 数据转换函数 ====================
 // 将 BlockInstance 转换为 vue-flow 节点
-const convertCustomNodeToVueFlowNode = (block: BlockInstance, blockType: BlockType): Node => {
+const convertCustomNodeToVueFlowNode = (
+  block: BlockInstance,
+  blockType: BlockType,
+  inputs = blockType.inputs,
+  outputs = blockType.outputs
+): Node => {
   return {
     id: block.name,
     type: 'custom', // 使用自定义节点类型
@@ -404,13 +408,18 @@ const convertCustomNodeToVueFlowNode = (block: BlockInstance, blockType: BlockTy
       blockType: blockType,
       config: block.config || {},
       parallel: block.parallel === true,
-      inputs: blockType.inputs,
-      outputs: blockType.outputs
+      inputs,
+      outputs
     }
   }
 }
 
-const convertCodeNodeToVueFlowNode = (block: BlockInstance, blockType: BlockType): Node => {
+const convertCodeNodeToVueFlowNode = (
+  block: BlockInstance,
+  blockType: BlockType,
+  inputs = block.config?.inputs || [],
+  outputs = block.config?.outputs || []
+): Node => {
   return {
     id: block.name,
     type: 'code', // 使用自定义节点类型
@@ -420,23 +429,24 @@ const convertCodeNodeToVueFlowNode = (block: BlockInstance, blockType: BlockType
       blockType: blockType,
       config: block.config || {},
       parallel: block.parallel === true,
-      inputs: block.config?.inputs || [],
-      outputs: block.config?.outputs || []
+      inputs,
+      outputs
     }
   }
 }
 
-const convertBlocksToNodes = (blocks: BlockInstance[]): Node[] => {
-  return blocks
-    .map((block) => {
-      const blockType = props.blockTypes.find((type) => type.type_name === block.type_name)
-      if (!blockType) return null
-      if (blockType.type_name == 'internal:code') {
-        return convertCodeNodeToVueFlowNode(block, blockType)
-      }
-      return convertCustomNodeToVueFlowNode(block, blockType)
-    })
-    .filter((it) => it !== null)
+const convertBlocksToNodes = (
+  blocks: BlockInstance[],
+  wires: Wire[] = viewState.value.wires
+): Node[] => {
+  return blocks.map((block) => {
+    const blockType = getCanvasBlockType(block, props.blockTypes)
+    const { inputs, outputs } = getCanvasBlockPorts(block, blockType, wires)
+    if (blockType.type_name == 'internal:code') {
+      return convertCodeNodeToVueFlowNode(block, blockType, inputs, outputs)
+    }
+    return convertCustomNodeToVueFlowNode(block, blockType, inputs, outputs)
+  })
 }
 
 // 将 Wire 转换为 vue-flow Edge
@@ -451,9 +461,11 @@ const convertWiresToEdges = (wires: Wire[], blocks = viewState.value.blocks): Ed
         targetHandle: wire.target_input
       }
 
-      return buildEdge(connection, blocks) as Edge
+      // 已保存的历史连线需要优先可见。端口元数据缺失时，节点转换会创建
+      // 占位 Handle，这里用中性色恢复边；用户新建/改接连线仍走严格校验。
+      return buildEdge(connection, blocks, true)
     })
-    .filter((it) => it !== null)
+    .filter((it): it is Edge => it !== null)
 }
 
 // 将 vue-flow 节点转换回 BlockInstance
@@ -595,7 +607,7 @@ const flushGraphData = () => {
 const restoreGraph = () => {
   restoringGraph = true
   try {
-    const vueFlowNodes = convertBlocksToNodes(viewState.value.blocks)
+    const vueFlowNodes = convertBlocksToNodes(viewState.value.blocks, viewState.value.wires)
     const vueFlowEdges = convertWiresToEdges(viewState.value.wires)
     const blocksById = new Map(viewState.value.blocks.map((block) => [block.name, block]))
     const nodesWithoutPosition = new Set(
@@ -889,12 +901,8 @@ const handleImport = async () => {
         const importedBlocks = data.blocks as unknown as BlockInstance[]
         const importedWires = data.wires as unknown as Wire[]
         const unknownBlockTypes = getUnknownBlockTypes(importedBlocks, props.blockTypes)
-        if (unknownBlockTypes.length > 0) {
-          throw new Error(`缺少区块类型 ${unknownBlockTypes.join('、')}`)
-        }
-        // 端口对不上的连线不再让整份导入失败：节点定义随版本演进是常态，
-        // 全有或全无会让用户拿不回任何内容。这里丢弃无法识别的连线，
-        // 并把逐条明细报给用户，行为回到早期的宽容策略。
+        // 只丢弃端点节点本身不存在、因而无法在画布上表达的连线。端口元数据
+        // 暂缺时仍保留连线，并由占位 Handle 与统一问题清单提示用户修复。
         const vueFlowEdges = convertWiresToEdges(importedWires, importedBlocks)
         const acceptedWireKeys = new Set(
           vueFlowEdges.map(
@@ -942,14 +950,17 @@ const handleImport = async () => {
         emit('update:blocks', viewState.value.blocks)
         emit('update:wires', acceptedWires)
         emit('update:config', viewState.value.config)
-        if (droppedWires.length > 0) {
-          // 明细逐条列出，用户才知道该手工补哪几根线
-          importDroppedWires.value = droppedWires.map(
+        const reportItems = [
+          ...unknownBlockTypes.map((typeName) => `节点类型当前不可用：${typeName}`),
+          ...droppedWires.map(
             (wire) =>
-              `${wire.source_block}.${wire.source_output} → ${wire.target_block}.${wire.target_input}`
+              `连线端点节点不存在：${wire.source_block}.${wire.source_output} → ${wire.target_block}.${wire.target_input}`
           )
+        ]
+        if (reportItems.length > 0) {
+          importReportItems.value = reportItems
           showImportReportModal.value = true
-          message.warning(`导入完成，但有 ${droppedWires.length} 根连线无法识别`)
+          message.warning(`导入完成，已保留可恢复内容，另有 ${reportItems.length} 项需要处理`)
         } else {
           message.success('导入成功')
         }
@@ -1095,6 +1106,27 @@ const overlapValidationIssues = computed<CanvasValidationIssue[]>(() =>
     }))
 )
 
+/**
+ * 当前服务端元数据无法完整解释的历史图数据。
+ *
+ * 使用 viewState 而不是只看已渲染的边，才能在端点节点缺失、边无法绘制时
+ * 仍保留诊断。未知类型和未知端口都有对应占位节点/Handle，可在画布内定位。
+ */
+const graphValidationIssues = computed<CanvasValidationIssue[]>(() =>
+  getWorkflowGraphIssues(viewState.value.blocks, viewState.value.wires, props.blockTypes).map(
+    (issue) => {
+      const node = nodes.value.find((item) => item.id === issue.nodeId)
+      return {
+        nodeId: issue.nodeId,
+        label: node?.data?.label || issue.nodeId || '工作流',
+        message: issue.message,
+        severity: issue.severity,
+        code: issue.code
+      }
+    }
+  )
+)
+
 const validationIssues = computed(() => {
   const serverIssueKeys = new Set(
     serverValidationIssues.value.map((issue) => `${issue.nodeId}:${issue.code || issue.message}`)
@@ -1102,6 +1134,9 @@ const validationIssues = computed(() => {
   return [
     ...serverValidationIssues.value,
     ...localValidationIssues.value.filter(
+      (issue) => !serverIssueKeys.has(`${issue.nodeId}:${issue.code || issue.message}`)
+    ),
+    ...graphValidationIssues.value.filter(
       (issue) => !serverIssueKeys.has(`${issue.nodeId}:${issue.code || issue.message}`)
     ),
     ...overlapValidationIssues.value
@@ -1156,8 +1191,8 @@ const handleIssueJump = (nodeId: string) => {
   showIssueListModal.value = false
 }
 
-/** 导入时被丢弃的连线明细 */
-const importDroppedWires = ref<string[]>([])
+/** 导入时保留的兼容性问题，以及确实无法表达而被丢弃的连线 */
+const importReportItems = ref<string[]>([])
 const showImportReportModal = ref(false)
 
 // ==================== 画布内节点搜索 ====================
@@ -2069,7 +2104,7 @@ const onDrop = (event: DragEvent) => {
       </template>
     </NModal>
 
-    <!-- 导入结果：列出被丢弃的连线，便于手工补齐 -->
+    <!-- 导入结果：列出兼容性问题与确实无法恢复的连线 -->
     <NModal
       v-model:show="showImportReportModal"
       preset="card"
@@ -2077,9 +2112,9 @@ const onDrop = (event: DragEvent) => {
       class="settings-modal"
       :style="{ width: 'min(560px, calc(100vw - 32px))' }"
     >
-      <NText depth="2">以下连线在当前版本中找不到对应端口，已跳过，其余内容导入成功：</NText>
+      <NText depth="2">工作流已导入；以下项目需要处理，节点和可恢复连线均已保留：</NText>
       <NList>
-        <NListItem v-for="item in importDroppedWires" :key="item">
+        <NListItem v-for="item in importReportItems" :key="item">
           <NText code>{{ item }}</NText>
         </NListItem>
       </NList>

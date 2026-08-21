@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  getCanvasBlockPorts,
+  getCanvasBlockType,
   filterWiresForBlocks,
   getUnknownBlockTypes,
+  getWorkflowGraphIssues,
   mergeWorkflowConfig,
   parseWorkflowTransferPayload,
   getRenderableNodePosition,
@@ -74,5 +77,120 @@ describe('workflow import data', () => {
     expect(getRenderableNodePosition({ x: 0, y: 0 })).toEqual({ x: 0, y: 0 })
     expect(getRenderableNodePosition(null)).toEqual({ x: 0, y: 0 })
     expect(getRenderableNodePosition(undefined)).toEqual({ x: 0, y: 0 })
+  })
+
+  it('keeps an unknown node renderable and preserves its original type name', () => {
+    const block = {
+      name: 'script',
+      type_name: 'plugin:missing',
+      config: {
+        inputs: [{ name: 'prompt', label: 'Prompt', type: 'str', required: true }],
+        outputs: [{ name: 'answer', label: 'Answer', type: 'str' }]
+      }
+    }
+
+    const blockType = getCanvasBlockType(block, [])
+
+    expect(blockType.type_name).toBe('plugin:missing')
+    expect(blockType.label).toContain('plugin:missing')
+    expect(getCanvasBlockPorts(block, blockType)).toEqual({
+      inputs: [expect.objectContaining({ name: 'prompt', type: 'str' })],
+      outputs: [expect.objectContaining({ name: 'answer', type: 'str' })]
+    })
+  })
+
+  it('reports unknown block types and ports instead of silently dropping them', () => {
+    const blocks = [
+      { name: 'source', type_name: 'plugin:missing', config: {} },
+      { name: 'target', type_name: 'core:known', config: {} }
+    ]
+    const wires = [
+      {
+        source_block: 'source',
+        source_output: 'answer',
+        target_block: 'target',
+        target_input: 'missing_input'
+      }
+    ]
+    const blockTypes = [
+      {
+        type_name: 'core:known',
+        name: 'Known',
+        label: 'Known',
+        description: '',
+        inputs: [],
+        outputs: [],
+        configs: []
+      }
+    ]
+
+    const issues = getWorkflowGraphIssues(blocks, wires, blockTypes)
+
+    expect(issues.map((issue) => issue.code)).toEqual([
+      'unknown_block_type',
+      'unknown_source_port',
+      'unknown_target_port'
+    ])
+    expect(issues[0].nodeId).toBe('source')
+  })
+
+  it('creates visible placeholder handles for ports referenced by historical wires', () => {
+    const block = { name: 'known', type_name: 'core:known', config: {} }
+    const blockType = {
+      type_name: 'core:known',
+      name: 'Known',
+      label: 'Known',
+      description: '',
+      inputs: [],
+      outputs: [],
+      configs: []
+    }
+    const wires = [
+      {
+        source_block: 'known',
+        source_output: 'legacy_output',
+        target_block: 'known',
+        target_input: 'legacy_input'
+      }
+    ]
+
+    expect(getCanvasBlockPorts(block, blockType, wires)).toEqual({
+      inputs: [expect.objectContaining({ name: 'legacy_input', type: 'unknown' })],
+      outputs: [expect.objectContaining({ name: 'legacy_output', type: 'unknown' })]
+    })
+  })
+
+  it('reports missing wire endpoints separately from unavailable ports', () => {
+    const blocks = [{ name: 'present', type_name: 'core:known', config: {} }]
+    const wires = [
+      {
+        source_block: 'missing_source',
+        source_output: 'value',
+        target_block: 'present',
+        target_input: 'input'
+      },
+      {
+        source_block: 'present',
+        source_output: 'value',
+        target_block: 'missing_target',
+        target_input: 'input'
+      }
+    ]
+    const blockTypes = [
+      {
+        type_name: 'core:known',
+        name: 'Known',
+        label: 'Known',
+        description: '',
+        inputs: [{ name: 'input', label: 'Input', description: '', type: 'str', required: false }],
+        outputs: [{ name: 'value', label: 'Value', description: '', type: 'str' }],
+        configs: []
+      }
+    ]
+
+    expect(getWorkflowGraphIssues(blocks, wires, blockTypes).map((issue) => issue.code)).toEqual([
+      'missing_source_block',
+      'missing_target_block'
+    ])
   })
 })
