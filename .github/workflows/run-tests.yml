@@ -26,6 +26,17 @@ name: Run Tests
 
 on:
   workflow_call:
+    inputs:
+      release_tag:
+        description: "Optional release tag whose source should be tested."
+        required: false
+        type: string
+        default: ""
+      release_commit:
+        description: "Optional immutable commit verified by the release preflight."
+        required: false
+        type: string
+        default: ""
   pull_request:
     branches: [main, master]
   push:
@@ -57,6 +68,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_commit || inputs.release_tag || github.sha }}
+          fetch-depth: 0
 
       - name: Verify synchronized versions
         run: python scripts/version.py check
@@ -69,6 +83,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_commit || inputs.release_tag || github.sha }}
+          fetch-depth: 0
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v6
@@ -109,6 +126,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_commit || inputs.release_tag || github.sha }}
+          fetch-depth: 0
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v6
@@ -178,6 +198,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_commit || inputs.release_tag || github.sha }}
+          fetch-depth: 0
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v6
@@ -208,6 +231,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_commit || inputs.release_tag || github.sha }}
+          fetch-depth: 0
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4

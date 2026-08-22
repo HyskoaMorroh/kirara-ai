@@ -36,6 +36,8 @@ jobs:
     uses: ./.github/workflows/release-preflight.yml
     with:
       run_backend_and_image: true
+      release_tag: ${{ inputs.image_tag }}
+      expected_commit: ${{ github.sha }}
     secrets: inherit
 
   docker:
@@ -46,13 +48,21 @@ jobs:
         name: Checkout dispatch commit
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.verify.outputs.release_commit }}
+          fetch-depth: 0
       - name: Set output
         id: vars
+        env:
+          INPUT_TAG: ${{ inputs.image_tag }}
+          EXPECTED_COMMIT: ${{ needs.verify.outputs.release_commit }}
         run: |
-          INPUT_TAG="${{ inputs.image_tag }}"
           if [ -z "$INPUT_TAG" ]; then
             echo "Set image_tag before manually publishing a versioned image."
+            exit 1
+          fi
+          source_commit="$(git rev-parse HEAD)"
+          if [ "$source_commit" != "$EXPECTED_COMMIT" ]; then
+            echo "Checkout commit $source_commit does not match the preflight commit $EXPECTED_COMMIT."
             exit 1
           fi
           git_tag="$(python3 scripts/version.py tag)"
@@ -61,7 +71,11 @@ jobs:
             echo "image_tag must match the source Git tag ($git_tag); got $INPUT_TAG."
             exit 1
           fi
-          python3 scripts/version.py check --tag "$git_tag"
+          python3 scripts/version.py verify-tag \
+            --tag "$INPUT_TAG" \
+            --expected-commit "$source_commit" \
+            --expect-head \
+            --remote origin
           echo "git_tag=$git_tag" >> "$GITHUB_OUTPUT"
           echo "image_version=$image_version" >> "$GITHUB_OUTPUT"
       - name: Check output

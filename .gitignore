@@ -56,3 +56,4 @@ graphify-out/
 
 # CI 调试与构建留痕（本地审计用，不随项目分发）
 /work/
+.version-sync.lock

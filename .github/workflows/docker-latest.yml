@@ -6,8 +6,8 @@ on:
       - published
 
 concurrency:
-  group: docker-latest-${{ github.ref }}
-  cancel-in-progress: true
+  group: docker-latest-current
+  cancel-in-progress: false
 
 jobs:
   verify:
@@ -23,6 +23,7 @@ jobs:
     uses: ./.github/workflows/release-preflight.yml
     with:
       run_backend_and_image: true
+      release_tag: ${{ github.event.release.tag_name }}
     secrets: inherit
 
   docker:
@@ -35,24 +36,28 @@ jobs:
         name: Checkout release source
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.release.tag_name || github.sha }}
+          ref: ${{ needs.verify.outputs.release_commit }}
+          fetch-depth: 0
       -
         name: Verify publish eligibility
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_COMMIT: ${{ needs.verify.outputs.release_commit }}
           RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}
           RELEASE_IS_DRAFT: ${{ github.event.release.draft }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "publish=true" >> $GITHUB_OUTPUT
-            echo "publish_latest=true" >> $GITHUB_OUTPUT
-            echo "Manual publish requested." >> $GITHUB_STEP_SUMMARY
-            exit 0
+          source_commit="$(git rev-parse HEAD)"
+          if [ "$source_commit" != "$RELEASE_COMMIT" ]; then
+            echo "Checkout commit $source_commit does not match the preflight commit $RELEASE_COMMIT."
+            exit 1
           fi
-
-          python3 scripts/version.py check --tag "$RELEASE_TAG"
+          python3 scripts/version.py verify-tag \
+            --tag "$RELEASE_TAG" \
+            --expected-commit "$source_commit" \
+            --expect-head \
+            --remote origin
           EXPECTED_TAG="$(python3 scripts/version.py tag)"
           PROJECT_VERSION="$(python3 scripts/version.py get)"
           echo "tag=$EXPECTED_TAG" >> "$GITHUB_OUTPUT"

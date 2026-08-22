@@ -23,6 +23,25 @@ on:
         required: false
         type: boolean
         default: false
+      release_tag:
+        description: "Release Git tag whose immutable source must pass this gate."
+        required: false
+        type: string
+        default: ""
+      release_commit:
+        description: "Optional immutable commit to use for every preflight checkout."
+        required: false
+        type: string
+        default: ""
+      expected_commit:
+        description: "Optional caller commit that the release tag must resolve to."
+        required: false
+        type: string
+        default: ""
+    outputs:
+      release_commit:
+        description: "Commit verified as the release source for every downstream job."
+        value: ${{ jobs.version.outputs.release_commit }}
   push:
     branches: [main, master]
   pull_request:
@@ -43,9 +62,14 @@ jobs:
     name: Version synchronization
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      release_commit: ${{ steps.identity.outputs.release_commit }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_commit || inputs.release_tag || github.sha }}
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -55,11 +79,33 @@ jobs:
       - name: Verify synchronized versions
         run: python scripts/version.py check
 
+      - name: Verify release tag identity
+        id: identity
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          if [ -z "$RELEASE_TAG" ]; then
+            echo "release_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          verify_args=(verify-tag --tag "$RELEASE_TAG" --expect-head --remote origin --json)
+          if [ -n "$EXPECTED_COMMIT" ]; then
+            verify_args+=(--expected-commit "$EXPECTED_COMMIT")
+          fi
+          identity_json="$(python scripts/version.py "${verify_args[@]}")"
+          release_commit="$(printf '%s' "$identity_json" | python -c 'import json, sys; print(json.load(sys.stdin)["commit"])')"
+          echo "release_commit=$release_commit" >> "$GITHUB_OUTPUT"
+          echo "Verified release identity: $RELEASE_TAG -> $release_commit" >> "$GITHUB_STEP_SUMMARY"
+
   backend-and-image:
     name: Backend matrix and Docker smoke
     needs: version
     if: ${{ inputs.run_backend_and_image }}
     uses: ./.github/workflows/run-tests.yml
+    with:
+      release_tag: ${{ inputs.release_tag }}
+      release_commit: ${{ needs.version.outputs.release_commit }}
     secrets: inherit
 
   contracts:
@@ -70,6 +116,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.version.outputs.release_commit }}
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -155,6 +204,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.version.outputs.release_commit }}
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -240,6 +292,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.version.outputs.release_commit }}
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v6

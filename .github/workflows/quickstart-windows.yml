@@ -23,6 +23,7 @@ jobs:
     uses: ./.github/workflows/release-preflight.yml
     with:
       run_backend_and_image: true
+      release_tag: ${{ github.event.release.tag_name }}
     secrets: inherit
 
   release:
@@ -81,13 +82,32 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v6
       with:
-        ref: ${{ github.event.release.tag_name || github.sha }}
+        ref: ${{ needs.preflight.outputs.release_commit }}
+        fetch-depth: 0
 
     - name: Set up Python for building
       uses: actions/setup-python@v6
       with:
         python-version: '3.11'
         cache: 'pip'
+
+    - name: Verify immutable release source
+      env:
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
+        EXPECTED_COMMIT: ${{ needs.preflight.outputs.release_commit }}
+      shell: pwsh
+      run: |
+        $sourceCommit = (git rev-parse HEAD).Trim()
+        if ($sourceCommit -ne $env:EXPECTED_COMMIT) {
+          throw "Checkout commit $sourceCommit does not match the preflight commit $env:EXPECTED_COMMIT."
+        }
+        if ($env:GITHUB_EVENT_NAME -eq "release") {
+          python scripts/version.py verify-tag `
+            --tag $env:RELEASE_TAG `
+            --expected-commit $sourceCommit `
+            --expect-head `
+            --remote origin
+        }
 
     - name: Verify synchronized release version
       id: version
@@ -96,7 +116,11 @@ jobs:
       run: |
         python scripts/version.py check
         if ($env:GITHUB_EVENT_NAME -eq "release") {
-          python scripts/version.py check --tag $env:RELEASE_TAG
+          python scripts/version.py verify-tag `
+            --tag $env:RELEASE_TAG `
+            --expected-commit (git rev-parse HEAD) `
+            --expect-head `
+            --remote origin
         }
         $tag = (python scripts/version.py tag).Trim()
         "tag=$tag" >> $env:GITHUB_OUTPUT

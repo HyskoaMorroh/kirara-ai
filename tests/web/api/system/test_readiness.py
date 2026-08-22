@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kirara_ai.config.global_config import GlobalConfig, IMConfig, WebConfig
-from kirara_ai.im.adapter import AdapterHealthSnapshot
+from kirara_ai.im.adapter import AdapterHealthProvider, AdapterHealthSnapshot
 from kirara_ai.im.manager import IMManager
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.llm.llm_manager import LLMManager
@@ -68,7 +68,7 @@ async def test_readiness_warns_when_running_onebot_is_waiting_for_connection(tmp
     config.ims = [
         IMConfig(name="qq", enable=True, adapter="onebot", config={})
     ]
-    adapter = MagicMock()
+    adapter = MagicMock(spec=AdapterHealthProvider)
     adapter.get_health_snapshot.return_value = AdapterHealthSnapshot(
         status="waiting", connected_account_count=0
     )

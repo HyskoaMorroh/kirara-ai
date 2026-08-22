@@ -10,14 +10,16 @@ and operational documentation are derived and checked here.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, BinaryIO, Iterator, NamedTuple
 
 try:
     import tomllib
@@ -26,7 +28,14 @@ except ModuleNotFoundError:  # Python 3.10 support; tomli is a project dependenc
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_INDEX_NAME = ".version-artifacts.json"
+VERSION_TRANSACTION_NAME = ".version-sync-transaction"
+VERSION_TRANSACTION_TEMP_NAME = ".version-sync-transaction.tmp"
+VERSION_LOCK_NAME = ".version-sync.lock"
 VERSION_PATTERN = re.compile(r"(\d+\.\d+\.\d+)(?:(a|b|rc)(\d+))?")
+RELEASE_KINDS = frozenset(
+    {"a", "alpha", "b", "beta", "rc", "stable", "patch", "minor", "major"}
+)
+RELEASE_STAGE_RANK = {"a": 0, "b": 1, "rc": 2, None: 3}
 ANY_RELEASE_TOKEN_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])v?(?P<release>\d+\.\d+\.\d+)"
     r"(?P<separator>-?)(?P<stage>a|b|rc|alpha|beta)?(?P<number>\d+)?"
@@ -67,11 +76,15 @@ SKIP_SCAN_DIRECTORIES = frozenset(
         ".venv",
         ".venv-win",
         "artifacts",
+        "data",
         "dist",
         "graphify-out",
         "logs",
         "node_modules",
         "work",
+        VERSION_TRANSACTION_NAME,
+        VERSION_TRANSACTION_TEMP_NAME,
+        VERSION_LOCK_NAME,
     }
 )
 
@@ -85,11 +98,27 @@ EXCLUDED_DIRECTORY_REASONS = {
 }
 EXCLUDED_FILE_REASONS = {
     "CHANGELOG.md": "historical changelog",
-    "docs/UPGRADING_TO_3.3.0a7.md": "historical upgrade guide",
     "webui/UPSTREAM.md": "upstream version record",
     "scripts/version.py": "version synchronization implementation",
     ARTIFACT_INDEX_NAME: "version synchronization index",
 }
+HISTORICAL_UPGRADE_GUIDE_PATTERN = re.compile(
+    r"^docs/UPGRADING_TO_[^/]+\.md$", re.IGNORECASE
+)
+TRANSACTION_PROTECTED_FILES = frozenset(
+    {
+        ".env",
+        "config.cfg",
+        "config.json",
+        "config.yaml",
+        "config.yaml.bak",
+        "password.hash",
+        "docs/LOGO.jpg",
+        "docs/logo.jpg",
+    }
+)
+_VERSION_LOCK_STATE: dict[Path, tuple[BinaryIO, int, int]] = {}
+_VERSION_LOCK_STATE_GUARD = threading.RLock()
 
 
 class ArtifactIndex(NamedTuple):
@@ -108,6 +137,51 @@ class VersionArtifact(NamedTuple):
     exclusion_reason: str | None = None
 
 
+class ReleaseVersion(NamedTuple):
+    """A supported release version in a comparison-friendly shape."""
+
+    major: int
+    minor: int
+    patch: int
+    stage: str | None
+    number: int
+
+
+class ReleasePlan(NamedTuple):
+    """One read-only release decision derived from source metadata and Git tags."""
+
+    current: str
+    candidate: str
+    npm: str
+    tag: str
+    kind: str
+    remote: str | None
+    local_only: bool
+    occupied: tuple[str, ...]
+
+
+class TagIdentity(NamedTuple):
+    """The immutable Git identity represented by one release tag."""
+
+    tag: str
+    object_id: str
+    object_type: str
+    commit: str
+
+
+class GitCommandError(RuntimeError):
+    """A Git failure whose exit status can be classified by callers."""
+
+    def __init__(self, arguments: tuple[str, ...], returncode: int, detail: str):
+        command = "git " + " ".join(arguments)
+        suffix = f": {detail}" if detail else ""
+        super().__init__(
+            f"{command} failed with exit code {returncode}{suffix}"
+        )
+        self.arguments = arguments
+        self.returncode = returncode
+
+
 def to_npm_version(project_version: str) -> str:
     """Convert the supported PEP 440 release spellings to npm semver."""
     match = VERSION_PATTERN.fullmatch(project_version)
@@ -118,6 +192,181 @@ def to_npm_version(project_version: str) -> str:
         )
     release, prerelease, number = match.groups()
     return release if prerelease is None else f"{release}-{prerelease}{number}"
+
+
+def parse_version(version: str) -> ReleaseVersion:
+    """Parse one supported PEP 440 release into comparable components."""
+    match = VERSION_PATTERN.fullmatch(version)
+    if match is None:
+        raise ValueError(
+            f"unsupported project version {version!r}; expected X.Y.Z, "
+            "X.Y.ZaN, X.Y.ZbN, or X.Y.ZrcN"
+        )
+    release, stage, number = match.groups()
+    major, minor, patch = (int(part) for part in release.split("."))
+    return ReleaseVersion(major, minor, patch, stage, int(number or 0))
+
+
+def _release_sort_key(version: ReleaseVersion) -> tuple[int, int, int, int, int]:
+    return (
+        version.major,
+        version.minor,
+        version.patch,
+        RELEASE_STAGE_RANK[version.stage],
+        version.number,
+    )
+
+
+def compare_versions(left: str, right: str) -> int:
+    """Compare two supported release versions using release ordering."""
+    left_key = _release_sort_key(parse_version(left))
+    right_key = _release_sort_key(parse_version(right))
+    return (left_key > right_key) - (left_key < right_key)
+
+
+def _format_release(version: ReleaseVersion) -> str:
+    release = f"{version.major}.{version.minor}.{version.patch}"
+    return release if version.stage is None else f"{release}{version.stage}{version.number}"
+
+
+def _canonical_release_kind(kind: str | None) -> str | None:
+    if kind is None:
+        return None
+    normalized = kind.strip().lower()
+    if normalized not in RELEASE_KINDS:
+        choices = ", ".join(sorted(RELEASE_KINDS))
+        raise ValueError(f"unsupported release kind {kind!r}; expected one of: {choices}")
+    return {"alpha": "a", "beta": "b"}.get(normalized, normalized)
+
+
+def _increment_patch(version: ReleaseVersion) -> ReleaseVersion:
+    return ReleaseVersion(version.major, version.minor, version.patch + 1, None, 0)
+
+
+def _first_candidate_after(
+    highest: ReleaseVersion, stage: str | None
+) -> ReleaseVersion:
+    """Return the first requested prerelease that can follow ``highest``."""
+    if stage is not None and highest.stage is not None:
+        # A later prerelease channel can continue on the same release line:
+        # 3.3.1a8 -> 3.3.1b1 and 3.3.1b4 -> 3.3.1rc1.
+        if RELEASE_STAGE_RANK[stage] > RELEASE_STAGE_RANK[highest.stage]:
+            return ReleaseVersion(
+                highest.major, highest.minor, highest.patch, stage, 1
+            )
+    next_line = _increment_patch(highest)
+    return next_line._replace(stage=stage, number=1 if stage is not None else 0)
+
+
+def _candidate_for_kind(current: ReleaseVersion, kind: str | None) -> ReleaseVersion:
+    """Apply the explicit release policy before occupied-tag collision checks."""
+    if kind is None:
+        if current.stage is not None:
+            return current._replace(number=current.number + 1)
+        return _increment_patch(current)
+    if kind == "stable":
+        if current.stage is not None:
+            return current._replace(stage=None, number=0)
+        return _increment_patch(current)
+    if kind == "patch":
+        return _increment_patch(current)
+    if kind == "minor":
+        return ReleaseVersion(current.major, current.minor + 1, 0, None, 0)
+    if kind == "major":
+        return ReleaseVersion(current.major + 1, 0, 0, None, 0)
+
+    target_stage = kind
+    if current.stage == target_stage:
+        return current._replace(number=current.number + 1)
+    if current.stage is None:
+        base = _increment_patch(current)
+    elif RELEASE_STAGE_RANK[target_stage] <= RELEASE_STAGE_RANK[current.stage]:
+        base = _increment_patch(current)
+    else:
+        base = current
+    return base._replace(stage=target_stage, number=1)
+
+
+def _candidate_after_highest(
+    candidate: ReleaseVersion,
+    highest: ReleaseVersion,
+    kind: str | None,
+) -> ReleaseVersion:
+    """Move a candidate beyond the published timeline without changing policy."""
+    if kind == "minor":
+        return ReleaseVersion(highest.major, highest.minor + 1, 0, None, 0)
+    if kind == "major":
+        return ReleaseVersion(highest.major + 1, 0, 0, None, 0)
+    if candidate.stage is None:
+        return _increment_patch(highest)
+    if (
+        candidate.major,
+        candidate.minor,
+        candidate.patch,
+        candidate.stage,
+    ) == (
+        highest.major,
+        highest.minor,
+        highest.patch,
+        highest.stage,
+    ):
+        return candidate._replace(number=highest.number + 1)
+    return _first_candidate_after(highest, candidate.stage)
+
+
+def _normalize_candidate_version(value: str) -> str | None:
+    normalized = _normalize_release_token(value.strip())
+    if normalized is None:
+        return None
+    try:
+        parse_version(normalized)
+    except ValueError:
+        return None
+    return normalized
+
+
+def next_version(
+    current_version: str,
+    *,
+    kind: str | None = None,
+    occupied_versions: set[str] | None = None,
+) -> str:
+    """Resolve the next non-conflicting release without changing any files.
+
+    The default keeps alpha, beta, and rc releases on their current channel.
+    A stable source advances to the next patch release.  Channel changes and
+    major/minor releases are explicit so a routine bump cannot guess a risky
+    release boundary.
+    """
+    current = parse_version(current_version)
+    canonical_kind = _canonical_release_kind(kind)
+    occupied = {
+        normalized
+        for value in (occupied_versions or set())
+        if (normalized := _normalize_candidate_version(value)) is not None
+    }
+    candidate = _candidate_for_kind(current, canonical_kind)
+    highest_occupied = max(
+        (parse_version(version) for version in occupied),
+        key=_release_sort_key,
+        default=None,
+    )
+    while _format_release(candidate) in occupied or (
+        highest_occupied is not None
+        and _release_sort_key(candidate) <= _release_sort_key(highest_occupied)
+    ):
+        if highest_occupied is None:
+            candidate = candidate._replace(number=candidate.number + 1)
+        else:
+            # A stale checkout must advance from the highest published line,
+            # while explicit minor/major requests retain their requested scope.
+            candidate = _candidate_after_highest(candidate, highest_occupied, canonical_kind)
+    result = _format_release(candidate)
+    if compare_versions(result, current_version) <= 0:
+        raise RuntimeError(
+            f"calculated version {result} does not advance current version {current_version}"
+        )
+    return result
 
 
 def to_git_tag(project_version: str) -> str:
@@ -152,6 +401,31 @@ def _write_text(path: Path, contents: str) -> None:
     # Bytes preserve an existing CRLF/LF choice on Windows and avoid unrelated
     # line-ending churn in documentation and workflow files.
     path.write_bytes(contents.encode("utf-8"))
+
+
+def _write_durable_bytes(path: Path, contents: bytes) -> None:
+    """Write transaction evidence and flush it before publishing its directory."""
+    with path.open("wb") as handle:
+        handle.write(contents)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    """Flush a directory when the host filesystem exposes directory handles."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            # Windows commonly rejects fsync on directory handles; file-level
+            # flushes still make the transaction evidence durable where possible.
+            pass
+    finally:
+        os.close(descriptor)
 
 
 def _write_project_version(root: Path, project_version: str) -> None:
@@ -266,8 +540,12 @@ def _text_carrier_type(path: Path, root: Path) -> str | None:
 
 def _exclusion_reason(path: Path, root: Path) -> str | None:
     relative = _relative(path, root)
+    if relative in TRANSACTION_PROTECTED_FILES:
+        return "user-owned or secret-bearing file"
     if relative in EXCLUDED_FILE_REASONS:
         return EXCLUDED_FILE_REASONS[relative]
+    if HISTORICAL_UPGRADE_GUIDE_PATTERN.fullmatch(relative):
+        return "historical upgrade guide"
     if relative.startswith("docs/superpowers/"):
         return "planning and generated task material"
     for part in path.relative_to(root).parts:
@@ -399,6 +677,7 @@ def _discover_text_records(root: Path, project_version: str) -> list[VersionArti
         if _is_package_manifest(path) or path.name in {
             "package-lock.json",
             "npm-shrinkwrap.json",
+            "pyproject.toml",
             "uv.lock",
         }:
             continue
@@ -420,7 +699,7 @@ def _discover_text_records(root: Path, project_version: str) -> list[VersionArti
     return sorted(records, key=lambda record: record.path.as_posix())
 
 
-def discover_version_artifact_records(root: Path) -> list[VersionArtifact]:
+def _discover_version_artifact_records_unlocked(root: Path) -> list[VersionArtifact]:
     """Return structured and text carriers with an auditable active state."""
     root = Path(root)
     project_name, project_version = _read_project_metadata(root)
@@ -436,6 +715,13 @@ def discover_version_artifact_records(root: Path) -> list[VersionArtifact]:
         )
     records.extend(_discover_text_records(root, project_version))
     return list(dict.fromkeys(records))
+
+
+def discover_version_artifact_records(root: Path) -> list[VersionArtifact]:
+    """Return artifact records from one consistent workspace snapshot."""
+    root = Path(root)
+    with _version_sync_lock(root):
+        return _discover_version_artifact_records_unlocked(root)
 
 
 def discover_version_artifacts(root: Path) -> list[Path]:
@@ -507,39 +793,358 @@ def _iter_workspace_files(root: Path) -> list[Path]:
     return files
 
 
-def _snapshot_workspace(root: Path) -> dict[str, bytes]:
+def _is_transaction_protected(path: Path, root: Path) -> bool:
+    """Keep private runtime files outside the release-sync rollback journal."""
+    relative = _relative(path, root)
+    return (
+        relative in TRANSACTION_PROTECTED_FILES
+        or path.name == ".env"
+        or path.name.endswith(".hash")
+        or path.is_relative_to(root / "data")
+    )
+
+
+def _validate_workspace_target(path: Path, root: Path) -> None:
+    """Reject symlinks, directories, and targets that escape the workspace."""
+    root_resolved = Path(root).resolve()
+    resolved = path.resolve(strict=False)
+    if not resolved.is_relative_to(root_resolved) or path.is_symlink():
+        raise RuntimeError(
+            f"refusing to synchronize unsafe workspace target {_relative(path, root)!r}"
+        )
+    if path.exists() and not path.is_file():
+        raise RuntimeError(
+            f"refusing to synchronize non-file workspace target {_relative(path, root)!r}"
+        )
+
+
+def _snapshot_workspace(
+    root: Path, paths: list[Path] | tuple[Path, ...] | None = None
+) -> dict[str, bytes]:
+    """Capture existing files, optionally restricted to synchronization targets."""
     snapshot: dict[str, bytes] = {}
-    for path in _iter_workspace_files(root):
+    candidates = _iter_workspace_files(root) if paths is None else paths
+    for path in candidates:
+        _validate_workspace_target(path, root)
+        if _is_transaction_protected(path, root):
+            continue
+        if not path.is_file():
+            continue
         try:
             snapshot[_relative(path, root)] = path.read_bytes()
-        except OSError:
-            continue
+        except OSError as error:
+            raise RuntimeError(
+                f"cannot snapshot synchronization target {_relative(path, root)!r}: {error}"
+            ) from error
     return snapshot
 
 
-def _restore_workspace(root: Path, snapshot: dict[str, bytes]) -> None:
-    before = set(snapshot)
-    for path in _iter_workspace_files(root):
-        relative = _relative(path, root)
-        if relative not in before:
-            path.unlink(missing_ok=True)
+def _missing_workspace_targets(
+    root: Path, paths: list[Path] | tuple[Path, ...]
+) -> set[str]:
+    """Record synchronization targets that did not exist before the operation."""
+    missing: set[str] = set()
+    for path in paths:
+        _validate_workspace_target(path, root)
+        if not _is_transaction_protected(path, root) and not path.exists():
+            missing.add(_relative(path, root))
+    return missing
+
+
+def _restore_workspace(
+    root: Path,
+    snapshot: dict[str, bytes],
+    missing: set[str] | frozenset[str] = frozenset(),
+) -> None:
+    """Restore only files owned by the version sync; preserve unrelated new files."""
+    for relative in missing:
+        path = root / Path(relative)
+        _validate_workspace_target(path, root)
+        if _is_transaction_protected(path, root):
+            raise RuntimeError(
+                f"refusing to restore protected synchronization target {relative!r}"
+            )
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+        elif path.exists():
+            raise RuntimeError(
+                f"cannot remove unexpected directory at synchronization target {relative!r}"
+            )
     for relative, contents in snapshot.items():
         path = root / Path(relative)
+        _validate_workspace_target(path, root)
+        if _is_transaction_protected(path, root):
+            raise RuntimeError(
+                f"refusing to restore protected synchronization target {relative!r}"
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(contents)
 
 
-def set_version(root: Path, project_version: str) -> None:
+def _version_transaction_path(root: Path) -> Path:
+    return root / VERSION_TRANSACTION_NAME
+
+
+def _version_transaction_temp_path(root: Path) -> Path:
+    return root / VERSION_TRANSACTION_TEMP_NAME
+
+
+def _assert_transaction_directory(root: Path, path: Path, label: str) -> None:
+    root_resolved = Path(root).resolve()
+    path_resolved = path.resolve(strict=False)
+    if path_resolved.parent != root_resolved or path.is_symlink() or not path.is_dir():
+        raise RuntimeError(f"refusing to use invalid {label} outside the project")
+
+
+def _remove_version_transaction(root: Path) -> None:
+    root = Path(root)
+    path = _version_transaction_path(root)
+    if path.exists():
+        _assert_transaction_directory(root, path, "version transaction")
+        shutil.rmtree(path)
+
+
+def _persist_version_transaction(
+    root: Path,
+    snapshot: dict[str, bytes],
+    missing: set[str] | frozenset[str] = frozenset(),
+) -> None:
+    """Persist the pre-sync workspace so an interrupted sync can be undone."""
+    temporary = _version_transaction_temp_path(root)
+    final = _version_transaction_path(root)
+    if temporary.exists():
+        _assert_transaction_directory(root, temporary, "version transaction staging path")
+        shutil.rmtree(temporary)
+    if final.exists():
+        raise RuntimeError(
+            "a previous version transaction is still present; recover it before synchronizing"
+        )
+    temporary.mkdir(parents=True)
+    try:
+        for relative, contents in snapshot.items():
+            path = temporary / Path("snapshot") / Path(relative)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _write_durable_bytes(path, contents)
+        manifest = {
+            "schema": 2,
+            "phase": "prepared",
+            "files": sorted(snapshot),
+            "missing": sorted(missing),
+        }
+        _write_durable_bytes(
+            temporary / "manifest.json",
+            (json.dumps(manifest, indent=2) + "\n").encode("utf-8"),
+        )
+        _fsync_directory(temporary / "snapshot")
+        _fsync_directory(temporary)
+        os.replace(temporary, final)
+        _fsync_directory(root)
+    except Exception:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        raise
+
+
+def _recover_version_transaction(root: Path) -> None:
+    """Restore a complete pre-sync snapshot left by an interrupted process."""
+    root = Path(root)
+    temporary = _version_transaction_temp_path(root)
+    if temporary.exists():
+        _assert_transaction_directory(root, temporary, "version transaction staging path")
+        shutil.rmtree(temporary)
+    transaction = _version_transaction_path(root)
+    if not transaction.exists():
+        return
+    _assert_transaction_directory(root, transaction, "version transaction")
+    manifest_path = transaction / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"cannot recover version transaction: {error}") from error
+    if not isinstance(manifest, dict) or manifest.get("schema") not in {1, 2}:
+        raise RuntimeError("cannot recover version transaction: unsupported manifest")
+    files = manifest.get("files")
+    if not isinstance(files, list) or not all(isinstance(item, str) for item in files):
+        raise RuntimeError("cannot recover version transaction: malformed file list")
+    missing = manifest.get("missing", [])
+    if not isinstance(missing, list) or not all(
+        isinstance(item, str) for item in missing
+    ):
+        raise RuntimeError("cannot recover version transaction: malformed missing list")
+    snapshot_root = transaction / "snapshot"
+    if not snapshot_root.is_dir() or snapshot_root.is_symlink():
+        raise RuntimeError("cannot recover version transaction: missing snapshot directory")
+    snapshot_root_resolved = snapshot_root.resolve()
+
+    def normalize_transaction_paths(values: list[str], label: str) -> set[str]:
+        normalized_values: set[str] = set()
+        for relative in values:
+            normalized = relative.replace("\\", "/")
+            parts = normalized.split("/")
+            if (
+                not normalized
+                or normalized.startswith("/")
+                or re.match(r"^[A-Za-z]:/", normalized)
+                or any(part in {"", ".", ".."} for part in parts)
+                or normalized in normalized_values
+            ):
+                raise RuntimeError(
+                    f"cannot recover version transaction: unsafe {label} path {relative!r}"
+                )
+            normalized_values.add(normalized)
+        return normalized_values
+
+    normalized_files = normalize_transaction_paths(files, "snapshot")
+    normalized_missing = normalize_transaction_paths(missing, "missing")
+    if normalized_files.intersection(normalized_missing):
+        raise RuntimeError(
+            "cannot recover version transaction: snapshot and missing paths overlap"
+        )
+    for label, paths in (("snapshot", normalized_files), ("missing", normalized_missing)):
+        for normalized in paths:
+            target = root / Path(*normalized.split("/"))
+            if _is_transaction_protected(target, root):
+                raise RuntimeError(
+                    f"cannot recover version transaction: protected {label} path {normalized!r}"
+                )
+
+    snapshot: dict[str, bytes] = {}
+    for normalized in normalized_files:
+        parts = normalized.split("/")
+        snapshot_path = snapshot_root / Path(*parts)
+        resolved = snapshot_path.resolve(strict=False)
+        if (
+            resolved != snapshot_root_resolved / Path(*parts)
+            or snapshot_path.is_symlink()
+            or not snapshot_path.is_file()
+        ):
+            raise RuntimeError(
+                f"cannot recover version transaction: invalid snapshot file {normalized!r}"
+            )
+        snapshot[normalized] = snapshot_path.read_bytes()
+    _restore_workspace(root, snapshot, frozenset(normalized_missing))
+    _remove_version_transaction(root)
+
+
+def recover_version_transaction(root: Path) -> None:
+    """Recover a release metadata sync before another sync or validation."""
+    root = Path(root)
+    if not root.is_dir():
+        return
+    with _version_sync_lock(root):
+        _recover_version_transaction(root)
+
+
+def _version_lock_path(root: Path) -> Path:
+    return Path(root) / VERSION_LOCK_NAME
+
+
+@contextmanager
+def _version_sync_lock(root: Path) -> Iterator[None]:
+    """Serialize release metadata recovery and synchronization per workspace.
+
+    The lock is held by the operating system rather than by a PID marker, so a
+    process crash releases it automatically and cannot leave a stale lock that
+    blocks startup recovery.  The small lock file is ignored by Git and version
+    carrier discovery.
+    """
+    root = Path(root)
+    root = root.resolve()
+    if not root.is_dir():
+        yield
+        return
+    owner = threading.get_ident()
+    with _VERSION_LOCK_STATE_GUARD:
+        current = _VERSION_LOCK_STATE.get(root)
+        if current is not None:
+            handle, current_owner, depth = current
+            if current_owner != owner:
+                raise RuntimeError(
+                    "another version synchronization is already in progress; "
+                    "wait for it to finish before retrying"
+                )
+            _VERSION_LOCK_STATE[root] = (handle, owner, depth + 1)
+            reentrant = True
+        else:
+            handle = _version_lock_path(root).open("a+b")
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            _VERSION_LOCK_STATE[root] = (handle, owner, 1)
+            reentrant = False
+    try:
+        if not reentrant:
+            handle.seek(0)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                with _VERSION_LOCK_STATE_GUARD:
+                    _VERSION_LOCK_STATE.pop(root, None)
+                handle.close()
+                raise RuntimeError(
+                    "another version synchronization is already in progress; "
+                    "wait for it to finish before retrying"
+                ) from error
+        try:
+            yield
+        finally:
+            with _VERSION_LOCK_STATE_GUARD:
+                _, _, depth = _VERSION_LOCK_STATE[root]
+                if depth > 1:
+                    _VERSION_LOCK_STATE[root] = (handle, owner, depth - 1)
+                else:
+                    _VERSION_LOCK_STATE.pop(root, None)
+                    try:
+                        handle.seek(0)
+                        if os.name == "nt":
+                            import msvcrt
+
+                            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                        else:
+                            import fcntl
+
+                            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                    handle.close()
+    finally:
+        # The lock file itself remains as a stable inode. Removing it while a
+        # waiting process has already opened the file would split the lock
+        # namespace and permit two writers to proceed concurrently.
+        pass
+
+
+def _set_version_unlocked(root: Path, project_version: str) -> None:
     """Set the source version and regenerate every discovered derived carrier."""
     root = Path(root)
     to_npm_version(project_version)
+    _recover_version_transaction(root)
     source_version = _read_project_version(root)
     _, known_versions = _load_artifact_index(root)
     known_versions.update(_canonical_versions(_version_spellings(source_version)))
-    snapshot = _snapshot_workspace(root)
+    manifests = _discover_package_manifests(root)
+    text_records = _discover_text_records(root, source_version)
+    synchronization_targets = [
+        root / "pyproject.toml",
+        root / "uv.lock",
+        _artifact_index_path(root),
+        *manifests,
+        *(lock for manifest in manifests for lock in _npm_lock_paths(manifest)),
+        *(record.path for record in text_records if record.active),
+    ]
+    snapshot = _snapshot_workspace(root, synchronization_targets)
+    missing = _missing_workspace_targets(root, synchronization_targets)
+    _persist_version_transaction(root, snapshot, missing)
     try:
         _write_project_version(root, project_version)
-        for manifest in _discover_package_manifests(root):
+        for manifest in manifests:
             _write_package_version(manifest, project_version)
             for lock_path in _npm_lock_paths(manifest):
                 _write_npm_lock_version(lock_path, project_version)
@@ -551,9 +1156,462 @@ def set_version(root: Path, project_version: str) -> None:
         errors = check_versions(root)
         if errors:
             raise RuntimeError("version synchronization failed:\n" + "\n".join(errors))
-    except Exception:
-        _restore_workspace(root, snapshot)
+        _remove_version_transaction(root)
+    except Exception as error:
+        try:
+            _recover_version_transaction(root)
+        except Exception as recovery_error:
+            raise RuntimeError(
+                f"version synchronization failed: {error}; "
+                f"transaction recovery also failed: {recovery_error}"
+            ) from error
         raise
+
+
+def set_version(root: Path, project_version: str) -> None:
+    """Set the source version and regenerate every discovered derived carrier."""
+    with _version_sync_lock(Path(root)):
+        _set_version_unlocked(Path(root), project_version)
+
+
+def _git_output(root: Path, *arguments: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", *arguments],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"git {' '.join(arguments)} timed out after 30 seconds"
+        ) from error
+    if result.returncode:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise GitCommandError(tuple(arguments), result.returncode, detail)
+    return result.stdout
+
+
+def _try_git_output(root: Path, *arguments: str) -> str | None:
+    """Return output for the one optional probe: a missing branch upstream."""
+    try:
+        return _git_output(root, *arguments)
+    except GitCommandError as error:
+        upstream_probe = (
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        )
+        if (
+            tuple(arguments) == upstream_probe
+            and error.returncode == 128
+            and re.search(
+                r"no upstream configured|has no upstream branch",
+                str(error),
+                flags=re.IGNORECASE,
+            )
+        ):
+            return None
+        raise
+
+
+def _validate_remote_name(remote: str) -> str:
+    """Accept ordinary Git remote names without allowing option injection."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", remote):
+        raise ValueError(f"invalid Git remote name {remote!r}")
+    return remote
+
+
+def _validate_git_tag_name(tag: str) -> str:
+    """Accept only tags this tool can generate before passing them to Git."""
+    if not isinstance(tag, str) or not re.fullmatch(
+        r"v\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?", tag
+    ):
+        raise ValueError(
+            f"invalid Git tag name {tag!r}; expected vX.Y.Z, vX.Y.ZaN, "
+            "vX.Y.ZbN, or vX.Y.ZrcN"
+        )
+    return tag
+
+
+def _validate_commit_name(commit: str) -> str:
+    """Accept full or abbreviated hexadecimal commit names without options."""
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9A-Fa-f]{7,64}", commit):
+        raise ValueError(f"invalid Git commit name {commit!r}")
+    return commit
+
+
+def _validate_object_id(value: str, label: str) -> str:
+    normalized = value.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", normalized):
+        raise RuntimeError(f"Git returned an invalid {label} object id: {value!r}")
+    return normalized
+
+
+def _local_git_tag_identity(root: Path, tag: str) -> TagIdentity:
+    """Resolve a local lightweight or annotated tag to its release commit."""
+    tag = _validate_git_tag_name(tag)
+    ref = f"refs/tags/{tag}"
+    object_id = _validate_object_id(
+        _git_output(root, "rev-parse", "--verify", ref), "tag"
+    )
+    object_type = _git_output(root, "cat-file", "-t", object_id).strip()
+    if object_type not in {"commit", "tag"}:
+        raise RuntimeError(
+            f"Git tag {tag!r} resolves to unsupported object type {object_type!r}; "
+            "expected a commit or annotated tag"
+        )
+    commit = _validate_object_id(
+        _git_output(root, "rev-parse", "--verify", f"{ref}^{{commit}}"), "commit"
+    )
+    return TagIdentity(tag, object_id, object_type, commit)
+
+
+def _remote_git_tag_identity(root: Path, remote: str, tag: str) -> TagIdentity:
+    """Resolve a remote tag without trusting the local tag namespace."""
+    remote = _validate_remote_name(remote)
+    tag = _validate_git_tag_name(tag)
+    ref = f"refs/tags/{tag}"
+    peeled_ref = f"{ref}^{{}}"
+    output = _git_output(
+        root,
+        "ls-remote",
+        "--tags",
+        remote,
+        ref,
+        peeled_ref,
+    )
+    records: dict[str, str] = {}
+    for line in output.splitlines():
+        object_id, separator, found_ref = line.partition("\t")
+        if not separator or found_ref not in {ref, peeled_ref}:
+            continue
+        records[found_ref] = _validate_object_id(object_id, "remote tag")
+    object_id = records.get(ref)
+    if object_id is None:
+        raise RuntimeError(f"remote {remote!r} has no Git tag {tag!r}")
+    peeled = records.get(peeled_ref)
+    return TagIdentity(tag, object_id, "tag" if peeled else "commit", peeled or object_id)
+
+
+def verify_tag_identity(
+    root: Path,
+    tag: str,
+    *,
+    expected_commit: str | None = None,
+    expect_head: bool = False,
+    remote: str | None = None,
+    local_only: bool = False,
+) -> dict[str, Any]:
+    """Verify that a release tag, checkout, and optional remote are one identity.
+
+    The project version remains the source of the tag spelling.  This function
+    verifies the immutable object behind that spelling so a release cannot
+    accidentally build from a different branch, retagged commit, or remote.
+    """
+    root = Path(root)
+    if remote and local_only:
+        raise ValueError("--remote and --local-only cannot be used together")
+    tag = _validate_git_tag_name(tag)
+    project_version = _read_project_version(root)
+    expected_tag = to_git_tag(project_version)
+    if tag != expected_tag:
+        raise RuntimeError(
+            f"Git tag does not match pyproject.toml: expected {expected_tag}, found {tag}"
+        )
+
+    local = _local_git_tag_identity(root, tag)
+    head = _validate_object_id(
+        _git_output(root, "rev-parse", "--verify", "HEAD"), "HEAD"
+    )
+    head_matches = head == local.commit
+    if expect_head and not head_matches:
+        raise RuntimeError(
+            f"Git HEAD {head} does not match tag {tag} release commit {local.commit}"
+        )
+
+    expected_commit_value = None
+    if expected_commit is not None:
+        expected_commit = _validate_commit_name(expected_commit)
+        expected_commit_value = _validate_object_id(
+            _git_output(root, "rev-parse", "--verify", f"{expected_commit}^{{commit}}"),
+            "expected commit",
+        )
+        if local.commit != expected_commit_value:
+            raise RuntimeError(
+                f"Git tag {tag} points to {local.commit}, expected commit "
+                f"{expected_commit_value}"
+            )
+
+    resolved_remote = None
+    remote_identity = None
+    remote_matches = None
+    if not local_only:
+        resolved_remote = _validate_remote_name(remote or resolve_release_remote(root))
+        remote_identity = _remote_git_tag_identity(root, resolved_remote, tag)
+        remote_matches = (
+            remote_identity.object_id == local.object_id
+            and remote_identity.commit == local.commit
+            and remote_identity.object_type == local.object_type
+        )
+        if not remote_matches:
+            raise RuntimeError(
+                f"remote {resolved_remote!r} Git tag {tag} does not match the local "
+                f"release identity: local {local.object_id}/{local.commit}, "
+                f"remote {remote_identity.object_id}/{remote_identity.commit}"
+            )
+
+    return {
+        "tag": local.tag,
+        "object_id": local.object_id,
+        "object_type": local.object_type,
+        "commit": local.commit,
+        "head": head,
+        "head_matches": head_matches,
+        "expected_commit": expected_commit_value,
+        "remote": resolved_remote,
+        "remote_object_id": remote_identity.object_id if remote_identity else None,
+        "remote_commit": remote_identity.commit if remote_identity else None,
+        "remote_matches": remote_matches,
+    }
+
+
+def resolve_release_remote(root: Path) -> str:
+    """Resolve the remote that owns the current release line.
+
+    The branch upstream is authoritative.  If no upstream is configured,
+    ``origin`` is accepted when present, followed by the only configured
+    remote.  Ambiguous or remote-less repositories must opt into ``--local-only``.
+    """
+    root = Path(root)
+    upstream = _try_git_output(
+        root,
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{upstream}",
+    )
+    if upstream is not None:
+        normalized_upstream = upstream.strip()
+        remote, separator, branch = normalized_upstream.partition("/")
+        if not separator or not remote or not branch:
+            raise RuntimeError(
+                "Git upstream probe returned a malformed ref; pass --remote NAME "
+                "or explicitly choose --local-only"
+            )
+        return _validate_remote_name(remote)
+    remotes_output = _try_git_output(root, "remote")
+    remotes = [line.strip() for line in (remotes_output or "").splitlines() if line.strip()]
+    if "origin" in remotes:
+        return "origin"
+    if len(remotes) == 1:
+        return remotes[0]
+    if not remotes:
+        raise RuntimeError(
+            "no Git release remote could be determined; configure an upstream or "
+            "pass --remote NAME, or explicitly choose --local-only"
+        )
+    raise RuntimeError(
+        "multiple Git remotes are available but no upstream is configured; "
+        "pass --remote NAME or explicitly choose --local-only"
+    )
+
+
+def _local_git_tags(root: Path) -> set[str]:
+    return {
+        tag.strip()
+        for tag in _git_output(root, "tag", "--list").splitlines()
+        if tag.strip()
+    }
+
+
+def _remote_git_tags(root: Path, remote: str) -> set[str]:
+    remote = _validate_remote_name(remote)
+    tags: set[str] = set()
+    for line in _git_output(root, "ls-remote", "--tags", "--refs", remote).splitlines():
+        _object_id, separator, ref = line.partition("\t")
+        if separator and ref.startswith("refs/tags/"):
+            tag = ref.removeprefix("refs/tags/")
+            if "^" not in tag:
+                tags.add(tag)
+    return tags
+
+
+def occupied_git_versions(
+    root: Path,
+    remote: str | None = None,
+    *,
+    local_only: bool = False,
+) -> set[str]:
+    """Return recognized local and optional remote release versions."""
+    root = Path(root)
+    if remote and local_only:
+        raise ValueError("--remote and --local-only cannot be used together")
+    if remote:
+        remote = _validate_remote_name(remote)
+    tags = _local_git_tags(root)
+    if not local_only:
+        remote = remote or resolve_release_remote(root)
+        tags.update(_remote_git_tags(root, remote))
+    return {
+        normalized
+        for tag in tags
+        if (normalized := _normalize_candidate_version(tag)) is not None
+    }
+
+
+def _build_release_plan_unlocked(
+    root: Path,
+    *,
+    kind: str | None = None,
+    remote: str | None = None,
+    local_only: bool = False,
+) -> ReleasePlan:
+    """Resolve a complete release identity without modifying the workspace."""
+    root = Path(root)
+    if remote and local_only:
+        raise ValueError("--remote and --local-only cannot be used together")
+    resolved_remote = None if local_only else (
+        _validate_remote_name(remote) if remote else resolve_release_remote(root)
+    )
+    current_version = _read_project_version(root)
+    occupied = occupied_git_versions(
+        root,
+        remote=resolved_remote,
+        local_only=local_only,
+    )
+    candidate = next_version(
+        current_version,
+        kind=kind,
+        occupied_versions=occupied,
+    )
+    canonical_kind = _canonical_release_kind(kind)
+    return ReleasePlan(
+        current=current_version,
+        candidate=candidate,
+        npm=to_npm_version(candidate),
+        tag=to_git_tag(candidate),
+        kind=canonical_kind or "auto",
+        remote=resolved_remote,
+        local_only=local_only,
+        occupied=tuple(sorted(occupied, key=lambda value: _release_sort_key(parse_version(value)))),
+    )
+
+
+def build_release_plan(
+    root: Path,
+    *,
+    kind: str | None = None,
+    remote: str | None = None,
+    local_only: bool = False,
+) -> ReleasePlan:
+    """Resolve a complete release identity while holding the workspace lock."""
+    root = Path(root)
+    with _version_sync_lock(root):
+        return _build_release_plan_unlocked(
+            root,
+            kind=kind,
+            remote=remote,
+            local_only=local_only,
+        )
+
+
+def _release_plan_payload(plan: ReleasePlan) -> dict[str, Any]:
+    """Return the stable machine-readable representation used by CLI automation."""
+    return plan._asdict()
+
+
+def verify_release_candidate(
+    root: Path,
+    candidate: str,
+    *,
+    kind: str | None = None,
+    remote: str | None = None,
+    local_only: bool = False,
+) -> None:
+    """Recompute a planned release immediately before writing.
+
+    Checking only whether the exact candidate Tag exists is insufficient: a
+    concurrent release may publish a different, higher Tag and make the old
+    candidate stale without occupying its name.
+    """
+    root = Path(root)
+    normalized_candidate = _normalize_candidate_version(candidate)
+    if normalized_candidate is None:
+        raise ValueError(
+            f"unsupported release candidate {candidate!r}; expected X.Y.Z, "
+            "X.Y.ZaN, X.Y.ZbN, or X.Y.ZrcN, optionally prefixed with v"
+        )
+    candidate = normalized_candidate
+    occupied = occupied_git_versions(
+        root,
+        remote=remote,
+        local_only=local_only,
+    )
+    if candidate in occupied:
+        location = "local Git tags" if local_only else f"local or {remote} Git tags"
+        raise RuntimeError(
+            f"release candidate {candidate} became occupied in {location}; "
+            "run the release plan again"
+        )
+    current_version = _read_project_version(root)
+    refreshed_candidate = next_version(
+        current_version,
+        kind=kind,
+        occupied_versions=occupied,
+    )
+    if refreshed_candidate != candidate:
+        location = "local Git tags" if local_only else f"local or {remote} Git tags"
+        raise RuntimeError(
+            f"release candidate {candidate} is stale after rechecking {location}; "
+            f"the current release plan resolves to {refreshed_candidate}; "
+            "run the release plan again"
+        )
+
+
+def _ensure_clean_worktree(root: Path) -> None:
+    status = _git_output(root, "status", "--porcelain")
+    if status.strip():
+        raise RuntimeError(
+            "working tree is dirty; commit or stash existing changes, or pass --allow-dirty"
+        )
+
+
+def bump_version(
+    root: Path,
+    *,
+    kind: str | None = None,
+    remote: str | None = None,
+    dry_run: bool = False,
+    allow_dirty: bool = False,
+    local_only: bool = False,
+) -> str:
+    """Resolve and optionally synchronize the next release version."""
+    root = Path(root)
+    with _version_sync_lock(root):
+        _recover_version_transaction(root)
+        if not dry_run and not allow_dirty:
+            _ensure_clean_worktree(root)
+        plan = build_release_plan(
+            root,
+            kind=kind,
+            remote=remote,
+            local_only=local_only,
+        )
+        if not dry_run:
+            verify_release_candidate(
+                root,
+                plan.candidate,
+                kind=kind,
+                remote=plan.remote,
+                local_only=plan.local_only,
+            )
+            set_version(root, plan.candidate)
+        return plan.candidate
 
 
 def _locked_project_version(root: Path, project_name: str) -> str | None:
@@ -569,7 +1627,7 @@ def _locked_project_version(root: Path, project_name: str) -> str | None:
     return None
 
 
-def check_versions(root: Path, tag: str | None = None) -> list[str]:
+def _check_versions_unlocked(root: Path, tag: str | None = None) -> list[str]:
     """Return every version drift and malformed active carrier."""
     root = Path(root)
     errors: list[str] = []
@@ -717,6 +1775,13 @@ def check_versions(root: Path, tag: str | None = None) -> list[str]:
     return errors
 
 
+def check_versions(root: Path, tag: str | None = None) -> list[str]:
+    """Return version drift from one consistent workspace snapshot."""
+    root = Path(root)
+    with _version_sync_lock(root):
+        return _check_versions_unlocked(root, tag)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -724,38 +1789,202 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("npm", help="print the npm semver version")
     subparsers.add_parser("tag", help="print the Git release tag")
     subparsers.add_parser("discover", help="audit every discovered version artifact")
+    next_parser = subparsers.add_parser(
+        "next", help="preview the next non-conflicting release version"
+    )
+    next_parser.add_argument(
+        "--kind",
+        help="release channel: alpha, beta, rc, stable, patch, minor, or major",
+    )
+    next_parser.add_argument(
+        "--remote",
+        help="also check release tags from this Git remote, for example origin",
+    )
+    next_parser.add_argument(
+        "--local-only",
+        action="store_true",
+        help="skip remote tag checks explicitly for offline development",
+    )
+    plan_parser = subparsers.add_parser(
+        "plan", help="print the complete read-only release plan"
+    )
+    plan_parser.add_argument(
+        "--kind",
+        help="release channel: alpha, beta, rc, stable, patch, minor, or major",
+    )
+    plan_parser.add_argument(
+        "--remote",
+        help="also check release tags from this Git remote, for example origin",
+    )
+    plan_parser.add_argument(
+        "--local-only",
+        action="store_true",
+        help="skip remote tag checks explicitly for offline development",
+    )
+    plan_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit a stable JSON object for CI and release automation",
+    )
+    bump_parser = subparsers.add_parser(
+        "bump", help="synchronize the next non-conflicting release version"
+    )
+    bump_parser.add_argument(
+        "--kind",
+        help="release channel: alpha, beta, rc, stable, patch, minor, or major",
+    )
+    bump_parser.add_argument(
+        "--remote",
+        help="also check release tags from this Git remote, for example origin",
+    )
+    bump_parser.add_argument(
+        "--local-only",
+        action="store_true",
+        help="skip remote tag checks explicitly for offline development",
+    )
+    bump_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="preview the resolved version without changing files",
+    )
+    bump_parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="allow existing uncommitted changes while synchronizing",
+    )
     set_parser = subparsers.add_parser("set", help="set and synchronize a version")
     set_parser.add_argument("version")
     check_parser = subparsers.add_parser("check", help="verify generated versions")
     check_parser.add_argument("--tag")
+    verify_tag_parser = subparsers.add_parser(
+        "verify-tag", help="verify a release tag and its immutable Git commit identity"
+    )
+    verify_tag_parser.add_argument("--tag", required=True)
+    verify_tag_parser.add_argument(
+        "--expected-commit",
+        help="require the tag to resolve to this commit",
+    )
+    verify_tag_parser.add_argument(
+        "--expect-head",
+        action="store_true",
+        help="require the checked-out HEAD to equal the tag commit",
+    )
+    verify_tag_parser.add_argument(
+        "--remote",
+        help="also verify the same tag object on this Git remote",
+    )
+    verify_tag_parser.add_argument(
+        "--local-only",
+        action="store_true",
+        help="skip remote identity verification explicitly for offline development",
+    )
+    verify_tag_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit a stable JSON object for CI and release automation",
+    )
     return parser
+
+
+def _run_cli_command(args: argparse.Namespace) -> int:
+    """Execute a parsed command while the caller owns any needed lock."""
+    if args.command == "bump":
+        version = bump_version(
+            PROJECT_ROOT,
+            kind=args.kind,
+            remote=args.remote,
+            dry_run=args.dry_run,
+            allow_dirty=args.allow_dirty,
+            local_only=args.local_only,
+        )
+        action = "version candidate" if args.dry_run else "version synchronized"
+        print(f"{action}: {version}")
+        return 0
+    if args.command == "set":
+        set_version(PROJECT_ROOT, args.version)
+        print(f"version synchronized: {args.version}")
+        return 0
+    if args.command == "verify-tag":
+        identity = verify_tag_identity(
+            PROJECT_ROOT,
+            args.tag,
+            expected_commit=args.expected_commit,
+            expect_head=args.expect_head,
+            remote=args.remote,
+            local_only=args.local_only,
+        )
+        if args.json:
+            print(json.dumps(identity, ensure_ascii=False, sort_keys=True))
+        else:
+            for key, value in identity.items():
+                print(f"{key}: {value}")
+        return 0
+
+    project_version = _read_project_version(PROJECT_ROOT)
+    if args.command == "get":
+        print(project_version)
+    elif args.command == "npm":
+        print(to_npm_version(project_version))
+    elif args.command == "tag":
+        print(to_git_tag(project_version))
+    elif args.command == "next":
+        print(
+            build_release_plan(
+                PROJECT_ROOT,
+                kind=args.kind,
+                remote=args.remote,
+                local_only=args.local_only,
+            ).candidate
+        )
+    elif args.command == "plan":
+        plan = build_release_plan(
+            PROJECT_ROOT,
+            kind=args.kind,
+            remote=args.remote,
+            local_only=args.local_only,
+        )
+        payload = _release_plan_payload(plan)
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        else:
+            for key in (
+                "current",
+                "candidate",
+                "npm",
+                "tag",
+                "kind",
+                "remote",
+                "local_only",
+                "occupied",
+            ):
+                value = payload[key]
+                if isinstance(value, tuple):
+                    value = ",".join(value)
+                print(f"{key}: {value}")
+    elif args.command == "discover":
+        for record in discover_version_artifact_records(PROJECT_ROOT):
+            state = "active" if record.active else f"excluded: {record.exclusion_reason}"
+            print(f"{state}\t{record.carrier_type}\t{_relative(record.path, PROJECT_ROOT)}")
+    else:
+        errors = check_versions(PROJECT_ROOT, args.tag)
+        if errors:
+            for error in errors:
+                print(error, file=sys.stderr)
+            return 1
+        print(f"version artifacts synchronized: {project_version}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        project_version = _read_project_version(PROJECT_ROOT)
-        if args.command == "get":
-            print(project_version)
-        elif args.command == "npm":
-            print(to_npm_version(project_version))
-        elif args.command == "tag":
-            print(to_git_tag(project_version))
-        elif args.command == "discover":
-            for record in discover_version_artifact_records(PROJECT_ROOT):
-                state = "active" if record.active else f"excluded: {record.exclusion_reason}"
-                print(f"{state}\t{record.carrier_type}\t{_relative(record.path, PROJECT_ROOT)}")
-        elif args.command == "set":
-            set_version(PROJECT_ROOT, args.version)
-            print(f"version synchronized: {args.version}")
-        else:
-            errors = check_versions(PROJECT_ROOT, args.tag)
-            if errors:
-                for error in errors:
-                    print(error, file=sys.stderr)
-                return 1
-            print(f"version artifacts synchronized: {project_version}")
-        return 0
+        if args.command in {"bump", "set"}:
+            return _run_cli_command(args)
+        # Recovery and every read-only command share one lock window.  This
+        # prevents `check`/`plan` from observing files halfway through a sync.
+        with _version_sync_lock(PROJECT_ROOT):
+            _recover_version_transaction(PROJECT_ROOT)
+            return _run_cli_command(args)
     except (OSError, ValueError, RuntimeError) as error:
         print(f"version error: {error}", file=sys.stderr)
         return 1

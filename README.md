@@ -276,6 +276,30 @@ npx vue-tsc --noEmit
 .venv-win/Scripts/python.exe -m pytest tests/test_release_workflow_contract.py tests/test_webui_build_contract.py -q
 ```
 
+### 智能版本升级
+
+`pyproject.toml` 是唯一版本源。常规发布不需要手工猜测或填写下一版本号，使用版本工具先预览、再同步：
+
+```powershell
+$python = ".venv-win/Scripts/python.exe"
+& $python scripts/version.py plan --remote origin
+& $python scripts/version.py plan --remote origin --json
+& $python scripts/version.py next --remote origin
+& $python scripts/version.py bump --remote origin
+$releaseTag = (& $python scripts/version.py tag).Trim()
+$commit = (git rev-parse HEAD).Trim()
+& $python scripts/version.py check
+& $python scripts/version.py verify-tag `
+  --tag $releaseTag `
+  --expected-commit $commit `
+  --expect-head `
+  --remote origin
+```
+
+默认命令沿用当前 alpha、beta 或 rc 通道并递增编号；正式版转换使用 `--kind stable`，功能线升级使用明确的 `--kind minor` 或 `--kind major`。工具会读取本地 Tag，并自动探测发布远端：优先当前分支 upstream，其次 `origin`，最后才使用唯一远端；远端不明确或查询失败时会停止，不会悄悄退回本地结果。离线开发必须明确使用 `--local-only`。工具自动跳过已占用版本。`plan` 一次给出当前版本、候选 Python/npm/Git Tag、发布通道、远端和已占用版本，`--json` 可直接供 CI 使用；`next` 保留为只输出候选版本的兼容命令。`bump` 在真正写入前会再次读取 Tag 并重新计算完整候选，若候选已被占用或发布线已被其他流程推进则停止并要求重算；随后才同步 Python、npm、锁文件、Docker、CI、文档等活动载体。写入前默认要求工作树干净，确认已有修改可以共存时才使用 `--allow-dirty`。失败会恢复本次同步产生的文件变化。
+
+正式发布还必须把 Tag、源码提交和所有产物锁定为同一个不可变身份：`check` 负责版本载体同步，`verify-tag` 负责确认当前源码的 Git Tag、HEAD、期望 commit 以及远端 Tag 对象一致。它必须在创建 GitHub Release、构建 Docker 镜像或生成 Windows 快速启动包前通过；GitHub Actions 的发布入口会把验证出的 commit 传给所有后续 job，避免 Tag、分支最新提交和构建产物互相漂移。
+
 `yarn install --frozen-lockfile` 需要能访问 `registry.npmjs.org`；`webui/yarn.lock` 里的下载地址已全部指向官方源，并有测试守卫防止再混入镜像地址。
 
 ### CI 门禁
@@ -288,7 +312,7 @@ npx vue-tsc --noEmit
 | `Release Preflight` | `push` / `pull_request` / `merge_group` + 手动 | 发布契约检查；WebUI 类型检查 → 单元测试 → 生产构建；ESLint 报告（不阻塞） |
 | `Project Check` | `push` / `merge_group` + 手动 | mypy 类型检查报告 |
 | `PR Code Review` | `pull_request_target` | mypy 结果回帖到 PR |
-| `Docker build latest` / `Windows Quickstart` | 手动 + 发布 Release | 发布产物；镜像发布前会先重跑全量后端用例 |
+| `Docker build latest` / `Windows Quickstart` | 发布 Release；Windows 另支持手动 | 发布产物；镜像发布前会先重跑全量后端用例 |
 
 前端与后端的门禁分居两个工作流，互不重复执行。
 
@@ -312,13 +336,15 @@ npx vue-tsc --noEmit
 
 ### GitHub 自动发布 Docker Hub 镜像
 
-发布 GitHub Release 后，工作流会为每个非草稿版本构建并发布 `<Release 标签>` Docker 镜像；只有 GitHub 标记为仓库当前 **Latest** 的正式 Release 才额外更新 `latest` 标签。预发布和非 Latest Release 仍会发布其版本镜像，但不会覆盖 `latest`。`Docker build with tags` 不再监听 Tag 推送，仅保留为手动应急发布入口，运行时必须填写 `image_tag`。仍可在 GitHub Actions 页面手动运行 `Docker build latest`。仓库需在 GitHub Settings → Secrets and variables → Actions 中配置：
+发布 GitHub Release 后，工作流会为每个非草稿版本构建并发布对应的 Docker 镜像；只有 GitHub 标记为仓库当前 **Latest** 的正式 Release 才额外更新 `latest` 标签。预发布和非 Latest Release 仍会发布其版本镜像，但不会覆盖 `latest`。`Docker build latest` 仅由已发布的 GitHub Release 触发；需要手动重发当前分支版本时，请在 GitHub Actions 页面手动运行 `Docker build with tags`，并填写与 `scripts/version.py tag` 输出一致的 `image_tag`。仓库需在 GitHub Settings → Secrets and variables → Actions 中配置：
 
 - Secret `DOCKERHUB_USERNAME`：Docker Hub 用户名。
 - Secret `DOCKERHUB_TOKEN`：Docker Hub Access Token。
 - Variable `DOCKERHUB_IMAGE`：可选，完整镜像名，例如 `your-dockerhub-username/kirara-agent-framework`；不填写时使用用户名加默认仓库名。
 
 服务器部署时，将 `.env.example` 复制为仅保存在服务器的 `.env`，填写 `DOCKERHUB_IMAGE=your-dockerhub-username/kirara-agent-framework:latest`，然后执行 `docker compose pull` 和 `docker compose up -d --force-recreate`。Compose 不再回退到第三方镜像；未配置镜像名会直接报错，避免误部署旧版本。
+
+发布身份也分为两种标签：GitHub Tag 使用 `scripts/version.py tag` 生成的 `vX.Y.Z...`，Docker Hub 版本镜像使用 `scripts/version.py get` 生成的 `X.Y.Z...`，不把带 `v` 的 Git Tag 直接当作镜像标签。完整流程见 [`docs/UPGRADING.md`](docs/UPGRADING.md)。
 
 已有 `data` 目录会保留旧工作流和规则。若要验证新镜像的默认工作流，请使用新的空数据目录或通过完整备份导入，不要直接删除现有数据。镜像会从仓库内受版本控制的 `webui/` 源码构建前端，不再依赖 npm 上的可变 `beta` 标签；更新 WebUI 时请随项目 A 一起发布新镜像。
 

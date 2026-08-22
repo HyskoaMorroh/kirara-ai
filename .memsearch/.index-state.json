@@ -1,0 +1,12 @@
+{
+  "collection": "ms_kirara_ai3_3_0b8_83236454",
+  "last_started_at": "2026-08-22T16:32:19.716634Z",
+  "milvus_uri": "http://127.0.0.1:19531",
+  "operation": "index",
+  "paths": [
+    "E:/output/kirara-ai/kirara-ai3.3.0b8/.memsearch/memory"
+  ],
+  "schema_version": 1,
+  "status": "running",
+  "updated_at": "2026-08-22T16:32:19.716634Z"
+}

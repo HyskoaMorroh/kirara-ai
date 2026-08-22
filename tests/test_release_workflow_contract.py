@@ -78,7 +78,7 @@ def test_windows_quickstart_publishes_only_for_the_latest_formal_release():
     assert 'RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}' in workflow
     assert 'gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq \'.tag_name\'' in workflow
     assert "needs.release.outputs.publish == 'true'" in workflow
-    assert "ref: ${{ github.event.release.tag_name || github.sha }}" in workflow
+    assert "ref: ${{ needs.preflight.outputs.release_commit }}" in workflow
 
 
 def test_prereleases_publish_a_versioned_image_without_replacing_latest():
@@ -89,6 +89,17 @@ def test_prereleases_publish_a_versioned_image_without_replacing_latest():
 
     assert "Published prerelease $RELEASE_TAG will publish only its versioned Docker image." in workflow
     assert 'if [ "${{ steps.release.outputs.publish_latest }}" = "true" ]; then' in workflow
+
+
+def test_latest_docker_publishes_are_serialized_across_release_tags():
+    """An older slow release must never overwrite a newer latest image."""
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "docker-latest.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "group: docker-latest-current" in workflow
+    assert "group: docker-latest-${{ github.ref }}" not in workflow
+    assert "cancel-in-progress: false" in workflow
 
 
 def test_non_latest_releases_still_publish_their_versioned_image():
@@ -213,6 +224,10 @@ def test_publishing_a_docker_image_requires_a_green_test_run():
     )
     assert "uses: ./.github/workflows/run-tests.yml" in preflight
     assert "secrets: inherit" in preflight
+    assert "release_commit:" in preflight
+    assert "value: ${{ jobs.version.outputs.release_commit }}" in preflight
+    assert "release_commit: ${{ needs.version.outputs.release_commit }}" in preflight
+    assert "ref: ${{ needs.version.outputs.release_commit }}" in preflight
     assert "tests/test_a4_upgrade_contract.py" in preflight
     assert "yarn type-check" in preflight
     assert "yarn test:unit" in preflight
@@ -253,13 +268,17 @@ def test_release_workflows_reject_unexpected_manual_version_tags():
     )
 
     for workflow in (latest, tagged):
-        assert "python3 scripts/version.py check --tag" in workflow
+        assert "python3 scripts/version.py verify-tag" in workflow
         assert "v3.3.0a7" not in workflow
-    assert 'python3 scripts/version.py check --tag "$RELEASE_TAG"' in latest
+    assert 'RELEASE_TAG"' in latest
+    assert "python3 scripts/version.py verify-tag \\" in latest
+    assert '            --expected-commit "$source_commit" \\' in latest
+    assert "            --expect-head \\" in latest
+    assert '            --remote origin' in latest
     assert 'EXPECTED_TAG="$(python3 scripts/version.py tag)"' in latest
     assert 'git_tag="$(python3 scripts/version.py tag)"' in tagged
     assert 'image_version="$(python3 scripts/version.py get)"' in tagged
-    assert 'python3 scripts/version.py check --tag "$git_tag"' in tagged
+    assert '            --expected-commit "$source_commit" \\' in tagged
     assert 'echo "git_tag=$git_tag" >> "$GITHUB_OUTPUT"' in tagged
     assert 'echo "image_version=$image_version" >> "$GITHUB_OUTPUT"' in tagged
     assert "workflow_dispatch:" not in latest.split("release:", maxsplit=1)[0]
@@ -272,8 +291,8 @@ def test_every_build_and_release_entry_point_uses_the_version_command():
         "release-preflight.yml": "python scripts/version.py check",
         "run-tests.yml": "python scripts/version.py check",
         "project_check.yml": "python scripts/version.py check",
-        "docker-latest.yml": "scripts/version.py check --tag",
-        "docker-tag.yml": "scripts/version.py check --tag",
+        "docker-latest.yml": "scripts/version.py verify-tag",
+        "docker-tag.yml": "scripts/version.py verify-tag",
         "quickstart-windows.yml": "python scripts/version.py check",
     }
     for filename, command in required.items():
@@ -299,7 +318,8 @@ def test_manual_docker_publish_uses_the_dispatch_commit_source():
     assert 'GITHUB_REF_NAME" != "$DEFAULT_BRANCH"' in workflow
     assert "needs: validate-source" in workflow
     assert "name: Checkout dispatch commit" in workflow
-    assert "ref: ${{ github.sha }}" in workflow
+    assert "ref: ${{ needs.verify.outputs.release_commit }}" in workflow
+    assert "expected_commit: ${{ github.sha }}" in workflow
     assert "Checkout tagged source" not in workflow
     assert "ref: ${{ github.ref }}" not in workflow
     assert 'GITHUB_REF_TYPE" != "tag"' not in workflow
@@ -312,11 +332,20 @@ def test_manual_docker_publish_separates_git_tag_from_image_version():
         encoding="utf-8"
     )
 
-    assert 'INPUT_TAG="${{ inputs.image_tag }}"' in workflow
+    assert "INPUT_TAG: ${{ inputs.image_tag }}" in workflow
+    assert 'INPUT_TAG="${{ inputs.image_tag }}"' not in workflow
     assert 'if [ "$INPUT_TAG" != "$git_tag" ]; then' in workflow
     assert 'tags: ${{ steps.image.outputs.name }}:${{ steps.vars.outputs.image_version }}' in workflow
     assert 'VITE_APP_VERSION=${{ steps.vars.outputs.git_tag }}' in workflow
     assert 'tags: ${{ steps.image.outputs.name }}:v' not in workflow
+
+
+def test_release_docker_workflow_has_no_unreachable_manual_publish_branch():
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "docker-latest.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then' not in workflow
 
 
 def test_release_documentation_keeps_ui_version_injection_dynamic():
@@ -326,8 +355,55 @@ def test_release_documentation_keeps_ui_version_injection_dynamic():
     )
 
     assert "VITE_APP_VERSION=v3.3.0a7" not in upgrade
-    assert "python scripts/version.py tag" in upgrade
-    assert "python scripts/version.py check --tag $releaseTag" in upgrade
+    assert "scripts/version.py tag" in upgrade
+    assert "scripts/version.py verify-tag" in upgrade
+    assert "--expected-commit $commit" in upgrade
+    assert "--expect-head" in upgrade
+    assert "--remote origin" in upgrade
+
+
+def test_release_documentation_uses_smart_version_resolution_without_fixed_next_version():
+    """Release instructions must derive the next version and inspect tag collisions."""
+    upgrade = (PROJECT_ROOT / "docs" / "UPGRADING.md").read_text(encoding="utf-8")
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    for document in (upgrade, readme):
+        assert "scripts/version.py next" in document
+        assert "scripts/version.py bump" in document
+        assert "--remote origin" in document
+        assert "--kind stable" in document
+        assert "Read-Host" not in document
+
+
+def test_release_documentation_does_not_freeze_the_current_version_in_its_intro():
+    """The upgrade guide must remain current without a version-tool rewrite."""
+    upgrade = (PROJECT_ROOT / "docs" / "UPGRADING.md").read_text(encoding="utf-8")
+    introduction = upgrade.split("## 0. 版本维护规则", maxsplit=1)[0]
+
+    assert not re.search(r"`v?\d+\.\d+\.\d+(?:a|b|rc)\d+`", introduction)
+    assert "文档中的当前版本标记由" not in introduction
+
+
+def test_release_documentation_matches_the_actual_docker_publish_entry_points():
+    """Operators must be sent to the workflow that can really be dispatched."""
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "`Docker build latest` 仅由已发布的 GitHub Release 触发" in readme
+    assert "手动运行 `Docker build with tags`" in readme
+    assert "手动运行 `Docker build latest`" not in readme
+
+
+def test_release_documentation_separates_git_and_registry_tags():
+    """Git uses v-prefixed tags while Docker uses the package version."""
+    upgrade = (PROJECT_ROOT / "docs" / "UPGRADING.md").read_text(encoding="utf-8")
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    for document in (upgrade, readme):
+        assert "scripts/version.py tag" in document
+        assert "scripts/version.py get" in document
+    assert '$imageVersion = (& $versionTool scripts/version.py get).Trim()' in upgrade
+    assert '-t "kirara-ai:$imageVersion"' in upgrade
+    assert "-t kirara-ai:$releaseTag" not in upgrade
 
 
 def test_workflow_call_release_gates_include_the_frozen_index_override():
