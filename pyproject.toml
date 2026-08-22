@@ -56,7 +56,7 @@ dependencies = [
     "alembic",
     # mcp 2.x 移除了 McpError 等接口，pygls 2.x 移除了 pygls.server.LanguageServer，均需锁定 1.x
     "mcp>=1.6,<2",
-    "pygls>=1.3,<2",
+    "pygls>=1.3,<3",
     "jedi",
     "pyflakes",
 ]
