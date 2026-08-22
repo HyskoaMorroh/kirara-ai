@@ -42,6 +42,34 @@ const currentAdapter = ref<IMAdapter | null>(null)
 const formRef = ref<FormInst | null>(null)
 const isEdit = ref<string | null>(null)
 
+type StatusTagType = 'default' | 'success' | 'warning' | 'error'
+
+const adapterStatus = (
+  adapter: IMAdapter
+): { label: string; type: StatusTagType; className: string } => {
+  if (!adapter.enable) return { label: '未启用', type: 'default', className: 'disabled' }
+  if (!adapter.is_running) return { label: '已停止', type: 'warning', className: 'stopped' }
+
+  switch (adapter.health?.status) {
+    case 'connected': {
+      const accounts = adapter.health.connected_account_count
+      return {
+        label: accounts > 0 ? `已连接 · ${accounts} 个账号` : '已连接',
+        type: 'success',
+        className: 'connected'
+      }
+    }
+    case 'waiting':
+      return { label: '等待连接', type: 'warning', className: 'waiting' }
+    case 'disconnected':
+      return { label: '已断开', type: 'error', className: 'disconnected' }
+    case 'stale':
+      return { label: '心跳超时', type: 'error', className: 'stale' }
+    default:
+      return { label: '运行中', type: 'success', className: 'running' }
+  }
+}
+
 const md = new MarkdownIt()
 const defaultRender =
   md.renderer.rules.link_open ||
@@ -93,11 +121,18 @@ const fetchAdapters = async () => {
         a.bot_profile = cachedbot_profileMap.get(a.name) || null
       })
     }
-    // 刷新真实 bot_profile
-    adapters.value.forEach(async (adapter) => {
-      const { adapter: adapterDetail } = await imApi.getAdapterDetail(adapter.name)
-      adapter.bot_profile = adapterDetail.bot_profile
-    })
+    await Promise.all(
+      adapters.value.map(async (adapter) => {
+        try {
+          const { adapter: adapterDetail } = await imApi.getAdapterDetail(adapter.name)
+          adapter.bot_profile = adapterDetail.bot_profile
+          adapter.health = adapterDetail.health
+          adapter.is_running = adapterDetail.is_running
+        } catch (error) {
+          console.error(`获取适配器 ${adapter.name} 的连接详情失败:`, error)
+        }
+      })
+    )
   } catch (error) {
     message.error('获取适配器列表失败: ' + error)
     console.error('获取适配器列表失败:', error)
@@ -116,7 +151,8 @@ const addAdapter = async () => {
     config: {},
     is_running: false,
     enable: true,
-    bot_profile: null
+    bot_profile: null,
+    health: null
   }
 }
 
@@ -309,17 +345,12 @@ defineExpose({
                       </n-avatar>
                     </template>
                     <template #header-extra>
-                      <n-tag v-if="!adapter.enable" type="default" class="status-tag disabled">
-                        未启用
-                      </n-tag>
                       <n-tag
-                        v-else-if="adapter.is_running"
-                        type="success"
-                        class="status-tag running"
+                        :type="adapterStatus(adapter).type"
+                        :class="['status-tag', adapterStatus(adapter).className]"
                       >
-                        运行中
+                        {{ adapterStatus(adapter).label }}
                       </n-tag>
-                      <n-tag v-else type="warning" class="status-tag stopped"> 已停止 </n-tag>
                     </template>
                     <template #action>
                       <n-space class="action-buttons">
@@ -564,13 +595,21 @@ defineExpose({
   transition: all 0.3s ease;
 }
 
-.status-tag.running {
+.status-tag.running,
+.status-tag.connected {
   background-color: var(--success-color);
   color: white;
 }
 
-.status-tag.stopped {
+.status-tag.stopped,
+.status-tag.waiting {
   background-color: var(--warning-color);
+  color: white;
+}
+
+.status-tag.disconnected,
+.status-tag.stale {
+  background-color: var(--error-color);
   color: white;
 }
 

@@ -11,6 +11,17 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "aiocqhttp"
+version = "1.4.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "quart", version = "0.20.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "quart", version = "0.21.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c2/91/e4bf8584695b065e223aa42ed4462fb67532a9f936d45df5d982eb3320b6/aiocqhttp-1.4.4.tar.gz", hash = "sha256:eb2b6996753cacee45bf615aba5db4625b495e7a184a2fd27d2e5408f472c03d", size = 22989, upload-time = "2023-06-11T05:20:08.649Z" }
+
+[[package]]
 name = "aiofiles"
 version = "25.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1290,9 +1301,10 @@ wheels = [
 
 [[package]]
 name = "kirara-ai"
-version = "3.3.0b9"
+version = "3.3.0b10"
 source = { editable = "." }
 dependencies = [
+    { name = "aiocqhttp" },
     { name = "aiohttp" },
     { name = "alembic" },
     { name = "bcrypt" },
@@ -1334,6 +1346,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiocqhttp", specifier = ">=1.4.4,<2" },
     { name = "aiohttp" },
     { name = "alembic" },
     { name = "bcrypt", specifier = ">=4.0.1" },

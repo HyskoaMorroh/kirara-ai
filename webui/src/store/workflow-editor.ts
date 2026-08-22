@@ -19,6 +19,7 @@ export interface WorkflowEditorIntent {
   updateName: (name: string) => void
   updateDescription: (description: string) => void
   updateWorkflowId: (workflowId: string) => void
+  updateConfig: (config: WorkflowConfig) => void
   saveToHistory: () => void
   undo: () => void
   redo: () => void
@@ -190,8 +191,8 @@ class WorkflowEditorModel {
     }
   })
 
-  // 新增：是否跳过保存历史记录的标志
-  private skipSavingHistory = ref(false)
+  // 用深度计数而不是布尔值，保证嵌套及并行异步操作都在结束前抑制历史记录。
+  private historySuppressionDepth = ref(0)
 
   // 计算属性
   private readonly viewState = computed<WorkflowEditorViewState>(() => ({
@@ -204,18 +205,33 @@ class WorkflowEditorModel {
     canUndo: this.state.value.undoStack.length > 0,
     canRedo: this.state.value.redoStack.length > 0,
     hasClipboard: this.state.value.clipboard !== null,
-    skipSavingHistory: this.skipSavingHistory.value,
+    skipSavingHistory: this.historySuppressionDepth.value > 0,
     config: this.state.value.config
   }))
 
-  // 新增：执行操作但不保存历史记录的高阶函数
-  performActionWithoutHistory(action: () => void) {
-    this.skipSavingHistory.value = true
+  private endHistorySuppression() {
+    this.historySuppressionDepth.value = Math.max(0, this.historySuppressionDepth.value - 1)
+  }
+
+  // 执行操作但不保存历史记录；Promise 完成前保持抑制，且支持嵌套调用。
+  performActionWithoutHistory<T>(action: () => T): T {
+    this.historySuppressionDepth.value += 1
+    let result: T
     try {
-      action()
-    } finally {
-      this.skipSavingHistory.value = false
+      result = action()
+    } catch (error) {
+      this.endHistorySuppression()
+      throw error
     }
+
+    if (result && typeof (result as any).then === 'function') {
+      return Promise.resolve(result).finally(() => {
+        this.endHistorySuppression()
+      }) as T
+    }
+
+    this.endHistorySuppression()
+    return result
   }
 
   // 提取：保存当前状态到 undo 栈
@@ -341,9 +357,13 @@ class WorkflowEditorModel {
       this.state.value.workflowId = workflowId
     },
 
+    updateConfig: (config) => {
+      this.state.value.config = config
+    },
+
     saveToHistory: () => {
       // 只有在 skipSavingHistory 为 false 时才保存历史记录
-      if (this.skipSavingHistory.value) return
+      if (this.historySuppressionDepth.value > 0) return
       this.pushToUndoStack()
     },
 

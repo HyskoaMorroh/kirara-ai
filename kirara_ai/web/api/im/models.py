@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 
 from kirara_ai.config.global_config import IMConfig
+from kirara_ai.im.adapter import AdapterHealthSnapshot
 from kirara_ai.im.im_registry import IMAdapterInfo
 from kirara_ai.im.profile import UserProfile
 
@@ -14,6 +15,7 @@ class IMAdapterStatus(IMAdapterConfig):
 
     is_running: bool
     bot_profile: Optional[UserProfile] = None
+    health: Optional[AdapterHealthSnapshot] = None
 
 class IMAdapterList(BaseModel):
     """IM适配器列表响应"""

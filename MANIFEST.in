@@ -2,6 +2,7 @@ recursive-include kirara_ai/plugins/im_http_legacy_adapter/assets *
 recursive-include kirara_ai/plugins/im_qqbot_adapter/assets *
 recursive-include kirara_ai/plugins/im_telegram_adapter/assets *
 recursive-include kirara_ai/plugins/im_wecom_adapter/assets *
+recursive-include kirara_ai/plugins/im_onebot_adapter/assets *
 recursive-include kirara_ai/alembic *
 recursive-include kirara_ai/web/static *
 # 开箱可用的预设工作流。这些 YAML 由 WorkflowRegistry.load_workflows() 在首次

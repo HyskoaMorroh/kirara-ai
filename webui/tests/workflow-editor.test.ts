@@ -189,6 +189,70 @@ describe('workflow editor history', () => {
     expect(viewState.value.name).toBe('before')
   })
 
+  it('keeps history suppression active across nested actions', () => {
+    const intent = workflowEditorModel.getIntent()
+    const viewState = workflowEditorModel.getViewState()
+    intent.initialize({
+      blocks: [],
+      wires: [],
+      blockTypes: [],
+      name: 'before',
+      workflowId: 'user:nested-suppression',
+      config: { max_execution_time: 0 }
+    })
+
+    workflowEditorModel.performActionWithoutHistory(() => {
+      workflowEditorModel.performActionWithoutHistory(() => {
+        expect(viewState.value.skipSavingHistory).toBe(true)
+        intent.saveToHistory()
+      })
+      expect(viewState.value.skipSavingHistory).toBe(true)
+      intent.saveToHistory()
+      intent.updateName('after')
+    })
+
+    expect(viewState.value.skipSavingHistory).toBe(false)
+    expect(viewState.value.canUndo).toBe(false)
+  })
+
+  it('keeps history suppression active until an async action settles', async () => {
+    const intent = workflowEditorModel.getIntent()
+    const viewState = workflowEditorModel.getViewState()
+    intent.initialize({
+      blocks: [],
+      wires: [],
+      blockTypes: [],
+      name: 'before',
+      workflowId: 'user:async-suppression',
+      config: { max_execution_time: 0 }
+    })
+
+    await workflowEditorModel.performActionWithoutHistory(async () => {
+      await Promise.resolve()
+      expect(viewState.value.skipSavingHistory).toBe(true)
+      intent.saveToHistory()
+      intent.updateName('after')
+    })
+
+    expect(viewState.value.skipSavingHistory).toBe(false)
+    expect(viewState.value.canUndo).toBe(false)
+    intent.undo()
+    expect(viewState.value.name).toBe('after')
+  })
+
+  it('restores suppression after an async action rejects', async () => {
+    const viewState = workflowEditorModel.getViewState()
+
+    await expect(
+      workflowEditorModel.performActionWithoutHistory(async () => {
+        await Promise.resolve()
+        throw new Error('expected async failure')
+      })
+    ).rejects.toThrow('expected async failure')
+
+    expect(viewState.value.skipSavingHistory).toBe(false)
+  })
+
   it('reuses unchanged records between immutable snapshots and clones changed records only', () => {
     const initial = {
       blocks: [

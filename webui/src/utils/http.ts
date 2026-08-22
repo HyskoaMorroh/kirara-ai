@@ -1,6 +1,32 @@
 // import { useMessage } from 'naive-ui'
 
 const BASE_URL = '/backend-api/api'
+const MAX_ERROR_BODY_LENGTH = 240
+
+function compactResponseText(text: string): string {
+  return text
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, MAX_ERROR_BODY_LENGTH)
+}
+
+function responseStatus(response: Response): string {
+  const statusText = response.statusText.trim()
+  return statusText ? `HTTP ${response.status} ${statusText}` : `HTTP ${response.status}`
+}
+
+function getBackendErrorMessage(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null
+
+  const record = value as Record<string, unknown>
+  for (const key of ['error', 'message', 'detail']) {
+    const candidate = record[key]
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+  }
+
+  return null
+}
 
 class Http {
   //   private message = useMessage()
@@ -55,10 +81,27 @@ class Http {
         headers: headers
       })
 
-      const data = await response.json()
+      // Read once so empty, 204, truncated, and non-JSON proxy responses can be
+      // reported with their HTTP status instead of leaking a JSON parser error.
+      const body = await response.text()
+      let data: unknown = undefined
+      if (body.trim()) {
+        try {
+          data = JSON.parse(body)
+        } catch {
+          if (!response.ok) {
+            const summary = compactResponseText(body)
+            throw new Error(
+              `请求失败 (${responseStatus(response)})${summary ? `: ${summary}` : ''}`
+            )
+          }
+          throw new Error(`响应不是有效的 JSON (${responseStatus(response)})`)
+        }
+      }
 
       if (!response.ok) {
-        throw new Error(data.error || '请求失败')
+        const backendMessage = getBackendErrorMessage(data)
+        throw new Error(backendMessage || `请求失败 (${responseStatus(response)})`)
       }
 
       return data as T

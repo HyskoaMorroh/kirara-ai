@@ -17,6 +17,11 @@ from kirara_ai.plugin_manager.plugin import Plugin
 from kirara_ai.plugin_manager.plugin_event_bus import PluginEventBus
 
 
+LEGACY_EXTERNAL_PLUGIN_REPLACEMENTS = {
+    "im_onebot_adapters": "im_onebot_adapter",
+}
+
+
 class PluginLoader:
     def __init__(self, container: DependencyContainer, plugin_dir: str):
         self.plugins: Dict[str, Plugin] = {}  # 存储插件实例
@@ -86,12 +91,22 @@ class PluginLoader:
         """加载插件，支持内部插件和外部插件"""
         self.logger.info(f"Loading plugin: {plugin_name}")
         try:
+            replacement = LEGACY_EXTERNAL_PLUGIN_REPLACEMENTS.get(plugin_name)
+            if replacement:
+                self.logger.info(
+                    f"Plugin {plugin_name} is replaced by built-in plugin {replacement}"
+                )
+                if replacement in self.plugins:
+                    return self.plugins[replacement]
+                plugin_name = replacement
+
             if plugin_name in self.internal_plugins:  # 内部插件
-                self._load_internal_plugin(plugin_name)
+                return self._load_internal_plugin(plugin_name)
             else:  # 外部插件
-                self._load_external_plugin(plugin_name)
+                return self._load_external_plugin(plugin_name)
         except Exception as e:
             self.logger.error(f"Failed to load plugin {plugin_name}: {e}")
+            return None
 
     def _load_internal_plugin(self, plugin_name: str):
         """加载内部插件"""
@@ -126,6 +141,17 @@ class PluginLoader:
         """加载外部插件"""
         from importlib import reload
         from importlib.metadata import entry_points
+
+        replacement = LEGACY_EXTERNAL_PLUGIN_REPLACEMENTS.get(plugin_name)
+        if replacement:
+            self.logger.info(
+                f"Skipping external plugin {plugin_name}; built-in {replacement} is authoritative"
+            )
+            if replacement in self.plugins:
+                return self.plugins[replacement]
+            if replacement in self.internal_plugins:
+                return self._load_internal_plugin(replacement)
+            raise ValueError(f"Built-in replacement {replacement} is unavailable")
 
         # 获取插件的 entry point
         eps = entry_points(group=Plugin.ENTRY_POINT_GROUP)
@@ -510,6 +536,14 @@ class PluginLoader:
 
                 for ep in plugin_eps:
                     try:
+                        replacement = LEGACY_EXTERNAL_PLUGIN_REPLACEMENTS.get(ep.name)
+                        if replacement:
+                            self.logger.info(
+                                f"Ignoring legacy external plugin {ep.name}; "
+                                f"built-in {replacement} is authoritative"
+                            )
+                            continue
+
                         # 获取插件元数据
                         metadata = {
                             "name": dist.metadata["Name"],

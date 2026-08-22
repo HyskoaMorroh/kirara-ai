@@ -13,6 +13,7 @@ from typing import Callable, Optional
 from ruamel.yaml import YAML
 
 from kirara_ai.config.global_config import GlobalConfig
+from kirara_ai.im.adapter import AdapterHealthProvider
 from kirara_ai.im.manager import IMManager
 from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.mcp_module.manager import MCPServerManager
@@ -201,15 +202,35 @@ def _dispatch_targets(
 
 def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck:
     enabled = [item.name for item in config.ims if item.enable]
-    available = sum(bool(manager.is_adapter_running(name)) for name in enabled)
-    status: ReadinessStatus = (
-        "pass" if not enabled or available == len(enabled) else "warn"
-    )
+    counts = {
+        "connected": 0,
+        "waiting": 0,
+        "disconnected": 0,
+        "stale": 0,
+    }
+    for name in enabled:
+        if not manager.is_adapter_running(name):
+            counts["disconnected"] += 1
+            continue
+        adapter = manager.adapters.get(name)
+        if isinstance(adapter, AdapterHealthProvider):
+            snapshot = adapter.get_health_snapshot()
+            counts[snapshot.status] += 1
+        else:
+            counts["connected"] += 1
+
+    available = counts["connected"]
+    status: ReadinessStatus = "pass" if not enabled or available == len(enabled) else "warn"
     return _check(
         CHECK_IDS[4], status,
-        "IM 适配器可用" if status == "pass" else "部分已配置 IM 适配器未运行",
-        "无需处理" if status == "pass" else "检查 IM 适配器配置和连接状态",
-        configured_count=len(enabled), available_count=available,
+        "IM 适配器已连接" if status == "pass" else "部分 IM 适配器尚未建立连接",
+        "无需处理" if status == "pass" else "检查 IM 适配器运行状态、登录状态和连接心跳",
+        configured_count=len(enabled),
+        available_count=available,
+        connected_count=counts["connected"],
+        waiting_count=counts["waiting"],
+        disconnected_count=counts["disconnected"],
+        stale_count=counts["stale"],
     )
 
 

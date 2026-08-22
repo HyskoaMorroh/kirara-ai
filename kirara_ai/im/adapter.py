@@ -1,7 +1,8 @@
+import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Protocol
+from typing import Any, Literal, Optional, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing_extensions import runtime_checkable
 
 from kirara_ai.im.message import IMMessage
@@ -18,6 +19,26 @@ class BotStatus(BaseModel):
 
     username: str
     avatar_url: str
+
+
+class IMActionTimeoutError(asyncio.TimeoutError):
+    """An IM platform action exceeded its adapter-level timeout."""
+
+
+class AdapterHealthSnapshot(BaseModel):
+    """Secret-free connection health exposed by capable IM adapters."""
+
+    status: Literal["connected", "waiting", "disconnected", "stale"]
+    connected_account_count: int = Field(default=0, ge=0)
+    last_heartbeat_age_seconds: Optional[float] = Field(default=None, ge=0)
+
+
+@runtime_checkable
+class AdapterHealthProvider(Protocol):
+    """Optional capability for adapters with a distinct connection state."""
+
+    def get_health_snapshot(self) -> AdapterHealthSnapshot:
+        """Return connection health without account identifiers or credentials."""
 
 @runtime_checkable
 class EditStateAdapter(Protocol):

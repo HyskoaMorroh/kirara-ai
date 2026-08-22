@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kirara-ai"
-version = "3.3.0b9"
+version = "3.3.0b10"
 authors = [
     { name="Lss233", email="i@lss233.com" },
 ]
@@ -41,6 +41,7 @@ dependencies = [
     "bcrypt>=4.0.1",
     "PyJWT>=2.8.0",
     "hypercorn>=0.15.0",
+    "aiocqhttp>=1.4.4,<2",
     "psutil>=5.9.0",
     "setuptools",
     "tomli>=2.0.0",
@@ -86,6 +87,7 @@ namespaces = true
 # 多模态、分段回复等进阶模板。
 [tool.setuptools.package-data]
 "kirara_ai.web" = ["static/*"]
+"kirara_ai.plugins.im_onebot_adapter" = ["assets/*"]
 "kirara_ai.workflow.presets" = ["*/*.yaml", "catalog.json"]
 
 # 不把本机运行或构建时生成的字节码带进 wheel。源码会由 Python 在目标环境

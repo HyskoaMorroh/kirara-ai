@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Annotated, Any, Dict, List, Optional
 
 from kirara_ai.im.adapter import IMAdapter
@@ -30,6 +31,11 @@ class GetIMMessage(Block):
 
 class SendIMMessage(Block):
     """发送 IM 消息"""
+
+    # Blocks are executed in worker threads while adapters belong to the main
+    # event loop.  A bounded wait keeps a broken IM connection from hanging a
+    # workflow forever while still making the block's result reflect delivery.
+    SEND_TIMEOUT_SECONDS = 120.0
 
     name = "msg_sender"
     description = "把消息发回聊天平台。发送对象留空时默认回复给触发消息的人。"
@@ -63,7 +69,36 @@ class SendIMMessage(Block):
         loop: asyncio.AbstractEventLoop = self.container.resolve(
             asyncio.AbstractEventLoop
         )
-        loop.create_task(adapter.send_message(msg, target or src_msg.sender))
+
+        if loop.is_running():
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if running_loop is loop:
+                raise RuntimeError(
+                    "SendIMMessage must run outside its adapter event-loop thread"
+                )
+
+            future = asyncio.run_coroutine_threadsafe(
+                adapter.send_message(msg, target or src_msg.sender), loop
+            )
+            try:
+                future.result(timeout=self.SEND_TIMEOUT_SECONDS)
+            except FutureTimeoutError as exc:
+                if future.done():
+                    raise
+                future.cancel()
+                raise TimeoutError(
+                    f"IM message sending timed out after {self.SEND_TIMEOUT_SECONDS:g} seconds"
+                ) from exc
+        else:
+            asyncio.run(
+                asyncio.wait_for(
+                    adapter.send_message(msg, target or src_msg.sender),
+                    timeout=self.SEND_TIMEOUT_SECONDS,
+                )
+            )
         return {"ok": True}
 
 # IMMessage 转纯文本

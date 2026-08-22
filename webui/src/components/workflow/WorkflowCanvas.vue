@@ -171,10 +171,11 @@ const formValue = ref({
 })
 
 // 初始化工作流ID
-viewState.value.workflowId =
+intent.updateWorkflowId(
   'user:' + Array.from({ length: 5 }, () => Math.floor(Math.random() * 36).toString(36)).join('')
-viewState.value.name = formValue.value.name
-viewState.value.description = formValue.value.description
+)
+intent.updateName(formValue.value.name)
+intent.updateDescription(formValue.value.description)
 
 // 表单验证规则
 const formRules = {
@@ -794,7 +795,7 @@ const handleSave = async () => {
     saving.value = true
     loadingBar.start()
     showSettingsModal.value = false
-    viewState.value.config = workflowConfig
+    intent.updateConfig(workflowConfig)
     emit('update:config', workflowConfig)
     emit('save', workflowName, workflowDescription, workflowId)
   } catch (error: any) {
@@ -924,19 +925,23 @@ const handleImport = async () => {
 
         recordHistoryBeforeCanvasMutation()
         workflowEditorModel.performActionWithoutHistory(() => {
-          viewState.value.blocks = importedBlocks
-          viewState.value.wires = acceptedWires
-          viewState.value.name = data.name || viewState.value.name
-          viewState.value.description = data.description || viewState.value.description
-          viewState.value.workflowId = data.workflow_id || viewState.value.workflowId
-          viewState.value.config = mergeWorkflowConfig(
+          const importedName = data.name || viewState.value.name
+          const importedDescription = data.description || viewState.value.description
+          const importedWorkflowId = data.workflow_id || viewState.value.workflowId
+          const importedConfig = mergeWorkflowConfig(
             data.config as WorkflowConfig | undefined,
             viewState.value.config
           )
+          intent.updateBlocks(importedBlocks)
+          intent.updateWires(acceptedWires)
+          intent.updateName(importedName)
+          intent.updateDescription(importedDescription)
+          intent.updateWorkflowId(importedWorkflowId)
+          intent.updateConfig(importedConfig)
           formValue.value = {
-            workflowId: viewState.value.workflowId,
-            name: viewState.value.name,
-            description: viewState.value.description,
+            workflowId: importedWorkflowId,
+            name: importedName,
+            description: importedDescription,
             config: mergeWorkflowConfig(
               data.config as WorkflowConfig | undefined,
               formValue.value.config
@@ -1395,10 +1400,10 @@ const initGraphData = () => {
 
 // 初始化属性数据
 const initPropertiesData = () => {
-  viewState.value.name = props.initialName || ''
-  viewState.value.description = props.initialDescription || ''
-  viewState.value.workflowId = props.initialWorkflowId || ''
-  viewState.value.config = mergeWorkflowConfig(props.initialConfig, viewState.value.config)
+  intent.updateName(props.initialName || '')
+  intent.updateDescription(props.initialDescription || '')
+  intent.updateWorkflowId(props.initialWorkflowId || '')
+  intent.updateConfig(mergeWorkflowConfig(props.initialConfig, viewState.value.config))
 
   formValue.value = {
     workflowId: props.initialWorkflowId || ':',
@@ -1454,7 +1459,7 @@ watch([() => props.initialName, () => props.initialDescription, () => props.init
 watch(
   () => props.initialConfig,
   (config) => {
-    viewState.value.config = mergeWorkflowConfig(config, viewState.value.config)
+    intent.updateConfig(mergeWorkflowConfig(config, viewState.value.config))
     formValue.value.config = mergeWorkflowConfig(config, formValue.value.config)
   },
   { deep: true }

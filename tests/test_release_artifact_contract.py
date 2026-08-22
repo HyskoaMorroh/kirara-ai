@@ -15,6 +15,7 @@ REQUIRED_DISTRIBUTION_PATHS = (
     "kirara_ai/backup/service.py",
     "kirara_ai/alembic/env.py",
     "kirara_ai/plugins/im_qqbot_adapter/assets/qqbot.png",
+    "kirara_ai/plugins/im_onebot_adapter/assets/onebot.png",
     "kirara_ai/plugins/im_telegram_adapter/assets/telegram.png",
     "kirara_ai/plugins/im_wecom_adapter/assets/wecom.png",
     "kirara_ai/workflow/presets/chat/plain_text.yaml",
@@ -87,9 +88,17 @@ def test_release_versions_are_synchronized():
     assert (PROJECT_ROOT / "webui" / "yarn.lock").is_file()
 
 
-def test_catalog_is_declared_as_installed_package_data():
-    package_data = _project_metadata()["tool"]["setuptools"]["package-data"]
+def test_runtime_assets_are_declared_as_installed_package_data():
+    metadata = _project_metadata()
+    package_data = metadata["tool"]["setuptools"]["package-data"]
     assert "catalog.json" in package_data["kirara_ai.workflow.presets"]
+    assert "assets/*" in package_data["kirara_ai.plugins.im_onebot_adapter"]
+
+    dependency_names = {
+        re.split(r"[<>=!~;\[]", dependency, maxsplit=1)[0].strip().lower()
+        for dependency in metadata["project"]["dependencies"]
+    }
+    assert "aiocqhttp" in dependency_names
 
 
 def _archive_members(archive: Path) -> set[str]:

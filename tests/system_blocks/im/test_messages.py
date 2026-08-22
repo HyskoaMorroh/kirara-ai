@@ -24,6 +24,34 @@ class MockIMAdapter(IMAdapter):
     
     async def stop(self):
         return None
+
+
+class DelayedIMAdapter(MockIMAdapter):
+    def __init__(self):
+        self.completed = False
+
+    async def send_message(self, message, target=None):
+        await asyncio.sleep(0.01)
+        self.completed = True
+
+
+class FailingIMAdapter(MockIMAdapter):
+    async def send_message(self, message, target=None):
+        raise RuntimeError("OneBot send failed")
+
+
+class HangingIMAdapter(MockIMAdapter):
+    def __init__(self):
+        self.cancelled = False
+        self.started = asyncio.Event()
+
+    async def send_message(self, message, target=None):
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
     
 # 创建模拟的 IMManager 类
 class MockIMManager(IMManager):
@@ -80,7 +108,7 @@ async def test_send_im_message_async():
     block.container = container
     
     # 执行块
-    result = block.execute(msg=send_message)
+    result = await asyncio.to_thread(block.execute, msg=send_message)
     
     # 验证结果 
     assert result is not None
@@ -90,10 +118,91 @@ async def test_send_im_message_async():
     block.container = container
     
     # 执行块
-    result = block.execute(msg=send_message, target=ChatSender.from_c2c_chat(user_id="specific_user", display_name="Specific User"))
+    result = await asyncio.to_thread(
+        block.execute,
+        msg=send_message,
+        target=ChatSender.from_c2c_chat(
+            user_id="specific_user", display_name="Specific User"
+        ),
+    )
     
     # 验证结果
     assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_send_im_message_waits_until_adapter_finishes():
+    container = DependencyContainer()
+    adapter = DelayedIMAdapter()
+    source = IMMessage(
+        sender=ChatSender.from_c2c_chat("test_user", "Test User"),
+        message_elements=[TextMessage("question")],
+    )
+    reply = IMMessage(
+        sender=ChatSender.get_bot_sender(),
+        message_elements=[TextMessage("answer")],
+    )
+    container.register(IMAdapter, adapter)
+    container.register(IMMessage, source)
+    container.register(asyncio.AbstractEventLoop, asyncio.get_running_loop())
+    block = SendIMMessage()
+    block.container = container
+
+    result = await asyncio.to_thread(block.execute, msg=reply)
+
+    assert result == {"ok": True}
+    assert adapter.completed is True
+
+
+@pytest.mark.asyncio
+async def test_send_im_message_propagates_adapter_failure():
+    container = DependencyContainer()
+    source = IMMessage(
+        sender=ChatSender.from_c2c_chat("test_user", "Test User"),
+        message_elements=[TextMessage("question")],
+    )
+    reply = IMMessage(
+        sender=ChatSender.get_bot_sender(),
+        message_elements=[TextMessage("answer")],
+    )
+    container.register(IMAdapter, FailingIMAdapter())
+    container.register(IMMessage, source)
+    container.register(asyncio.AbstractEventLoop, asyncio.get_running_loop())
+    block = SendIMMessage()
+    block.container = container
+
+    with pytest.raises(RuntimeError, match="OneBot send failed"):
+        await asyncio.to_thread(block.execute, msg=reply)
+
+
+@pytest.mark.asyncio
+async def test_send_im_message_timeout_cancels_adapter_coroutine():
+    container = DependencyContainer()
+    adapter = HangingIMAdapter()
+    source = IMMessage(
+        sender=ChatSender.from_c2c_chat("test_user", "Test User"),
+        message_elements=[TextMessage("question")],
+    )
+    reply = IMMessage(
+        sender=ChatSender.get_bot_sender(),
+        message_elements=[TextMessage("answer")],
+    )
+    container.register(IMAdapter, adapter)
+    container.register(IMMessage, source)
+    container.register(asyncio.AbstractEventLoop, asyncio.get_running_loop())
+    block = SendIMMessage()
+    block.SEND_TIMEOUT_SECONDS = 0.01
+    block.container = container
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        await asyncio.to_thread(block.execute, msg=reply)
+
+    await asyncio.wait_for(adapter.started.wait(), timeout=1)
+    for _ in range(20):
+        if adapter.cancelled:
+            break
+        await asyncio.sleep(0.01)
+    assert adapter.cancelled is True
 
 
 def test_get_im_message(container):
@@ -185,4 +294,4 @@ def test_append_im_message():
     assert isinstance(result["msg"].sender, ChatSender)
     assert len(result["msg"].message_elements) == 2
     assert result["msg"].message_elements[0].text == "基础消息"
-    assert result["msg"].message_elements[1].text == "追加内容" 
+    assert result["msg"].message_elements[1].text == "追加内容"

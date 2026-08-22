@@ -138,9 +138,11 @@ jobs:
           assert (root / "workflow" / "presets" / "chat" / "mcp_tools.yaml").is_file()
           assert (root / "web" / "static" / "backup.html").is_file()
           assert (root / "plugins" / "im_qqbot_adapter" / "assets" / "qqbot.png").is_file()
+          assert (root / "plugins" / "im_onebot_adapter" / "assets" / "onebot.png").is_file()
           assert (root / "plugins" / "im_telegram_adapter" / "assets" / "telegram.png").is_file()
           assert (root / "plugins" / "im_wecom_adapter" / "assets" / "wecom.png").is_file()
           assert (root / "alembic" / "env.py").is_file()
+          import kirara_ai.plugins.im_onebot_adapter.adapter
           import kirara_ai.web.api.system.readiness
           print("fresh wheel smoke OK:", kirara_ai.__file__)
           PY

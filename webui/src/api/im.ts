@@ -38,6 +38,13 @@ export interface IMAdapter {
   enable: boolean
   config: Record<string, any>
   bot_profile: UserProfile | null
+  health: IMAdapterHealth | null
+}
+
+export interface IMAdapterHealth {
+  status: 'connected' | 'waiting' | 'disconnected' | 'stale'
+  connected_account_count: number
+  last_heartbeat_age_seconds: number | null
 }
 
 // 适配器类型枚举
@@ -69,6 +76,7 @@ export interface IMAdapterDetail {
   is_running: boolean
   config: Record<string, any>
   bot_profile: UserProfile | null
+  health: IMAdapterHealth | null
 }
 
 export interface ConfigSchema {

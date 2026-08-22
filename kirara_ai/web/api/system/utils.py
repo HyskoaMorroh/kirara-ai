@@ -1,5 +1,6 @@
 import hashlib
 import os
+import platform
 import subprocess
 import sys
 from functools import lru_cache
@@ -229,26 +230,71 @@ async def download_file(url: str, temp_dir: str) -> tuple[str, str]:
         print(f"下载失败: {e}")
         return "", ""
 
+def _cpu_description_from_key_values(
+    content: str, preferred_keys: tuple[str, ...]
+) -> str | None:
+    values: dict[str, str] = {}
+    for line in content.splitlines():
+        key, separator, value = line.partition(":")
+        if not separator:
+            continue
+        normalized_key = " ".join(key.casefold().split())
+        normalized_value = value.strip()
+        if normalized_value and normalized_key not in values:
+            values[normalized_key] = normalized_value
+
+    for key in preferred_keys:
+        value = values.get(key)
+        if value and not value.isdecimal():
+            return value
+    return None
+
+
+def _run_cpu_info_command(command: list[str], keys: tuple[str, ...]) -> str | None:
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            shell=False,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    cpu_info = _cpu_description_from_key_values(result.stdout, keys)
+    if cpu_info:
+        return cpu_info
+
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) > 1 and lines[0].casefold() in keys:
+        return lines[1]
+    return None
+
+
 @lru_cache(maxsize=1)
 def get_cpu_info() -> str:
-    """获取CPU信息，使用lru_cache进行缓存"""
-    try:
-        if sys.platform == 'win32':
-            # Windows 系统下获取 CPU 信息
-            result = subprocess.run(['wmic', 'cpu', 'get', 'name'], capture_output=True, text=True)
-            if result.returncode == 0:
-                cpu_info = result.stdout.strip().removeprefix('Name').strip()
-        else:
-            # Linux 系统下获取 CPU 信息
-            with open('/proc/cpuinfo', 'r') as f:
-                for line in f:
-                    if line.startswith('model name'):
-                        cpu_info = line.split(':')[1].strip()
-                        break
-        
-        return cpu_info if cpu_info else "Unknown"
-    except:
-        return "Unknown"
+    """Return a useful CPU description in hosts and minimal containers."""
+    cpu_info: str | None = None
+    if sys.platform == "win32":
+        cpu_info = _run_cpu_info_command(["wmic", "cpu", "get", "name"], ("name",))
+    elif sys.platform.startswith("linux"):
+        try:
+            with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as cpu_file:
+                cpu_info = _cpu_description_from_key_values(
+                    cpu_file.read(),
+                    ("model name", "hardware", "cpu model", "processor"),
+                )
+        except OSError:
+            pass
+        if not cpu_info:
+            cpu_info = _run_cpu_info_command(
+                ["lscpu"], ("model name", "model", "architecture")
+            )
+
+    return cpu_info or platform.processor().strip() or platform.machine().strip() or "Unknown"
 
 def get_memory_usage() -> dict:
     """获取内存使用情况"""

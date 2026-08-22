@@ -6,7 +6,8 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from kirara_ai.config.global_config import GlobalConfig, WebConfig
+from kirara_ai.config.global_config import GlobalConfig, IMConfig, WebConfig
+from kirara_ai.im.adapter import AdapterHealthSnapshot
 from kirara_ai.im.manager import IMManager
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.llm.llm_manager import LLMManager
@@ -57,6 +58,38 @@ async def test_readiness_checks_are_ordered_bounded_and_secret_free(tmp_path):
     serialized = result.model_dump_json()
     assert "do-not-return-this" not in serialized
     assert all(check.remediation for check in result.checks)
+
+
+@pytest.mark.asyncio
+async def test_readiness_warns_when_running_onebot_is_waiting_for_connection(tmp_path):
+    config, workflows, dispatch, im_manager, llm_manager, mcp_manager = (
+        _readiness_dependencies(tmp_path)
+    )
+    config.ims = [
+        IMConfig(name="qq", enable=True, adapter="onebot", config={})
+    ]
+    adapter = MagicMock()
+    adapter.get_health_snapshot.return_value = AdapterHealthSnapshot(
+        status="waiting", connected_account_count=0
+    )
+    im_manager.adapters = {"qq": adapter}
+    im_manager.is_adapter_running.return_value = True
+
+    result = await run_readiness_checks(
+        config,
+        workflows,
+        dispatch,
+        im_manager,
+        llm_manager,
+        mcp_manager,
+        data_path=tmp_path,
+        timeout_seconds=0.5,
+    )
+
+    check = next(item for item in result.checks if item.id == "im_available")
+    assert check.status == "warn"
+    assert check.evidence["connected_count"] == 0
+    assert check.evidence["waiting_count"] == 1
 
 
 @pytest.mark.asyncio

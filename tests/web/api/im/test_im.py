@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -9,7 +10,7 @@ from pydantic import BaseModel, Field
 from kirara_ai.config.config_loader import ConfigLoader
 from kirara_ai.config.global_config import GlobalConfig, IMConfig, WebConfig
 from kirara_ai.events.event_bus import EventBus
-from kirara_ai.im.adapter import IMAdapter
+from kirara_ai.im.adapter import AdapterHealthSnapshot, IMAdapter
 from kirara_ai.im.im_registry import IMRegistry
 from kirara_ai.im.manager import IMManager
 from kirara_ai.im.message import IMMessage, TextMessage
@@ -26,6 +27,7 @@ TEST_ADAPTER_ID = "dummy-bot-1234"
 TEST_ADAPTER_NOT_RUNNING_ID = "dummy-bot-2234"
 TEST_ADAPTER_TYPE = "dummy"
 TEST_ADAPTER_CONFIG = {"token": "test-token", "name": "Test Bot"}
+REDACTED_ADAPTER_CONFIG = {"token": "", "name": "Test Bot"}
 
 
 # ==================== 测试用 Adapter ====================
@@ -44,6 +46,7 @@ class DummyAdapter(IMAdapter):
     def __init__(self, config: DummyConfig):
         self.config = config
         self.is_running = False
+        self.stop_calls = 0
         self.messages = []  # 存储发送的消息
         self.editing_states = {}  # 存储编辑状态
 
@@ -66,7 +69,15 @@ class DummyAdapter(IMAdapter):
 
     async def stop(self):
         """停止 adapter"""
+        self.stop_calls += 1
         self.is_running = False
+
+    def get_health_snapshot(self) -> AdapterHealthSnapshot:
+        return AdapterHealthSnapshot(
+            status="connected" if self.is_running else "disconnected",
+            connected_account_count=1 if self.is_running else 0,
+            last_heartbeat_age_seconds=0.25 if self.is_running else None,
+        )
 
 
 # ==================== Fixtures ====================
@@ -115,6 +126,7 @@ def app():
     manager.start_adapters(loop=loop)
     web_server = WebServer(container)
     container.register(WebServer, web_server)
+    web_server.app.state.container = container
     
     # 设置认证服务
     setup_auth_service(container)
@@ -154,6 +166,13 @@ class TestIMAdapter:
         adapter = next(a for a in adapters if a.get("name") == TEST_ADAPTER_ID)
         assert adapter.get("adapter") == TEST_ADAPTER_TYPE
         assert adapter.get("is_running") is True
+        assert adapter.get("health") == {
+            "status": "connected",
+            "connected_account_count": 1,
+            "last_heartbeat_age_seconds": 0.25,
+        }
+        assert adapter.get("config") == REDACTED_ADAPTER_CONFIG
+        assert "test-token" not in response.text
 
     @pytest.mark.asyncio
     async def test_get_adapter(self, test_client, auth_headers):
@@ -167,7 +186,9 @@ class TestIMAdapter:
         adapter = data.get("adapter")
         assert adapter.get("name") == TEST_ADAPTER_ID
         assert adapter.get("adapter") == TEST_ADAPTER_TYPE
-        assert adapter.get("config") == TEST_ADAPTER_CONFIG
+        assert adapter.get("health", {}).get("status") == "connected"
+        assert adapter.get("config") == REDACTED_ADAPTER_CONFIG
+        assert "test-token" not in response.text
 
     @pytest.mark.asyncio
     async def test_create_adapter(self, test_client, auth_headers):
@@ -189,13 +210,163 @@ class TestIMAdapter:
         adapter = data.get("adapter")
         assert adapter.get("name") == "new-adapter"
         assert adapter.get("adapter") == TEST_ADAPTER_TYPE
-        assert adapter.get("config") == TEST_ADAPTER_CONFIG
+        assert adapter.get("config") == REDACTED_ADAPTER_CONFIG
+        assert "test-token" not in response.text
 
         # 验证配置保存
         ConfigLoader.save_config_with_backup.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_update_adapter(self, test_client, auth_headers):
+    async def test_create_adapter_reports_running_status(self, app, test_client, auth_headers):
+        """启用创建的适配器时，响应必须反映真实运行状态。"""
+        manager = app.state.container.resolve(IMManager)
+        adapter_name = "running-adapter"
+        if manager.has_adapter(adapter_name):
+            manager.delete_adapter(adapter_name)
+
+        ConfigLoader.save_config_with_backup = MagicMock()
+        response = test_client.post(
+            "/backend-api/api/im/adapters",
+            headers=auth_headers,
+            json=IMAdapterConfig(
+                name=adapter_name,
+                enable=True,
+                adapter=TEST_ADAPTER_TYPE,
+                config=TEST_ADAPTER_CONFIG,
+            ).model_dump(),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["adapter"]["is_running"] is True
+
+        manager.delete_adapter(adapter_name)
+
+    @pytest.mark.asyncio
+    async def test_update_adapter_rolls_back_when_replacement_start_fails(
+        self, app, test_client, auth_headers, monkeypatch
+    ):
+        """替换适配器启动失败时，旧配置和旧运行态必须完整恢复。"""
+        config = app.state.container.resolve(GlobalConfig)
+        manager = app.state.container.resolve(IMManager)
+        old_configs = deepcopy(config.ims)
+        old_adapters = dict(manager.get_adapters())
+        old_running = {
+            name: getattr(adapter, "is_running", False)
+            for name, adapter in old_adapters.items()
+        }
+        replacement_name = "replacement-start-failure"
+        replacement_adapters = []
+
+        original_create_adapter = manager.create_adapter
+
+        def capture_create_adapter(name, adapter_class, adapter_config):
+            adapter = original_create_adapter(name, adapter_class, adapter_config)
+            if name.startswith("__im_update_"):
+                replacement_adapters.append(adapter)
+            return adapter
+
+        monkeypatch.setattr(manager, "create_adapter", capture_create_adapter)
+
+        def fail_replacement_start(adapter_id, loop):
+            adapter = manager.get_adapter(adapter_id)
+            if getattr(getattr(adapter, "config", None), "name", None) == "Replacement":
+                future = loop.create_future()
+                future.set_exception(RuntimeError("replacement start failed"))
+                return future
+            return original_start_adapter(adapter_id, loop)
+
+        original_start_adapter = manager.start_adapter
+        monkeypatch.setattr(manager, "start_adapter", fail_replacement_start)
+        ConfigLoader.save_config_with_backup = MagicMock()
+
+        try:
+            response = test_client.put(
+                f"/backend-api/api/im/adapters/{TEST_ADAPTER_ID}",
+                headers=auth_headers,
+                json=IMAdapterConfig(
+                    name=replacement_name,
+                    enable=True,
+                    adapter=TEST_ADAPTER_TYPE,
+                    config={"token": "replacement", "name": "Replacement"},
+                ).model_dump(),
+            )
+
+            assert response.status_code == 500
+            assert manager.has_adapter(TEST_ADAPTER_ID)
+            assert not manager.has_adapter(replacement_name)
+            assert config.ims == old_configs
+            assert {
+                name: manager.is_adapter_running(name)
+                for name in old_adapters
+            } == old_running
+        finally:
+            manager.adapters.clear()
+            manager.adapters.update(old_adapters)
+            config.ims = old_configs
+            for name, adapter in old_adapters.items():
+                adapter.is_running = old_running[name]
+
+    @pytest.mark.asyncio
+    async def test_update_adapter_rolls_back_when_config_save_fails(
+        self, app, test_client, auth_headers, monkeypatch
+    ):
+        """替换后的配置落盘失败时，旧配置和旧运行态必须完整恢复。"""
+        config = app.state.container.resolve(GlobalConfig)
+        manager = app.state.container.resolve(IMManager)
+        old_configs = deepcopy(config.ims)
+        old_adapters = dict(manager.get_adapters())
+        old_running = {
+            name: getattr(adapter, "is_running", False)
+            for name, adapter in old_adapters.items()
+        }
+        replacement_adapters = []
+
+        original_create_adapter = manager.create_adapter
+
+        def capture_create_adapter(name, adapter_class, adapter_config):
+            adapter = original_create_adapter(name, adapter_class, adapter_config)
+            if name.startswith("__im_update_"):
+                replacement_adapters.append(adapter)
+            return adapter
+
+        monkeypatch.setattr(manager, "create_adapter", capture_create_adapter)
+
+        def fail_save(*_args, **_kwargs):
+            raise OSError("config disk unavailable")
+
+        monkeypatch.setattr(ConfigLoader, "save_config_with_backup", fail_save)
+
+        try:
+            response = test_client.put(
+                f"/backend-api/api/im/adapters/{TEST_ADAPTER_ID}",
+                headers=auth_headers,
+                json=IMAdapterConfig(
+                    name="replacement-save-failure",
+                    enable=True,
+                    adapter=TEST_ADAPTER_TYPE,
+                    config={"token": "replacement", "name": "Replacement"},
+                ).model_dump(),
+            )
+
+            assert response.status_code == 500
+            assert len(replacement_adapters) == 1
+            assert replacement_adapters[0].stop_calls == 1
+            assert manager.has_adapter(TEST_ADAPTER_ID)
+            assert not manager.has_adapter("replacement-save-failure")
+            assert config.ims == old_configs
+            assert {
+                name: manager.is_adapter_running(name)
+                for name in old_adapters
+            } == old_running
+        finally:
+            manager.adapters.clear()
+            manager.adapters.update(old_adapters)
+            config.ims = old_configs
+            for name, adapter in old_adapters.items():
+                adapter.is_running = old_running[name]
+
+    @pytest.mark.asyncio
+    async def test_update_adapter(self, app, test_client, auth_headers):
         """测试更新适配器"""
         adapter_data = IMAdapterConfig(
             name=TEST_ADAPTER_ID,
@@ -216,11 +387,42 @@ class TestIMAdapter:
         adapter = data.get("adapter")
         assert adapter.get("name") == TEST_ADAPTER_ID
         assert adapter.get("adapter") == TEST_ADAPTER_TYPE
-        assert adapter.get("config").get("token") == "updated-token"
+        assert adapter.get("config").get("token") == ""
         assert adapter.get("config").get("name") == "Updated Bot"
+        assert "updated-token" not in response.text
+
+        manager = app.state.container.resolve(IMManager)
+        assert manager.get_adapter_config(TEST_ADAPTER_ID).config["token"] == "updated-token"
 
         # 验证配置保存
         ConfigLoader.save_config_with_backup.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_update_adapter_blank_secret_keeps_existing_value(
+        self, app, test_client, auth_headers
+    ):
+        """编辑页回传空白密钥时，不覆盖服务器已经保存的值。"""
+        manager = app.state.container.resolve(IMManager)
+        existing_token = manager.get_adapter_config(TEST_ADAPTER_ID).config["token"]
+        adapter_data = IMAdapterConfig(
+            name=TEST_ADAPTER_ID,
+            adapter=TEST_ADAPTER_TYPE,
+            config={"token": "", "name": "Renamed Bot"},
+        )
+
+        ConfigLoader.save_config_with_backup = MagicMock()
+        response = test_client.put(
+            f"/backend-api/api/im/adapters/{TEST_ADAPTER_ID}",
+            headers=auth_headers,
+            json=adapter_data.model_dump(),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["adapter"]["config"] == {
+            "token": "",
+            "name": "Renamed Bot",
+        }
+        assert manager.get_adapter_config(TEST_ADAPTER_ID).config["token"] == existing_token
 
     @pytest.mark.asyncio
     async def test_stop_adapter(self, test_client, auth_headers):

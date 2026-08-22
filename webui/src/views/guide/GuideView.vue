@@ -14,6 +14,7 @@ import {
   NIcon,
   NProgress,
   NTooltip,
+  NPopconfirm,
   NRow,
   NCol,
   NDivider
@@ -29,15 +30,18 @@ import {
   ChatbubblesOutline,
   AppsOutline,
   TimeOutline,
-  HardwareChipOutline
+  HardwareChipOutline,
+  RefreshOutline
 } from '@vicons/ionicons5'
 import LLMStatistics from '@/components/LLMStatistics.vue'
+import { getBrowserLocalStorage, readJsonRecord, writeStorageItem } from '@/utils/safe-storage'
 import {
-  getBrowserLocalStorage,
-  readJsonRecord,
-  readStorageItem,
-  writeStorageItem
-} from '@/utils/safe-storage'
+  hideQuickStartGuide,
+  isQuickStartGuideVisible,
+  resetQuickStartGuideProgress,
+  shouldShowQuickStartRestore,
+  showQuickStartGuide
+} from './guide-visibility'
 
 const router = useRouter()
 const appStore = useAppStore()
@@ -45,51 +49,61 @@ const message = useMessage()
 
 // 控制引导卡片的显示
 const getGuideStorage = () => getBrowserLocalStorage()
-const showGuide = ref(readStorageItem(getGuideStorage(), 'hideGuide') !== 'true')
+const showGuide = ref(isQuickStartGuideVisible(getGuideStorage()))
+const completedGuideSteps = ref(readJsonRecord(getGuideStorage(), 'completedSteps'))
 
 // 关闭引导卡片
 const hideGuide = () => {
   showGuide.value = false
-  writeStorageItem(getGuideStorage(), 'hideGuide', 'true')
+  hideQuickStartGuide(getGuideStorage())
+}
+
+// 允许用户从快速开始页恢复之前隐藏的引导卡片
+const restoreGuide = () => {
+  showGuide.value = true
+  showQuickStartGuide(getGuideStorage())
+}
+
+const resetGuideProgress = () => {
+  completedGuideSteps.value = {}
+  resetQuickStartGuideProgress(getGuideStorage())
+  message.success('快速开始进度已重置')
 }
 
 // 计算每个步骤的完成状态
 const stepsStatus = computed(() => {
-  // 从 localStorage 获取已完成的步骤
-  const completedSteps = readJsonRecord(getGuideStorage(), 'completedSteps')
-
   const steps = [
     {
       key: 'plugins',
-      completed: completedSteps.plugins,
+      completed: completedGuideSteps.value.plugins,
       title: '浏览插件市场',
       description: '发现并安装适合您需求的插件',
       path: '/plugins/market'
     },
     {
       key: 'im',
-      completed: completedSteps.im,
+      completed: completedGuideSteps.value.im,
       title: '添加 IM',
       description: '连接您常用的聊天平台',
       path: '/im'
     },
     {
       key: 'llm',
-      completed: completedSteps.llm,
+      completed: completedGuideSteps.value.llm,
       title: '添加 LLM',
       description: '连接 AI 模型服务',
       path: '/llm'
     },
     {
       key: 'dispatch',
-      completed: completedSteps.dispatch,
+      completed: completedGuideSteps.value.dispatch,
       title: '了解调度规则',
       description: '学习如何召唤和使用 Bot',
       path: '/workflow/dispatch-rules'
     },
     {
       key: 'workflow',
-      completed: completedSteps.workflow,
+      completed: completedGuideSteps.value.workflow,
       title: '自定义工作流',
       description: '打造专属于您的 AI 助手',
       path: '/workflow'
@@ -106,9 +120,11 @@ const currentStep = computed(() => {
 
 const handleStepClick = (step: number, path: string) => {
   // 标记当前步骤为已完成
-  const completedSteps = readJsonRecord(getGuideStorage(), 'completedSteps')
-  completedSteps[stepsStatus.value[step].key] = true
-  writeStorageItem(getGuideStorage(), 'completedSteps', JSON.stringify(completedSteps))
+  completedGuideSteps.value = {
+    ...completedGuideSteps.value,
+    [stepsStatus.value[step].key]: true
+  }
+  writeStorageItem(getGuideStorage(), 'completedSteps', JSON.stringify(completedGuideSteps.value))
 
   // 跳转到目标页面
   router.push(path)
@@ -213,23 +229,43 @@ watch(
   <div class="guide-container">
     <n-space vertical :size="16">
       <!-- 快速开始引导 -->
-      <n-card
-        v-if="showGuide && !isAllCompleted"
-        title="快速开始"
-        :bordered="false"
-        class="guide-card"
-      >
+      <n-card v-if="showGuide" title="快速开始" :bordered="false" class="guide-card">
         <template #header-extra>
-          <n-tooltip trigger="hover">
-            <template #trigger>
-              <n-button circle tertiary type="error" size="small" @click="hideGuide">
-                <template #icon>
-                  <n-icon><CloseCircleOutline /></n-icon>
-                </template>
-              </n-button>
-            </template>
-            隐藏引导
-          </n-tooltip>
+          <n-space align="center" :size="8">
+            <n-popconfirm
+              v-if="isAllCompleted"
+              positive-text="重置"
+              negative-text="取消"
+              @positive-click="resetGuideProgress"
+            >
+              <template #trigger>
+                <n-button secondary size="small">
+                  <template #icon>
+                    <n-icon><RefreshOutline /></n-icon>
+                  </template>
+                  重置进度
+                </n-button>
+              </template>
+              重新开始快速引导？这不会更改已经保存的系统配置。
+            </n-popconfirm>
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <n-button
+                  circle
+                  tertiary
+                  type="error"
+                  size="small"
+                  aria-label="隐藏快速开始引导"
+                  @click="hideGuide"
+                >
+                  <template #icon>
+                    <n-icon><CloseCircleOutline /></n-icon>
+                  </template>
+                </n-button>
+              </template>
+              隐藏引导
+            </n-tooltip>
+          </n-space>
         </template>
         <n-steps :current="currentStep" class="guide-steps">
           <n-step
@@ -261,6 +297,31 @@ watch(
             </template>
           </n-step>
         </n-steps>
+      </n-card>
+
+      <n-card
+        v-else-if="shouldShowQuickStartRestore(showGuide)"
+        :bordered="false"
+        class="guide-restore-card"
+      >
+        <div class="guide-restore-content">
+          <div>
+            <div class="guide-restore-title">快速开始引导已隐藏</div>
+            <div class="guide-restore-description">
+              {{
+                isAllCompleted
+                  ? '引导已经完成。重新显示后可以回顾步骤或重置进度。'
+                  : '重新显示后可继续完成插件、聊天平台、模型和工作流配置。'
+              }}
+            </div>
+          </div>
+          <n-button type="primary" secondary @click="restoreGuide">
+            <template #icon>
+              <n-icon><CheckmarkCircleOutline /></n-icon>
+            </template>
+            重新显示引导
+          </n-button>
+        </div>
       </n-card>
 
       <!-- 系统状态概览卡片 -->
@@ -467,6 +528,7 @@ watch(
 }
 
 .guide-card,
+.guide-restore-card,
 .status-overview-card,
 .system-load-card,
 .system-info-card {
@@ -480,11 +542,49 @@ watch(
 }
 
 .guide-card:hover,
+.guide-restore-card:hover,
 .status-overview-card:hover,
 .system-load-card:hover,
 .system-info-card:hover {
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.08);
   transform: translateY(-2px);
+}
+
+.guide-restore-content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px 0;
+}
+
+.guide-restore-title {
+  color: var(--text-color);
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.guide-restore-description {
+  max-width: 720px;
+  margin-top: 4px;
+  color: var(--text-color-secondary);
+  line-height: 1.5;
+}
+
+@media (max-width: 768px) {
+  .guide-container {
+    padding: 16px;
+  }
+
+  .guide-restore-content {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .guide-restore-content :deep(.n-button) {
+    align-self: flex-start;
+  }
 }
 
 .guide-steps {
