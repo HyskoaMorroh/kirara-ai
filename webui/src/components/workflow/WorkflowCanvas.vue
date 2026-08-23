@@ -89,6 +89,10 @@ import {
   WORKFLOW_TRANSFER_SCHEMA_VERSION
 } from './workflow-data'
 import { createUniqueNodeName } from './workflow-node-utils'
+import {
+  createWorkflowCanvasInitializationGuard,
+  getWorkflowCanvasInitializationKey
+} from './workflow-canvas-initialization'
 // ==================== 属性和事件定义 ====================
 const props = defineProps<{
   blocks: BlockInstance[]
@@ -97,6 +101,7 @@ const props = defineProps<{
   initialName?: string
   initialDescription?: string
   initialWorkflowId?: string
+  initializationKey?: string | number
   initialConfig?: WorkflowConfig
   loading?: boolean
 }>()
@@ -1331,7 +1336,7 @@ const handleOverflowSelect = (key: string | number) => {
 
 // ==================== 初始化函数 ====================
 // 初始化图形数据
-let _graphDataInitialized = false
+const graphInitializationGuard = createWorkflowCanvasInitializationGuard()
 // 类型兼容性表在一次会话内不变，但 initGraphData 会被 props 的 deep watch
 // 反复触发。缓存这个 Promise，避免每次画布数据变动都重新请求一遍。
 let _compatibilityPromise: Promise<Record<string, Record<string, boolean>>> | null = null
@@ -1376,8 +1381,18 @@ const initGraphData = () => {
   // 空白工作流同样必须初始化共享编辑器状态。此前只在存在节点/连线时
   // 初始化，导致从已有工作流切换到“新建工作流”后，单例仍保留上一张图。
   if (props.initialConfig) {
-    if (_graphDataInitialized) return
-    _graphDataInitialized = true
+    const initializationKey = getWorkflowCanvasInitializationKey(
+      props.initialWorkflowId,
+      props.initializationKey
+    )
+    if (!graphInitializationGuard.shouldInitialize(initializationKey)) return
+
+    // 同一 Canvas 实例切换工作流时，旧工作流的延迟写回不能污染新工作流。
+    updateBlocks.cancel()
+    updateWires.cancel()
+    graphHistoryPending = false
+    lastEmittedBlocks = null
+    lastEmittedWires = null
     // 更新 viewState
     intent.initialize({
       blocks: props.blocks,
@@ -1442,8 +1457,23 @@ const isEchoOfOwnEmit = (
 // 只观察引用与长度，不做 deep 比较：blocks/wires 的内部编辑总是由画布自己
 // 发起，父组件只会整体替换数组。
 watch(
-  [() => props.blocks, () => props.wires, () => props.blockTypes],
-  ([blocks, wires, blockTypes], [previousBlocks, previousWires, previousBlockTypes]) => {
+  [
+    () => props.blocks,
+    () => props.wires,
+    () => props.blockTypes,
+    () => props.initialWorkflowId,
+    () => props.initializationKey
+  ],
+  (
+    [blocks, wires, blockTypes, initialWorkflowId, initializationKey],
+    [previousBlocks, previousWires, previousBlockTypes, previousWorkflowId, previousKey]
+  ) => {
+    const identityChanged =
+      initialWorkflowId !== previousWorkflowId || initializationKey !== previousKey
+    if (identityChanged) {
+      initGraphData()
+      return
+    }
     if (
       isEchoOfOwnEmit(
         blocks !== previousBlocks,
@@ -1542,6 +1572,7 @@ onMounted(() => {
 
 // 组件卸载
 onBeforeUnmount(() => {
+  graphInitializationGuard.reset()
   updateBlocks.cancel()
   updateWires.cancel()
   window.removeEventListener('beforeunload', beforeunloadHandler)

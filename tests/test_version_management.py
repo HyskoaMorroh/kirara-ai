@@ -1226,6 +1226,10 @@ def test_discover_records_active_and_excluded_carriers_with_reasons(tmp_path):
         '[[package]]\nname = "kirara-ai"\nversion = "3.3.0b8"\n', encoding="utf-8"
     )
     (tmp_path / "CHANGELOG.md").write_text("Historical v3.3.0b7\n", encoding="utf-8")
+    for planning_file in ("findings.md", "task_plan.md", "progress.md"):
+        (tmp_path / planning_file).write_text(
+            "Generated planning notes for v3.3.0a7\n", encoding="utf-8"
+        )
     (tmp_path / "docs/superpowers/plans/release.md").write_text(
         "Old plan 3.3.0b7\n", encoding="utf-8"
     )
@@ -1243,6 +1247,12 @@ def test_discover_records_active_and_excluded_carriers_with_reasons(tmp_path):
     assert records["ops/release.yml"].carrier_type == "source-or-config"
     assert records["CHANGELOG.md"].active is False
     assert records["CHANGELOG.md"].exclusion_reason == "historical changelog"
+    for planning_file in ("findings.md", "task_plan.md", "progress.md"):
+        assert records[planning_file].active is False
+        assert (
+            records[planning_file].exclusion_reason
+            == "planning and generated task material"
+        )
     plan = records["docs/superpowers/plans/release.md"]
     assert plan.active is False
     assert plan.exclusion_reason == "planning and generated task material"

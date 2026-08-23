@@ -224,7 +224,18 @@ class WorkflowEditorModel {
       throw error
     }
 
-    if (result && typeof (result as any).then === 'function') {
+    let isThenable = false
+    try {
+      isThenable =
+        result !== null &&
+        (typeof result === 'object' || typeof result === 'function') &&
+        typeof (result as any).then === 'function'
+    } catch (error) {
+      this.endHistorySuppression()
+      throw error
+    }
+
+    if (isThenable) {
       return Promise.resolve(result).finally(() => {
         this.endHistorySuppression()
       }) as T

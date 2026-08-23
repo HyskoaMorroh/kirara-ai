@@ -4,14 +4,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kirara_ai.config.global_config import GlobalConfig, LLMBackendConfig
 from kirara_ai.im.message import IMMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
 from kirara_ai.ioc.container import DependencyContainer
+from kirara_ai.llm.llm_manager import LLMManager
+from kirara_ai.llm.resilience import FailoverExecutionError
 from kirara_ai.llm.format.message import LLMChatMessage, LLMChatTextContent, LLMToolResultContent
 from kirara_ai.llm.format.request import LLMChatRequest
 from kirara_ai.llm.format.response import LLMChatResponse, Message, Usage
 from kirara_ai.llm.format.tool import CallableWrapper, Function, TextContent, Tool, ToolCall, ToolInputSchema
-from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.workflow.core.dispatch.models.dispatch_rules import CombinedDispatchRule, RuleGroup, SimpleDispatchRule
 from kirara_ai.workflow.core.dispatch.rules.base import DispatchRule
 from kirara_ai.workflow.core.execution.executor import WorkflowExecutor
@@ -132,6 +134,61 @@ class MockLLMManagerWithToolCalls(LLMManager):
 
     def get_llm(self, model_id):
         return self.mock_llm
+
+
+class _HttpError(Exception):
+    def __init__(self, status_code: int):
+        super().__init__(f"upstream status {status_code}")
+        self.status_code = status_code
+
+
+class _ResilientAdapter:
+    def __init__(self, provider_name, outcomes):
+        self.backend_name = provider_name
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def chat(self, request):
+        self.calls += 1
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def _resilient_manager(model_adapters):
+    config = GlobalConfig()
+    config.llms.api_backends = [
+        LLMBackendConfig(
+            name=adapter.backend_name,
+            adapter="fake",
+            priority=index,
+            models=list(model_adapters),
+            circuit_failure_threshold=10,
+        )
+        for index, adapter in enumerate(
+            adapter for adapters in model_adapters.values() for adapter in adapters
+        )
+    ]
+    manager = object.__new__(LLMManager)
+    manager.config = config
+    manager.active_backends = model_adapters
+    manager._resilience_breakers = {}
+    manager._resilience_attempts = {}
+    manager._resilience_initialized = False
+    manager._initialize_resilience_state()
+    return manager
+
+
+def _response(text="这是 AI 的回复", model="model-a"):
+    return LLMChatResponse(
+        message=Message(
+            role="assistant",
+            content=[LLMChatTextContent(text=text)],
+        ),
+        model=model,
+        usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
 
 @pytest.fixture
 def container():
@@ -322,6 +379,90 @@ def test_chat_completion_still_uses_the_default_model_when_nothing_is_configured
     assert requested_models == ["local-text-model"]
 
 
+def test_chat_completion_uses_resilient_provider_queue_before_model_fallback():
+    primary = _ResilientAdapter("primary", [_HttpError(503), _HttpError(503)])
+    secondary = _ResilientAdapter("secondary", [_response(model="model-a")])
+    fallback = _ResilientAdapter("fallback", [_response(text="fallback model", model="model-b")])
+    manager = _resilient_manager({
+        "model-a": [primary, secondary],
+        "model-b": [fallback],
+    })
+    manager.get_llm = MagicMock(side_effect=AssertionError("legacy get_llm path used"))
+    container = DependencyContainer()
+    container.register(LLMManager, manager)
+    block = ChatCompletion(
+        model_name="model-a",
+        fallback_model_1="model-b",
+        max_retries=2,
+        retry_delay=0,
+    )
+    block.container = container
+
+    result = block.execute(
+        prompt=[Message(role="user", content=[LLMChatTextContent(text="测试")])]
+    )
+
+    assert result["resp"].model == "model-a"
+    assert primary.calls == 2
+    assert secondary.calls == 1
+    assert fallback.calls == 0
+    manager.get_llm.assert_not_called()
+
+
+def test_chat_completion_stops_model_fallback_after_authentication_failure():
+    primary = _ResilientAdapter("primary", [_HttpError(401)])
+    fallback = _ResilientAdapter("fallback", [_response(model="model-b")])
+    manager = _resilient_manager({
+        "model-a": [primary],
+        "model-b": [fallback],
+    })
+    container = DependencyContainer()
+    container.register(LLMManager, manager)
+    block = ChatCompletion(
+        model_name="model-a",
+        fallback_model_1="model-b",
+        max_retries=3,
+        retry_delay=0,
+    )
+    block.container = container
+
+    with pytest.raises(FailoverExecutionError):
+        block.execute(
+            prompt=[Message(role="user", content=[LLMChatTextContent(text="测试")])]
+        )
+
+    assert primary.calls == 1
+    assert fallback.calls == 0
+
+
+def test_chat_completion_moves_to_next_model_after_retryable_provider_exhaustion():
+    primary = _ResilientAdapter("primary", [_HttpError(503)])
+    secondary = _ResilientAdapter("secondary", [_HttpError(429)])
+    fallback = _ResilientAdapter("fallback", [_response(model="model-b")])
+    manager = _resilient_manager({
+        "model-a": [primary, secondary],
+        "model-b": [fallback],
+    })
+    container = DependencyContainer()
+    container.register(LLMManager, manager)
+    block = ChatCompletion(
+        model_name="model-a",
+        fallback_model_1="model-b",
+        max_retries=1,
+        retry_delay=0,
+    )
+    block.container = container
+
+    result = block.execute(
+        prompt=[Message(role="user", content=[LLMChatTextContent(text="测试")])]
+    )
+
+    assert result["resp"].model == "model-b"
+    assert primary.calls == 1
+    assert secondary.calls == 1
+    assert fallback.calls == 1
+
+
 def test_chat_response_converter():
     """测试聊天响应转换器"""
     # 创建聊天响应
@@ -419,6 +560,38 @@ def test_chat_completion_with_tools_no_tool_calls(container):
     assert isinstance(result["resp"], LLMChatResponse)
     assert isinstance(result["iteration_msgs"], list)
     assert len(result["iteration_msgs"]) == 0  # 无消息，因为没有工具调用
+
+
+def test_chat_completion_with_tools_uses_resilient_boundary_for_every_iteration(container):
+    adapter = _ResilientAdapter(
+        "primary",
+        [
+            LLMChatResponse(
+                message=Message(
+                    role="assistant",
+                    content=[LLMChatTextContent(text="我需要查询天气")],
+                    tool_calls=get_llm_tool_calls(),
+                ),
+                model="model-a",
+            ),
+            _response(text="旧金山今天是晴天", model="model-a"),
+        ],
+    )
+    manager = _resilient_manager({"model-a": [adapter]})
+    manager.get_llm = MagicMock(side_effect=AssertionError("legacy get_llm path used"))
+    container.register(LLMManager, manager)
+    block = ChatCompletionWithTools(model_name="model-a", max_iterations=3)
+    block.container = container
+
+    result = block.execute(
+        msg=[LLMChatMessage(role="user", content=[LLMChatTextContent(text="天气")])],
+        tools=get_tools(),
+    )
+
+    assert result["resp"].message.content[0].text == "旧金山今天是晴天"
+    assert adapter.calls == 2
+    assert len(manager.get_resilience_status()[0]["recent_attempts"]) == 2
+    manager.get_llm.assert_not_called()
 
 
 # ---- function_calling：只联系模型、不执行工具的低层区块 ----
@@ -545,6 +718,28 @@ def test_chat_function_calling_falls_back_to_the_next_model():
     assert manager.requested == ["missing-primary", "gpt-3.5-turbo"]
     assert "resp" in result
     assert result["resp"].message.content[0].text == "这是 AI 的回复"
+
+
+def test_chat_function_calling_uses_resilient_provider_queue():
+    primary = _ResilientAdapter("primary", [_HttpError(503)])
+    secondary = _ResilientAdapter("secondary", [_response(model="model-a")])
+    manager = _resilient_manager({"model-a": [primary, secondary]})
+    manager.get_llm = MagicMock(side_effect=AssertionError("legacy get_llm path used"))
+    container = DependencyContainer()
+    container.register(LLMManager, manager)
+    block = FunctionCalling(model_name="model-a", max_retries=1, retry_delay=0)
+    block.container = container
+
+    result = block.execute(request_body=LLMChatRequest(
+        model="model-a",
+        tools=get_tools(),
+        messages=[LLMChatMessage(role="user", content=[LLMChatTextContent(text="今天天气如何？")])],
+    ))
+
+    assert result["resp"].model == "model-a"
+    assert primary.calls == 1
+    assert secondary.calls == 1
+    manager.get_llm.assert_not_called()
 
 
 # ---- 采样温度：类型放宽 + 调度规则 metadata 生效 ----

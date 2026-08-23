@@ -21,6 +21,11 @@ llm_bp = Blueprint("llm", __name__)
 logger = get_logger("WebServer.LLM")
 
 
+def _backend_info(backend) -> LLMBackendInfo:
+    """Serialize a backend without dropping newly added resilience settings."""
+    return LLMBackendInfo.model_validate(backend.model_dump())
+
+
 def serialize_config_update(func):
     """串行化会修改 LLM 配置的请求，避免与后台模型刷新交错写入。"""
     @wraps(func)
@@ -47,15 +52,7 @@ async def list_backends():
         config: GlobalConfig = g.container.resolve(GlobalConfig)
         backends = []
         for backend in config.llms.api_backends:
-            backends.append(
-                LLMBackendInfo(
-                    name=backend.name,
-                    adapter=backend.adapter,
-                    config=backend.config,
-                    enable=backend.enable,
-                    models=backend.models,
-                )
-            )
+            backends.append(_backend_info(backend))
         return LLMBackendListResponse(
             data=LLMBackendList(backends=backends)
         ).model_dump()
@@ -76,18 +73,22 @@ async def get_backend(backend_name: str):
         if not backend:
             return jsonify({"error": f"Backend {backend_name} not found"}), 404
 
-        return LLMBackendResponse(
-            data=LLMBackendInfo(
-                name=backend.name,
-                adapter=backend.adapter,
-                config=backend.config,
-                enable=backend.enable,
-                models=backend.models,
-            )
-        ).model_dump()
+        return LLMBackendResponse(data=_backend_info(backend)).model_dump()
     except Exception as e:
         logger.opt(exception=e).error("Failed to get backend")
         return jsonify({"error": str(e)}), 500
+
+
+@llm_bp.route("/resilience/status", methods=["GET"])
+@require_auth
+async def get_resilience_status():
+    """Return sanitized provider health for the operational status view."""
+    try:
+        manager: LLMManager = g.container.resolve(LLMManager)
+        return jsonify({"data": manager.get_resilience_status()})
+    except Exception as e:
+        logger.opt(exception=e).error("Failed to get LLM resilience status")
+        return jsonify({"error": "Failed to get LLM resilience status"}), 500
 
 
 @llm_bp.route("/backends", methods=["POST"])
@@ -110,13 +111,7 @@ async def create_backend():
             )
 
         # 创建新的后端配置
-        backend = LLMBackendInfo(
-            name=request_data.name,
-            adapter=request_data.adapter,
-            config=request_data.config,
-            enable=request_data.enable,
-            models=request_data.models,
-        )
+        backend = _backend_info(request_data)
 
         # 添加到配置中
         config.llms.api_backends.append(backend)
@@ -157,13 +152,7 @@ async def update_backend(backend_name: str):
             return jsonify({"error": f"Backend {backend_name} not found"}), 404
 
         # 创建更新后的后端配置
-        updated_backend = LLMBackendInfo(
-            name=request_data.name,
-            adapter=request_data.adapter,
-            config=request_data.config,
-            enable=request_data.enable,
-            models=request_data.models,
-        )
+        updated_backend = _backend_info(request_data)
 
         original_backend = config.llms.api_backends[backend_index]
         backend_was_loaded = backend_name in manager.backends
@@ -236,15 +225,7 @@ async def delete_backend(backend_name: str):
 
         ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
             
-        return LLMBackendResponse(
-            data=LLMBackendInfo(
-                name=deleted_backend.name,
-                adapter=deleted_backend.adapter,
-                config=deleted_backend.config,
-                enable=deleted_backend.enable,
-                models=deleted_backend.models,
-            )
-        ).model_dump()
+        return LLMBackendResponse(data=_backend_info(deleted_backend)).model_dump()
     except Exception as e:
         logger.opt(exception=e).error("Failed to delete backend")
         return jsonify({"error": str(e)}), 500

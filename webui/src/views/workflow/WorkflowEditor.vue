@@ -334,6 +334,7 @@ onBeforeUnmount(() => {
       :initial-name="name"
       :initial-description="description"
       :initial-workflow-id="groupId + ':' + workflowId"
+      :initialization-key="loadedWorkflowIdentity?.generation"
       :initial-config="config"
       :loading="saving"
       @update:blocks="handleBlocksChange"

@@ -22,6 +22,24 @@ TEST_PASSWORD = "test-password"
 TEST_SECRET_KEY = "test-secret-key"
 TEST_BACKEND_NAME = "test-backend"
 TEST_ADAPTER_TYPE = "test-adapter"
+RESILIENCE_SETTINGS = {
+    "auto_detect_interval_days": 9,
+    "priority": 7,
+    "participate_in_failover": False,
+    "max_retries": 2,
+    "retry_backoff_seconds": 0.25,
+    "retry_backoff_max_seconds": 3.5,
+    "request_timeout_seconds": 42.0,
+    "circuit_failure_threshold": 4,
+    "circuit_error_rate_threshold": 0.75,
+    "circuit_min_requests": 8,
+    "circuit_recovery_timeout_seconds": 17.0,
+}
+
+
+def assert_resilience_settings(backend, expected=RESILIENCE_SETTINGS):
+    for field, value in expected.items():
+        assert backend[field] == value
 
 
 # ==================== 测试用适配器 ====================
@@ -85,6 +103,7 @@ def app():
             config={"api_key": "test-key", "model": "test-model"},
             enable=True,
             models=["test-model"],
+            **RESILIENCE_SETTINGS,
         )
     ]
     container.register(GlobalConfig, config)
@@ -140,6 +159,7 @@ class TestLLMBackend:
         assert len(backends) == 1
         assert backends[0].get("name") == TEST_BACKEND_NAME
         assert backends[0].get("adapter") == TEST_ADAPTER_TYPE
+        assert_resilience_settings(backends[0])
 
     @pytest.mark.asyncio
     async def test_get_backend(self, test_client, auth_headers):
@@ -153,6 +173,34 @@ class TestLLMBackend:
         backend = data.get("data")
         assert backend.get("name") == TEST_BACKEND_NAME
         assert backend.get("adapter") == TEST_ADAPTER_TYPE
+        assert_resilience_settings(backend)
+
+    @pytest.mark.asyncio
+    async def test_resilience_status_requires_authentication(self, test_client):
+        response = test_client.get("/backend-api/api/llm/resilience/status")
+
+        assert response.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_resilience_status_is_authenticated_and_sanitized(
+        self, test_client, auth_headers
+    ):
+        response = test_client.get(
+            "/backend-api/api/llm/resilience/status", headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        providers = response.json()["data"]
+        assert providers[0]["provider"] == TEST_BACKEND_NAME
+        assert providers[0]["model"] == "test-model"
+        assert providers[0]["priority"] == RESILIENCE_SETTINGS["priority"]
+
+        serialized = response.text.lower()
+        assert "test-key" not in serialized
+        assert "api_key" not in serialized
+        assert "authorization" not in serialized
+        assert "cookie" not in serialized
+        assert "error_summary" not in serialized
 
     @pytest.mark.asyncio
     async def test_auto_detect_models_normalizes_legacy_string_ids(self, test_client, auth_headers):
@@ -177,6 +225,7 @@ class TestLLMBackend:
             config={"api_key": "new-key", "model": "new-model"},
             enable=True,
             models=["new-model"],
+            **RESILIENCE_SETTINGS,
         )
 
         # Mock 配置文件保存
@@ -194,6 +243,7 @@ class TestLLMBackend:
             backend = data.get("data")
             assert backend.get("name") == "new-backend"
             assert backend.get("adapter") == TEST_ADAPTER_TYPE
+            assert_resilience_settings(backend)
 
             # 验证配置保存
             mock_save.assert_called_once()
@@ -207,6 +257,7 @@ class TestLLMBackend:
             config={"api_key": "updated-key", "model": "updated-model"},
             enable=True,
             models=["updated-model"],
+            **RESILIENCE_SETTINGS,
         )
 
         # Mock 配置文件保存
@@ -223,6 +274,7 @@ class TestLLMBackend:
         backend = data.get("data")
         assert backend.get("name") == TEST_BACKEND_NAME
         assert backend.get("config").get("api_key") == "updated-key"
+        assert_resilience_settings(backend)
 
         # 验证配置保存
         ConfigLoader.save_config_with_backup.assert_called_once()
@@ -286,6 +338,7 @@ class TestLLMBackend:
         assert "data" in data
         backend = data.get("data")
         assert backend.get("name") == TEST_BACKEND_NAME
+        assert_resilience_settings(backend)
         ConfigLoader.save_config_with_backup.assert_called_once()
 
         # 验证后端已被删除

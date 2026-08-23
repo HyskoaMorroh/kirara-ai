@@ -34,6 +34,20 @@ class LLMBackendConfig(BaseModel):
         default=[], description="支持的模型列表"
     )
     auto_detect_interval_days: int = Field(default=5, description="自动检测模型间隔天数，0表示禁用自动检测")
+    priority: int = Field(default=100, ge=0, description="Provider 优先级，数字越小越优先")
+    participate_in_failover: bool = Field(default=True, description="是否参与同模型故障转移队列")
+    max_retries: int = Field(default=0, ge=0, le=10, description="Provider 内部最大重试次数")
+    retry_backoff_seconds: float = Field(default=0.5, ge=0, description="重试初始退避秒数")
+    retry_backoff_max_seconds: float = Field(default=5.0, ge=0, description="重试最大退避秒数")
+    request_timeout_seconds: float = Field(default=60.0, gt=0, description="兼容旧配置：一次模型执行的总时间预算")
+    non_stream_timeout_seconds: float = Field(default=60.0, gt=0, description="非流式请求总超时")
+    stream_first_byte_timeout_seconds: float = Field(default=15.0, gt=0, description="流式请求首字节超时")
+    stream_idle_timeout_seconds: float = Field(default=30.0, gt=0, description="流式请求相邻字节最大静默时间")
+    circuit_failure_threshold: int = Field(default=3, ge=1, description="连续失败多少次后打开熔断")
+    circuit_error_rate_threshold: float = Field(default=0.5, ge=0, le=1, description="达到最小样本后的错误率阈值")
+    circuit_min_requests: int = Field(default=10, ge=1, description="错误率熔断的最小请求数")
+    circuit_recovery_timeout_seconds: float = Field(default=30.0, ge=0, description="熔断打开后进入半开探测的等待时间")
+    circuit_recovery_success_threshold: int = Field(default=2, ge=1, le=100, description="半开状态连续成功多少次后恢复")
 
     @model_validator(mode='before')
     @classmethod

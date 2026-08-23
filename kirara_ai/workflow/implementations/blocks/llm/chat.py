@@ -15,6 +15,7 @@ from kirara_ai.llm.format.request import LLMChatRequest, Tool
 from kirara_ai.llm.format.response import LLMChatResponse
 from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.llm.model_types import LLMAbility, ModelType
+from kirara_ai.llm.resilience import FailoverExecutionError, RETRYABLE_ERROR_CATEGORIES
 from kirara_ai.logger import get_logger
 from kirara_ai.memory.composes.base import ComposableMessageType
 from kirara_ai.workflow.core.block import Block, Input, Output, ParamMeta
@@ -31,6 +32,38 @@ def model_name_options_provider(container: DependencyContainer, block: Block) ->
 # 避免把一个必然被服务端拒绝的请求发出去。
 TEMPERATURE_MIN = 0.0
 TEMPERATURE_MAX = 2.0
+MODEL_FALLBACK_ERROR_CATEGORIES = {
+    *(category.value for category in RETRYABLE_ERROR_CATEGORIES),
+    "circuit_open",
+}
+
+
+def _uses_resilient_provider_queue(llm_manager: LLMManager) -> bool:
+    return (
+        getattr(llm_manager, "_resilience_initialized", False) is True
+        and callable(getattr(llm_manager, "execute_chat", None))
+    )
+
+
+def _execute_resilient_chat(
+    llm_manager: LLMManager,
+    request: LLMChatRequest,
+    *,
+    max_attempts: Optional[int] = None,
+    retry_delay: Optional[float] = None,
+) -> LLMChatResponse:
+    options: Dict[str, Any] = {}
+    if max_attempts is not None:
+        options["max_retries"] = max(0, max_attempts - 1)
+    if retry_delay is not None:
+        options["retry_delay"] = retry_delay
+    return llm_manager.execute_chat(request, **options).response
+
+
+def _can_fallback_to_next_model(error: FailoverExecutionError) -> bool:
+    if not error.attempts:
+        return True
+    return error.attempts[-1].error_category in MODEL_FALLBACK_ERROR_CATEGORIES
 
 
 def resolve_temperature(
@@ -306,8 +339,42 @@ class ChatCompletion(Block):
 
         # 尝试每个模型
         last_error = None
+        use_resilient_queue = _uses_resilient_provider_queue(llm_manager)
         for model_index, model_id in enumerate(model_priority_list):
             self.logger.info(f"Attempting model [{model_index + 1}/{len(model_priority_list)}]: {model_id}")
+
+            req = LLMChatRequest(messages=prompt, model=model_id)
+            if temperature is not None:
+                req.temperature = temperature
+
+            if use_resilient_queue:
+                try:
+                    response = _execute_resilient_chat(
+                        llm_manager,
+                        req,
+                        max_attempts=self.max_retries,
+                        retry_delay=self.retry_delay,
+                    )
+                    if model_index > 0:
+                        self.logger.info(
+                            f"Successfully used fallback model: {model_id} "
+                            f"(priority: {model_index + 1}/{len(model_priority_list)})"
+                        )
+                    else:
+                        self.logger.debug(f"Successfully used primary model: {model_id}")
+                    return {"resp": response}
+                except FailoverExecutionError as error:
+                    last_error = error
+                    if not _can_fallback_to_next_model(error):
+                        self.logger.error(
+                            f"Model {model_id} failed with a non-retryable provider error; "
+                            "stopping model fallback"
+                        )
+                        raise
+                    self.logger.warning(
+                        f"All eligible providers for model {model_id} failed; trying the next model"
+                    )
+                    continue
 
             # 对每个模型进行重试
             for retry_count in range(self.max_retries):
@@ -316,10 +383,6 @@ class ChatCompletion(Block):
                     if not llm:
                         self.logger.warning(f"LLM {model_id} not found, skipping to next model")
                         break  # 跳到下一个模型
-
-                    req = LLMChatRequest(messages=prompt, model=model_id)
-                    if temperature is not None:
-                        req.temperature = temperature
 
                     # 尝试调用模型
                     response = llm.chat(req)
@@ -498,8 +561,45 @@ class FunctionCalling(Block):
 
         # 尝试每个模型
         last_error = None
+        use_resilient_queue = _uses_resilient_provider_queue(llm_manager)
         for model_index, model_id in enumerate(model_priority_list):
             self.logger.info(f"Attempting function calling with model [{model_index + 1}/{len(model_priority_list)}]: {model_id}")
+
+            request_body.model = model_id
+            if use_resilient_queue:
+                try:
+                    response = _execute_resilient_chat(
+                        llm_manager,
+                        request_body,
+                        max_attempts=self.max_retries,
+                        retry_delay=self.retry_delay,
+                    )
+                    if model_index > 0:
+                        self.logger.info(
+                            f"Successfully used fallback model for function calling: {model_id} "
+                            f"(priority: {model_index + 1}/{len(model_priority_list)})"
+                        )
+                    else:
+                        self.logger.debug(f"Successfully used primary model for function calling: {model_id}")
+
+                    if not response.message.tool_calls:
+                        self.logger.debug("No tool calls found, return response directly")
+                        return {"resp": response}
+                    self.logger.debug("Tool calls found, return response with tool calls")
+                    return {"tool_call": response}
+                except FailoverExecutionError as error:
+                    last_error = error
+                    if not _can_fallback_to_next_model(error):
+                        self.logger.error(
+                            f"Function calling model {model_id} failed with a non-retryable provider error; "
+                            "stopping model fallback"
+                        )
+                        raise
+                    self.logger.warning(
+                        f"All eligible providers for function calling model {model_id} failed; "
+                        "trying the next model"
+                    )
+                    continue
 
             # 对每个模型进行重试
             for retry_count in range(self.max_retries):
@@ -509,8 +609,6 @@ class FunctionCalling(Block):
                         self.logger.warning(f"LLM {model_id} not found, skipping to next model")
                         break  # 跳到下一个模型
 
-                    # 在这里指定llm的model
-                    request_body.model = model_id
                     response: LLMChatResponse = llm.chat(request_body)
 
                     # 成功返回
@@ -615,8 +713,10 @@ class ChatCompletionWithTools(Block):
                 f"Using  model: {self.model_name} to execute function calling")
 
         loop = self.container.resolve(asyncio.AbstractEventLoop)
-        llm = self.container.resolve(LLMManager).get_llm(self.model_name)
-        if not llm:
+        llm_manager = self.container.resolve(LLMManager)
+        use_resilient_queue = _uses_resilient_provider_queue(llm_manager)
+        llm = None if use_resilient_queue else llm_manager.get_llm(self.model_name)
+        if not use_resilient_queue and not llm:
             raise ValueError(
                 f"LLM {self.model_name} not found, please check the model name")
 
@@ -641,7 +741,10 @@ class ChatCompletionWithTools(Block):
 
             tools_mapping = {t.name: t for t in tools}
 
-            response: LLMChatResponse = llm.chat(request_body)
+            if use_resilient_queue:
+                response = _execute_resilient_chat(llm_manager, request_body)
+            else:
+                response = llm.chat(request_body)
             iter_count += 1
             if response.message.tool_calls:
                 iteration_msgs.append(response.message)

@@ -165,6 +165,20 @@ describe('workflow editor history', () => {
     expect(viewState.value.skipSavingHistory).toBe(false)
   })
 
+  it('restores history saving when thenable detection throws', () => {
+    const viewState = workflowEditorModel.getViewState()
+    const thenable = Object.defineProperty({}, 'then', {
+      get() {
+        throw new Error('then getter failure')
+      }
+    })
+
+    expect(() => workflowEditorModel.performActionWithoutHistory(() => thenable)).toThrow(
+      'then getter failure'
+    )
+    expect(viewState.value.skipSavingHistory).toBe(false)
+  })
+
   it('records and undoes normal edits after a suppressed action throws', () => {
     const intent = workflowEditorModel.getIntent()
     const viewState = workflowEditorModel.getViewState()

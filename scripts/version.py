@@ -98,6 +98,9 @@ EXCLUDED_DIRECTORY_REASONS = {
 }
 EXCLUDED_FILE_REASONS = {
     "CHANGELOG.md": "historical changelog",
+    "findings.md": "planning and generated task material",
+    "task_plan.md": "planning and generated task material",
+    "progress.md": "planning and generated task material",
     "webui/UPSTREAM.md": "upstream version record",
     "scripts/version.py": "version synchronization implementation",
     ARTIFACT_INDEX_NAME: "version synchronization index",

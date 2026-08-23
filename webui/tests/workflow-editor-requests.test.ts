@@ -88,6 +88,7 @@ const mountEditor = () =>
             'initialName',
             'initialDescription',
             'initialWorkflowId',
+            'initializationKey',
             'initialConfig',
             'loading'
           ],
@@ -130,6 +131,7 @@ describe('WorkflowEditor request ordering', () => {
 
     const canvas = wrapper.findComponent({ name: 'WorkflowCanvas' })
     expect(canvas.props('initialName')).toBe('Workflow B')
+    expect(canvas.props('initializationKey')).toBe(2)
     canvas.vm.$emit('update:blocks', [{ name: 'edited' }])
     await nextTick()
 
