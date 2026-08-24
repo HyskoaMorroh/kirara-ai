@@ -28,6 +28,11 @@ TEST_ADAPTER_NOT_RUNNING_ID = "dummy-bot-2234"
 TEST_ADAPTER_TYPE = "dummy"
 TEST_ADAPTER_CONFIG = {"token": "test-token", "name": "Test Bot"}
 REDACTED_ADAPTER_CONFIG = {"token": "", "name": "Test Bot"}
+LEGACY_HEALTH_FIELDS = {
+    "status",
+    "connected_account_count",
+    "last_heartbeat_age_seconds",
+}
 
 
 # ==================== 测试用 Adapter ====================
@@ -171,6 +176,7 @@ class TestIMAdapter:
             "connected_account_count": 1,
             "last_heartbeat_age_seconds": 0.25,
         }
+        assert set(adapter["health"]) == LEGACY_HEALTH_FIELDS
         assert adapter.get("config") == REDACTED_ADAPTER_CONFIG
         assert "test-token" not in response.text
 
@@ -187,6 +193,7 @@ class TestIMAdapter:
         assert adapter.get("name") == TEST_ADAPTER_ID
         assert adapter.get("adapter") == TEST_ADAPTER_TYPE
         assert adapter.get("health", {}).get("status") == "connected"
+        assert set(adapter["health"]) == LEGACY_HEALTH_FIELDS
         assert adapter.get("config") == REDACTED_ADAPTER_CONFIG
         assert "test-token" not in response.text
 
@@ -210,6 +217,7 @@ class TestIMAdapter:
         adapter = data.get("adapter")
         assert adapter.get("name") == "new-adapter"
         assert adapter.get("adapter") == TEST_ADAPTER_TYPE
+        assert set(adapter["health"]) == LEGACY_HEALTH_FIELDS
         assert adapter.get("config") == REDACTED_ADAPTER_CONFIG
         assert "test-token" not in response.text
 
@@ -389,6 +397,7 @@ class TestIMAdapter:
         assert adapter.get("adapter") == TEST_ADAPTER_TYPE
         assert adapter.get("config").get("token") == ""
         assert adapter.get("config").get("name") == "Updated Bot"
+        assert set(adapter["health"]) == LEGACY_HEALTH_FIELDS
         assert "updated-token" not in response.text
 
         manager = app.state.container.resolve(IMManager)

@@ -3,7 +3,9 @@ import os
 import secrets
 import signal
 import time
+from pathlib import Path
 
+from kirara_ai.config import DATA_PATH
 from kirara_ai.config.config_loader import ConfigLoader
 from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.database import DatabaseManager
@@ -23,6 +25,8 @@ from kirara_ai.memory.composes import DefaultMemoryComposer, DefaultMemoryDecomp
 from kirara_ai.memory.memory_manager import MemoryManager
 from kirara_ai.memory.scopes import GlobalScope, GroupScope, MemberScope
 from kirara_ai.plugin_manager.plugin_loader import PluginLoader
+from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
+from kirara_ai.plugin_manager.resource_sources import ResourceSourceService
 from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
 from kirara_ai.plugin_manager.models import LifecycleName
 from kirara_ai.scheduler import TaskScheduler
@@ -136,19 +140,43 @@ def init_tracing_system(container: DependencyContainer):
     logger.info("Tracing system initialized")
     return tracing_manager
 
+
+def _config_path() -> Path:
+    """Return the configuration file in the mounted application data volume."""
+    return Path(DATA_PATH) / "config.yaml"
+
+
+def init_agent_runtime(container: DependencyContainer):
+    """Register the shared Agent runtime against the application's services."""
+    # Import lazily because Runtime imports the message package, whose package
+    # initialisation also loads plugin-facing IM interfaces.
+    from kirara_ai.agent_runtime import AgentRegistry, AgentRuntimeExecutor
+
+    agent_registry = AgentRegistry(DATA_PATH)
+    resource_service = container.resolve(ResourceLifecycleService)
+    runtime = AgentRuntimeExecutor(
+        agent_registry=agent_registry,
+        llm_manager=container.resolve(LLMManager),
+        mcp_manager=container.resolve(MCPServerManager),
+        resource_loader=resource_service.read_entry,
+        resource_service=resource_service,
+    )
+    container.register(AgentRegistry, agent_registry)
+    container.register(AgentRuntimeExecutor, runtime)
+    return runtime
+
 def init_application() -> DependencyContainer:
     """初始化应用程序"""
     logger.info("Initializing application...")
 
     # 配置文件路径
-    config_path = "./data/config.yaml"
+    config_path = _config_path()
 
     # 加载配置文件
     logger.info(f"Loading configuration from {config_path}")
     # check data directory
-    if not os.path.exists("./data"):
-        os.makedirs("./data")
-    if os.path.exists(config_path):
+    Path(DATA_PATH).mkdir(parents=True, exist_ok=True)
+    if config_path.exists():
         config: GlobalConfig = ConfigLoader.load_config(config_path, GlobalConfig)
         logger.info("Configuration loaded successfully")
     else:
@@ -173,7 +201,7 @@ def init_application() -> DependencyContainer:
         config.web.secret_key = secrets.token_hex(32)
         logger.warning("Web secret_key is not set, generated a new random secret_key")
         try:
-            ConfigLoader.save_config_with_backup(config_path, config)
+            ConfigLoader.save_config_with_backup(str(config_path), config)
             logger.info(f"Generated secret_key has been saved to {config_path}")
         except Exception as e:
             logger.error(f"Failed to persist generated secret_key: {e}")
@@ -199,6 +227,13 @@ def init_application() -> DependencyContainer:
     # 注册工作流注册表
     workflow_registry = WorkflowRegistry(container)
     container.register(WorkflowRegistry, workflow_registry)
+    resource_service = ResourceLifecycleService(
+            DATA_PATH,
+            workflow_registry=workflow_registry,
+            container=container,
+        )
+    container.register(ResourceLifecycleService, resource_service)
+    container.register(ResourceSourceService, ResourceSourceService(resource_service))
 
     # 注册调度规则注册表
     dispatch_registry = DispatchRuleRegistry(container)
@@ -266,6 +301,10 @@ def init_application() -> DependencyContainer:
     mcp_manager = container.resolve(MCPServerManager)
     logger.info("Loading MCP servers")
     mcp_manager.load_servers()
+
+    # All inbound channels use this one runtime once an Agent is configured.
+    # Legacy workflow dispatch remains available when no Agent is configured.
+    init_agent_runtime(container)
 
     # 注册定时任务调度器（负责按周期自动检测模型列表）
     container.register(TaskScheduler, TaskScheduler(container))

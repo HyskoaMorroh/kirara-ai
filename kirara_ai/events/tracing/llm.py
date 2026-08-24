@@ -1,10 +1,14 @@
 import time
-from typing import Union
+from typing import TYPE_CHECKING, Iterable, Optional, Union
 
 from kirara_ai.llm.format.request import LLMChatRequest
 from kirara_ai.llm.format.response import LLMChatResponse
 
 from .base import TraceCompleteEvent, TraceEvent, TraceFailEvent, TraceStartEvent
+
+if TYPE_CHECKING:
+    from kirara_ai.llm.pricing import CostSnapshot
+    from kirara_ai.llm.resilience import ProviderAttempt
 
 
 class LLMTraceEvent(TraceEvent):
@@ -44,13 +48,19 @@ class LLMRequestCompleteEvent(LLMTraceEvent, TraceCompleteEvent):
                 backend_name: str,
                 request: LLMChatRequest,
                 response: LLMChatResponse,
-                start_time: float):
+                start_time: float,
+                attempts: Optional[Iterable["ProviderAttempt"]] = None,
+                cost_snapshot: Optional["CostSnapshot"] = None,
+                ttft_ms: Optional[int] = None):
         super().__init__(trace_id, model_id, backend_name)
         self.request = request
         self.response = response
         self.start_time = start_time
         self.end_time = time.time()
         self.duration = int((self.end_time - start_time) * 1000)
+        self.attempts = list(attempts or ())
+        self.cost_snapshot = cost_snapshot
+        self.ttft_ms = ttft_ms
 
 class LLMRequestFailEvent(LLMTraceEvent, TraceFailEvent):
     """LLM请求失败事件"""
@@ -61,10 +71,14 @@ class LLMRequestFailEvent(LLMTraceEvent, TraceFailEvent):
                 backend_name: str,
                 request: LLMChatRequest,
                 error: Union[str, Exception],
-                start_time: float):
+                start_time: float,
+                attempts: Optional[Iterable["ProviderAttempt"]] = None,
+                ttft_ms: Optional[int] = None):
         super().__init__(trace_id, model_id, backend_name)
         self.request = request
         self.error = str(error)
         self.start_time = start_time
         self.end_time = time.time()
         self.duration = int((self.end_time - start_time) * 1000)
+        self.attempts = list(attempts or ())
+        self.ttft_ms = ttft_ms

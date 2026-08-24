@@ -1,4 +1,4 @@
-"""Bounded provider failover primitives for synchronous LLM adapters."""
+"""Bounded provider failover primitives for synchronous and streaming LLM adapters."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import uuid
 from collections import deque
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import Any, Callable, Deque, Iterable, Optional
+from typing import Any, Callable, Deque, Iterable, Iterator, Optional
 
 
 class CircuitState(str, Enum):
@@ -228,6 +228,13 @@ class ProviderAttempt:
     started_at: float = 0.0
     first_byte_at: Optional[float] = None
     completed_at: Optional[float] = None
+    partial_output: bool = False
+
+    @property
+    def ttft_seconds(self) -> Optional[float]:
+        if self.first_byte_at is None:
+            return None
+        return max(0.0, self.first_byte_at - self.started_at)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -238,6 +245,53 @@ class ChatExecutionResult:
     response: Any
     trace_id: str
     attempts: list[ProviderAttempt]
+
+
+class StreamExecutionResult(Iterator[Any]):
+    """One-shot stream iterator with live trace and attempt metadata."""
+
+    def __init__(
+        self,
+        iterator: Iterator[Any],
+        *,
+        trace_id: str,
+        attempts: list[ProviderAttempt],
+        on_close: Optional[Callable[[], None]] = None,
+    ):
+        self._iterator = iterator
+        self._on_close = on_close
+        self._started = False
+        self._closed = False
+        self.trace_id = trace_id
+        self.attempts = attempts
+
+    def __iter__(self) -> "StreamExecutionResult":
+        return self
+
+    def __next__(self) -> Any:
+        if self._closed:
+            raise StopIteration
+        self._started = True
+        try:
+            return next(self._iterator)
+        except BaseException:
+            self._closed = True
+            raise
+
+    def close(self) -> None:
+        """Stop the one-shot stream and close its logical trace exactly once."""
+        if self._closed:
+            return
+        started = self._started
+        self._closed = True
+        close = getattr(self._iterator, "close", None)
+        try:
+            if callable(close):
+                close()
+        finally:
+            # Closing an unstarted generator does not execute its body.
+            if not started and self._on_close is not None:
+                self._on_close()
 
 
 class RequestCancelledError(RuntimeError):
@@ -252,6 +306,23 @@ class RequestCancelledError(RuntimeError):
     ):
         self.trace_id = trace_id
         self.attempts = list(attempts)
+        super().__init__(message)
+
+
+class StreamInterruptedError(RuntimeError):
+    """Raised when a stream fails after at least one visible chunk was emitted."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        trace_id: str,
+        attempts: Iterable[ProviderAttempt],
+        cause: Optional[BaseException] = None,
+    ):
+        self.trace_id = trace_id
+        self.attempts = list(attempts)
+        self.cause = cause
         super().__init__(message)
 
 

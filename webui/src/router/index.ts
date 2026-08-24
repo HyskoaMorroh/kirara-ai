@@ -83,6 +83,12 @@ const router = createRouter({
           component: () => import('@/views/plugins/PluginMarket.vue')
         },
         {
+          path: '/resources',
+          name: 'resources',
+          component: () => import('@/views/resources/ResourceView.vue'),
+          meta: { title: '资源管理', requiresAuth: true }
+        },
+        {
           path: '/memory',
           name: 'memory',
           component: () => import('@/views/ComingSoon.vue')

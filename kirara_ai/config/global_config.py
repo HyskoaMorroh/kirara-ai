@@ -1,4 +1,5 @@
-from typing import Any, Dict, List, Optional
+import shlex
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -78,18 +79,177 @@ class LLMConfig(BaseModel):
         default=[], description="LLM API后端列表"
     )
 
+class MCPTransportConfig(BaseModel):
+    """CC Switch-compatible MCP server transport configuration.
+
+    The public shape deliberately mirrors CC Switch and common MCP client
+    configuration files.  Validation of required fields is performed by the
+    import boundary as well, while this model remains permissive enough to
+    load an old, temporarily incomplete Kirara configuration for migration.
+    """
+
+    type: str = Field(default="stdio", description="传输类型: stdio/http/sse")
+    command: Optional[str] = Field(default=None, description="stdio 命令")
+    args: List[str] = Field(default_factory=list, description="stdio 参数数组")
+    env: Dict[str, str] = Field(default_factory=dict, description="stdio 环境变量")
+    cwd: Optional[str] = Field(default=None, description="stdio 工作目录")
+    url: Optional[str] = Field(default=None, description="http/sse URL")
+    headers: Dict[str, str] = Field(default_factory=dict, description="http/sse 请求 Headers")
+
+    model_config = ConfigDict(extra="allow")
+
+
+class MCPAppsConfig(BaseModel):
+    """CC Switch application enablement matrix."""
+
+    claude: bool = False
+    claude_desktop: bool = Field(default=False, alias="claude-desktop")
+    codex: bool = False
+    gemini: bool = False
+    grokbuild: bool = False
+    opencode: bool = False
+    openclaw: bool = False
+    hermes: bool = False
+
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+
+def _legacy_args_to_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        try:
+            return shlex.split(value, posix=False)
+        except ValueError:
+            return value.split()
+    raise TypeError("MCP args must be an array")
+
+
 class MCPServerConfig(BaseModel):
-    """MCP服务器配置"""
+    """MCP entry using the CC Switch unified structure.
+
+    Canonical fields are ``id``, ``name``, ``server``, ``apps`` and metadata
+    fields.  The compatibility properties at the bottom are intentionally
+    runtime-only and keep old Kirara callers working during migration; they
+    are never emitted by ``model_dump``.
+    """
 
     id: str = Field(description="服务器标识ID")
+    name: str = Field(default="", description="服务器显示名称")
+    server: MCPTransportConfig = Field(default_factory=MCPTransportConfig)
+    apps: MCPAppsConfig = Field(default_factory=MCPAppsConfig)
     description: str = Field(default="", description="服务器描述")
-    url: Optional[str] = Field(default="", description="服务器URL")
-    headers: Dict[str, str] = Field(default_factory=dict, description="服务器请求 Headers")
-    command: Optional[str] = Field(default="", description="服务器命令")
-    args: List[str] = Field(default_factory=list, description="服务器参数")
-    env: Dict[str, str] = Field(default_factory=dict, description="环境变量")
-    connection_type: str = Field(default="stdio", description="连接类型: stdio/sse")
-    enable: bool = Field(default=True, description="是否启用")
+    tags: List[str] = Field(default_factory=list, description="服务器标签")
+    homepage: Optional[str] = Field(default=None, description="项目主页")
+    docs: Optional[str] = Field(default=None, description="文档地址")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Kirara 运行时元数据")
+
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_shape(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        values = dict(data)
+        legacy_type = values.pop("connection_type", None)
+        legacy_enable = values.pop("enable", None)
+
+        if "name" not in values or not values.get("name"):
+            values["name"] = values.get("id", "")
+
+        if "server" not in values or values.get("server") is None:
+            transport: Dict[str, Any] = {
+                "type": legacy_type or values.pop("type", "stdio"),
+            }
+            for key in ("command", "url", "headers", "env", "cwd"):
+                if key in values:
+                    transport[key] = values.pop(key)
+            if "args" in values:
+                transport["args"] = _legacy_args_to_list(values.pop("args"))
+            values["server"] = transport
+        else:
+            # Do not allow the old top-level fields to leak into the canonical
+            # shape when a mixed config is loaded during an upgrade.
+            for key in ("command", "url", "headers", "env", "cwd", "args", "type"):
+                values.pop(key, None)
+
+        metadata = dict(values.get("metadata") or {})
+        if legacy_enable is not None:
+            metadata["runtime_enabled"] = bool(legacy_enable)
+        else:
+            metadata.setdefault("runtime_enabled", True)
+        values["metadata"] = metadata
+        return values
+
+    @property
+    def runtime_enabled(self) -> bool:
+        return bool(self.metadata.get("runtime_enabled", True))
+
+    @runtime_enabled.setter
+    def runtime_enabled(self, value: bool) -> None:
+        self.metadata["runtime_enabled"] = bool(value)
+
+    @property
+    def enable(self) -> bool:
+        """Legacy runtime alias; not part of the persisted public schema."""
+        return self.runtime_enabled
+
+    @enable.setter
+    def enable(self, value: bool) -> None:
+        self.runtime_enabled = value
+
+    @property
+    def connection_type(self) -> str:
+        """Legacy alias for ``server.type``."""
+        return self.server.type
+
+    @connection_type.setter
+    def connection_type(self, value: str) -> None:
+        self.server.type = value
+
+    @property
+    def command(self) -> Optional[str]:
+        return self.server.command
+
+    @command.setter
+    def command(self, value: Optional[str]) -> None:
+        self.server.command = value
+
+    @property
+    def args(self) -> List[str]:
+        return self.server.args
+
+    @args.setter
+    def args(self, value: List[str]) -> None:
+        self.server.args = _legacy_args_to_list(value)
+
+    @property
+    def url(self) -> Optional[str]:
+        return self.server.url
+
+    @url.setter
+    def url(self, value: Optional[str]) -> None:
+        self.server.url = value
+
+    @property
+    def headers(self) -> Dict[str, str]:
+        return self.server.headers
+
+    @headers.setter
+    def headers(self, value: Dict[str, str]) -> None:
+        self.server.headers = value
+
+    @property
+    def env(self) -> Dict[str, str]:
+        return self.server.env
+
+    @env.setter
+    def env(self, value: Dict[str, str]) -> None:
+        self.server.env = value
 
 
 class MCPConfig(BaseModel):

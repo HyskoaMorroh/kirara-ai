@@ -47,12 +47,24 @@ class MCPToolProvider(Block):
             raise ValueError("MCP工具调用缺少调用 ID")
         tool_name = function.name
 
-        server_info = mcp_manager.get_tool_server(tool_name)
-        if not server_info:
-            raise ValueError(f"找不到工具: {tool_name}")
-        server, original_name = server_info
-        
-        result = await server.call_tool(original_name, function.arguments)
+        arguments = function.arguments or {}
+        # The manager is the single execution boundary for policy, connection
+        # state, confirmation and audit.  Do not call the server instance here.
+        result = await mcp_manager.call_tool(
+            tool_name,
+            arguments,
+            agent_allowlist=frozenset(self.enabled_tools),
+            session_allowlist=frozenset(self.enabled_tools),
+            workflow_allowlist=frozenset(self.enabled_tools),
+            confirmed=False,
+        )
+        if result is None:
+            return LLMToolResultContent(
+                id=tool_call.id,
+                name=tool_name,
+                content=[tool.TextContent(text="工具调用未执行：工具不可用、权限不足或需要确认。")],
+                isError=True,
+            )
         
         tool_result = await self._create_tool_result(
             tool_call.id, tool_name, result.content

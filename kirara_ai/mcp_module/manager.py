@@ -5,12 +5,13 @@ import asyncio
 from collections import deque
 from functools import partial
 import time
-from typing import Callable, Dict, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, Iterable, NamedTuple, Optional, Tuple
 
 from mcp import McpError, types
 from mcp.shared.session import RequestResponder
 
 from kirara_ai.config.global_config import GlobalConfig, MCPServerConfig
+from kirara_ai.agent_runtime.core import effective_mcp_allowlist
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.logger import get_logger
 from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
@@ -121,8 +122,9 @@ class MCPServerManager:
     def get_statistics(self) -> Dict[str, int]:
         """获取MCP服务器统计信息"""
         total = len(self.servers)
-        stdio = sum(bool(s.server_config.connection_type == "stdio") for s in self.servers.values())
-        sse = sum(bool(s.server_config.connection_type == "sse") for s in self.servers.values())
+        stdio = sum(bool(s.server_config.server.type == "stdio") for s in self.servers.values())
+        http = sum(bool(s.server_config.server.type == "http") for s in self.servers.values())
+        sse = sum(bool(s.server_config.server.type == "sse") for s in self.servers.values())
         connected = sum(bool(s.state == MCPConnectionState.CONNECTED) for s in self.servers.values())
         disconnected = sum(bool(s.state == MCPConnectionState.DISCONNECTED) for s in self.servers.values())
         error = sum(bool(s.state == MCPConnectionState.ERROR) for s in self.servers.values())
@@ -130,6 +132,7 @@ class MCPServerManager:
         return {
             "total": total,
             "stdio": stdio,
+            "http": http,
             "sse": sse,
             "connected": connected,
             "disconnected": disconnected,
@@ -224,6 +227,8 @@ class MCPServerManager:
             
             # 从工具缓存中移除该服务器的工具
             self._remove_server_tools_from_cache(server_id)
+            self.prompts_cache.pop(server_id, None)
+            self.resources_cache.pop(server_id, None)
             
             logger.info(f"Successfully disconnected from MCP server {server_id}")
             return True
@@ -325,7 +330,17 @@ class MCPServerManager:
         
         return (server, entry.original_name)
     
-    async def call_tool(self, tool_name: str, tool_args: dict) -> Optional[types.CallToolResult]:
+    async def call_tool(
+        self,
+        tool_name: str,
+        tool_args: dict,
+        *,
+        agent_allowlist: Optional[set[str] | frozenset[str]] = None,
+        agent_mcp_server_ids: Optional[Iterable[str]] = None,
+        session_allowlist: Optional[set[str] | frozenset[str]] = None,
+        workflow_allowlist: Optional[set[str] | frozenset[str]] = None,
+        confirmed: bool = False,
+    ) -> Optional[types.CallToolResult]:
         """
         调用指定工具
         
@@ -344,6 +359,39 @@ class MCPServerManager:
             logger.error(f"Tool {tool_name} not found or server not available")
             self._audit_operation(server_id, "call_tool", started_at, "not_found")
             return None
+
+        if agent_mcp_server_ids is not None:
+            bound_servers = {
+                str(value).strip()
+                for value in agent_mcp_server_ids
+                if str(value).strip()
+            }
+            if server_id not in bound_servers:
+                logger.warning("Rejected MCP tool from an unbound server")
+                self._audit_operation(server_id, "call_tool", started_at, "server_not_bound")
+                return None
+
+        if agent_allowlist is not None:
+            try:
+                allowed_tools = effective_mcp_allowlist(
+                    agent_allowlist=agent_allowlist,
+                    session_allowlist=session_allowlist,
+                    workflow_allowlist=workflow_allowlist,
+                    connected_tools=self.tools_cache.keys(),
+                )
+            except ValueError as error:
+                logger.warning("Rejected MCP tool policy expansion")
+                self._audit_operation(server_id, "call_tool", started_at, "denied", error)
+                return None
+            if tool_name not in allowed_tools:
+                logger.warning("Rejected MCP tool outside runtime allowlist")
+                self._audit_operation(server_id, "call_tool", started_at, "denied")
+                return None
+
+        if self._tool_requires_confirmation(entry.tool_info) and not confirmed:
+            logger.warning("Rejected MCP tool call pending user confirmation")
+            self._audit_operation(server_id, "call_tool", started_at, "confirmation_required")
+            return None
         
         server, original_name = result
         
@@ -361,6 +409,18 @@ class MCPServerManager:
             logger.error(f"Error occurred when calling tool {tool_name}")
             self._audit_operation(server_id, "call_tool", started_at, "error", e)
             return None
+
+    @staticmethod
+    def _tool_requires_confirmation(tool_info: types.Tool) -> bool:
+        """Gate destructive MCP annotations and local confirmation metadata."""
+
+        annotations = getattr(tool_info, "annotations", None)
+        if annotations is not None and getattr(annotations, "destructiveHint", False) is True:
+            return True
+        metadata = getattr(tool_info, "_meta", None) or getattr(tool_info, "metadata", None) or {}
+        if not isinstance(metadata, dict):
+            return False
+        return metadata.get("requires_confirmation") is True
         
     async def _update_prompts_cache(self, server_id: str) -> bool:
         """

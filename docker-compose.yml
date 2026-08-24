@@ -5,6 +5,7 @@ services:
     restart: always
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
+      DATA_PATH: /app/data
     volumes:
       # 数据目录
       - ./data:/app/data

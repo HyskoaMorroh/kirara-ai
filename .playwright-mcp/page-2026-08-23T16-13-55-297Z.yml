@@ -1,0 +1,25 @@
+- generic [ref=e143]:
+  - generic [ref=e145]:
+    - generic [ref=e146]: Kirara AI
+    - button [ref=e147] [cursor=pointer]
+  - generic [ref=e152]:
+    - banner [ref=e153]:
+      - generic [ref=e154]:
+        - generic [ref=e155]: LIFECYCLE CONTROL
+        - heading "资源管理" [level=1] [ref=e156]
+        - paragraph [ref=e157]: 统一管理 Skill、Prompt 与 Session 的来源、版本、权限和执行状态。
+      - button "审计记录" [active] [ref=e158] [cursor=pointer]
+      - button "安装资源" [ref=e165] [cursor=pointer]
+    - region "资源筛选" [ref=e172]:
+      - generic [ref=e175] [cursor=pointer]:
+        - generic "全部资源" [ref=e176]
+        - img "loading" [ref=e178]
+      - generic [ref=e185]: 0 项资源
+    - generic [ref=e187]:
+      - generic [ref=e193]: 暂无已安装资源
+      - button "安装第一个资源" [ref=e195] [cursor=pointer]
+  - generic [ref=e198]:
+    - button "切换到浅色主题" [ref=e199] [cursor=pointer]
+    - generic [ref=e204]:
+      - superscript [ref=e206]
+      - text: "API: 已连接 版本: v3.3.0b11"

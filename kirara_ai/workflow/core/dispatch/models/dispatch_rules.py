@@ -26,10 +26,24 @@ class CombinedDispatchRule(BaseModel):
     name: str
     description: str = ""
     workflow_id: str
+    # Agent is an explicit runtime binding.  ``workflow_id`` remains required
+    # for persisted-rule compatibility and for legacy workflow dispatch.
+    agent_id: Optional[str] = None
     priority: int = 5
     enabled: bool = True
     rule_groups: List[RuleGroup]  # 规则组之间是 AND 关系
     metadata: Dict[str, Any] = {}
+
+    @property
+    def bound_agent_id(self) -> Optional[str]:
+        """Return the explicit Agent binding, including the legacy metadata form."""
+
+        if self.agent_id is not None and str(self.agent_id).strip():
+            return str(self.agent_id).strip()
+        legacy_agent_id = self.metadata.get("agent_id")
+        if legacy_agent_id is None or not str(legacy_agent_id).strip():
+            return None
+        return str(legacy_agent_id).strip()
 
     def match(self, message: IMMessage, workflow_registry: WorkflowRegistry, container: DependencyContainer) -> bool:
         """

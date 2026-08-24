@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  connectionToWorkflowWire,
+  createWorkflowConnectionPortIndex,
+  createWorkflowEdgeId,
   getCanvasBlockPorts,
   getCanvasBlockType,
   filterWiresForBlocks,
@@ -8,6 +11,8 @@ import {
   mergeWorkflowConfig,
   parseWorkflowTransferPayload,
   getRenderableNodePosition,
+  validateWorkflowConnection,
+  workflowWireToConnection,
   WORKFLOW_TRANSFER_SCHEMA_VERSION
 } from '../src/components/workflow/workflow-data'
 
@@ -192,5 +197,173 @@ describe('workflow import data', () => {
       'missing_source_block',
       'missing_target_block'
     ])
+  })
+
+  it('validates dynamic code ports by direction and type, then preserves handles in a wire round trip', () => {
+    const blocks = [
+      {
+        name: 'script',
+        type_name: 'internal:code',
+        config: {
+          inputs: [{ name: 'prompt', label: 'Prompt', type: 'str', required: true }],
+          outputs: [{ name: 'answer', label: 'Answer', type: 'str' }]
+        }
+      },
+      {
+        name: 'consumer',
+        type_name: 'core:consumer',
+        config: {}
+      }
+    ]
+    const blockTypes = [
+      {
+        type_name: 'internal:code',
+        name: 'Code',
+        label: 'Code',
+        description: '',
+        inputs: [],
+        outputs: [],
+        configs: []
+      },
+      {
+        type_name: 'core:consumer',
+        name: 'Consumer',
+        label: 'Consumer',
+        description: '',
+        inputs: [{ name: 'value', label: 'Value', description: '', type: 'str', required: false }],
+        outputs: [],
+        configs: []
+      }
+    ]
+    const connection = {
+      source: 'script',
+      sourceHandle: 'answer',
+      target: 'consumer',
+      targetHandle: 'value'
+    }
+
+    expect(validateWorkflowConnection(connection, blocks, blockTypes, { str: { str: true } })).toEqual({
+      valid: true
+    })
+    expect(
+      validateWorkflowConnection(
+        { ...connection, sourceHandle: 'prompt' },
+        blocks,
+        blockTypes,
+        { str: { str: true } }
+      ).valid
+    ).toBe(false)
+    expect(
+      validateWorkflowConnection(
+        { ...connection, targetHandle: 'missing' },
+        blocks,
+        blockTypes,
+        { str: { str: true } }
+      ).valid
+    ).toBe(false)
+
+    const wire = connectionToWorkflowWire(connection)
+    expect(workflowWireToConnection(wire)).toEqual(connection)
+    expect(createWorkflowEdgeId(connection)).toBe('script-answer-consumer-value')
+  })
+
+  it('keeps an unresolved saved wire inspectable without treating it as a new valid connection', () => {
+    const connection = {
+      source: 'old-node',
+      sourceHandle: 'removed-output',
+      target: 'new-node',
+      targetHandle: 'input'
+    }
+    const wire = connectionToWorkflowWire(connection)
+
+    expect(workflowWireToConnection(wire)).toEqual(connection)
+    expect(
+      validateWorkflowConnection(connection, [], [], {}).valid
+    ).toBe(false)
+  })
+
+  it('uses a reusable port index without changing dynamic connection validation', () => {
+    const blocks = [
+      {
+        name: 'script',
+        type_name: 'internal:code',
+        config: {
+          inputs: [],
+          outputs: [{ name: 'answer', type: 'str' }]
+        }
+      },
+      {
+        name: 'consumer',
+        type_name: 'core:consumer',
+        config: {}
+      }
+    ]
+    const blockTypes = [
+      {
+        type_name: 'internal:code',
+        name: 'Code',
+        label: 'Code',
+        description: '',
+        inputs: [],
+        outputs: [],
+        configs: []
+      },
+      {
+        type_name: 'core:consumer',
+        name: 'Consumer',
+        label: 'Consumer',
+        description: '',
+        inputs: [{ name: 'value', label: 'Value', description: '', type: 'str', required: false }],
+        outputs: [],
+        configs: []
+      }
+    ]
+    const index = createWorkflowConnectionPortIndex(blocks, blockTypes)
+
+    expect(
+      validateWorkflowConnection(
+        {
+          source: 'script',
+          sourceHandle: 'answer',
+          target: 'consumer',
+          targetHandle: 'value'
+        },
+        blocks,
+        blockTypes,
+        { str: { str: true } },
+        index
+      )
+    ).toEqual({ valid: true })
+    expect(
+      validateWorkflowConnection(
+        {
+          source: 'script',
+          sourceHandle: 'missing',
+          target: 'consumer',
+          targetHandle: 'value'
+        },
+        blocks,
+        blockTypes,
+        { str: { str: true } },
+        index
+      )
+    ).toEqual({ valid: false, reason: 'unknown_source_port' })
+  })
+
+  it('keeps new connections strict while preserving an incomplete historical handle', () => {
+    const incomplete = {
+      source: 'source',
+      sourceHandle: null,
+      target: 'target',
+      targetHandle: 'value'
+    }
+
+    expect(() => connectionToWorkflowWire(incomplete)).toThrow('连线必须包含')
+    expect(connectionToWorkflowWire(incomplete, { preserveIncompleteHandles: true })).toEqual({
+      source_block: 'source',
+      source_output: '',
+      target_block: 'target',
+      target_input: 'value'
+    })
   })
 })

@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from kirara_ai.events.tracing import LLMRequestCompleteEvent, LLMRequestFailEvent, LLMRequestStartEvent
+from kirara_ai.llm.resilience import ProviderAttempt
 from kirara_ai.tracing import LLMTracer
 from tests.tracing.test_base import TracingTestBase
 
@@ -46,6 +47,32 @@ class TestLLMTracer(TracingTestBase):
         self.assertEqual(trace.total_tokens, 30)
         # 验证活跃追踪是否移除
         self.assertNotIn(trace_id, self.tracer._active_traces)
+
+    def test_complete_request_tracking_records_the_final_provider(self):
+        request = self.create_test_request()
+        response = self.create_test_response()
+        trace_id = self.tracer.start_request_tracking("primary", request)
+        attempts = [
+            ProviderAttempt(
+                trace_id=trace_id,
+                model="test-model",
+                provider="secondary",
+                attempt=1,
+                retry_index=0,
+                success=True,
+            )
+        ]
+
+        self.tracer.complete_request_tracking(
+            trace_id,
+            request,
+            response,
+            attempts=attempts,
+            backend_name="secondary",
+        )
+
+        trace = self.tracer.get_trace_by_id(trace_id)
+        self.assertEqual(trace.backend_name, "secondary")
 
     def test_fail_request_tracking(self):
         """测试失败追踪请求"""
@@ -140,4 +167,4 @@ class TestLLMTracer(TracingTestBase):
         self.assertTrue(len(stats["backends"]) > 0)
         backend_stat = stats["backends"][0]
         self.assertEqual(backend_stat["backend_name"], "test-backend")
-        self.assertEqual(backend_stat["count"], 3) 
+        self.assertEqual(backend_stat["count"], 3)

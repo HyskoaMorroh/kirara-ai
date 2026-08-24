@@ -43,6 +43,9 @@ class Http {
           ...config.headers,
           ...this.getAuthHeader()
         }
+        if (typeof FormData !== 'undefined' && config.body instanceof FormData) {
+          delete headers['Content-Type']
+        }
         config = {
           ...config,
           credentials: 'include'
@@ -70,6 +73,9 @@ class Http {
           ...headers,
           ...config.headers,
           ...this.getAuthHeader()
+        }
+        if (typeof FormData !== 'undefined' && config.body instanceof FormData) {
+          delete headers['Content-Type']
         }
         config = {
           ...config,
@@ -133,6 +139,14 @@ class Http {
     })
   }
 
+  postForm<T>(path: string, data: FormData, config: Omit<RequestInit, 'method' | 'body'> = {}) {
+    return this.request<T>(path, {
+      ...config,
+      method: 'POST',
+      body: data
+    })
+  }
+
   put<T>(path: string, data?: any, config: Omit<RequestInit, 'method' | 'body'> = {}) {
     return this.request<T>(path, {
       ...config,
@@ -155,6 +169,7 @@ class Http {
     wsUrl.pathname = `${BASE_URL}${path}`
     return new WebSocket(wsUrl.toString())
   }
+
 }
 
 export const http = new Http()

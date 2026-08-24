@@ -1,31 +1,54 @@
+from __future__ import annotations
+
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from kirara_ai.config.global_config import MCPAppsConfig, MCPServerConfig, MCPTransportConfig
+
+
+REDACTED_SECRET = "********"
+
+
+class MCPTransportInfo(BaseModel):
+    """Public CC Switch transport shape with secret values redacted."""
+
+    type: str
+    command: Optional[str] = None
+    args: List[str] = Field(default_factory=list)
+    env: Dict[str, str] = Field(default_factory=dict)
+    cwd: Optional[str] = None
+    url: Optional[str] = None
+    headers: Dict[str, str] = Field(default_factory=dict)
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
 
 class MCPServerInfo(BaseModel):
-    """MCP服务器信息"""
+    """Canonical MCP entry returned by the API."""
+
     id: str
-    description: Optional[str] = None
-    connection_type: str
-    command: Optional[str] = None
-    args: str = Field(default="")
-    url: Optional[str] = None
+    name: str
+    server: MCPTransportInfo
+    apps: MCPAppsConfig
+    description: str = ""
+    tags: List[str] = Field(default_factory=list)
+    homepage: Optional[str] = None
+    docs: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     connection_state: str
 
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+
 class MCPToolInfo(BaseModel):
-    """MCP工具信息"""
     name: str
     description: Optional[str] = None
     input_schema: Dict[str, Any] = Field(default_factory=dict)
+    server_id: Optional[str] = None
 
 
 class MCPPromptInfo(BaseModel):
-    """MCP提示词信息
-
-    WebUI 的提示词卡片按 `id` 显示标题、按 `description` 显示说明，并把 `id`
-    回传给采样接口，因此这里在 MCP 原始字段之外额外暴露 `id`（取 name）。
-    """
     id: str
     name: str
     description: Optional[str] = None
@@ -33,11 +56,6 @@ class MCPPromptInfo(BaseModel):
 
 
 class MCPResourceInfo(BaseModel):
-    """MCP资源信息
-
-    WebUI 的资源卡片按 `id` 显示标题，并把 `id` 拼进资源读取接口的路径，
-    因此这里在 MCP 原始字段之外额外暴露 `id`（取 name，缺失时回退到 uri）。
-    """
     id: str
     name: str
     uri: str
@@ -47,13 +65,12 @@ class MCPResourceInfo(BaseModel):
 
 
 class MCPPromptSampleRequest(BaseModel):
-    """提示词采样请求"""
     promptId: str
     text: str = Field(default="")
     temperature: Optional[float] = None
 
+
 class MCPServerList(BaseModel):
-    """MCP服务器列表"""
     items: List[MCPServerInfo]
     total: int
     page: int
@@ -62,9 +79,9 @@ class MCPServerList(BaseModel):
 
 
 class MCPStatistics(BaseModel):
-    """MCP统计信息"""
     total_servers: int
     stdio_servers: int
+    http_servers: int
     sse_servers: int
     connected_servers: int
     disconnected_servers: int
@@ -72,22 +89,87 @@ class MCPStatistics(BaseModel):
     total_tools: int
 
 
-class MCPServerCreateRequest(BaseModel):
-    """创建MCP服务器请求"""
+class _CanonicalServerPayload(BaseModel):
+    """Shared request boundary; legacy fields are accepted only for migration."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
     id: str
+    name: Optional[str] = None
+    server: Optional[MCPTransportConfig] = None
+    apps: MCPAppsConfig = Field(default_factory=MCPAppsConfig)
     description: Optional[str] = None
-    command: str
-    args: str
-    connection_type: str
+    tags: List[str] = Field(default_factory=list)
+    homepage: Optional[str] = None
+    docs: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_payload(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        return MCPServerConfig.model_validate(data).model_dump(
+            mode="python", by_alias=True, exclude_none=False
+        )
+
+    def to_config(self, *, server_id: Optional[str] = None) -> MCPServerConfig:
+        data = self.model_dump(mode="python", by_alias=True, exclude_none=False)
+        if server_id is not None:
+            data["id"] = server_id
+        return MCPServerConfig.model_validate(data)
+
+
+class MCPServerCreateRequest(_CanonicalServerPayload):
+    pass
 
 
 class MCPServerUpdateRequest(BaseModel):
-    """更新MCP服务器请求"""
-    description: Optional[str] = None
-    command: Optional[str] = None
-    args: str = Field(default="")
-    connection_type: Optional[str] = None
-    url: Optional[str] = None
-    headers: Optional[Dict[str, str]] = None
-    env: Optional[Dict[str, str]] = None
+    """Partial canonical update; old top-level fields remain migration-only."""
 
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    name: Optional[str] = None
+    server: Optional[MCPTransportConfig] = None
+    apps: Optional[MCPAppsConfig] = None
+    description: Optional[str] = None
+    tags: Optional[List[str]] = None
+    homepage: Optional[str] = None
+    docs: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_payload(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        values = dict(data)
+        legacy_keys = {"connection_type", "command", "args", "url", "headers", "env", "cwd", "type"}
+        if "server" not in values and any(key in values for key in legacy_keys):
+            transport = {
+                key: values.pop(key)
+                for key in ("type", "command", "args", "url", "headers", "env", "cwd")
+                if key in values
+            }
+            if "connection_type" in values:
+                transport["type"] = values.pop("connection_type")
+            values["server"] = MCPTransportConfig.model_validate(transport)
+        return values
+
+    def update_values(self) -> Dict[str, Any]:
+        """Return only fields explicitly supplied by the caller.
+
+        This keeps a partial update from replacing optional canonical fields
+        with Pydantic defaults.  Legacy fields are consumed by the validator
+        and are never returned to the route layer.
+        """
+        return self.model_dump(mode="python", by_alias=True, exclude_unset=True)
+
+
+class MCPToolCallRequest(BaseModel):
+    toolName: str
+    params: Dict[str, Any] = Field(default_factory=dict)
+    confirmed: bool = False
+    agent_allowlist: Optional[List[str]] = None
+    session_allowlist: Optional[List[str]] = None
+    workflow_allowlist: Optional[List[str]] = None

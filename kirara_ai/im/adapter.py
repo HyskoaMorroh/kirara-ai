@@ -1,6 +1,6 @@
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Literal, Optional, Protocol
+from typing import Any, Dict, Literal, Optional, Protocol
 
 from pydantic import BaseModel, Field
 from typing_extensions import runtime_checkable
@@ -31,6 +31,16 @@ class AdapterHealthSnapshot(BaseModel):
     status: Literal["connected", "waiting", "disconnected", "stale"]
     connected_account_count: int = Field(default=0, ge=0)
     last_heartbeat_age_seconds: Optional[float] = Field(default=None, ge=0)
+    adapter_started: Optional[bool] = None
+    websocket_connected: Optional[bool] = None
+    external_login_status: Optional[
+        Literal[
+            "unknown",
+            "upstream_reported_online",
+            "upstream_reported_offline",
+        ]
+    ] = None
+    outbox: Optional[Dict[str, int]] = None
 
 
 @runtime_checkable

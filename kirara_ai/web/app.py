@@ -23,12 +23,14 @@ from kirara_ai.web.utils import (
 )
 
 from .api.block import block_bp
+from .api.agent import agent_bp
 from .api.dispatch import dispatch_bp
 from .api.im import im_bp
 from .api.llm import llm_bp
 from .api.mcp import mcp_bp
 from .api.media import media_bp
 from .api.plugin import plugin_bp
+from .api.resource import resource_bp
 from .api.system import system_bp
 from .api.tracing import tracing_bp
 from .api.workflow import workflow_bp
@@ -83,12 +85,14 @@ def create_web_api_app(container: DependencyContainer) -> Quart:
 
     # 注册蓝图
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
+    app.register_blueprint(agent_bp, url_prefix="/api/agents")
     app.register_blueprint(im_bp, url_prefix="/api/im")
     app.register_blueprint(llm_bp, url_prefix="/api/llm")
     app.register_blueprint(dispatch_bp, url_prefix="/api/dispatch")
     app.register_blueprint(block_bp, url_prefix="/api/block")
     app.register_blueprint(workflow_bp, url_prefix="/api/workflow")
     app.register_blueprint(plugin_bp, url_prefix="/api/plugin")
+    app.register_blueprint(resource_bp, url_prefix="/api/resources")
     app.register_blueprint(system_bp, url_prefix="/api/system")
     app.register_blueprint(media_bp, url_prefix="/api/media")
     app.register_blueprint(tracing_bp, url_prefix="/api/tracing")

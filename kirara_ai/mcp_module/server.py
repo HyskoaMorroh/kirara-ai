@@ -7,6 +7,7 @@ import anyio.lowlevel
 from mcp import ClientSession, StdioServerParameters, stdio_client, types
 from mcp.client.session import MessageHandlerFnT
 from mcp.client.sse import sse_client
+from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.session import RequestResponder
 from pydantic import AnyUrl
 
@@ -20,7 +21,7 @@ class MCPServer:
     """
     MCP (Model Control Protocol) 服务器客户端类
     
-    用于与 MCP 服务器进行通信，支持 stdio 和 SSE 两种连接模式。
+    用于与 MCP 服务器进行通信，支持 stdio、SSE 和 Streamable HTTP 三种连接模式。
     提供工具调用、补全、资源管理等功能。
     
     本类为 mcp.ClientSession 的代理，
@@ -130,23 +131,35 @@ class MCPServer:
         
         try:
             # 初始化连接
-            if self.server_config.connection_type == "stdio":
-                if self.server_config.command is None:
+            transport = self.server_config.server
+            if transport.type == "stdio":
+                if transport.command is None:
                     raise ValueError("stdio 连接类型需要提供命令")
                 self._client = stdio_client(StdioServerParameters(
-                    command=self.server_config.command, 
-                    args=self.server_config.args,
-                    env=self.server_config.env
+                    command=transport.command,
+                    args=transport.args,
+                    env=transport.env or None,
+                    cwd=transport.cwd,
                 ))
-            elif self.server_config.connection_type == "sse":
-                if self.server_config.url is None:
+            elif transport.type == "sse":
+                if transport.url is None:
                     raise ValueError("sse 连接类型需要提供 url")
-                self._client = sse_client(self.server_config.url, headers=self.server_config.headers)
+                self._client = sse_client(transport.url, headers=transport.headers or None)
+            elif transport.type == "http":
+                if transport.url is None:
+                    raise ValueError("http 连接类型需要提供 url")
+                self._client = streamablehttp_client(
+                    transport.url,
+                    headers=transport.headers or None,
+                )
             else:
-                raise ValueError(f"不支持的服务器连接类型: {self.server_config.connection_type}")
+                raise ValueError(f"不支持的服务器连接类型: {transport.type}")
             
             # 使用 exit_stack 管理资源
-            read, write = await exit_stack.enter_async_context(self._client)
+            client_streams = await exit_stack.enter_async_context(self._client)
+            # Streamable HTTP returns a third session-id callback; ClientSession
+            # consumes the same read/write pair as stdio and SSE.
+            read, write = client_streams[:2]
             self.session = await exit_stack.enter_async_context(ClientSession(read, write, message_handler=self.message_handler_callback))
             
             # 初始化会话

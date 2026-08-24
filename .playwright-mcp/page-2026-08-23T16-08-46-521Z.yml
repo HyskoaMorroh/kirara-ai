@@ -1,0 +1,144 @@
+- generic [ref=e58]:
+  - complementary [ref=e59]:
+    - generic [ref=e60]:
+      - generic [ref=e61]: Kirara AI
+      - menu [ref=e63]:
+        - menuitem "快速开始" [ref=e64]:
+          - img [ref=e65] [cursor=pointer]
+          - text: 快速开始
+        - menuitem "控制台" [ref=e70]:
+          - img [ref=e71] [cursor=pointer]
+          - text: 控制台
+        - menuitem "系统记录" [ref=e75]:
+          - img [ref=e76] [cursor=pointer]
+          - text: 系统记录
+        - menuitem "聊天平台管理" [ref=e85]:
+          - img [ref=e86] [cursor=pointer]
+          - text: 聊天平台管理
+        - menuitem "模型管理" [ref=e89]:
+          - img [ref=e90] [cursor=pointer]
+          - text: 模型管理
+        - menuitem "工作流" [ref=e96]:
+          - img [ref=e97] [cursor=pointer]
+          - text: 工作流
+        - menuitem "MCP" [ref=e104]:
+          - img [ref=e105] [cursor=pointer]
+          - text: MCP
+        - menuitem "媒体管理" [ref=e111]:
+          - img [ref=e112] [cursor=pointer]
+          - text: 媒体管理
+        - menuitem "插件管理" [ref=e118]:
+          - img [ref=e119] [cursor=pointer]
+          - text: 插件管理
+        - menuitem "资源管理" [ref=e122]:
+          - img [ref=e123] [cursor=pointer]
+          - text: 资源管理
+        - menuitem "系统设置" [ref=e127]:
+          - img [ref=e128] [cursor=pointer]
+          - text: 系统设置
+    - generic [ref=e131] [cursor=pointer]
+  - generic [ref=e138]:
+    - generic [ref=e139]:
+      - generic [ref=e140]:
+        - heading [ref=e141]:
+          - heading "快速开始" [ref=e142]
+          - button "隐藏快速开始引导" [ref=e144] [cursor=pointer]
+        - generic [ref=e151]:
+          - generic [ref=e152]:
+            - generic [ref=e153]: "1"
+            - generic [ref=e156]:
+              - generic [ref=e157]: 浏览插件市场
+              - generic [ref=e161]:
+                - generic [ref=e162]: 发现并安装适合您需求的插件
+                - button "立刻前往" [ref=e163] [cursor=pointer]
+          - generic [ref=e169]:
+            - generic [ref=e170]: "2"
+            - generic [ref=e173]:
+              - generic [ref=e174]: 添加 IM
+              - generic [ref=e177]: 连接您常用的聊天平台
+          - generic [ref=e180]:
+            - generic [ref=e181]: "3"
+            - generic [ref=e184]:
+              - generic [ref=e185]: 添加 LLM
+              - generic [ref=e188]: 连接 AI 模型服务
+          - generic [ref=e191]:
+            - generic [ref=e192]: "4"
+            - generic [ref=e195]:
+              - generic [ref=e196]: 了解调度规则
+              - generic [ref=e199]: 学习如何召唤和使用 Bot
+          - generic [ref=e202]:
+            - generic [ref=e203]: "5"
+            - generic [ref=e206]:
+              - generic [ref=e207]: 自定义工作流
+              - generic [ref=e209]: 打造专属于您的 AI 助手
+      - generic [ref=e213]:
+        - generic [ref=e221]:
+          - generic [ref=e222]: 运行时长
+          - generic [ref=e223]: 7分钟13秒
+        - generic [ref=e231]:
+          - generic [ref=e232]: 已接入 IM
+          - generic [ref=e233]: "0"
+        - generic [ref=e248]:
+          - generic [ref=e249]: 已接入 LLM
+          - generic [ref=e250]: "0"
+        - generic [ref=e257]:
+          - generic [ref=e258]: 已安装插件
+          - generic [ref=e259]: "4"
+      - generic [ref=e260]:
+        - generic [ref=e262]:
+          - heading [ref=e263]:
+            - heading "系统负载" [ref=e264]
+          - generic [ref=e265]:
+            - generic [ref=e267]:
+              - generic [ref=e268]: CPU 使用率
+              - generic [ref=e274]: 44%
+              - progressbar [ref=e276]
+            - separator [ref=e280]
+            - generic [ref=e282]:
+              - generic [ref=e283]: 内存可用率
+              - generic [ref=e291]: 92%
+              - progressbar [ref=e293]
+              - generic [ref=e297]:
+                - generic [ref=e298]: "Kirara 占用: 133.62MB"
+                - generic [ref=e299]: "系统可用: 1322.23MB"
+        - generic [ref=e301]:
+          - heading [ref=e302]:
+            - heading "系统信息" [ref=e303]
+          - generic [ref=e304]:
+            - generic [ref=e306]:
+              - generic [ref=e307]: Kirara AI
+              - generic [ref=e308]: 3.3.0b11
+            - generic [ref=e310]:
+              - generic [ref=e311]: 操作系统
+              - generic [ref=e312]: win32
+            - generic [ref=e314]:
+              - generic [ref=e315]: CPU 型号
+              - generic [ref=e316]: Intel64 Family 6 Model 186 Stepping 2, GenuineIntel
+            - generic [ref=e318]:
+              - generic [ref=e319]: Python
+              - generic [ref=e320]: 3.11.15
+      - generic [ref=e321]:
+        - generic [ref=e322]: LLM 统计
+        - generic [ref=e323]:
+          - heading [ref=e324]:
+            - heading "LLM 使用分析" [ref=e325]
+          - generic [ref=e331]:
+            - generic [ref=e339]:
+              - generic [ref=e340]: 30天请求数
+              - generic [ref=e341]: "0"
+            - generic [ref=e349]:
+              - generic [ref=e350]: 成功率
+              - generic [ref=e351]: 0%
+            - generic [ref=e361]:
+              - generic [ref=e362]: Token 消耗
+              - generic [ref=e363]: "0"
+            - generic [ref=e371]:
+              - generic [ref=e372]: 平均响应时间
+              - generic [ref=e373]: 0ms
+    - generic [ref=e395] [cursor=pointer]
+  - generic [ref=e397]:
+    - superscript [ref=e399]
+    - generic [ref=e400]: "系统状态: 正常"
+    - superscript [ref=e402]
+    - text: "API: 已连接 WebUI 版本: v3.3.0b11 后端版本: 3.3.0b11 内存使用: 133.62 MB CPU: 44.3% IM: 0 LLM: 0 插件: 4 工作流: 17"
+    - button "切换到深色主题" [ref=e403] [cursor=pointer]

@@ -1,3 +1,5 @@
+import importlib
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -60,6 +62,12 @@ def test_external_legacy_onebot_entry_point_cannot_override_internal_plugin(
 
 
 def test_real_internal_plugin_directory_discovers_onebot_adapter():
+    canonical_plugin_module = importlib.import_module(
+        "kirara_ai.plugins.im_onebot_adapter"
+    )
+    canonical_outbox_module = importlib.import_module(
+        "kirara_ai.plugins.im_onebot_adapter.outbox"
+    )
     container = DependencyContainer()
     config = GlobalConfig()
     container.register(GlobalConfig, config)
@@ -74,4 +82,10 @@ def test_real_internal_plugin_directory_discovers_onebot_adapter():
     assert "im_onebot_adapter" in loader.internal_plugins
     plugin = loader.plugins["im_onebot_adapter"]
     assert plugin.__class__.__name__ == "OneBotAdapterPlugin"
-    assert plugin.__class__.__module__ == "im_onebot_adapter"
+    assert plugin.__class__ is canonical_plugin_module.OneBotAdapterPlugin
+    assert plugin.__class__.__module__ == "kirara_ai.plugins.im_onebot_adapter"
+    assert "im_onebot_adapter.outbox" not in sys.modules
+    assert (
+        importlib.import_module("kirara_ai.plugins.im_onebot_adapter.outbox").OneBotDelivery
+        is canonical_outbox_module.OneBotDelivery
+    )

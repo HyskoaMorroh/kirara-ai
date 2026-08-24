@@ -303,3 +303,50 @@ async def test_mcp_operations_emit_redacted_audit_events():
         "get_prompt",
         "get_resource",
     ]
+
+
+@pytest.mark.asyncio
+async def test_mcp_stop_clears_all_server_caches():
+    container = DependencyContainer()
+    container.register(GlobalConfig, GlobalConfig())
+    manager = MCPServerManager(container)
+
+    server = MagicMock()
+    server.state = MCPConnectionState.CONNECTED
+
+    async def disconnect():
+        server.state = MCPConnectionState.DISCONNECTED
+        return True
+
+    server.disconnect = AsyncMock(side_effect=disconnect)
+    manager.servers["local-tools"] = server
+    manager.tools_cache["search"] = ToolCacheEntry("local-tools", "search", MagicMock())
+    manager.prompts_cache["local-tools"] = [MagicMock()]
+    manager.resources_cache["local-tools"] = [MagicMock()]
+
+    assert await manager.stop_server("local-tools") is True
+    assert not manager.tools_cache
+    assert "local-tools" not in manager.prompts_cache
+    assert "local-tools" not in manager.resources_cache
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_call_requires_runtime_allowlist_intersection():
+    container = DependencyContainer()
+    container.register(GlobalConfig, GlobalConfig())
+    manager = MCPServerManager(container)
+
+    server = MagicMock()
+    server.state = MCPConnectionState.CONNECTED
+    server.server_config.id = "local-tools"
+    server.call_tool = AsyncMock()
+    manager.servers["local-tools"] = server
+    manager.tools_cache["search"] = ToolCacheEntry("local-tools", "search", MagicMock())
+
+    assert await manager.call_tool(
+        "search",
+        {},
+        agent_allowlist={"search"},
+        session_allowlist={"other"},
+    ) is None
+    server.call_tool.assert_not_awaited()

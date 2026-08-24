@@ -2,7 +2,7 @@
 from kirara_ai.llm.adapter import LLMBackendAdapter, LLMChatProtocol
 from kirara_ai.llm.format.message import LLMChatTextContent
 from kirara_ai.llm.format.request import LLMChatRequest
-from kirara_ai.llm.format.response import LLMChatResponse, Message
+from kirara_ai.llm.format.response import LLMChatResponse, Message, Usage, UsageSource
 from kirara_ai.tracing import LLMTracer
 from kirara_ai.tracing.decorator import trace_llm_chat
 from tests.tracing.test_base import TracingTestBase
@@ -20,6 +20,7 @@ class TestLLMAdapter(LLMBackendAdapter, LLMChatProtocol):
         return LLMChatResponse(
             model="test-model",
             message=Message(role="assistant", content=[LLMChatTextContent(text="test response")]),
+            usage=Usage(prompt_tokens=1, completion_tokens=2, total_tokens=3),
         )
 
 class TestTraceDecorator(TracingTestBase):
@@ -52,6 +53,7 @@ class TestTraceDecorator(TracingTestBase):
         trace = traces[0]
         self.assertEqual(trace.status, "success")
         self.assertEqual(trace.backend_name, "test-backend")
+        self.assertEqual(trace.usage_source, UsageSource.PROVIDER.value)
 
     def test_trace_failure(self):
         """测试失败追踪"""
@@ -74,4 +76,4 @@ class TestTraceDecorator(TracingTestBase):
         trace = traces[0]
         self.assertEqual(trace.status, "failed")
         self.assertEqual(trace.error, "Test error")
-        self.assertEqual(trace.backend_name, "test-backend") 
+        self.assertEqual(trace.backend_name, "test-backend")

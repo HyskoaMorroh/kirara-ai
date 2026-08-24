@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, Optional
 
 from sqlalchemy import case, func
 
@@ -10,6 +10,8 @@ from kirara_ai.ioc.inject import Inject
 from kirara_ai.llm.format.message import LLMChatMessage, LLMChatTextContent
 from kirara_ai.llm.format.request import LLMChatRequest
 from kirara_ai.llm.format.response import LLMChatResponse, Message
+from kirara_ai.llm.pricing import CostSnapshot
+from kirara_ai.llm.resilience import ProviderAttempt
 from kirara_ai.logger import get_logger
 from kirara_ai.tracing.core import TracerBase, generate_trace_id
 from kirara_ai.tracing.models import LLMRequestTrace
@@ -117,13 +119,18 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
         self,
         trace_id: str,
         request: LLMChatRequest,
-        response: LLMChatResponse
+        response: LLMChatResponse,
+        *,
+        attempts: Optional[Iterable[ProviderAttempt]] = None,
+        cost_snapshot: Optional[CostSnapshot] = None,
+        ttft_ms: Optional[int] = None,
+        backend_name: Optional[str] = None,
     ):
         """完成LLM请求跟踪"""
         if trace_id in self._active_traces:
             trace_data = self._active_traces[trace_id]
             model_id = request.model or trace_data.get('model_id', "unknown")
-            backend_name = trace_data.get('backend_name', "unknown")
+            backend_name = backend_name or trace_data.get('backend_name', "unknown")
             start_time = trace_data.get('start_time', 0)
 
             event = LLMRequestCompleteEvent(
@@ -132,7 +139,10 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
                 backend_name=backend_name,
                 request=request.model_copy(deep=True),
                 response=response.model_copy(deep=True),
-                start_time=start_time
+                start_time=start_time,
+                attempts=attempts,
+                cost_snapshot=cost_snapshot,
+                ttft_ms=ttft_ms,
             )
             # 移除活跃追踪
             del self._active_traces[trace_id]
@@ -143,13 +153,17 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
         self,
         trace_id: str,
         request: LLMChatRequest,
-        error: Any
+        error: Any,
+        *,
+        attempts: Optional[Iterable[ProviderAttempt]] = None,
+        ttft_ms: Optional[int] = None,
+        backend_name: Optional[str] = None,
     ):
         """记录LLM请求失败"""
         if trace_id in self._active_traces:
             trace_data = self._active_traces[trace_id]
             model_id = request.model or trace_data.get('model_id', "unknown")
-            backend_name = trace_data.get('backend_name', "unknown")
+            backend_name = backend_name or trace_data.get('backend_name', "unknown")
             start_time = trace_data.get('start_time', 0)
 
             event = LLMRequestFailEvent(
@@ -158,7 +172,9 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
                 backend_name=backend_name,
                 request=request.model_copy(deep=True),
                 error=error,
-                start_time=start_time
+                start_time=start_time,
+                attempts=attempts,
+                ttft_ms=ttft_ms,
             )
             # 移除活跃追踪
             del self._active_traces[trace_id]

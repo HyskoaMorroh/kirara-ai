@@ -78,7 +78,6 @@ class PluginLoader:
         if not plugin_dir:
             plugin_dir = self.plugin_dir
         self.logger.info(f"Discovering internal plugins from directory: {plugin_dir}")
-        sys.path.append(plugin_dir)
 
         for plugin_name in os.listdir(plugin_dir):
             plugin_path = os.path.join(plugin_dir, plugin_name)
@@ -110,7 +109,7 @@ class PluginLoader:
 
     def _load_internal_plugin(self, plugin_name: str):
         """加载内部插件"""
-        module = importlib.import_module(plugin_name)
+        module = importlib.import_module(f"kirara_ai.plugins.{plugin_name}")
         plugin_classes = [
             cls
             for cls in module.__dict__.values()

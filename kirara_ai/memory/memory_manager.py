@@ -75,9 +75,7 @@ class MemoryManager(MediaReferenceProvider[List[MemoryEntry]]):
 
     def store(self, scope: MemoryScope, entry: MemoryEntry, extra_identifier: Optional[str] = None) -> None:
         """存储新的记忆"""
-        scope_key = scope.get_scope_key(entry.sender)
-        if extra_identifier is not None:
-            scope_key = f"{extra_identifier}-{scope_key}"
+        scope_key = self._scope_key(scope, entry.sender, extra_identifier)
 
         if scope_key not in self.memories:
             self.memories[scope_key] = self.persistence.load(scope_key)
@@ -99,20 +97,18 @@ class MemoryManager(MediaReferenceProvider[List[MemoryEntry]]):
 
     def query(self, scope: MemoryScope, sender: ChatSender, extra_identifier: Optional[str] = None) -> List[MemoryEntry]:
         """查询历史记忆"""
-        relevant_memories = []
-        scope_key = scope.get_scope_key(sender)
-        if extra_identifier is not None:
-            scope_key = f"{extra_identifier}-{scope_key}"
+        scope_key = self._scope_key(scope, sender, extra_identifier)
 
         if scope_key not in self.memories:
             self.memories[scope_key] = self.persistence.load(scope_key)
 
-        # 遍历所有记忆，找出作用域内的记忆
-        for scope_key, entries in self.memories.items():
-
-            for entry in entries:
-                if scope.is_in_scope(entry.sender, sender):
-                    relevant_memories.append(entry)
+        # 只从当前的持久化作用域读取。跨渠道共享必须由调用方显式提供同一个
+        # extra_identifier，不能因为两个渠道的用户 ID 恰好相同而串线。
+        relevant_memories = [
+            entry
+            for entry in self.memories[scope_key]
+            if scope.is_in_scope(entry.sender, sender)
+        ]
 
         # 按时间排序
         relevant_memories.sort(key=lambda x: x.timestamp)
@@ -127,14 +123,19 @@ class MemoryManager(MediaReferenceProvider[List[MemoryEntry]]):
         if isinstance(self.persistence, AsyncMemoryPersistence):
             self.persistence.stop()
 
-    def clear_memory(self, scope: MemoryScope, sender: ChatSender) -> None:
+    def clear_memory(
+        self,
+        scope: MemoryScope,
+        sender: ChatSender,
+        extra_identifier: Optional[str] = None,
+    ) -> None:
         """清空指定作用域和发送者的记忆
 
         Args:
             scope: 记忆作用域
             sender: 发送者标识
         """
-        scope_key = scope.get_scope_key(sender)
+        scope_key = self._scope_key(scope, sender, extra_identifier)
         # 移除媒体引用
         if scope_key not in self.memories:
             return
@@ -144,6 +145,17 @@ class MemoryManager(MediaReferenceProvider[List[MemoryEntry]]):
 
         # 保存空记录到持久化层
         self.persistence.save(scope_key, [])
+
+    @staticmethod
+    def _scope_key(
+        scope: MemoryScope,
+        sender: ChatSender,
+        extra_identifier: Optional[str] = None,
+    ) -> str:
+        scope_key = scope.get_scope_key(sender)
+        if extra_identifier is not None:
+            scope_key = f"{extra_identifier}-{scope_key}"
+        return scope_key
 
     def get_reference_owner(self, reference_key: str) -> Optional[List[MemoryEntry]]:
         """获取引用所有者"""
@@ -166,4 +178,3 @@ class MemoryManager(MediaReferenceProvider[List[MemoryEntry]]):
         for media_id in removed_media_ids:
             if media_id not in unremoved_media_ids:
                 media_carrier.remove_reference(media_id, "memory", reference_key)
-

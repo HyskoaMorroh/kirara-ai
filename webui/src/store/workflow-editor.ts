@@ -193,6 +193,7 @@ class WorkflowEditorModel {
 
   // 用深度计数而不是布尔值，保证嵌套及并行异步操作都在结束前抑制历史记录。
   private historySuppressionDepth = ref(0)
+  private batchActionDepth = 0
 
   // 计算属性
   private readonly viewState = computed<WorkflowEditorViewState>(() => ({
@@ -245,6 +246,41 @@ class WorkflowEditorModel {
     return result
   }
 
+  /**
+   * Treat a compound graph edit as one undoable operation. Only the outermost
+   * batch captures the pre-edit state; nested and async work remains suppressed
+   * until it settles, including rejection paths.
+   */
+  performBatchAction<T>(action: () => T): T {
+    const isOutermostBatch = this.batchActionDepth === 0
+    const initialState = isOutermostBatch ? this.createHistoryState() : null
+    this.batchActionDepth += 1
+
+    const finishBatch = () => {
+      this.batchActionDepth = Math.max(0, this.batchActionDepth - 1)
+      if (initialState && !snapshotsEqual(initialState, this.createHistoryState())) {
+        this.pushHistoryState(initialState)
+      }
+    }
+
+    let result: T
+    try {
+      result = this.performActionWithoutHistory(action)
+    } catch (error) {
+      finishBatch()
+      throw error
+    }
+
+    // performActionWithoutHistory normalizes every thenable to a local Promise.
+    // instanceof therefore avoids reading a user-controlled `then` getter twice.
+    if (result instanceof Promise) {
+      return Promise.resolve(result).finally(finishBatch) as T
+    }
+
+    finishBatch()
+    return result
+  }
+
   // 提取：保存当前状态到 undo 栈
   private createHistoryState(): HistoryState {
     return createWorkflowGraphSnapshot({
@@ -259,9 +295,13 @@ class WorkflowEditorModel {
 
   private pushToUndoStack(clearRedo = true) {
     const currentState = this.createHistoryState()
+    this.pushHistoryState(currentState, clearRedo)
+  }
+
+  private pushHistoryState(state: HistoryState, clearRedo = true) {
     const previousState = this.state.value.undoStack.at(-1)
-    if (!previousState || !snapshotsEqual(previousState, currentState)) {
-      this.state.value.undoStack.push(currentState)
+    if (!previousState || !snapshotsEqual(previousState, state)) {
+      this.state.value.undoStack.push(state)
     }
     // 超出上限时丢弃最早的快照，保证内存占用有界
     if (this.state.value.undoStack.length > MAX_HISTORY_DEPTH) {

@@ -1,8 +1,10 @@
 """OneBot V11 IM adapter using aiocqhttp's public ASGI interface."""
 
 import asyncio
+import hashlib
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -35,12 +37,14 @@ from kirara_ai.im.message import (
 )
 from kirara_ai.im.profile import Gender, UserProfile
 from kirara_ai.im.sender import ChatSender, ChatType
+from kirara_ai.database import DatabaseManager
 from kirara_ai.logger import HypercornLoggerWrapper, get_logger
 from kirara_ai.web.app import WebServer
 from kirara_ai.workflow.core.dispatch.dispatcher import WorkflowDispatcher
 
 from .config import OneBotConfig
 from .render import paginate_onebot_text, render_onebot_text
+from .outbox import OneBotDeliveryResult, OneBotOutboxService
 from .utils.media import (
     decode_inline_media,
     download_public_media,
@@ -70,6 +74,7 @@ class OneBotAdapter(
 
     dispatcher: WorkflowDispatcher
     web_server: WebServer
+    database_manager: DatabaseManager
 
     def __init__(self, config: OneBotConfig):
         self.config = config
@@ -85,10 +90,13 @@ class OneBotAdapter(
         self._server_sockets: Any = None
         self._standalone_port: Optional[int] = None
         self._heartbeat_task: Optional[asyncio.Task[Any]] = None
+        self._outbox_resume_task: Optional[asyncio.Task[Any]] = None
+        self._outbox: Optional[OneBotOutboxService] = None
         self._mount_path: Optional[str] = None
         self._mounted_route: Any = None
         self._started = False
         self._connection_status = "waiting"
+        self._external_login_status = "unknown"
         self._last_heartbeat_at: Optional[float] = None
         self._profile_cache: dict[str, UserProfile] = {}
         self._profile_cache_time: dict[str, float] = {}
@@ -117,6 +125,8 @@ class OneBotAdapter(
             self._connection_status = (
                 "connected" if self.connections else "disconnected"
             )
+            if not self.connections:
+                self._external_login_status = "upstream_reported_offline"
             self.logger.warning("OneBot 连接已断开")
             return
         if meta_type in {"lifecycle", "heartbeat"}:
@@ -124,8 +134,10 @@ class OneBotAdapter(
             self.connections[self_id] = {"last_heartbeat": now}
             self._last_heartbeat_at = now
             self._connection_status = "connected"
+            self._external_login_status = "upstream_reported_online"
             if meta_type == "lifecycle" and sub_type == "connect":
                 self.logger.info("OneBot 连接已建立")
+            self._schedule_outbox_resume()
 
     async def _handle_notice(self, event: Event) -> None:
         return None
@@ -178,7 +190,50 @@ class OneBotAdapter(
             status=status,
             connected_account_count=len(self.connections),
             last_heartbeat_age_seconds=heartbeat_age,
+            adapter_started=self._started,
+            websocket_connected=bool(self.connections),
+            external_login_status=self._external_login_status,
+            outbox=self._outbox_counts(),
         )
+
+    def _ensure_outbox(self) -> OneBotOutboxService:
+        if self._outbox is not None:
+            return self._outbox
+        database = getattr(self, "database_manager", None)
+        if database is None:
+            raise RuntimeError("OneBot persistent outbox requires DatabaseManager")
+        self._outbox = OneBotOutboxService(
+            database,
+            self._call_action,
+            max_attempts=self.config.outbox_max_attempts,
+            retry_delay_seconds=self.config.outbox_retry_delay_seconds,
+        )
+        return self._outbox
+
+    def _outbox_counts(self) -> Optional[dict[str, int]]:
+        database = getattr(self, "database_manager", None)
+        if database is None:
+            return None
+        try:
+            return self._ensure_outbox().status_counts()
+        except Exception as exc:
+            self.logger.warning(f"OneBot 投递队列状态读取失败：{exc}")
+            return None
+
+    def _schedule_outbox_resume(self) -> None:
+        if getattr(self, "database_manager", None) is None:
+            return
+        if self._outbox_resume_task is not None and not self._outbox_resume_task.done():
+            return
+        self._outbox_resume_task = asyncio.create_task(self._resume_outbox())
+
+    async def _resume_outbox(self) -> None:
+        results = await self._ensure_outbox().resume_pending()
+        failed = sum(result.status != "accepted" for result in results)
+        if failed:
+            self.logger.warning(
+                f"OneBot 恢复投递完成，{failed} 个发送单元仍需人工核对"
+            )
 
     async def _call_action(self, action: str, **params: Any) -> dict[str, Any]:
         self_id = params.pop("self_id", None)
@@ -334,21 +389,35 @@ class OneBotAdapter(
             return MessageSegment.text(f"文件：{filename}\n链接：{url}")
         return None
 
-    async def _send_segments(self, recipient: ChatSender, segments: list[MessageSegment]) -> dict[str, Any]:
+    def _segment_action(
+        self, recipient: ChatSender, segments: list[MessageSegment]
+    ) -> tuple[str, dict[str, Any]]:
         self_id = self._action_self_id(recipient)
         if recipient.chat_type == ChatType.GROUP:
             if recipient.group_id is None:
                 raise ValueError("群聊发送缺少 group_id")
-            return await self._call_action(
-                "send_group_msg", group_id=int(recipient.group_id), message=segments,
-                self_id=self_id,
+            return (
+                "send_group_msg",
+                {
+                    "group_id": int(recipient.group_id),
+                    "message": segments,
+                    "self_id": self_id,
+                },
             )
         if recipient.chat_type == ChatType.C2C:
-            return await self._call_action(
-                "send_private_msg", user_id=int(recipient.user_id), message=segments,
-                self_id=self_id,
+            return (
+                "send_private_msg",
+                {
+                    "user_id": int(recipient.user_id),
+                    "message": segments,
+                    "self_id": self_id,
+                },
             )
         raise ValueError(f"不支持的 OneBot 聊天类型：{recipient.chat_type}")
+
+    async def _send_segments(self, recipient: ChatSender, segments: list[MessageSegment]) -> dict[str, Any]:
+        action, params = self._segment_action(recipient, segments)
+        return await self._call_action(action, **params)
 
     def _action_self_id(self, recipient: Optional[ChatSender] = None) -> Optional[str]:
         if recipient is not None:
@@ -369,10 +438,11 @@ class OneBotAdapter(
             return (self_id, "c2c", str(recipient.user_id))
         raise ValueError(f"不支持的 OneBot 聊天类型：{recipient.chat_type}")
 
-    async def _send_message_unlocked(
-        self, message: IMMessage, recipient: ChatSender
-    ) -> None:
-        """Send message elements in order; API failures intentionally propagate."""
+    async def _render_message_batches(
+        self, message: IMMessage
+    ) -> list[list[MessageSegment]]:
+        """Render ordered OneBot action payloads without sending them."""
+        batches: list[list[MessageSegment]] = []
         pending_special: list[MessageSegment] = []
         for element in message.message_elements:
             if isinstance(element, TextMessage):
@@ -381,7 +451,7 @@ class OneBotAdapter(
                     continue
                 for page in paginate_onebot_text(text):
                     segments = [*pending_special, MessageSegment.text(page)]
-                    await self._send_segments(recipient, segments)
+                    batches.append(segments)
                     pending_special = []
                 continue
 
@@ -393,17 +463,86 @@ class OneBotAdapter(
             if segment is not None:
                 if isinstance(element, (ImageMessage, VoiceMessage, VideoMessage, FileMessage)):
                     if pending_special:
-                        await self._send_segments(recipient, pending_special)
+                        batches.append(pending_special)
                         pending_special = []
-                    await self._send_segments(recipient, [segment])
+                    batches.append([segment])
                 else:
                     pending_special.append(segment)
 
         if pending_special:
-            await self._send_segments(recipient, pending_special)
+            batches.append(pending_special)
+        return batches
 
-    async def send_message(self, message: IMMessage, recipient: ChatSender) -> None:
+    async def _send_message_unlocked(
+        self, message: IMMessage, recipient: ChatSender
+    ) -> None:
+        """Send message elements in order; API failures intentionally propagate."""
+        for segments in await self._render_message_batches(message):
+            await self._send_segments(recipient, segments)
+
+    @staticmethod
+    def _page_delivery_id(logical_delivery_id: str, page_index: int) -> str:
+        value = f"{logical_delivery_id}:{page_index}".encode("utf-8")
+        return hashlib.sha256(value).hexdigest()
+
+    @staticmethod
+    def _delivery_error(result: OneBotDeliveryResult) -> BaseException:
+        if result.error is not None:
+            return result.error
+        message = result.error_message or f"OneBot delivery {result.status}"
+        if result.status == "ambiguous":
+            return OneBotActionTimeoutError(message)
+        return RuntimeError(message)
+
+    async def _send_via_outbox(
+        self,
+        message: IMMessage,
+        recipient: ChatSender,
+        delivery_id: Optional[str],
+    ) -> None:
+        batches = await self._render_message_batches(message)
+        if not batches:
+            return
+        if delivery_id is None:
+            delivery_id = getattr(message, "_onebot_delivery_id", None)
+        if delivery_id is None:
+            delivery_id = uuid.uuid4().hex
+            setattr(message, "_onebot_delivery_id", delivery_id)
+        if len(delivery_id) > 64:
+            raise ValueError("OneBot delivery_id 不能超过 64 个字符")
+
+        outbox = self._ensure_outbox()
+        recipient_key = ":".join(self._recipient_key(recipient))
+        page_ids: list[str] = []
+        for page_index, segments in enumerate(batches):
+            action, params = self._segment_action(recipient, segments)
+            page_id = self._page_delivery_id(delivery_id, page_index)
+            page_ids.append(page_id)
+            outbox.enqueue(
+                page_id,
+                recipient_key,
+                action,
+                params,
+                logical_delivery_id=delivery_id,
+                page_index=page_index,
+                page_count=len(batches),
+            )
+
+        for page_id in page_ids:
+            result = await outbox.deliver(page_id)
+            if result.status != "accepted":
+                raise self._delivery_error(result)
+
+    async def send_message(
+        self,
+        message: IMMessage,
+        recipient: ChatSender,
+        delivery_id: Optional[str] = None,
+    ) -> None:
         """Serialize pages for one recipient while keeping other chats concurrent."""
+        if getattr(self, "database_manager", None) is not None:
+            await self._send_via_outbox(message, recipient, delivery_id)
+            return
         locks = getattr(self, "_recipient_locks", None)
         if locks is None:
             locks = self._recipient_locks = {}
@@ -610,10 +749,16 @@ class OneBotAdapter(
                 )
             self.logger.info(f"OneBot WebSocket 已挂载：{self._mount_path}/ws")
         self._heartbeat_task = asyncio.create_task(self._monitor_heartbeats())
+        if getattr(self, "database_manager", None) is not None:
+            self._ensure_outbox().recover_on_startup()
         self._started = True
         self._connection_status = "waiting"
 
     async def stop(self) -> None:
+        if self._outbox_resume_task and not self._outbox_resume_task.done():
+            self._outbox_resume_task.cancel()
+            await asyncio.gather(self._outbox_resume_task, return_exceptions=True)
+        self._outbox_resume_task = None
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
             try:
@@ -651,6 +796,7 @@ class OneBotAdapter(
         self.connections.clear()
         self._started = False
         self._connection_status = "disconnected"
+        self._external_login_status = "unknown"
         self._last_heartbeat_at = None
 
     async def query_user_profile(self, chat_sender: ChatSender) -> UserProfile:

@@ -56,6 +56,20 @@ class OneBotConfig(BaseModel):
         title="OneBot 操作超时",
         description="等待 OneBot API 返回的最长秒数；发送超时不会自动重试。",
     )
+    outbox_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        title="明确失败重试上限",
+        description="仅在确认上游未处理操作时有限重试；超时或断线等结果未知情况不会重发。",
+    )
+    outbox_retry_delay_seconds: float = Field(
+        default=1.0,
+        ge=0,
+        le=60,
+        title="投递重试基础间隔",
+        description="明确瞬态失败的指数退避基础秒数。",
+    )
     inbound_media_timeout_seconds: float = Field(
         default=15.0,
         gt=0,

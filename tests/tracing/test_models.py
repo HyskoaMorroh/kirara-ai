@@ -1,6 +1,10 @@
 from datetime import datetime
+from decimal import Decimal
 
 from kirara_ai.events.tracing import LLMRequestCompleteEvent, LLMRequestFailEvent, LLMRequestStartEvent
+from kirara_ai.llm.format.response import Usage, UsageSource
+from kirara_ai.llm.pricing import CostSnapshot
+from kirara_ai.llm.resilience import ProviderAttempt
 from tests.tracing.test_base import TracingTestBase
 
 
@@ -50,6 +54,68 @@ class TestLLMRequestTrace(TracingTestBase):
         self.assertEqual(self.trace.completion_tokens, 20)
         self.assertEqual(self.trace.total_tokens, 30)
         self.assertIsNotNone(self.trace.response)
+
+    def test_complete_event_persists_usage_attempt_ttft_and_cost_snapshot(self):
+        request = self.create_test_request()
+        response = self.create_test_response(
+            Usage(
+                prompt_tokens=10,
+                completion_tokens=20,
+                total_tokens=30,
+                cached_tokens=2,
+                cache_write_tokens=1,
+                source=UsageSource.PROVIDER,
+            )
+        )
+        attempt = ProviderAttempt(
+            trace_id="test-trace-id",
+            model="test-model",
+            provider="test-backend",
+            attempt=1,
+            retry_index=0,
+            success=True,
+            started_at=10.0,
+            first_byte_at=10.25,
+            completed_at=11.0,
+        )
+        cost = CostSnapshot(
+            price_version_id="price-v1",
+            provider="test-backend",
+            model="test-model",
+            currency="USD",
+            priced_at=datetime.now().astimezone(),
+            input_tokens=7,
+            output_tokens=20,
+            cache_read_tokens=2,
+            cache_write_tokens=1,
+            input_cost=Decimal("0.1"),
+            output_cost=Decimal("0.2"),
+            cache_read_cost=Decimal("0.01"),
+            cache_write_cost=Decimal("0.02"),
+            total_cost=Decimal("0.33"),
+            usage_source=UsageSource.PROVIDER,
+        )
+        event = LLMRequestCompleteEvent(
+            trace_id="test-trace-id",
+            model_id="test-model",
+            backend_name="test-backend",
+            request=request,
+            response=response,
+            start_time=datetime.now().timestamp(),
+            attempts=[attempt],
+            cost_snapshot=cost,
+        )
+
+        self.trace.update_from_event(event)
+        payload = self.trace.to_dict()
+
+        self.assertEqual(payload["usage_source"], "provider")
+        self.assertEqual(payload["cache_write_tokens"], 1)
+        self.assertEqual(payload["ttft_ms"], 250)
+        self.assertEqual(payload["attempt_count"], 1)
+        self.assertEqual(payload["attempts"][0]["provider"], "test-backend")
+        self.assertEqual(payload["cost_snapshot"]["price_version_id"], "price-v1")
+        self.assertEqual(payload["cost_snapshot"]["total_cost"], "0.33")
 
     def test_update_from_fail_event(self):
         """测试从失败事件更新"""

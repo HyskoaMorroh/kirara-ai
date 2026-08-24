@@ -2,36 +2,119 @@
 # -*- coding: utf-8 -*-
 
 
-from typing import Any, Dict, Optional, cast
+from collections.abc import Mapping
+from typing import Any, Dict, Optional
 
 from quart import Blueprint, g, jsonify, request
 
 from kirara_ai.config.config_loader import CONFIG_FILE, ConfigLoader
-from kirara_ai.config.global_config import GlobalConfig, MCPServerConfig
+from kirara_ai.config.global_config import GlobalConfig, MCPServerConfig, MCPTransportConfig
 from kirara_ai.logger import get_logger
 from kirara_ai.mcp_module import MCPConnectionState, MCPServer, MCPServerManager
+from kirara_ai.mcp_module.compat import normalize_mcp_server_entry
 
 from ...auth.middleware import require_auth
-from .models import (MCPPromptInfo, MCPPromptSampleRequest, MCPResourceInfo, MCPServerCreateRequest, MCPServerInfo,
-                     MCPServerList, MCPServerUpdateRequest, MCPStatistics, MCPToolInfo)
+from .models import (
+    REDACTED_SECRET,
+    MCPPromptInfo,
+    MCPPromptSampleRequest,
+    MCPResourceInfo,
+    MCPServerCreateRequest,
+    MCPServerInfo,
+    MCPServerList,
+    MCPServerUpdateRequest,
+    MCPStatistics,
+    MCPToolCallRequest,
+    MCPToolInfo,
+)
 
 # 创建蓝图
 mcp_bp = Blueprint("mcp", __name__)
 logger = get_logger("WebServer.MCP")
 
+_SECRET_KEY_PARTS = (
+    "key",
+    "token",
+    "secret",
+    "password",
+    "credential",
+    "cookie",
+    "authorization",
+)
+
+
+def _is_secret_key(key: object) -> bool:
+    normalized = str(key).lower().replace("-", "_")
+    return any(part in normalized for part in _SECRET_KEY_PARTS)
+
+
+def _redact_value(value: Any, *, force: bool = False) -> Any:
+    """Redact secret-shaped values while retaining useful metadata shape."""
+    if force:
+        return REDACTED_SECRET
+    if isinstance(value, Mapping):
+        return {
+            str(key): _redact_value(item, force=_is_secret_key(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_value(item) for item in value]
+    return value
+
+
+def _redact_transport(transport: MCPTransportConfig) -> Dict[str, Any]:
+    raw = _redact_value(
+        transport.model_dump(mode="python", by_alias=True, exclude_none=False)
+    )
+    raw["env"] = {str(key): REDACTED_SECRET for key in (transport.env or {})}
+    raw["headers"] = {str(key): REDACTED_SECRET for key in (transport.headers or {})}
+    return raw
+
+
+def _merge_secret_map(current: Mapping[str, str], incoming: Mapping[str, str]) -> Dict[str, str]:
+    """Keep stored credentials when the client sends the public mask."""
+    merged = dict(current)
+    for key, value in incoming.items():
+        if value == REDACTED_SECRET and key in merged:
+            continue
+        merged[str(key)] = str(value)
+    return merged
+
+
+def _public_error(message: str = "MCP operation failed") -> Dict[str, str]:
+    """Keep transport credentials and remote exception details out of API errors."""
+    return {"message": message}
+
+
+def _api_tool_name(manager: MCPServerManager, server_id: str, original_name: str) -> Optional[str]:
+    """Resolve an API server-local tool name to the manager's display name."""
+    for display_name, entry in manager.get_tools().items():
+        if entry.server_id == server_id and entry.original_name == original_name:
+            return display_name
+    return None
+
 
 def _convert_to_server_info(server: MCPServer) -> MCPServerInfo:
     """将服务器对象转换为MCPServerInfo响应对象"""
+    config = server.server_config
     return MCPServerInfo(
-        id=server.server_config.id,
-        description=server.server_config.description,
-        connection_type=server.server_config.connection_type,
-        command=server.server_config.command,
-        args=" ".join(server.server_config.args) if isinstance(
-            server.server_config.args, list) else server.server_config.args,
-        url=getattr(server.server_config, 'url', None),
-        connection_state=server.state.name.lower()
+        id=config.id,
+        name=config.name,
+        server=_redact_transport(config.server),
+        apps=config.apps,
+        description=config.description,
+        tags=config.tags,
+        homepage=config.homepage,
+        docs=config.docs,
+        metadata=_redact_value(config.metadata),
+        connection_state=server.state.name.lower(),
     )
+
+
+def _server_payload(server_info: MCPServerInfo) -> Dict[str, Any]:
+    return server_info.model_dump(mode="json", by_alias=True)
 
 
 def _convert_to_prompt_info(prompt) -> MCPPromptInfo:
@@ -79,7 +162,7 @@ async def list_servers():
         # 获取查询参数
         page = request.args.get('page', 1, type=int)
         page_size = request.args.get('page_size', 20, type=int)
-        connection_type = request.args.get('connection_type')
+        transport_type = request.args.get('type') or request.args.get('connection_type')
         status = request.args.get('status')
         query = request.args.get('query')
 
@@ -93,7 +176,7 @@ async def list_servers():
         server_list = []
         for server_id, server in servers.items():
             # 过滤条件
-            if connection_type and server.server_config.connection_type != connection_type:
+            if transport_type and server.server_config.server.type != transport_type:
                 continue
 
             server_state = server.state.name.lower()
@@ -105,8 +188,19 @@ async def list_servers():
                 elif status == 'error' and server_state != 'error':
                     continue
 
-            if query and query.lower() not in server_id.lower() and (
-                    not server.server_config.command or query.lower() not in server.server_config.command.lower()):
+            searchable = " ".join(
+                value
+                for value in (
+                    server_id,
+                    server.server_config.name,
+                    server.server_config.description,
+                    server.server_config.server.command,
+                    server.server_config.server.url,
+                    " ".join(server.server_config.tags),
+                )
+                if value
+            ).lower()
+            if query and query.lower() not in searchable:
                 continue
 
             server_list.append(_convert_to_server_info(server))
@@ -125,7 +219,7 @@ async def list_servers():
             page=page,
             page_size=page_size,
             total_pages=total_pages
-        ).model_dump()
+        ).model_dump(mode="json", by_alias=True)
     except Exception as e:
         logger.opt(exception=e).error("获取MCP服务器列表失败")
         return jsonify({"message": str(e)}), 500
@@ -150,6 +244,7 @@ async def get_statistics():
         return MCPStatistics(
             total_servers=stats.get("total", 0),
             stdio_servers=stats.get("stdio", 0),
+            http_servers=stats.get("http", 0),
             sse_servers=stats.get("sse", 0),
             connected_servers=stats.get("connected", 0),
             disconnected_servers=stats.get("disconnected", 0),
@@ -158,7 +253,7 @@ async def get_statistics():
         ).model_dump()
     except Exception as e:
         logger.opt(exception=e).error("获取MCP统计信息失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500
 
 
 @mcp_bp.route("/servers/<server_id>", methods=["GET"])
@@ -178,7 +273,7 @@ async def get_server(server_id: str):
         server_info = _convert_to_server_info(server)
 
         # 返回响应
-        return server_info.model_dump()
+        return _server_payload(server_info)
     except Exception as e:
         logger.opt(exception=e).error(f"获取MCP服务器 {server_id} 详情失败")
         return jsonify({"message": str(e)}), 500
@@ -248,7 +343,7 @@ async def create_server():
     try:
         # 获取请求数据
         data = await request.get_json()
-        request_data = MCPServerCreateRequest(**data)
+        request_data = MCPServerCreateRequest.model_validate(data or {})
 
         # 从容器中获取全局配置和MCP服务器管理器
         config: GlobalConfig = g.container.resolve(GlobalConfig)
@@ -258,15 +353,9 @@ async def create_server():
         if not manager.is_server_id_available(request_data.id):
             return jsonify({"message": f"服务器ID '{request_data.id}' 已存在或服务器正在运行"}), 409
 
-        # 创建新的MCP服务器配置
-        new_server_config = MCPServerConfig(
-            id=request_data.id,
-            description=request_data.description or "",
-            command=request_data.command,
-            args=request_data.args.split(" "),
-            connection_type=request_data.connection_type,
-            enable=True
-        )
+        # Normalize once at the API boundary.  Runtime code only receives the
+        # same canonical shape that CC Switch exports.
+        new_server_config = normalize_mcp_server_entry(request_data.to_config())
 
         # 添加到全局配置中
         config.mcp.servers.append(new_server_config)
@@ -281,10 +370,13 @@ async def create_server():
         server_info = _convert_to_server_info(server)
 
         # 返回响应
-        return server_info.model_dump()
+        return _server_payload(server_info)
+    except (ValueError, TypeError) as e:
+        logger.warning("Rejected invalid MCP server payload")
+        return jsonify(_public_error(str(e))), 400
     except Exception as e:
         logger.opt(exception=e).error("创建MCP服务器失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500
 
 
 @mcp_bp.route("/servers/<server_id>", methods=["PUT"])
@@ -294,7 +386,7 @@ async def update_server(server_id: str):
     try:
         # 获取请求数据
         data = await request.get_json()
-        request_data = MCPServerUpdateRequest(**data)
+        request_data = MCPServerUpdateRequest.model_validate(data or {})
 
         # 从容器中获取全局配置和MCP服务器管理器
         config: GlobalConfig = g.container.resolve(GlobalConfig)
@@ -315,29 +407,24 @@ async def update_server(server_id: str):
         if current_server and current_server.state == MCPConnectionState.CONNECTED:
             return jsonify({"message": "无法更新正在运行的服务器，请先停止服务器"}), 409
 
-        # 更新服务器配置
+        # Apply only explicitly supplied canonical fields.  Masked secrets
+        # mean "leave the stored value unchanged".
         server_config = config.mcp.servers[server_index]
+        updates = request_data.update_values()
+        if "name" in updates:
+            server_config.name = updates["name"]
+        if "server" in updates and updates["server"] is not None:
+            incoming = MCPTransportConfig.model_validate(updates["server"])
+            incoming.env = _merge_secret_map(server_config.server.env, incoming.env)
+            incoming.headers = _merge_secret_map(server_config.server.headers, incoming.headers)
+            server_config.server = incoming
+        for field in ("apps", "description", "tags", "homepage", "docs", "metadata"):
+            if field in updates:
+                setattr(server_config, field, updates[field])
 
-        if request_data.description is not None:
-            server_config.description = request_data.description
-
-        if request_data.command is not None:
-            server_config.command = request_data.command
-
-        if request_data.args is not None:
-            server_config.args = request_data.args.split(" ")
-
-        if request_data.connection_type is not None:
-            server_config.connection_type = request_data.connection_type
-            
-        if request_data.url is not None:
-            server_config.url = request_data.url
-
-        if request_data.headers is not None:
-            server_config.headers = request_data.headers
-            
-        if request_data.env is not None:
-            server_config.env = request_data.env
+        normalized = normalize_mcp_server_entry(server_config)
+        config.mcp.servers[server_index] = normalized
+        server_config = normalized
 
         # 保存配置
         ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
@@ -345,23 +432,22 @@ async def update_server(server_id: str):
         # 停止服务器
         await manager.stop_server(server_id)
 
-        # 重新加载服务器
+        # Reload only.  Connecting is an explicit lifecycle action, which
+        # avoids an edit request unexpectedly launching a local process or
+        # making a remote request.
         current_server = manager.load_server(server_config)
-
-        try:
-            await manager.connect_server(server_id)
-        except Exception as e:
-            logger.opt(exception=e).error(f"重新连接MCP服务器 {server_id} 失败")
-            return jsonify({"message": str(e)}), 500
 
         # 转换为响应格式
         server_info = _convert_to_server_info(current_server)
 
         # 返回响应
-        return server_info.model_dump()
+        return _server_payload(server_info)
+    except (ValueError, TypeError) as e:
+        logger.warning("Rejected invalid MCP server update")
+        return jsonify(_public_error(str(e))), 400
     except Exception as e:
         logger.opt(exception=e).error(f"更新MCP服务器 {server_id} 失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500
 
 
 @mcp_bp.route("/servers/<server_id>", methods=["DELETE"])
@@ -475,10 +561,11 @@ async def get_all_tools():
 @require_auth
 async def call_tool(server_id: str):
     """调用工具"""
+    tool_name = "unknown"
     try:
-        data: Dict[str, str | Dict[str, Any]] = await request.get_json()
-        toolName: str = cast(str, data.get("toolName"))
-        params: Dict[str, Any] = cast(Dict[str, Any], data.get("params"))
+        data = await request.get_json()
+        request_data = MCPToolCallRequest.model_validate(data or {})
+        tool_name = request_data.toolName
 
         # 从容器中获取MCP服务器管理器
         manager: MCPServerManager = g.container.resolve(MCPServerManager)
@@ -488,14 +575,34 @@ async def call_tool(server_id: str):
         if not server:
             return jsonify({"message": f"服务器 '{server_id}' 不存在"}), 404
 
-        # 获取工具
-        result = await server.call_tool(toolName, params)
+        manager_tool_name = _api_tool_name(manager, server_id, request_data.toolName)
+        if manager_tool_name is None:
+            return jsonify({"message": f"工具 '{request_data.toolName}' 不存在"}), 404
 
-        # 返回响应
-        return jsonify({"result": result.model_dump()})
+        result = await manager.call_tool(
+            manager_tool_name,
+            request_data.params,
+            agent_allowlist=set(request_data.agent_allowlist)
+            if request_data.agent_allowlist is not None
+            else None,
+            session_allowlist=set(request_data.session_allowlist)
+            if request_data.session_allowlist is not None
+            else None,
+            workflow_allowlist=set(request_data.workflow_allowlist)
+            if request_data.workflow_allowlist is not None
+            else None,
+            confirmed=request_data.confirmed,
+        )
+        if result is None:
+            return jsonify({"message": "工具调用未获准或服务器未连接"}), 403
+
+        return jsonify({"result": result.model_dump(mode="json")})
+    except ValueError as e:
+        logger.warning("Rejected invalid MCP tool call")
+        return jsonify(_public_error(str(e))), 400
     except Exception as e:
-        logger.opt(exception=e).error(f"调用工具 {toolName} 失败")
-        return jsonify({"message": str(e)}), 500
+        logger.opt(exception=e).error(f"调用工具 {tool_name} 失败")
+        return jsonify(_public_error()), 500
 
 @mcp_bp.route("/servers/<server_id>/prompts", methods=["GET"])
 @require_auth

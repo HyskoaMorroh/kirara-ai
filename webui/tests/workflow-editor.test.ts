@@ -229,6 +229,170 @@ describe('workflow editor history', () => {
     expect(viewState.value.canUndo).toBe(false)
   })
 
+  it('records a batch of node and wire mutations at one history point', () => {
+    const intent = workflowEditorModel.getIntent()
+    const viewState = workflowEditorModel.getViewState()
+    intent.initialize({
+      blocks: [{ type_name: 'core:source', name: 'source', config: {}, position: { x: 0, y: 0 } }],
+      wires: [],
+      blockTypes: [],
+      name: 'before',
+      workflowId: 'user:batch-history',
+      config: { max_execution_time: 0 }
+    })
+
+    workflowEditorModel.performBatchAction(() => {
+      intent.updateBlocks([
+        ...viewState.value.blocks,
+        { type_name: 'core:target', name: 'target', config: {}, position: { x: 300, y: 0 } }
+      ])
+      intent.updateWires([
+        {
+          source_block: 'source',
+          source_output: 'result',
+          target_block: 'target',
+          target_input: 'value'
+        }
+      ])
+    })
+
+    expect(viewState.value.blocks).toHaveLength(2)
+    expect(viewState.value.wires).toHaveLength(1)
+    intent.undo()
+    expect(viewState.value.blocks).toHaveLength(1)
+    expect(viewState.value.wires).toEqual([])
+    expect(viewState.value.canUndo).toBe(false)
+    intent.redo()
+    expect(viewState.value.blocks).toHaveLength(2)
+    expect(viewState.value.wires).toHaveLength(1)
+  })
+
+  it('does not add a second history point for nested batches and restores suppression after async failure', async () => {
+    const intent = workflowEditorModel.getIntent()
+    const viewState = workflowEditorModel.getViewState()
+    intent.initialize({
+      blocks: [],
+      wires: [],
+      blockTypes: [],
+      name: 'before',
+      workflowId: 'user:nested-batch-history',
+      config: { max_execution_time: 0 }
+    })
+
+    await expect(
+      workflowEditorModel.performBatchAction(async () => {
+        workflowEditorModel.performBatchAction(() => {
+          intent.updateName('during')
+        })
+        await Promise.resolve()
+        throw new Error('batch failed')
+      })
+    ).rejects.toThrow('batch failed')
+
+    expect(viewState.value.skipSavingHistory).toBe(false)
+    expect(viewState.value.canUndo).toBe(true)
+    intent.undo()
+    expect(viewState.value.name).toBe('before')
+  })
+
+  it('keeps redo intact when a batch makes no observable change', () => {
+    const intent = workflowEditorModel.getIntent()
+    const viewState = workflowEditorModel.getViewState()
+    intent.initialize({
+      blocks: [],
+      wires: [],
+      blockTypes: [],
+      name: 'before',
+      workflowId: 'user:no-op-batch',
+      config: { max_execution_time: 0 }
+    })
+    workflowEditorModel.performBatchAction(() => intent.updateName('after'))
+    intent.undo()
+    expect(viewState.value.name).toBe('before')
+    expect(viewState.value.canRedo).toBe(true)
+
+    const result = workflowEditorModel.performBatchAction(() => 42)
+
+    expect(result).toBe(42)
+    expect(viewState.value.canRedo).toBe(true)
+    intent.redo()
+    expect(viewState.value.name).toBe('after')
+  })
+
+  it('does not create history for a failed batch that made no change', () => {
+    const intent = workflowEditorModel.getIntent()
+    const viewState = workflowEditorModel.getViewState()
+    intent.initialize({
+      blocks: [],
+      wires: [],
+      blockTypes: [],
+      name: 'before',
+      workflowId: 'user:failed-no-op-batch',
+      config: { max_execution_time: 0 }
+    })
+
+    expect(() =>
+      workflowEditorModel.performBatchAction(() => {
+        throw new Error('batch failed before mutation')
+      })
+    ).toThrow('batch failed before mutation')
+
+    expect(viewState.value.skipSavingHistory).toBe(false)
+    expect(viewState.value.canUndo).toBe(false)
+  })
+
+  it('restores batch state when reading a returned then property throws', () => {
+    const intent = workflowEditorModel.getIntent()
+    const viewState = workflowEditorModel.getViewState()
+    intent.initialize({
+      blocks: [],
+      wires: [],
+      blockTypes: [],
+      name: 'before',
+      workflowId: 'user:batch-then-getter',
+      config: { max_execution_time: 0 }
+    })
+    const thenable = Object.defineProperty({}, 'then', {
+      get() {
+        throw new Error('batch then getter failure')
+      }
+    })
+
+    expect(() => workflowEditorModel.performBatchAction(() => thenable)).toThrow(
+      'batch then getter failure'
+    )
+    expect(viewState.value.skipSavingHistory).toBe(false)
+    expect(viewState.value.canUndo).toBe(false)
+
+    workflowEditorModel.performBatchAction(() => intent.updateName('after'))
+    intent.undo()
+    expect(viewState.value.name).toBe('before')
+  })
+
+  it('preserves an asynchronous batch return value and records its changes once', async () => {
+    const intent = workflowEditorModel.getIntent()
+    const viewState = workflowEditorModel.getViewState()
+    intent.initialize({
+      blocks: [],
+      wires: [],
+      blockTypes: [],
+      name: 'before',
+      workflowId: 'user:async-batch-result',
+      config: { max_execution_time: 0 }
+    })
+
+    const result = await workflowEditorModel.performBatchAction(async () => {
+      await Promise.resolve()
+      intent.updateName('after')
+      return 'saved'
+    })
+
+    expect(result).toBe('saved')
+    intent.undo()
+    expect(viewState.value.name).toBe('before')
+    expect(viewState.value.canUndo).toBe(false)
+  })
+
   it('keeps history suppression active until an async action settles', async () => {
     const intent = workflowEditorModel.getIntent()
     const viewState = workflowEditorModel.getViewState()

@@ -14,6 +14,31 @@ type PortWire = WorkflowWire & {
   target_input: string
 }
 
+export type WorkflowConnection = {
+  source: string | null
+  sourceHandle?: string | null
+  target: string | null
+  targetHandle?: string | null
+}
+
+export type WorkflowConnectionValidation =
+  | { valid: true }
+  | {
+      valid: false
+      reason:
+        | 'missing_endpoint'
+        | 'missing_source_block'
+        | 'missing_target_block'
+        | 'unknown_source_port'
+        | 'unknown_target_port'
+        | 'incompatible_types'
+    }
+
+export type WorkflowConnectionPortIndex = {
+  outputs: Map<string, Map<string, string>>
+  inputs: Map<string, Map<string, string>>
+}
+
 type TypedBlock = {
   type_name: string
 }
@@ -137,6 +162,40 @@ export const filterWiresForBlocks = <TWire extends WorkflowWire, TBlock extends 
   )
 }
 
+/** Convert the persistent wire model without losing dynamic handle identity. */
+export const workflowWireToConnection = (wire: PortWire): WorkflowConnection => ({
+  source: wire.source_block,
+  sourceHandle: wire.source_output,
+  target: wire.target_block,
+  targetHandle: wire.target_input
+})
+
+/** Reject incomplete new connections, while allowing explicit preservation of legacy handles. */
+export const connectionToWorkflowWire = (
+  connection: WorkflowConnection,
+  options: { preserveIncompleteHandles?: boolean } = {}
+): PortWire => {
+  if (!connection.source || !connection.target) {
+    throw new Error('连线必须包含源节点、源端口、目标节点和目标端口')
+  }
+  if (
+    !options.preserveIncompleteHandles &&
+    (!connection.sourceHandle || !connection.targetHandle)
+  ) {
+    throw new Error('连线必须包含源节点、源端口、目标节点和目标端口')
+  }
+  return {
+    source_block: connection.source,
+    source_output: connection.sourceHandle || '',
+    target_block: connection.target,
+    target_input: connection.targetHandle || ''
+  }
+}
+
+/** Keep the existing edge identity stable for Vue Flow selection and update behavior. */
+export const createWorkflowEdgeId = (connection: WorkflowConnection) =>
+  `${connection.source}-${connection.sourceHandle}-${connection.target}-${connection.targetHandle}`
+
 export const mergeWorkflowConfig = <TConfig extends object>(
   config: TConfig | undefined,
   fallback: TConfig
@@ -239,6 +298,64 @@ export const getCanvasBlockPorts = (
     }
   }
   return { inputs, outputs }
+}
+
+/** Build the reusable lookup used by both canvas drag checks and pure validation. */
+export const createWorkflowConnectionPortIndex = (
+  blocks: ConfiguredBlock[],
+  blockTypes: BlockType[]
+): WorkflowConnectionPortIndex => {
+  const outputs = new Map<string, Map<string, string>>()
+  const inputs = new Map<string, Map<string, string>>()
+
+  for (const block of blocks) {
+    const ports = getCanvasBlockPorts(block, getCanvasBlockType(block, blockTypes))
+    outputs.set(block.name, new Map(ports.outputs.map((port) => [port.name, port.type])))
+    inputs.set(block.name, new Map(ports.inputs.map((port) => [port.name, port.type])))
+  }
+
+  return { outputs, inputs }
+}
+
+/**
+ * Validate direction and type against the same dynamic port model used for rendering.
+ * A missing compatibility table means the caller deliberately chose existence-only
+ * validation; an available table must explicitly allow the source/target pair.
+ */
+export const validateWorkflowConnection = (
+  connection: WorkflowConnection,
+  blocks: ConfiguredBlock[],
+  blockTypes: BlockType[],
+  compatibility?: Record<string, Record<string, boolean>>,
+  portIndex?: WorkflowConnectionPortIndex
+): WorkflowConnectionValidation => {
+  if (
+    !connection.source ||
+    !connection.sourceHandle ||
+    !connection.target ||
+    !connection.targetHandle
+  ) {
+    return { valid: false, reason: 'missing_endpoint' }
+  }
+
+  const index = portIndex || createWorkflowConnectionPortIndex(blocks, blockTypes)
+  if (!index.outputs.has(connection.source)) {
+    return { valid: false, reason: 'missing_source_block' }
+  }
+  if (!index.inputs.has(connection.target)) {
+    return { valid: false, reason: 'missing_target_block' }
+  }
+
+  const sourceType = index.outputs.get(connection.source)?.get(connection.sourceHandle)
+  if (!sourceType) return { valid: false, reason: 'unknown_source_port' }
+
+  const targetType = index.inputs.get(connection.target)?.get(connection.targetHandle)
+  if (!targetType) return { valid: false, reason: 'unknown_target_port' }
+
+  if (compatibility && compatibility[sourceType]?.[targetType] !== true) {
+    return { valid: false, reason: 'incompatible_types' }
+  }
+  return { valid: true }
 }
 
 /** Diagnose graph data that cannot be represented by current block metadata. */

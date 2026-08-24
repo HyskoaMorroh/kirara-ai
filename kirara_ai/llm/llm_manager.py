@@ -1,9 +1,11 @@
 import random
 import queue
+import inspect
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Union
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterator, List, Optional, Union
 
 from typing_extensions import deprecated
 
@@ -12,14 +14,19 @@ from kirara_ai.events.event_bus import EventBus
 from kirara_ai.events.llm import LLMAdapterLoaded, LLMAdapterUnloaded
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.ioc.inject import Inject
-from kirara_ai.llm.adapter import LLMBackendAdapter
+from kirara_ai.llm.adapter import LLMBackendAdapter, LLMChatStreamProtocol
 from kirara_ai.llm.llm_registry import LLMBackendRegistry
 from kirara_ai.llm.model_types import ModelAbility, ModelType
 from kirara_ai.llm.format.request import LLMChatRequest
+from kirara_ai.llm.format.response import LLMChatResponse, Message
+from kirara_ai.llm.pricing import CostSnapshot, PriceCatalog, calculate_cost_snapshot
 from kirara_ai.llm.resilience import (ChatExecutionResult, CircuitBreaker, CircuitState, ErrorCategory,
                                       FailoverExecutionError, ProviderAttempt, RequestCancelledError,
-                                      RETRYABLE_ERROR_CATEGORIES, classify_llm_error, sanitize_error_summary)
+                                      RETRYABLE_ERROR_CATEGORIES, StreamExecutionResult,
+                                      StreamInterruptedError, classify_llm_error, sanitize_error_summary)
 from kirara_ai.logger import get_logger
+from kirara_ai.tracing import LLMTracer
+from kirara_ai.tracing.decorator import mark_provider_usage, suppress_llm_chat_tracing
 
 
 class LLMManager:
@@ -246,9 +253,73 @@ class LLMManager:
         deadline_seconds: Optional[float] = None,
         cancellation_event: Optional[threading.Event] = None,
     ) -> ChatExecutionResult:
+        candidates = self.get_provider_candidates(request.model or "")
+        tracer = self._get_llm_tracer()
+        trace_id = self._start_logical_trace(tracer, request, candidates)
+        requested_at = datetime.now(timezone.utc)
+        initial_provider = self._candidate_provider(candidates)
+        try:
+            result = self._execute_chat(
+                request,
+                max_retries=max_retries,
+                retry_delay=retry_delay,
+                deadline_seconds=deadline_seconds,
+                cancellation_event=cancellation_event,
+                trace_id=trace_id,
+            )
+        except RequestCancelledError as error:
+            self._fail_logical_trace(
+                tracer,
+                trace_id,
+                request,
+                error,
+                error.attempts,
+                backend_name=self._final_provider(error.attempts, initial_provider),
+            )
+            raise
+        except Exception as error:
+            attempts = getattr(error, "attempts", ())
+            self._fail_logical_trace(
+                tracer,
+                trace_id,
+                request,
+                error,
+                attempts,
+                backend_name=self._final_provider(attempts, initial_provider),
+            )
+            raise
+        response = mark_provider_usage(result.response)
+        if response is not result.response:
+            result.response = response
+        final_provider = self._final_provider(result.attempts, initial_provider)
+        self._complete_logical_trace(
+            tracer,
+            trace_id,
+            request,
+            response,
+            result.attempts,
+            backend_name=final_provider,
+            cost_snapshot=self._calculate_cost_snapshot(
+                response,
+                provider=final_provider,
+                requested_at=requested_at,
+            ),
+        )
+        return result
+
+    def _execute_chat(
+        self,
+        request: LLMChatRequest,
+        *,
+        max_retries: Optional[int] = None,
+        retry_delay: Optional[float] = None,
+        deadline_seconds: Optional[float] = None,
+        cancellation_event: Optional[threading.Event] = None,
+        trace_id: Optional[str] = None,
+    ) -> ChatExecutionResult:
         """Execute one synchronous chat request through a bounded provider queue."""
         model_id = request.model or ""
-        trace_id = uuid.uuid4().hex
+        trace_id = trace_id or uuid.uuid4().hex
         if self._is_cancelled(cancellation_event):
             raise RequestCancelledError(trace_id=trace_id)
         candidates = self.get_provider_candidates(model_id)
@@ -410,6 +481,319 @@ class LLMManager:
             cause=last_error,
         ) from last_error
 
+    def execute_stream(
+        self,
+        request: LLMChatRequest,
+        *,
+        max_retries: Optional[int] = None,
+        retry_delay: Optional[float] = None,
+        deadline_seconds: Optional[float] = None,
+        cancellation_event: Optional[threading.Event] = None,
+    ) -> StreamExecutionResult:
+        """Execute a stream without joining output from different providers."""
+        model_id = request.model or ""
+        attempts: List[ProviderAttempt] = []
+        candidates = self.get_provider_candidates(model_id)
+        tracer = self._get_llm_tracer()
+        trace_id = self._start_logical_trace(tracer, request, candidates)
+        requested_at = datetime.now(timezone.utc)
+        initial_provider = self._candidate_provider(candidates)
+        try:
+            if self._is_cancelled(cancellation_event):
+                raise RequestCancelledError(trace_id=trace_id)
+            if not candidates:
+                raise FailoverExecutionError(
+                    f"No eligible providers for model {model_id}", attempts=attempts
+                )
+
+            started = time.monotonic()
+            configured_deadline = deadline_seconds
+            if configured_deadline is None:
+                first_config = self._backend_config(getattr(candidates[0], "backend_name", ""))
+                configured_deadline = (
+                    first_config.request_timeout_seconds if first_config else 60.0
+                )
+            deadline = started + max(0.0, configured_deadline)
+            provider_iterator = self._execute_stream_iterator(
+                request=request,
+                candidates=candidates,
+                trace_id=trace_id,
+                attempts=attempts,
+                deadline=deadline,
+                max_retries=max_retries,
+                retry_delay=retry_delay,
+                cancellation_event=cancellation_event,
+            )
+        except Exception as error:
+            self._fail_logical_trace(
+                tracer,
+                trace_id,
+                request,
+                error,
+                getattr(error, "attempts", attempts),
+                backend_name=initial_provider,
+            )
+            raise
+        iterator = self._trace_stream_iterator(
+            provider_iterator,
+            tracer=tracer,
+            trace_id=trace_id,
+            request=request,
+            attempts=attempts,
+            initial_provider=initial_provider,
+            requested_at=requested_at,
+        )
+        return StreamExecutionResult(
+            iterator,
+            trace_id=trace_id,
+            attempts=attempts,
+            on_close=lambda: self._fail_logical_trace(
+                tracer,
+                trace_id,
+                request,
+                "LLM stream closed before iteration",
+                attempts,
+                backend_name=initial_provider,
+            ),
+        )
+
+    def _trace_stream_iterator(
+        self,
+        iterator: Iterator[Any],
+        *,
+        tracer,
+        trace_id: str,
+        request: LLMChatRequest,
+        attempts: List[ProviderAttempt],
+        initial_provider: str,
+        requested_at: datetime,
+    ) -> Iterator[Any]:
+        responses: List[LLMChatResponse] = []
+        try:
+            for chunk in iterator:
+                if isinstance(chunk, LLMChatResponse):
+                    chunk = mark_provider_usage(chunk)
+                    responses.append(chunk)
+                yield chunk
+        except GeneratorExit:
+            self._fail_logical_trace(
+                tracer,
+                trace_id,
+                request,
+                "LLM stream closed before completion",
+                attempts,
+                backend_name=self._final_provider(attempts, initial_provider),
+            )
+            raise
+        except Exception as error:
+            error_attempts = getattr(error, "attempts", attempts)
+            self._fail_logical_trace(
+                tracer,
+                trace_id,
+                request,
+                error,
+                error_attempts,
+                backend_name=self._final_provider(error_attempts, initial_provider),
+            )
+            raise
+        else:
+            response = self._combine_stream_responses(responses, request)
+            final_provider = self._final_provider(attempts, initial_provider)
+            self._complete_logical_trace(
+                tracer,
+                trace_id,
+                request,
+                response,
+                attempts,
+                backend_name=final_provider,
+                cost_snapshot=self._calculate_cost_snapshot(
+                    response,
+                    provider=final_provider,
+                    requested_at=requested_at,
+                ),
+            )
+
+    def _execute_stream_iterator(
+        self,
+        *,
+        request: LLMChatRequest,
+        candidates: List[LLMBackendAdapter],
+        trace_id: str,
+        attempts: List[ProviderAttempt],
+        deadline: float,
+        max_retries: Optional[int],
+        retry_delay: Optional[float],
+        cancellation_event: Optional[threading.Event],
+    ) -> Iterator[Any]:
+        model_id = request.model or ""
+        last_error: Optional[BaseException] = None
+        stop_failover = False
+
+        for provider_index, adapter in enumerate(candidates):
+            if self._is_cancelled(cancellation_event):
+                raise RequestCancelledError(trace_id=trace_id, attempts=attempts)
+            provider_name = getattr(adapter, "backend_name", f"provider-{provider_index + 1}")
+            backend = self._backend_config(provider_name)
+            breaker = self._resilience_breakers.setdefault(
+                provider_name,
+                CircuitBreaker(
+                    failure_threshold=backend.circuit_failure_threshold if backend else 3,
+                    error_rate_threshold=backend.circuit_error_rate_threshold if backend else 0.5,
+                    min_requests=backend.circuit_min_requests if backend else 10,
+                    recovery_timeout_seconds=backend.circuit_recovery_timeout_seconds if backend else 30,
+                    recovery_success_threshold=backend.circuit_recovery_success_threshold if backend else 2,
+                ),
+            )
+            if not breaker.acquire():
+                skipped = ProviderAttempt(
+                    trace_id=trace_id,
+                    model=model_id,
+                    provider=provider_name,
+                    attempt=len(attempts) + 1,
+                    retry_index=0,
+                    success=False,
+                    error_category="circuit_open",
+                    error_summary="provider circuit is open",
+                    started_at=time.monotonic(),
+                    completed_at=time.monotonic(),
+                )
+                attempts.append(skipped)
+                self._record_attempt(skipped)
+                continue
+
+            provider_retries = max(
+                0,
+                max_retries
+                if max_retries is not None
+                else (backend.max_retries if backend else 0),
+            )
+            base_delay = max(
+                0.0,
+                retry_delay
+                if retry_delay is not None
+                else (backend.retry_backoff_seconds if backend else 0.5),
+            )
+            max_delay = backend.retry_backoff_max_seconds if backend else 5.0
+            first_byte_timeout = (
+                backend.stream_first_byte_timeout_seconds if backend else 15.0
+            )
+            idle_timeout = backend.stream_idle_timeout_seconds if backend else 30.0
+
+            for retry_index in range(provider_retries + 1):
+                attempt_started = time.monotonic()
+                if attempt_started >= deadline:
+                    stop_failover = True
+                    break
+                first_byte_at: Optional[float] = None
+                try:
+                    for chunk, received_at in self._stream_adapter_events(
+                        adapter,
+                        request,
+                        deadline=deadline,
+                        first_byte_timeout=first_byte_timeout,
+                        idle_timeout=idle_timeout,
+                        cancellation_event=cancellation_event,
+                    ):
+                        if first_byte_at is None:
+                            first_byte_at = received_at
+                        yield chunk
+                    completed = time.monotonic()
+                    breaker.record_success(completed)
+                    successful_attempt = ProviderAttempt(
+                        trace_id=trace_id,
+                        model=model_id,
+                        provider=provider_name,
+                        attempt=len(attempts) + 1,
+                        retry_index=retry_index,
+                        success=True,
+                        started_at=attempt_started,
+                        first_byte_at=first_byte_at,
+                        completed_at=completed,
+                        partial_output=False,
+                    )
+                    attempts.append(successful_attempt)
+                    self._record_attempt(successful_attempt)
+                    return
+                except RequestCancelledError as error:
+                    completed = time.monotonic()
+                    breaker.record_cancelled()
+                    cancelled_attempt = ProviderAttempt(
+                        trace_id=trace_id,
+                        model=model_id,
+                        provider=provider_name,
+                        attempt=len(attempts) + 1,
+                        retry_index=retry_index,
+                        success=False,
+                        error_category=ErrorCategory.CANCELLED.value,
+                        error_summary=sanitize_error_summary(error),
+                        started_at=attempt_started,
+                        first_byte_at=first_byte_at,
+                        completed_at=completed,
+                        partial_output=first_byte_at is not None,
+                    )
+                    attempts.append(cancelled_attempt)
+                    self._record_attempt(cancelled_attempt)
+                    error.trace_id = trace_id
+                    error.attempts = list(attempts)
+                    raise
+                except Exception as error:
+                    last_error = error
+                    category = classify_llm_error(error)
+                    completed = time.monotonic()
+                    breaker.record_failure(completed)
+                    failed_attempt = ProviderAttempt(
+                        trace_id=trace_id,
+                        model=model_id,
+                        provider=provider_name,
+                        attempt=len(attempts) + 1,
+                        retry_index=retry_index,
+                        success=False,
+                        error_category=category.value,
+                        error_summary=sanitize_error_summary(error),
+                        started_at=attempt_started,
+                        first_byte_at=first_byte_at,
+                        completed_at=completed,
+                        partial_output=first_byte_at is not None,
+                    )
+                    attempts.append(failed_attempt)
+                    self._record_attempt(failed_attempt)
+                    if first_byte_at is not None:
+                        raise StreamInterruptedError(
+                            f"LLM stream interrupted after partial output (trace_id={trace_id})",
+                            trace_id=trace_id,
+                            attempts=attempts,
+                            cause=error,
+                        ) from error
+                    if category not in RETRYABLE_ERROR_CATEGORIES:
+                        stop_failover = True
+                        break
+                    if retry_index >= provider_retries:
+                        break
+                    delay = min(max_delay, base_delay * (2**retry_index))
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        stop_failover = True
+                        break
+                    if self._wait_for_backoff(
+                        delay=min(delay, remaining),
+                        cancellation_event=cancellation_event,
+                    ):
+                        raise RequestCancelledError(
+                            trace_id=trace_id,
+                            attempts=attempts,
+                        )
+            if stop_failover:
+                break
+
+        summary = ", ".join(
+            f"{attempt.provider}:{attempt.error_category or 'failed'}" for attempt in attempts
+        ) or "no provider attempt"
+        raise FailoverExecutionError(
+            f"LLM stream failed (trace_id={trace_id}): {summary}",
+            attempts=attempts,
+            cause=last_error,
+        ) from last_error
+
     def get_resilience_status(self) -> List[Dict[str, Any]]:
         """Return provider health and sanitized recent attempts for operational UI."""
         if not self._resilience_initialized:
@@ -443,6 +827,7 @@ class LLMManager:
                             "started_at": item.started_at,
                             "completed_at": item.completed_at,
                             "first_byte_at": item.first_byte_at,
+                            "partial_output": item.partial_output,
                         }
                         for item in self._resilience_attempts.get(provider_name, [])[-20:]
                     ],
@@ -471,6 +856,184 @@ class LLMManager:
             except Exception:
                 pass
 
+    def _get_llm_tracer(self):
+        container = getattr(self, "container", None)
+        if container is None:
+            return None
+        try:
+            tracer = container.resolve(LLMTracer)
+        except KeyError:
+            return None
+        return tracer if all(callable(getattr(tracer, name, None)) for name in (
+            "start_request_tracking", "complete_request_tracking", "fail_request_tracking"
+        )) else None
+
+    def _get_price_catalog(self) -> Optional[PriceCatalog]:
+        container = getattr(self, "container", None)
+        if container is None:
+            return None
+        try:
+            catalog = container.resolve(PriceCatalog)
+        except KeyError:
+            return None
+        return catalog if isinstance(catalog, PriceCatalog) else None
+
+    @staticmethod
+    def _candidate_provider(candidates) -> str:
+        return getattr(candidates[0], "backend_name", "unknown") if candidates else "unknown"
+
+    @staticmethod
+    def _final_provider(attempts, fallback: str) -> str:
+        attempts = list(attempts or ())
+        successful = next((item.provider for item in reversed(attempts) if item.success), None)
+        return successful or (attempts[-1].provider if attempts else fallback)
+
+    @staticmethod
+    def _combine_stream_responses(
+        responses: List[LLMChatResponse],
+        request: LLMChatRequest,
+    ) -> LLMChatResponse:
+        if not responses:
+            return LLMChatResponse(
+                model=request.model,
+                message=Message(role="assistant", content=[]),
+            )
+        if len(responses) == 1:
+            return responses[0].model_copy(deep=True)
+
+        content = []
+        tool_calls = []
+        model = request.model
+        usage = None
+        finish_reason = None
+        role = "assistant"
+        for response in responses:
+            model = response.model or model
+            role = response.message.role
+            content.extend(part.model_copy(deep=True) for part in response.message.content)
+            if response.message.tool_calls:
+                tool_calls.extend(call.model_copy(deep=True) for call in response.message.tool_calls)
+            usage = response.usage or usage
+            finish_reason = response.message.finish_reason or finish_reason
+        return LLMChatResponse(
+            model=model,
+            usage=usage.model_copy(deep=True) if usage is not None else None,
+            message=Message(
+                role=role,
+                content=content,
+                tool_calls=tool_calls or None,
+                finish_reason=finish_reason,
+            ),
+        )
+
+    def _calculate_cost_snapshot(
+        self,
+        response: LLMChatResponse,
+        *,
+        provider: str,
+        requested_at: datetime,
+    ) -> Optional[CostSnapshot]:
+        if response.usage is None:
+            return None
+        catalog = self._get_price_catalog()
+        if catalog is None:
+            return None
+        model = response.model
+        if not model:
+            return None
+        try:
+            price = catalog.resolve(provider, model, requested_at)
+            return calculate_cost_snapshot(
+                response.usage,
+                price,
+                requested_at=requested_at,
+                provider=provider,
+                model=model,
+            )
+        except (LookupError, ValueError):
+            return None
+
+    @staticmethod
+    def _start_logical_trace(tracer, request, candidates) -> str:
+        fallback = uuid.uuid4().hex
+        if tracer is None:
+            return fallback
+        provider = getattr(candidates[0], "backend_name", "unknown") if candidates else "unknown"
+        try:
+            return tracer.start_request_tracking(provider, request)
+        except Exception:
+            return fallback
+
+    @staticmethod
+    def _complete_logical_trace(
+        tracer,
+        trace_id,
+        request,
+        response,
+        attempts,
+        *,
+        backend_name: str,
+        cost_snapshot: Optional[CostSnapshot] = None,
+    ) -> None:
+        if tracer is None:
+            return
+        complete = tracer.complete_request_tracking
+        try:
+            complete(
+                trace_id,
+                request,
+                response,
+                **LLMManager._supported_trace_kwargs(
+                    complete,
+                    attempts=attempts,
+                    backend_name=backend_name,
+                    cost_snapshot=cost_snapshot,
+                ),
+            )
+        except Exception:
+            return
+
+    @staticmethod
+    def _fail_logical_trace(
+        tracer,
+        trace_id,
+        request,
+        error,
+        attempts,
+        *,
+        backend_name: str,
+    ) -> None:
+        if tracer is None:
+            return
+        fail = tracer.fail_request_tracking
+        try:
+            fail(
+                trace_id,
+                request,
+                error,
+                **LLMManager._supported_trace_kwargs(
+                    fail,
+                    attempts=attempts,
+                    backend_name=backend_name,
+                ),
+            )
+        except Exception:
+            return
+
+    @staticmethod
+    def _supported_trace_kwargs(method, **metadata) -> Dict[str, Any]:
+        """Filter optional trace metadata without retrying a failed method call."""
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return metadata
+        if any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        ):
+            return metadata
+        return {name: value for name, value in metadata.items() if name in parameters}
+
     @classmethod
     def _call_adapter_with_deadline(
         cls,
@@ -490,7 +1053,8 @@ class LLMManager:
 
         def invoke() -> None:
             try:
-                result.put((True, adapter.chat(request)))
+                with suppress_llm_chat_tracing():
+                    result.put((True, adapter.chat(request)))
             except BaseException as error:
                 result.put((False, error))
 
@@ -516,6 +1080,76 @@ class LLMManager:
         if succeeded:
             return value
         raise value
+
+    @classmethod
+    def _stream_adapter_events(
+        cls,
+        adapter: LLMBackendAdapter,
+        request: LLMChatRequest,
+        *,
+        deadline: float,
+        first_byte_timeout: float,
+        idle_timeout: float,
+        cancellation_event=None,
+    ) -> Iterator[tuple[Any, float]]:
+        """Bridge a blocking stream iterator through a bounded cancellation-aware wait."""
+        events: queue.Queue = queue.Queue()
+        stopped = threading.Event()
+
+        def publish(kind: str, value: Any = None) -> bool:
+            if stopped.is_set():
+                return False
+            events.put((kind, value, time.monotonic()))
+            return True
+
+        def invoke() -> None:
+            try:
+                with suppress_llm_chat_tracing():
+                    if isinstance(adapter, LLMChatStreamProtocol):
+                        stream = adapter.stream_chat(request)
+                        for chunk in stream:
+                            if not publish("chunk", chunk):
+                                return
+                    else:
+                        if not publish("chunk", adapter.chat(request)):
+                            return
+                publish("done")
+            except BaseException as error:
+                publish("error", error)
+
+        worker = threading.Thread(target=invoke, name="kirara-llm-stream", daemon=True)
+        worker.start()
+        waiting_for_first = True
+        activity_deadline = min(deadline, time.monotonic() + first_byte_timeout)
+        try:
+            while True:
+                if cls._is_cancelled(cancellation_event):
+                    cls._cancel_adapter_request(adapter, request)
+                    raise RequestCancelledError()
+                remaining = min(deadline, activity_deadline) - time.monotonic()
+                if remaining <= 0:
+                    cls._cancel_adapter_request(adapter, request)
+                    phase = "first chunk" if waiting_for_first else "stream idle"
+                    raise TimeoutError(f"LLM {phase} timeout exceeded")
+                try:
+                    kind, value, received_at = events.get(timeout=min(0.05, remaining))
+                except queue.Empty:
+                    continue
+                if cls._is_cancelled(cancellation_event):
+                    cls._cancel_adapter_request(adapter, request)
+                    raise RequestCancelledError()
+                if received_at > deadline:
+                    cls._cancel_adapter_request(adapter, request)
+                    raise TimeoutError("LLM request deadline exceeded")
+                if kind == "error":
+                    raise value
+                if kind == "done":
+                    return
+                waiting_for_first = False
+                activity_deadline = min(deadline, received_at + idle_timeout)
+                yield value, received_at
+        finally:
+            stopped.set()
 
     @staticmethod
     def _wait_for_backoff(delay: float, cancellation_event=None) -> bool:

@@ -28,6 +28,17 @@ def sse_config():
     )
 
 @pytest.fixture
+def http_config():
+    return MCPServerConfig(
+        id="test-http",
+        server={
+            "type": "http",
+            "url": "https://mcp.example.test/mcp",
+            "headers": {"Authorization": "Bearer test"},
+        },
+    )
+
+@pytest.fixture
 def invalid_config():
     return MCPServerConfig(
         id="test-invalid",
@@ -111,6 +122,26 @@ async def test_connect_disconnect_sse(sse_config):
         disconnect_result = await server.disconnect()
         assert disconnect_result is True
         assert server.state == MCPConnectionState.DISCONNECTED
+
+@pytest.mark.asyncio
+async def test_connect_disconnect_http_uses_streamable_http_transport(http_config):
+    with patch("kirara_ai.mcp_module.server.streamablehttp_client") as mock_http_client, \
+         patch("kirara_ai.mcp_module.server.ClientSession", return_value=MockClientSession()):
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(
+            return_value=(AsyncMock(), AsyncMock(), lambda: "session-id")
+        )
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_http_client.return_value = mock_client
+
+        server = MCPServer(http_config)
+
+        assert await server.connect() is True
+        mock_http_client.assert_called_once_with(
+            "https://mcp.example.test/mcp",
+            headers={"Authorization": "Bearer test"},
+        )
+        assert await server.disconnect() is True
 
 @pytest.mark.asyncio
 async def test_connect_invalid_config(invalid_config):

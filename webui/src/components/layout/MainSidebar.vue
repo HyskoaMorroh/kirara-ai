@@ -13,7 +13,8 @@ import {
   SettingsOutline,
   TerminalOutline,
   ImageOutline,
-  AnalyticsOutline
+  AnalyticsOutline,
+  ShieldCheckmarkOutline
 } from '@vicons/ionicons5'
 import IconMCP from '@/components/icons/IconMCP.vue'
 import { NIcon } from 'naive-ui'
@@ -72,6 +73,11 @@ const menuOptions: MenuOption[] = [
     label: () => '插件管理',
     key: 'plugins',
     icon: renderIcon(ExtensionPuzzleOutline)
+  },
+  {
+    label: () => '资源管理',
+    key: 'resources',
+    icon: renderIcon(ShieldCheckmarkOutline)
   },
   {
     label: () => '系统设置',

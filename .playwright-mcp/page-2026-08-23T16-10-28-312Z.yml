@@ -1,0 +1,58 @@
+- generic [ref=f2e4]:
+  - complementary [ref=f2e5]:
+    - generic [ref=f2e6]:
+      - generic [ref=f2e7]: Kirara AI
+      - menu [ref=f2e9]:
+        - menuitem "快速开始" [ref=f2e10]:
+          - img [ref=f2e11] [cursor=pointer]
+          - text: 快速开始
+        - menuitem "控制台" [ref=f2e16]:
+          - img [ref=f2e17] [cursor=pointer]
+          - text: 控制台
+        - menuitem "系统记录" [ref=f2e21]:
+          - img [ref=f2e22] [cursor=pointer]
+          - text: 系统记录
+        - menuitem "聊天平台管理" [ref=f2e31]:
+          - img [ref=f2e32] [cursor=pointer]
+          - text: 聊天平台管理
+        - menuitem "模型管理" [ref=f2e35]:
+          - img [ref=f2e36] [cursor=pointer]
+          - text: 模型管理
+        - menuitem "工作流" [ref=f2e42]:
+          - img [ref=f2e43] [cursor=pointer]
+          - text: 工作流
+        - menuitem "MCP" [ref=f2e50]:
+          - img [ref=f2e51] [cursor=pointer]
+          - text: MCP
+        - menuitem "媒体管理" [ref=f2e57]:
+          - img [ref=f2e58] [cursor=pointer]
+          - text: 媒体管理
+        - menuitem "插件管理" [ref=f2e64]:
+          - img [ref=f2e65] [cursor=pointer]
+          - text: 插件管理
+        - menuitem "资源管理" [ref=f2e68]:
+          - img [ref=f2e69] [cursor=pointer]
+          - text: 资源管理
+        - menuitem "系统设置" [ref=f2e73]:
+          - img [ref=f2e74] [cursor=pointer]
+          - text: 系统设置
+    - generic [ref=f2e77] [cursor=pointer]
+  - generic [ref=f2e85]:
+    - banner [ref=f2e86]:
+      - generic [ref=f2e87]:
+        - generic [ref=f2e88]: LIFECYCLE CONTROL
+        - heading "资源管理" [level=1] [ref=f2e89]
+        - paragraph [ref=f2e90]: 统一管理 Skill、Prompt 与 Session 的来源、版本、权限和执行状态。
+      - button "审计记录" [ref=f2e91] [cursor=pointer]
+      - button "安装资源" [ref=f2e98] [cursor=pointer]
+    - region "资源筛选" [ref=f2e105]:
+      - generic [ref=f2e108] [cursor=pointer]:
+        - generic "全部资源" [ref=f2e109]
+        - img "loading" [ref=f2e111]
+      - generic [ref=f2e118]: 0 项资源
+  - generic [ref=f2e126]:
+    - superscript [ref=f2e128]
+    - generic [ref=f2e129]: "系统状态: 连接中..."
+    - superscript [ref=f2e131]
+    - text: "API: 未连接 WebUI 版本: v3.3.0b11"
+    - button "切换到浅色主题" [ref=f2e132] [cursor=pointer]

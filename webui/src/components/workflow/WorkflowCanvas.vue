@@ -78,6 +78,9 @@ import {
   snapToGrid
 } from './useLayout'
 import {
+  connectionToWorkflowWire,
+  createWorkflowConnectionPortIndex,
+  createWorkflowEdgeId,
   filterWiresForBlocks,
   getCanvasBlockPorts,
   getCanvasBlockType,
@@ -86,6 +89,8 @@ import {
   getWorkflowGraphIssues,
   mergeWorkflowConfig,
   parseWorkflowTransferPayload,
+  validateWorkflowConnection,
+  workflowWireToConnection,
   WORKFLOW_TRANSFER_SCHEMA_VERSION
 } from './workflow-data'
 import { createUniqueNodeName } from './workflow-node-utils'
@@ -263,33 +268,12 @@ const notifyCompatibilityUnavailable = () => {
  * 所以单纯拖动节点（仅坐标变化）不会让索引失效。
  */
 const connectionTypeIndex = computed(() => {
-  const outputs = new Map<string, Map<string, string>>()
-  const inputs = new Map<string, Map<string, string>>()
-  const blockTypeByName = new Map(props.blockTypes.map((type) => [type.type_name, type]))
-
-  for (const node of nodes.value) {
-    const typeName = node.data?.blockType?.type_name
-    const blockType = typeName ? blockTypeByName.get(typeName) : undefined
-    if (!blockType) continue
-
-    // 代码节点的端口是用户在配置里自定义的，类型只能从 config 里取
-    const isCodeBlock = typeName === 'internal:code'
-    const outputList: any[] = isCodeBlock
-      ? node.data?.config?.outputs || []
-      : blockType.outputs || []
-    const inputList: any[] = isCodeBlock ? node.data?.config?.inputs || [] : blockType.inputs || []
-
-    outputs.set(
-      node.id,
-      new Map(outputList.filter((port) => port?.name && port?.type).map((port) => [port.name, port.type]))
-    )
-    inputs.set(
-      node.id,
-      new Map(inputList.filter((port) => port?.name && port?.type).map((port) => [port.name, port.type]))
-    )
-  }
-
-  return { outputs, inputs }
+  const blocks = nodes.value.map((node) => ({
+    name: node.id,
+    type_name: node.data?.blockType?.type_name || '',
+    config: node.data?.config || {}
+  }))
+  return createWorkflowConnectionPortIndex(blocks, props.blockTypes)
 })
 
 /** 校验结果缓存；索引或兼容性表变化时整体作废 */
@@ -304,22 +288,13 @@ const isValidConnection = (connection: Connection) => {
   const cached = connectionCheckCache.get(cacheKey)
   if (cached !== undefined) return cached
 
-  const check = () => {
-    const index = connectionTypeIndex.value
-    // 获取源输出和目标输入的类型
-    const sourceType = index.outputs.get(connection.source || '')?.get(connection.sourceHandle || '')
-    const targetType = index.inputs.get(connection.target || '')?.get(connection.targetHandle || '')
-    if (!sourceType || !targetType) return false
-
-    // 兼容性表不可用时降级放行：接口故障不应让整块画布失去连线能力。
-    // 端口是否存在仍然照常校验，只跳过类型匹配这一步。
-    if (!typeCompatibilityReady.value) return true
-
-    // 使用类型兼容性映射检查
-    return typeCompatibility.value[sourceType]?.[targetType] === true
-  }
-
-  const result = check()
+  const result = validateWorkflowConnection(
+    connection,
+    [],
+    props.blockTypes,
+    typeCompatibilityReady.value ? typeCompatibility.value : undefined,
+    connectionTypeIndex.value
+  ).valid
   connectionCheckCache.set(cacheKey, result)
   return result
 }
@@ -389,7 +364,7 @@ const buildEdge = (
 
   return {
     ...params,
-    id: `${params.source}-${params.sourceHandle}-${params.target}-${params.targetHandle}`,
+    id: createWorkflowEdgeId(params),
     markerEnd: MarkerType.ArrowClosed,
     style: { stroke: getTypeColor(type || 'unknown').color_on, strokeWidth: 2 },
     class: 'workflow-edge',
@@ -460,12 +435,7 @@ const convertWiresToEdges = (wires: Wire[], blocks = viewState.value.blocks): Ed
   return filterWiresForBlocks(wires, blocks)
     .map((wire) => {
       // 构造一个Connection对象，然后使用buildEdge函数
-      const connection: Connection = {
-        source: wire.source_block,
-        sourceHandle: wire.source_output,
-        target: wire.target_block,
-        targetHandle: wire.target_input
-      }
+      const connection: Connection = workflowWireToConnection(wire) as Connection
 
       // 已保存的历史连线需要优先可见。端口元数据缺失时，节点转换会创建
       // 占位 Handle，这里用中性色恢复边；用户新建/改接连线仍走严格校验。
@@ -492,12 +462,9 @@ const convertNodesToBlocks = (sourceNodes = nodes.value): BlockInstance[] => {
 
 // 将 vue-flow 边转换回 Wire
 const convertEdgesToWires = (): Wire[] => {
-  return edges.value.map((edge) => ({
-    source_block: edge.source,
-    source_output: edge.sourceHandle || '',
-    target_block: edge.target,
-    target_input: edge.targetHandle || ''
-  }))
+  return edges.value.map((edge) =>
+    connectionToWorkflowWire(edge, { preserveIncompleteHandles: true })
+  )
 }
 
 // ==================== 数据更新函数 ====================
@@ -928,8 +895,8 @@ const handleImport = async () => {
             )
         )
 
-        recordHistoryBeforeCanvasMutation()
-        workflowEditorModel.performActionWithoutHistory(() => {
+        flushGraphData()
+        workflowEditorModel.performBatchAction(() => {
           const importedName = data.name || viewState.value.name
           const importedDescription = data.description || viewState.value.description
           const importedWorkflowId = data.workflow_id || viewState.value.workflowId

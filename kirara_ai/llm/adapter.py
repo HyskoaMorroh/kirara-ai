@@ -1,5 +1,5 @@
 from abc import ABC
-from typing import List, Protocol, runtime_checkable
+from typing import Iterable, List, Protocol, runtime_checkable
 
 from kirara_ai.config.global_config import ModelConfig
 from kirara_ai.llm.format.request import LLMChatRequest
@@ -17,6 +17,10 @@ class AutoDetectModelsProtocol(Protocol):
 @runtime_checkable
 class LLMChatProtocol(Protocol):
     def chat(self, req: LLMChatRequest) -> LLMChatResponse: ...
+
+@runtime_checkable
+class LLMChatStreamProtocol(Protocol):
+    def stream_chat(self, req: LLMChatRequest) -> Iterable[LLMChatResponse]: ...
 
 @runtime_checkable
 class LLMEmbeddingProtocol(Protocol):

@@ -1,0 +1,27 @@
+[  467133ms] [WARNING] [Vue warn]: Failed to resolve component: n-icon
+If this is a native custom element, make sure to exclude it from component resolution via compilerOptions.isCustomElement. 
+  at <FrpServiceCard> 
+  at <Space vertical="" gap=32 > 
+  at <TabPane name="webservice" tab="Web服务" key="webservice" > 
+  at <TransitionGroup name="next-transition" onBeforeLeave=fn<onAnimationBeforeLeave> onEnter=fn<onAnimationEnter>  ... > 
+  at <Tabs type="line" animated="" class="settings-tabs"  ... > 
+  at <Card title="系统设置" class="settings-card" > 
+  at <BasicSettings onVnodeUnmounted=fn<onVnodeUnmounted> ref=Ref< null > > 
+  at <RouterView> 
+  at <ResizeObserver onResize=fn<handleContentResize> > 
+  at <ResizeObserver onResize=fn<handleContainerResize> > 
+  at <Scrollbar onScroll=undefined ref="scrollbarInstRef" theme= {name: Scrollbar, common: Object, self: }  ... > 
+  at <LayoutContent class="main-content bg" native-scrollbar=false > 
+  at <Layout> 
+  at <Layout key=0 has-sider="" position="absolute" > 
+  at <AppLayout onVnodeUnmounted=fn<onVnodeUnmounted> ref=Ref< Proxy(Object) > > 
+  at <RouterView> 
+  at <DialogProvider> 
+  at <LoadingBarProvider> 
+  at <MessageProvider> 
+  at <ModalProvider> 
+  at <ConfigProvider theme= {name: dark, common: Object, Alert: Object, Anchor: Object, AutoComplete: Object} theme-overrides= {common: Object, Button: Object, Card: Object, Dialog: Object, Input: Object} abstract=""  ... > 
+  at <App> @ http://127.0.0.1:15175/node_modules/.vite/deps/chunk-VT7FWPCL.js?v=111ad46d:2133
+[  467246ms] [VERBOSE] [DOM] Input elements should have autocomplete attributes (suggested: "current-password"): (More info: https://goo.gl/9p2vKq) %o @ http://127.0.0.1:15175/settings:0
+[  467246ms] [VERBOSE] [DOM] Input elements should have autocomplete attributes (suggested: "new-password"): (More info: https://goo.gl/9p2vKq) %o @ http://127.0.0.1:15175/settings:0
+[  467246ms] [VERBOSE] [DOM] Input elements should have autocomplete attributes (suggested: "new-password"): (More info: https://goo.gl/9p2vKq) %o @ http://127.0.0.1:15175/settings:0

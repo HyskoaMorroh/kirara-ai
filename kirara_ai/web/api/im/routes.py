@@ -157,7 +157,7 @@ async def list_adapters():
             )
         )
 
-    return IMAdapterList(adapters=adapters).model_dump()
+    return IMAdapterList(adapters=adapters).model_dump(exclude_none=True)
 
 
 @im_bp.route("/adapters/<adapter_id>", methods=["GET"])
@@ -192,7 +192,7 @@ async def get_adapter(adapter_id: str):
             bot_profile=bot_profile,
             health=health,
         )
-    ).model_dump()
+    ).model_dump(exclude_none=True)
 
 
 @im_bp.route("/adapters", methods=["POST"])
@@ -251,7 +251,7 @@ async def create_adapter():
             config=_redact_sensitive_config(adapter_info.config),
             health=health,
         )
-    ).model_dump()
+    ).model_dump(exclude_none=True)
 
 
 @im_bp.route("/adapters/<adapter_id>", methods=["PUT"])
@@ -372,7 +372,7 @@ async def update_adapter(adapter_id: str):
         config=_redact_sensitive_config(adapter_info.config),
         bot_profile=bot_profile,
         health=health
-    )).model_dump()
+    )).model_dump(exclude_none=True)
 
 
 @im_bp.route("/adapters/<adapter_id>", methods=["DELETE"])
