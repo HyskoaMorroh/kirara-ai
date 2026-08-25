@@ -12,6 +12,7 @@ from hypercorn.asyncio import serve
 from hypercorn.config import Config
 from quart import Quart, g, jsonify
 
+from kirara_ai.config import DATA_PATH
 from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.logger import HypercornLoggerWrapper, get_logger
@@ -77,6 +78,21 @@ BUILTIN_STATIC_FOLDER = Path(__file__).parent / "static"
 logger = get_logger("WebServer")
 
 custom_static_assets: dict[str, str] = {}
+
+
+def resolve_password_file_path(configured_path: str) -> Path:
+    """Resolve relative authentication storage inside the mounted data root."""
+
+    configured = Path(configured_path).expanduser()
+    if configured.is_absolute():
+        return configured.resolve()
+    if configured.parts == ("data", "web", "password.hash"):
+        configured = Path("web/password.hash")
+    data_root = Path(DATA_PATH).resolve()
+    resolved = (data_root / configured).resolve()
+    if not resolved.is_relative_to(data_root):
+        raise ValueError("relative web password_file must remain inside DATA_PATH")
+    return resolved
 
 def create_web_api_app(container: DependencyContainer) -> Quart:
     """创建 Web API 应用（Quart）"""
@@ -260,7 +276,7 @@ class WebServer:
         container.register(
             AuthService,
             FileBasedAuthService(
-                password_file=Path(global_config.web.password_file),
+                password_file=resolve_password_file_path(global_config.web.password_file),
                 secret_key=global_config.web.secret_key,
             ),
         )

@@ -48,9 +48,16 @@ const router = createRouter({
           component: () => import('@/views/ComingSoon.vue')
         },
         {
+          path: '/llm/agents',
+          name: 'llm-agents',
+          component: () => import('@/views/llm/AgentView.vue'),
+          meta: { title: 'Agent 管理', requiresAuth: true }
+        },
+        {
           path: '/llm/chat',
           name: 'llm-chat',
-          component: () => import('@/views/ComingSoon.vue')
+          component: () => import('@/views/llm/ChatView.vue'),
+          meta: { title: 'Agent 对话', requiresAuth: true }
         },
         {
           path: '/workflow',

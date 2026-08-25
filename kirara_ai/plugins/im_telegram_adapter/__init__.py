@@ -1,7 +1,7 @@
 import asyncio
 import os
 
-from im_telegram_adapter.adapter import TelegramAdapter, TelegramConfig
+from .adapter import TelegramAdapter, TelegramConfig
 
 from kirara_ai.logger import get_logger
 from kirara_ai.plugin_manager.plugin import Plugin

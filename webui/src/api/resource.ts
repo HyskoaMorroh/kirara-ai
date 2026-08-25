@@ -1,6 +1,6 @@
 import { http } from '@/utils/http'
 
-export type ResourceType = 'skill' | 'prompt' | 'session' | 'mcp'
+export type ResourceType = 'skill' | 'prompt' | 'session' | 'memory' | 'mcp' | 'hook'
 
 export interface ResourceVersion {
   version: string
@@ -61,6 +61,41 @@ export interface SkillsSearchResponse {
   offset: number
 }
 
+export interface CatalogItem {
+  catalog_id: string
+  type: Exclude<ResourceType, 'session'>
+  name: string
+  description: string
+  version?: string
+  source?: string
+  source_key?: string
+  branch?: string
+  source_url?: string
+  tags?: string[]
+  owner?: string
+  repository?: string
+  directory?: string
+  installed?: boolean
+  installed_resource_id?: string | null
+  enabled?: boolean
+  installs?: number
+}
+
+export interface CatalogSearchResponse {
+  query: string
+  type: string | null
+  items: CatalogItem[]
+  total_count: number
+  limit: number
+  offset: number
+  remote: {
+    provider: 'skills.sh' | string
+    status: 'not_requested' | 'ok' | 'error'
+    error: string | null
+    total_count: number | null
+  }
+}
+
 export interface ResourceUpdateCheck {
   resource_id: string
   source_key?: string | null
@@ -109,34 +144,6 @@ export interface ResourceStorageStatus {
   backup_root: string
   writable: boolean
   versioned: boolean
-}
-
-export interface AgentResourceBinding {
-  resource_id: string
-  resource_type: ResourceType
-  version: string
-  enabled: boolean
-}
-
-export interface AgentSummary {
-  agent_id: string
-  display_name?: string | null
-  enabled: boolean
-  workflow_id?: string | null
-  model_priority: string[]
-  prompt_bindings: AgentResourceBinding[]
-  skill_bindings: AgentResourceBinding[]
-  mcp_bindings: AgentResourceBinding[]
-  relations: {
-    channels: string[]
-    accounts: Array<{
-      channel_type: string
-      adapter_instance: string
-      account_scope: string
-    }>
-    sessions: string[]
-    is_default: boolean
-  }
 }
 
 export async function listResources(type?: ResourceType) {
@@ -236,6 +243,20 @@ export async function searchSkills(query: string, limit = 20, offset = 0) {
   return http.get<SkillsSearchResponse>(`/resources/skills-sh/search?${params.toString()}`)
 }
 
+export async function searchResourceCatalog(type: Exclude<ResourceType, 'session'> | undefined, query: string, limit = 20, offset = 0) {
+  const params = new URLSearchParams({ q: query, limit: String(limit), offset: String(offset) })
+  if (type) params.set('type', type)
+  return http.get<CatalogSearchResponse>(`/resources/catalog/search?${params.toString()}`)
+}
+
+export async function getCatalogItem(catalogId: string) {
+  return http.get<CatalogItem>(`/resources/catalog/${encodeURIComponent(catalogId)}`)
+}
+
+export async function installCatalogItem(catalogId: string, branch = 'main') {
+  return http.post<ManagedResource>('/resources/catalog/install', { catalog_id: catalogId, branch })
+}
+
 export async function installRemoteSkill(skill: {
   owner: string
   name: string
@@ -261,10 +282,6 @@ export async function deleteResourceBackup(backupId: string, confirmed = false) 
   return http.delete(`/resources/backups/${encodeURIComponent(backupId)}`, {
     body: JSON.stringify({ confirmed })
   })
-}
-
-export async function listAgents() {
-  return http.get<AgentSummary[]>('/agents')
 }
 
 export async function listResourceAudit(resourceId?: string, offset = 0, limit = 20) {

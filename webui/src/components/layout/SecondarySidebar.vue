@@ -20,7 +20,23 @@ const menuOptions = computed<MenuOption[]>(() => {
     case 'im':
       return []
     case 'llm':
-      return []
+      return [
+        {
+          label: () => '模型配置',
+          key: 'llm-config',
+          path: '/llm'
+        },
+        {
+          label: () => 'Agent 管理',
+          key: 'llm-agents',
+          path: '/llm/agents'
+        },
+        {
+          label: () => 'Agent 对话',
+          key: 'llm-chat',
+          path: '/llm/chat'
+        }
+      ]
     case 'workflow':
       return [
         {
@@ -82,7 +98,7 @@ const getDefaultSubModule = (module: string) => {
     case 'im':
       return 'platforms'
     case 'llm':
-      return 'backends'
+      return 'config'
     case 'workflow':
       return 'list'
     case 'plugins':
@@ -100,6 +116,8 @@ const getMenuTitle = (key: string) => {
   switch (key) {
     case 'workflow':
       return '工作流'
+    case 'llm':
+      return '模型与 Agent'
     case 'plugins':
       return '插件'
     case 'memory':

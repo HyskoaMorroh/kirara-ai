@@ -1,9 +1,13 @@
 from functools import wraps
 
+from pydantic import ValidationError
 from quart import Blueprint, g, jsonify, request
 
+from kirara_ai.agent_runtime import AgentRegistry, RuntimeStatus
 from kirara_ai.config.config_loader import CONFIG_FILE, ConfigLoader
 from kirara_ai.config.global_config import GlobalConfig
+from kirara_ai.im.message import IMMessage, TextMessage
+from kirara_ai.im.sender import ChatSender
 from kirara_ai.llm.adapter import AutoDetectModelsProtocol
 from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.llm.llm_registry import LLMBackendRegistry
@@ -13,12 +17,86 @@ from kirara_ai.scheduler.model_catalog import normalize_detected_models
 from kirara_ai.scheduler.scheduler import CONFIG_UPDATE_LOCK
 from kirara_ai.web.api.llm.models import (LLMAdapterConfigSchema, LLMAdapterTypes, LLMBackendCreateRequest,
                                           LLMBackendInfo, LLMBackendList, LLMBackendListResponse, LLMBackendResponse,
-                                          LLMBackendUpdateRequest, ModelConfigListResponse)
+                                          LLMBackendUpdateRequest, ModelConfigListResponse, WebUIChatRequest)
+from kirara_ai.web.api.llm.webui_adapter import WebUIAdapter
+from kirara_ai.workflow.core.dispatch.dispatcher import WorkflowDispatcher
 
 from ...auth.middleware import require_auth
 
 llm_bp = Blueprint("llm", __name__)
 logger = get_logger("WebServer.LLM")
+
+
+@llm_bp.route("/chat", methods=["POST"])
+@require_auth
+async def webui_chat():
+    """Route a WebUI message through the same dispatcher used by IM channels."""
+
+    try:
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "Request body must be a JSON object"}), 400
+        chat_request = WebUIChatRequest.model_validate(payload)
+
+        if chat_request.chat_type == "group":
+            sender = ChatSender.from_group_chat(
+                user_id=chat_request.session_id,
+                group_id=chat_request.group_id or "",
+                display_name=chat_request.username,
+            )
+        else:
+            sender = ChatSender.from_c2c_chat(
+                user_id=chat_request.session_id,
+                display_name=chat_request.username,
+            )
+
+        message = IMMessage(
+            sender=sender,
+            message_elements=[TextMessage(chat_request.message)],
+        )
+        adapter = WebUIAdapter(session_agent_id=chat_request.agent_id)
+        dispatcher: WorkflowDispatcher = g.container.resolve(WorkflowDispatcher)
+        result = await dispatcher.dispatch(adapter, message, require_agent=True)
+        if result is None:
+            return jsonify({"error": "No dispatch rule handled this message"}), 409
+
+        context = result.context
+        if context is None:
+            from kirara_ai.agent_runtime import ChannelContext
+
+            context = ChannelContext.from_message(adapter, message)
+
+        if result.status is RuntimeStatus.FAILED:
+            logger.warning(
+                "WebUI Agent runtime failed with type {}",
+                (result.error or {}).get("type", "RuntimeError"),
+            )
+            return jsonify({"error": "Agent runtime failed"}), 502
+
+        return jsonify(
+            {
+                "status": result.status.value,
+                "text": result.text,
+                "agent_id": result.agent_id,
+                "session_id": chat_request.session_id,
+                "session_key": context.session_key,
+                "confirmation_id": result.confirmation_id,
+            }
+        )
+    except ValidationError as error:
+        logger.debug("Rejected invalid WebUI chat request: {}", error.error_count())
+        return jsonify({"error": "Invalid WebUI chat request"}), 400
+    except LookupError as error:
+        if str(error) == "No Agent is configured for this channel identity":
+            return jsonify({"error": str(error)}), 409
+        logger.warning("WebUI chat rejected: {}", error)
+        return jsonify({"error": str(error)}), 400
+    except ValueError as error:
+        logger.warning("WebUI chat rejected: {}", error)
+        return jsonify({"error": str(error)}), 400
+    except RuntimeError as error:
+        logger.opt(exception=error).error("WebUI Agent runtime dispatch failed")
+        return jsonify({"error": "Agent runtime dispatch failed"}), 502
 
 
 def _backend_info(backend) -> LLMBackendInfo:

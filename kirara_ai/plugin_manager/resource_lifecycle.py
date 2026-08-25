@@ -127,6 +127,7 @@ class ResourceLifecycleService:
         *,
         version: str | None = None,
         enabled: bool = True,
+        version_policy: str = "fixed",
     ) -> Any:
         """Build a trusted runtime binding from the server registry.
 
@@ -138,6 +139,9 @@ class ResourceLifecycleService:
 
         if resource_type not in RESOURCE_TYPES:
             raise ResourceValidationError("resource type is not supported")
+        normalized_policy = str(version_policy).strip().lower()
+        if normalized_policy not in {"fixed", "current"}:
+            raise ResourceValidationError("resource version policy must be fixed or current")
         with self._lock:
             resource = copy.deepcopy(self._require_resource(resource_id))
             if resource["type"] != resource_type:
@@ -163,6 +167,7 @@ class ResourceLifecycleService:
             enabled=enabled,
             permissions=tuple(version_record.get("permissions", ())),
             source=version_record.get("source", resource.get("source", "local")),
+            version_policy=normalized_policy,
         )
 
     def read_entry(self, resource_id: str, version: str | None = None) -> str:

@@ -8,13 +8,26 @@ from kirara_ai.config.config_loader import ConfigLoader
 from kirara_ai.config.global_config import GlobalConfig, LLMBackendConfig, ModelConfig, WebConfig
 from kirara_ai.events.event_bus import EventBus
 from kirara_ai.ioc.container import DependencyContainer
+from kirara_ai.agent_runtime import (
+    AgentDefinition,
+    AgentRegistry,
+    AgentRuntimeExecutor,
+    RuntimeResult,
+    RuntimeStatus,
+)
+from kirara_ai.im.sender import ChatType
 from kirara_ai.llm.adapter import LLMBackendAdapter, LLMChatProtocol
 from kirara_ai.llm.format.message import LLMChatTextContent
 from kirara_ai.llm.format.request import LLMChatRequest
 from kirara_ai.llm.format.response import LLMChatResponse, Message, Usage
 from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.llm.llm_registry import LLMAbility, LLMBackendRegistry
-from kirara_ai.web.app import WebServer
+from kirara_ai.web.app import WebServer, create_web_api_app
+from kirara_ai.web.auth.services import AuthService, MockAuthService
+from kirara_ai.workflow.core.dispatch.dispatcher import WorkflowDispatcher
+from kirara_ai.workflow.core.dispatch.models.dispatch_rules import CombinedDispatchRule
+from kirara_ai.workflow.core.dispatch.registry import DispatchRuleRegistry
+from kirara_ai.workflow.core.workflow.registry import WorkflowRegistry
 from tests.utils.auth_test_utils import auth_headers, setup_auth_service  # noqa
 
 # ==================== 常量区 ====================
@@ -82,6 +95,219 @@ class TestAdapter(LLMBackendAdapter, LLMChatProtocol):
             ModelConfig(id="latest-vision", type="llm", ability=0),
             "latest-text",
         ]
+
+
+class _ChatWorkflowRegistry:
+    def get_workflow(self, workflow_id, container):
+        return object()
+
+
+class _ChatRuntime:
+    def __init__(self):
+        self.calls = []
+
+    async def run(self, context, message, **options):
+        self.calls.append((context, message, options))
+        return RuntimeResult(
+            status=RuntimeStatus.COMPLETED,
+            text=f"reply:{message.content}",
+            context=context,
+            agent_id=options.get("session_agent_id"),
+        )
+
+
+@pytest.fixture
+def chat_app():
+    """Small real Quart graph for the WebUI-to-dispatcher contract."""
+    container = DependencyContainer()
+    container.register(DependencyContainer, container)
+    container.register(EventBus, EventBus())
+    container.register(AuthService, MockAuthService())
+    container.register(GlobalConfig, GlobalConfig())
+    container.register(WorkflowRegistry, _ChatWorkflowRegistry())
+    dispatch_registry = DispatchRuleRegistry(container)
+    dispatch_registry.register(
+        CombinedDispatchRule(
+            rule_id="webui-fallback",
+            name="WebUI fallback",
+            workflow_id="chat:normal",
+            rule_groups=[],
+        )
+    )
+    container.register(DispatchRuleRegistry, dispatch_registry)
+    registry = AgentRegistry()
+    registry.register(AgentDefinition(agent_id="webui-agent", model_priority=("model-a",)))
+    registry.register(AgentDefinition(agent_id="selected-agent", model_priority=("model-a",)))
+    registry.set_default("webui-agent")
+    container.register(AgentRegistry, registry)
+    runtime = _ChatRuntime()
+    container.register(AgentRuntimeExecutor, runtime)
+    container.register(WorkflowDispatcher, WorkflowDispatcher(container))
+    return create_web_api_app(container), runtime
+
+
+@pytest.fixture
+def chat_app_without_agent(monkeypatch):
+    """Real WebUI graph with an empty Agent registry and a fallback workflow."""
+    workflow_run = MagicMock(return_value={"workflow": "completed"})
+
+    class _WorkflowExecutor:
+        def __init__(self, container):
+            self.container = container
+
+        async def run(self):
+            return workflow_run()
+
+    monkeypatch.setattr(
+        "kirara_ai.workflow.core.dispatch.dispatcher.WorkflowExecutor",
+        _WorkflowExecutor,
+    )
+    container = DependencyContainer()
+    container.register(DependencyContainer, container)
+    container.register(EventBus, EventBus())
+    container.register(AuthService, MockAuthService())
+    container.register(GlobalConfig, GlobalConfig())
+    container.register(WorkflowRegistry, _ChatWorkflowRegistry())
+    dispatch_registry = DispatchRuleRegistry(container)
+    dispatch_registry.register(
+        CombinedDispatchRule(
+            rule_id="webui-fallback",
+            name="WebUI fallback",
+            workflow_id="chat:normal",
+            rule_groups=[],
+        )
+    )
+    container.register(DispatchRuleRegistry, dispatch_registry)
+    container.register(AgentRegistry, AgentRegistry())
+    runtime = _ChatRuntime()
+    container.register(AgentRuntimeExecutor, runtime)
+    container.register(WorkflowDispatcher, WorkflowDispatcher(container))
+    return create_web_api_app(container), runtime, workflow_run
+
+
+@pytest.mark.asyncio
+async def test_webui_chat_requires_authentication(chat_app):
+    app, _ = chat_app
+    client = app.test_client()
+
+    response = await client.post(
+        "/api/llm/chat",
+        json={"message": "hello", "session_id": "research-1"},
+    )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_webui_chat_dispatches_private_message_through_agent_runtime(chat_app):
+    app, runtime = chat_app
+    client = app.test_client()
+
+    response = await client.post(
+        "/api/llm/chat",
+        headers={"Authorization": "Bearer mock_token"},
+        json={
+            "message": "summarize the paper",
+            "session_id": "research-1",
+            "username": "Researcher",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = await response.get_json()
+    assert payload == {
+        "status": "completed",
+        "text": "reply:summarize the paper",
+        "agent_id": "webui-agent",
+        "session_id": "research-1",
+        "session_key": "webui/webui/webui/c2c:research-1/research-1",
+        "confirmation_id": None,
+    }
+    context, message, options = runtime.calls[0]
+    assert context.channel_type == "webui"
+    assert context.adapter_instance == "webui"
+    assert context.account_scope == "webui"
+    assert message.sender.chat_type is ChatType.C2C
+    assert options["session_agent_id"] == "webui-agent"
+
+
+@pytest.mark.asyncio
+async def test_webui_chat_allows_explicit_agent_and_preserves_group_scope(chat_app):
+    app, runtime = chat_app
+    client = app.test_client()
+
+    response = await client.post(
+        "/api/llm/chat",
+        headers={"Authorization": "Bearer mock_token"},
+        json={
+            "message": "compare these notes",
+            "session_id": "member-7",
+            "username": "Member",
+            "chat_type": "group",
+            "group_id": "study-room",
+            "agent_id": "selected-agent",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = await response.get_json()
+    assert payload["agent_id"] == "selected-agent"
+    assert payload["session_key"] == (
+        "webui/webui/webui/group:study-room/member-7"
+    )
+    context, message, options = runtime.calls[0]
+    assert message.sender.chat_type is ChatType.GROUP
+    assert context.conversation_scope == "group:study-room"
+    assert options["session_agent_id"] == "selected-agent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"message": "", "session_id": "session-a"},
+        {"message": "hello", "session_id": ""},
+        {"message": "hello", "session_id": "session-a", "chat_type": "group"},
+    ],
+)
+async def test_webui_chat_rejects_invalid_channel_identity(chat_app, body):
+    app, runtime = chat_app
+    client = app.test_client()
+
+    response = await client.post(
+        "/api/llm/chat",
+        headers={"Authorization": "Bearer mock_token"},
+        json=body,
+    )
+
+    assert response.status_code == 400
+    assert runtime.calls == []
+
+
+@pytest.mark.asyncio
+async def test_webui_chat_requires_an_agent_instead_of_running_fallback_workflow(
+    chat_app_without_agent,
+):
+    app, runtime, workflow_run = chat_app_without_agent
+    client = app.test_client()
+
+    response = await client.post(
+        "/api/llm/chat",
+        headers={"Authorization": "Bearer mock_token"},
+        json={
+            "message": "compare these notes",
+            "session_id": "member-7",
+            "chat_type": "group",
+            "group_id": "study-room",
+        },
+    )
+
+    assert response.status_code == 409
+    assert await response.get_json() == {
+        "error": "No Agent is configured for this channel identity"
+    }
+    assert runtime.calls == []
+    workflow_run.assert_not_called()
 
 # ==================== Fixtures ====================
 @pytest.fixture(scope="session")

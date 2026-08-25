@@ -1,5 +1,7 @@
 from datetime import timedelta
 
+import pytest
+
 from kirara_ai.config.global_config import GlobalConfig, WebConfig
 from kirara_ai.im.message import IMMessage, MessageElement
 from kirara_ai.im.sender import ChatSender
@@ -88,6 +90,36 @@ def test_placeholder_web_secret_is_replaced_before_auth_service_initialization()
 
     assert config.web.secret_key != placeholder
     assert auth_service.secret_key == config.web.secret_key
+
+
+def test_relative_web_password_file_is_anchored_to_data_path(tmp_path, monkeypatch):
+    from kirara_ai.web import app as web_app
+
+    data_path = tmp_path / "vps-data"
+    monkeypatch.setattr(web_app, "DATA_PATH", str(data_path))
+    container = DependencyContainer()
+    config = GlobalConfig(
+        web=WebConfig(
+            secret_key="test-secret-key",
+            password_file="./data/web/password.hash",
+        )
+    )
+    container.register(GlobalConfig, config)
+
+    WebServer(container)
+
+    assert container.resolve(AuthService).password_file == (
+        data_path / "web" / "password.hash"
+    ).resolve()
+
+
+def test_relative_web_password_file_cannot_escape_data_path(tmp_path, monkeypatch):
+    from kirara_ai.web import app as web_app
+
+    monkeypatch.setattr(web_app, "DATA_PATH", str(tmp_path / "vps-data"))
+
+    with pytest.raises(ValueError, match="must remain inside DATA_PATH"):
+        web_app.resolve_password_file_path("../password.hash")
 
 
 def test_wecom_and_telegram_table_rendering_keep_readable_structure():

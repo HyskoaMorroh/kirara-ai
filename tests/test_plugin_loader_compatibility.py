@@ -89,3 +89,45 @@ def test_real_internal_plugin_directory_discovers_onebot_adapter():
         importlib.import_module("kirara_ai.plugins.im_onebot_adapter.outbox").OneBotDelivery
         is canonical_outbox_module.OneBotDelivery
     )
+
+
+def test_real_internal_plugin_directory_discovers_qqbot_and_telegram_adapters():
+    qq_module = importlib.import_module("kirara_ai.plugins.im_qqbot_adapter")
+    telegram_module = importlib.import_module("kirara_ai.plugins.im_telegram_adapter")
+    container = DependencyContainer()
+    config = GlobalConfig()
+    container.register(GlobalConfig, config)
+    container.register(EventBus, EventBus())
+    loader = PluginLoader(
+        container,
+        str(__import__("pathlib").Path(__file__).parents[1] / "kirara_ai" / "plugins"),
+    )
+
+    loader.discover_internal_plugins()
+
+    assert "im_qqbot_adapter" in loader.internal_plugins
+    assert "im_telegram_adapter" in loader.internal_plugins
+    assert loader.plugins["im_qqbot_adapter"].__class__ is qq_module.QQBotAdapterPlugin
+    assert loader.plugins["im_telegram_adapter"].__class__ is telegram_module.TelegramAdapterPlugin
+
+
+def test_real_internal_plugin_directory_discovers_http_legacy_adapter():
+    http_module = importlib.import_module(
+        "kirara_ai.plugins.im_http_legacy_adapter"
+    )
+    container = DependencyContainer()
+    config = GlobalConfig()
+    container.register(GlobalConfig, config)
+    container.register(EventBus, EventBus())
+    loader = PluginLoader(
+        container,
+        str(__import__("pathlib").Path(__file__).parents[1] / "kirara_ai" / "plugins"),
+    )
+
+    loader.discover_internal_plugins()
+
+    assert "im_http_legacy_adapter" in loader.internal_plugins
+    assert (
+        loader.plugins["im_http_legacy_adapter"].__class__
+        is http_module.HttpLegacyAdapterPlugin
+    )

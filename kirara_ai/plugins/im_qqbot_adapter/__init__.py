@@ -1,7 +1,7 @@
 import asyncio
 import os
 
-from im_qqbot_adapter.adapter import QQBotAdapter, QQBotConfig
+from .adapter import QQBotAdapter, QQBotConfig
 
 from kirara_ai.logger import get_logger
 from kirara_ai.plugin_manager.plugin import Plugin

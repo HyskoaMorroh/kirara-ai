@@ -2,7 +2,10 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+import json
 from collections import deque
+from copy import deepcopy
+from datetime import datetime, timezone
 from functools import partial
 import time
 from typing import Callable, Dict, Iterable, NamedTuple, Optional, Tuple
@@ -41,8 +44,63 @@ class MCPServerManager:
         self.tools_cache: Dict[str, ToolCacheEntry] = {}
         self.prompts_cache: Dict[str, list[types.Prompt]] = {}
         self.resources_cache: Dict[str, list[types.Resource]] = {}
+        # Runtime state is intentionally ephemeral.  Lifecycle configuration
+        # remains owned by ResourceLifecycleService and is never polluted by
+        # connection attempts or remote error details.
+        self.runtime_status: Dict[str, dict[str, object]] = {}
         self.audit_records: deque[dict[str, object]] = deque(maxlen=1000)
         self._audit_sink = audit_sink
+
+    @staticmethod
+    def _runtime_timestamp() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _runtime_error(error: BaseException | str | None) -> str | None:
+        if error is None:
+            return None
+        if isinstance(error, str):
+            return error
+        # Keep the diagnostic useful while excluding transport URLs, command
+        # lines, credentials and arbitrary remote exception text.
+        return f"{type(error).__name__}: MCP operation failed"
+
+    def _set_runtime_status(
+        self,
+        server_id: str,
+        status: str,
+        *,
+        error: BaseException | str | None = None,
+    ) -> None:
+        if status not in {"stopped", "running", "failed"}:
+            raise ValueError("MCP runtime status is invalid")
+        self.runtime_status[server_id] = {
+            "status": status,
+            "running": status == "running",
+            "failed": status == "failed",
+            "last_error": self._runtime_error(error),
+            "last_checked_at": self._runtime_timestamp(),
+        }
+
+    def get_runtime_status(self, server_id: str) -> dict[str, object]:
+        """Return a stable, non-persistent runtime projection for one server."""
+
+        record = self.runtime_status.get(server_id)
+        server = self.servers.get(server_id)
+        state = getattr(server, "state", None) if server is not None else None
+
+        if state == MCPConnectionState.ERROR:
+            if record is None or record.get("status") != "failed":
+                self._set_runtime_status(server_id, "failed", error="MCP server reported an error")
+        elif state == MCPConnectionState.CONNECTED:
+            # A successful reconnect supersedes a previous failed attempt.
+            self._set_runtime_status(server_id, "running")
+        elif server is not None and (record is None or record.get("status") != "failed"):
+            self._set_runtime_status(server_id, "stopped")
+        elif record is None:
+            self._set_runtime_status(server_id, "stopped")
+
+        return deepcopy(self.runtime_status[server_id])
 
     def _audit_operation(
         self,
@@ -83,12 +141,64 @@ class MCPServerManager:
             
     def load_servers(self):
         """从配置加载所有MCP服务器"""
-        for server_config in self.config.mcp.servers:
+        for server_config in self._configured_servers():
             try:
                 self.load_server(server_config)
             except Exception as e:
                 logger.opt(exception=e).error(f"Failed to load MCP server {server_config.id}")
         logger.info(f"MCP server manager initialized, loaded {len(self.servers)} servers")
+
+    def _configured_servers(self) -> list[MCPServerConfig]:
+        """Merge legacy config with enabled server-managed MCP resources."""
+
+        configured: dict[str, MCPServerConfig] = {
+            item.id: item for item in self.config.mcp.servers
+        }
+        try:
+            from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
+
+            lifecycle = self.container.resolve(ResourceLifecycleService)
+            for resource in lifecycle.list_resources("mcp"):
+                if not resource.get("enabled"):
+                    continue
+                try:
+                    payload = json.loads(
+                        lifecycle.read_entry(resource["resource_id"], resource["current_version"])
+                    )
+                    server_config = MCPServerConfig.model_validate(payload)
+                    expected_id = resource["resource_id"].removeprefix("mcp.")
+                    if server_config.id != expected_id:
+                        raise ValueError("managed MCP server ID does not match its resource ID")
+                    server_config.metadata["resource_id"] = resource["resource_id"]
+                    configured[server_config.id] = server_config
+                except Exception as error:
+                    logger.warning(
+                        f"Skipping invalid enabled MCP resource {resource.get('resource_id')}: {type(error).__name__}"
+                    )
+        except (KeyError, ImportError):
+            pass
+        return list(configured.values())
+
+    async def refresh_managed_servers(self, *, connect: bool = True) -> None:
+        """Reconcile enabled MCP resources after a WebUI lifecycle change."""
+
+        desired = {item.id: item for item in self._configured_servers()}
+        for server_id in list(self.servers):
+            if server_id not in desired:
+                await self.stop_server(server_id)
+                self.servers.pop(server_id, None)
+        for server_id, server_config in desired.items():
+            current = self.servers.get(server_id)
+            if current is None:
+                self.load_server(server_config)
+                current = self.servers[server_id]
+            elif current.server_config.model_dump(mode="json") != server_config.model_dump(mode="json"):
+                await self.stop_server(server_id)
+                self.servers.pop(server_id, None)
+                self.load_server(server_config)
+                current = self.servers[server_id]
+            if connect and current.state != MCPConnectionState.CONNECTED:
+                await self.connect_server(server_id)
         
     def load_server(self, server_config: MCPServerConfig) -> MCPServer:
         """从配置加载MCP服务器"""
@@ -108,16 +218,12 @@ class MCPServerManager:
     def is_server_id_available(self, server_id: str) -> bool:
         """
         检查服务器ID是否可用
-        
-        判断条件：
-        1. 服务器ID不存在
-        2. 或者服务器存在但状态为 DISCONNECTED 或 ERROR
+
+        ``server_id`` 是持久化配置和 Agent MCP 绑定的稳定身份。只要该
+        身份已经存在，就不能被创建操作复用；断开或错误状态只表示可以
+        对已有实例执行重新连接，不表示可以覆盖已有配置。
         """
-        if server_id not in self.servers:
-            return True
-        
-        server = self.servers[server_id]
-        return server.state in [MCPConnectionState.DISCONNECTED, MCPConnectionState.ERROR]
+        return server_id not in self.servers
     
     def get_statistics(self) -> Dict[str, int]:
         """获取MCP服务器统计信息"""
@@ -158,12 +264,17 @@ class MCPServerManager:
         """连接MCP服务器"""
         server = self.servers.get(server_id)
         if not server:
+            self._clear_server_caches(server_id)
+            self._set_runtime_status(server_id, "failed", error="MCP server was not found")
             logger.error(f"Cannot connect to non-existent MCP server: {server_id}")
             return False
-        
+
         if server.state == MCPConnectionState.CONNECTED:
+            self._set_runtime_status(server_id, "running")
             logger.warning(f"MCP server {server_id} is already connected")
             return True
+
+        self._clear_server_caches(server_id)
         
         try:
             logger.info(f"Connecting to MCP server {server_id}")
@@ -174,18 +285,30 @@ class MCPServerManager:
             success = await server.connect()
             
             if not success:
+                self._clear_server_caches(server_id)
+                self._set_runtime_status(server_id, "failed", error="connection attempt failed")
                 logger.error(f"Failed to connect to MCP server {server_id}")
                 return False
             
             # 连接成功后，更新缓存
-            await self._update_tools_cache(server_id)
-            await self._update_prompts_cache(server_id)
-            await self._update_resources_cache(server_id)
+            cache_results = await asyncio.gather(
+                self._update_tools_cache(server_id),
+                self._update_prompts_cache(server_id),
+                self._update_resources_cache(server_id),
+            )
+            if not all(cache_results):
+                self._clear_server_caches(server_id)
+                self._set_runtime_status(server_id, "failed", error="capability loading failed")
+                logger.error(f"Failed to load MCP capabilities for server {server_id}")
+                return False
             
+            self._set_runtime_status(server_id, "running")
             logger.info(f"Successfully connected to MCP server {server_id}")
             return True
             
         except Exception as e:
+            self._clear_server_caches(server_id)
+            self._set_runtime_status(server_id, "failed", error=e)
             logger.opt(exception=e).error(f"Error occurred when connecting to MCP server {server_id}")
             return False
     
@@ -200,6 +323,10 @@ class MCPServerManager:
             loop.run_until_complete(asyncio.gather(*disconnect_tasks, return_exceptions=True))
             
         self.tools_cache.clear()
+        self.prompts_cache.clear()
+        self.resources_cache.clear()
+        for server_id in self.servers:
+            self._set_runtime_status(server_id, "stopped")
         
         logger.info("All MCP servers have been disconnected")
             
@@ -208,10 +335,14 @@ class MCPServerManager:
         server = self.servers.get(server_id)
         
         if not server:
+            self._clear_server_caches(server_id)
+            self._set_runtime_status(server_id, "stopped")
             logger.error(f"Cannot disconnect from non-existent MCP server: {server_id}")
             return False
         
         if server.state != MCPConnectionState.CONNECTED:
+            self._clear_server_caches(server_id)
+            self._set_runtime_status(server_id, "stopped")
             logger.warning(f"MCP server {server_id} is not connected")
             return True
         
@@ -222,20 +353,20 @@ class MCPServerManager:
             success = await server.disconnect()
             
             if not success:
+                self._set_runtime_status(server_id, "failed", error="disconnect attempt failed")
                 logger.error(f"Failed to disconnect from MCP server {server_id}")
                 return False
             
-            # 从工具缓存中移除该服务器的工具
-            self._remove_server_tools_from_cache(server_id)
-            self.prompts_cache.pop(server_id, None)
-            self.resources_cache.pop(server_id, None)
-            
+            self._set_runtime_status(server_id, "stopped")
             logger.info(f"Successfully disconnected from MCP server {server_id}")
             return True
-            
+
         except Exception as e:
+            self._set_runtime_status(server_id, "failed", error=e)
             logger.opt(exception=e).error(f"Error occurred when disconnecting from MCP server {server_id}")
             return False
+        finally:
+            self._clear_server_caches(server_id)
     
     async def _update_tools_cache(self, server_id: str) -> bool:
         """
@@ -302,6 +433,13 @@ class MCPServerManager:
         # 从缓存中移除这些工具
         for name in tool_names_to_remove:
             self.tools_cache.pop(name, None)
+
+    def _clear_server_caches(self, server_id: str) -> None:
+        """Remove every capability advertised by one server instance."""
+
+        self._remove_server_tools_from_cache(server_id)
+        self.prompts_cache.pop(server_id, None)
+        self.resources_cache.pop(server_id, None)
     
     def get_tools(self) -> Dict[str, ToolCacheEntry]:
         """

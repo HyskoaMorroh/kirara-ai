@@ -1,6 +1,6 @@
 import os
 
-from im_http_legacy_adapter.adapter import HttpLegacyAdapter, HttpLegacyConfig
+from .adapter import HttpLegacyAdapter, HttpLegacyConfig
 
 from kirara_ai.logger import get_logger
 from kirara_ai.plugin_manager.plugin import Plugin

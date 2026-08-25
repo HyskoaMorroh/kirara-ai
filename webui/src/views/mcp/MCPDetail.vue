@@ -14,7 +14,7 @@
         <div class="server-title">
           <n-icon size="24" :color="getStateColor(serverInfo?.connection_state || 'disconnected')">
             <component
-              :is="serverInfo?.connection_type === 'stdio' ? TerminalOutline : GlobeOutline"
+              :is="serverInfo?.server.type === 'stdio' ? TerminalOutline : GlobeOutline"
             />
           </n-icon>
           <span>{{ serverInfo?.id }}</span>
@@ -68,13 +68,13 @@
                 {{ serverInfo?.id }}
               </n-descriptions-item>
               <n-descriptions-item label="连接类型">
-                <n-tag :type="serverInfo?.connection_type === 'stdio' ? 'success' : 'info'">
-                  {{ serverInfo?.connection_type }}
+                <n-tag :type="serverInfo?.server.type === 'stdio' ? 'success' : 'info'">
+                  {{ serverInfo?.server.type }}
                 </n-tag>
               </n-descriptions-item>
-              <n-descriptions-item v-if="serverInfo?.connection_type === 'stdio'" label="命令">
+              <n-descriptions-item v-if="serverInfo?.server.type === 'stdio'" label="命令">
                 <div class="code-container">
-                  <code>{{ serverInfo?.command }} {{ serverInfo?.args }}</code>
+                  <code>{{ formatCommand }}</code>
                   <n-button text size="tiny" @click="copyCommand" class="copy-button">
                     <template #icon>
                       <n-icon><copy-outline /></n-icon>
@@ -82,9 +82,9 @@
                   </n-button>
                 </div>
               </n-descriptions-item>
-              <n-descriptions-item v-if="serverInfo?.connection_type === 'sse'" label="URL">
+              <n-descriptions-item v-if="serverInfo?.server.type !== 'stdio'" label="URL">
                 <div class="code-container">
-                  <code>{{ serverInfo?.url }}</code>
+                  <code>{{ serverInfo?.server.url }}</code>
                   <n-button text size="tiny" @click="copyUrl" class="copy-button">
                     <template #icon>
                       <n-icon><copy-outline /></n-icon>
@@ -102,14 +102,14 @@
         <!-- 环境变量或Headers卡片 -->
         <n-grid-item span="24 m:12">
           <n-card
-            :title="serverInfo?.connection_type === 'stdio' ? '环境变量' : 'Headers'"
+            :title="serverInfo?.server.type === 'stdio' ? '环境变量' : 'Headers'"
             class="detail-card"
             :bordered="false"
           >
             <div v-if="!hasEnvOrHeaders" class="empty-box">
               <n-empty
                 :description="`未设置${
-                  serverInfo?.connection_type === 'stdio' ? '环境变量' : 'Headers'
+                  serverInfo?.server.type === 'stdio' ? '环境变量' : 'Headers'
                 }`"
                 size="small"
               />
@@ -520,13 +520,23 @@ const isConnected = computed(() => serverInfo.value?.connection_state === 'conne
 
 const envOrHeaders = computed(() => {
   if (!serverInfo.value) return {}
-  return serverInfo.value.connection_type === 'stdio'
-    ? serverInfo.value.env || {}
-    : serverInfo.value.headers || {}
+  return serverInfo.value.server.type === 'stdio'
+    ? serverInfo.value.server.env || {}
+    : serverInfo.value.server.headers || {}
 })
 
 const hasEnvOrHeaders = computed(() => {
   return Object.keys(envOrHeaders.value).length > 0
+})
+
+const formatCommand = computed(() => {
+  if (!serverInfo.value) return ''
+  return [
+    serverInfo.value.server.command || '',
+    ...(serverInfo.value.server.args || [])
+  ]
+    .filter(Boolean)
+    .join(' ')
 })
 
 // 工具参数计算属性
@@ -787,16 +797,16 @@ const addConnectionLog = (state: string, message?: string) => {
 const copyCommand = () => {
   if (!serverInfo.value) return
 
-  const command = `${serverInfo.value.command || ''} ${serverInfo.value.args || ''}`
+  const command = formatCommand.value
   navigator.clipboard.writeText(command)
   message.success('命令已复制到剪贴板')
 }
 
 // 复制URL到剪贴板
 const copyUrl = () => {
-  if (!serverInfo.value || !serverInfo.value.url) return
+  if (!serverInfo.value || !serverInfo.value.server.url) return
 
-  navigator.clipboard.writeText(serverInfo.value.url)
+  navigator.clipboard.writeText(serverInfo.value.server.url)
   message.success('URL已复制到剪贴板')
 }
 

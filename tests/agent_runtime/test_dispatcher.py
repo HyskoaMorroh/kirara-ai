@@ -36,13 +36,38 @@ class _DispatchRegistry:
 
 
 class _Runtime:
-    def __init__(self, result: RuntimeResult):
+    def __init__(
+        self,
+        result: RuntimeResult,
+        confirm_result: RuntimeResult | None = None,
+    ):
         self.result = result
+        self.confirm_result = confirm_result or result
         self.calls = []
+        self.confirm_calls = []
 
     async def run(self, context, message, **options):
         self.calls.append((context, message, options))
         return self.result
+
+    async def confirm(self, confirmation_id, context):
+        self.confirm_calls.append((confirmation_id, context))
+        return self.confirm_result
+
+
+class _RecordingLogger:
+    def __init__(self):
+        self.debug_messages = []
+        self.error_messages = []
+
+    def debug(self, message, *args, **kwargs):
+        self.debug_messages.append(str(message))
+
+    def opt(self, *args, **kwargs):
+        return self
+
+    def error(self, message, *args, **kwargs):
+        self.error_messages.append(str(message))
 
 
 def _message(text: str = "hello") -> IMMessage:
@@ -133,7 +158,74 @@ async def test_agent_rule_sends_safe_confirmation_prompt_without_executing_again
     adapter.send_message.assert_awaited_once()
     prompt = adapter.send_message.await_args.args[0].content
     assert "confirm-123" in prompt
+    assert "确认 confirm-123" in prompt
     assert "publish it" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_confirmation_message_resumes_runtime_before_dispatch_rule_matching():
+    confirmation_id = "a" * 32
+    runtime = _Runtime(
+        RuntimeResult(status=RuntimeStatus.COMPLETED, text="must not run"),
+        RuntimeResult(status=RuntimeStatus.COMPLETED, text="confirmed reply"),
+    )
+    dispatcher = _dispatcher(_rule(agent_id="research-agent"), runtime)
+    adapter = SimpleNamespace(
+        channel_type="telegram",
+        adapter_instance="telegram-main",
+        account_scope="bot-a",
+        send_message=AsyncMock(),
+    )
+
+    result = await dispatcher.dispatch(adapter, _message(f"确认 {confirmation_id}"))
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert runtime.calls == []
+    assert len(runtime.confirm_calls) == 1
+    claimed_id, context = runtime.confirm_calls[0]
+    assert claimed_id == confirmation_id
+    assert context.session_key == "telegram/telegram-main/bot-a/c2c:sender-a/sender-a"
+    assert adapter.send_message.await_args.args[0].content == "confirmed reply"
+
+
+@pytest.mark.asyncio
+async def test_confirmation_message_uses_safe_failure_reply():
+    confirmation_id = "b" * 32
+    runtime = _Runtime(
+        RuntimeResult(status=RuntimeStatus.COMPLETED),
+        RuntimeResult(
+            status=RuntimeStatus.FAILED,
+            error={
+                "type": "ConfirmationSessionMismatch",
+                "message": "private upstream details",
+            },
+        ),
+    )
+    dispatcher = _dispatcher(_rule(agent_id="research-agent"), runtime)
+    adapter = SimpleNamespace(send_message=AsyncMock())
+
+    result = await dispatcher.dispatch(adapter, _message(f"确认 {confirmation_id}"))
+
+    assert result.status is RuntimeStatus.FAILED
+    reply = adapter.send_message.await_args.args[0].content
+    assert "原会话" in reply
+    assert "private upstream details" not in reply
+
+
+@pytest.mark.asyncio
+async def test_non_exact_confirmation_text_remains_a_normal_agent_message():
+    confirmation_id = "c" * 32
+    runtime = _Runtime(RuntimeResult(status=RuntimeStatus.COMPLETED, text="normal"))
+    dispatcher = _dispatcher(_rule(agent_id="research-agent"), runtime)
+    adapter = SimpleNamespace(send_message=AsyncMock())
+
+    await dispatcher.dispatch(
+        adapter,
+        _message(f"请帮我确认 {confirmation_id} 是否正确"),
+    )
+
+    assert len(runtime.calls) == 1
+    assert runtime.confirm_calls == []
 
 
 @pytest.mark.asyncio
@@ -249,6 +341,50 @@ async def test_explicit_dispatch_agent_wins_over_registry_binding():
 
 
 @pytest.mark.asyncio
+async def test_request_scoped_agent_selection_wins_without_mutating_registry_bindings():
+    registry = AgentRegistry()
+    registry.register(_agent("default-agent"))
+    registry.register(_agent("request-agent"))
+    registry.set_default("default-agent")
+    runtime = _Runtime(RuntimeResult(status=RuntimeStatus.COMPLETED, text="ok"))
+    dispatcher = _dispatcher(_rule(), runtime, registry)
+    adapter = SimpleNamespace(
+        channel_type="webui",
+        adapter_instance="webui",
+        account_scope="webui",
+        session_agent_id="request-agent",
+        send_message=AsyncMock(),
+    )
+
+    await dispatcher.dispatch(adapter, _message())
+
+    assert runtime.calls[0][2]["session_agent_id"] == "request-agent"
+    assert registry.default_agent_id == "default-agent"
+    assert registry.relation_summary("request-agent")["sessions"] == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_request_scoped_agent_is_not_silently_downgraded_to_workflow():
+    registry = AgentRegistry()
+    registry.register(_agent("default-agent"))
+    registry.set_default("default-agent")
+    runtime = _Runtime(RuntimeResult(status=RuntimeStatus.COMPLETED, text="ok"))
+    dispatcher = _dispatcher(_rule(), runtime, registry)
+    adapter = SimpleNamespace(
+        channel_type="webui",
+        adapter_instance="webui",
+        account_scope="webui",
+        session_agent_id="missing-agent",
+        send_message=AsyncMock(),
+    )
+
+    with pytest.raises(LookupError, match="missing-agent"):
+        await dispatcher.dispatch(adapter, _message())
+
+    assert runtime.calls == []
+
+
+@pytest.mark.asyncio
 async def test_registry_without_any_binding_keeps_the_workflow_path(monkeypatch):
     run = AsyncMock(return_value={"workflow": "completed"})
 
@@ -270,6 +406,61 @@ async def test_registry_without_any_binding_keeps_the_workflow_path(monkeypatch)
 
     assert returned == {"workflow": "completed"}
     run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_agent_required_dispatch_does_not_fall_back_to_a_workflow(monkeypatch):
+    run = AsyncMock(return_value={"workflow": "completed"})
+
+    class _WorkflowExecutor:
+        def __init__(self, container):
+            self.container = container
+
+        async def run(self):
+            return await run()
+
+    monkeypatch.setattr(
+        "kirara_ai.workflow.core.dispatch.dispatcher.WorkflowExecutor",
+        _WorkflowExecutor,
+    )
+    registry = AgentRegistry()
+    runtime = _Runtime(RuntimeResult(status=RuntimeStatus.COMPLETED))
+    dispatcher = _dispatcher(_rule(), runtime, registry)
+    adapter = SimpleNamespace(
+        channel_type="webui",
+        adapter_instance="webui",
+        account_scope="webui",
+        session_agent_id=None,
+        send_message=AsyncMock(),
+    )
+
+    with pytest.raises(LookupError, match="No Agent"):
+        await dispatcher.dispatch(adapter, _message(), require_agent=True)
+
+    assert runtime.calls == []
+    run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_expected_missing_agent_configuration_is_not_logged_as_an_error():
+    registry = AgentRegistry()
+    runtime = _Runtime(RuntimeResult(status=RuntimeStatus.COMPLETED))
+    dispatcher = _dispatcher(_rule(), runtime, registry)
+    recording_logger = _RecordingLogger()
+    dispatcher.logger = recording_logger
+    adapter = SimpleNamespace(
+        channel_type="webui",
+        adapter_instance="webui",
+        account_scope="webui",
+        session_agent_id=None,
+        send_message=AsyncMock(),
+    )
+
+    with pytest.raises(LookupError, match="No Agent"):
+        await dispatcher.dispatch(adapter, _message(), require_agent=True)
+
+    assert recording_logger.error_messages == []
+    assert any("Agent" in message for message in recording_logger.debug_messages)
 
 
 @pytest.mark.asyncio

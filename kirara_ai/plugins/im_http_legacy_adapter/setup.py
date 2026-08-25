@@ -9,7 +9,7 @@ setup(
     install_requires=["aiohttp", "requests"],
     entry_points={
         "chatgpt_mirai.plugins": [
-            "http_legacy = im_http_legacy_adapter.plugin:HttpLegacyAdapterPlugin"
+            "http_legacy = im_http_legacy_adapter:HttpLegacyAdapterPlugin"
         ]
     },
 )

@@ -35,6 +35,7 @@ def _binding_payload(binding: ResourceBinding) -> dict[str, Any]:
         "resource_id": binding.resource_id,
         "resource_type": binding.resource_type,
         "version": binding.version,
+        "version_policy": binding.version_policy,
         "content_sha256": binding.content_sha256,
         "enabled": binding.enabled,
         "permissions": list(binding.permissions),
@@ -53,7 +54,9 @@ def _agent_payload(agent: AgentDefinition, registry: AgentRegistry) -> dict[str,
         "capabilities": sorted(agent.capabilities),
         "prompt_bindings": [_binding_payload(item) for item in agent.prompt_bindings],
         "skill_bindings": [_binding_payload(item) for item in agent.skill_bindings],
+        "memory_bindings": [_binding_payload(item) for item in agent.memory_bindings],
         "mcp_bindings": [_binding_payload(item) for item in agent.mcp_bindings],
+        "hook_bindings": [_binding_payload(item) for item in agent.hook_bindings],
         "mcp_allowlist": sorted(agent.mcp_allowlist),
         "allow_tools": agent.allow_tools,
         "max_tool_iterations": agent.max_tool_iterations,
@@ -88,11 +91,19 @@ def _resolve_bindings(payload: Any, expected_type: str) -> tuple[ResourceBinding
         enabled = item.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ValueError("resource binding enabled must be boolean")
+        version_policy = item.get("version_policy", "current")
+        if version_policy not in {"fixed", "current"}:
+            raise ValueError("resource binding version_policy must be fixed or current")
+        version = item.get("version")
+        if version is not None and (not isinstance(version, str) or not version.strip()):
+            raise ValueError("resource binding version must be a non-empty string")
         result.append(
             _resources().resolve_binding(
                 resource_id.strip(),
                 expected_type,
+                version=(version.strip() if version_policy == "fixed" and version else None),
                 enabled=enabled,
+                version_policy=version_policy,
             )
         )
     return tuple(result)
@@ -111,7 +122,9 @@ def _agent_from_payload(payload: dict[str, Any], existing: AgentDefinition | Non
         "capabilities": existing.capabilities if existing else frozenset(),
         "prompt_bindings": existing.prompt_bindings if existing else (),
         "skill_bindings": existing.skill_bindings if existing else (),
+        "memory_bindings": existing.memory_bindings if existing else (),
         "mcp_bindings": existing.mcp_bindings if existing else (),
+        "hook_bindings": existing.hook_bindings if existing else (),
         "mcp_allowlist": existing.mcp_allowlist if existing else frozenset(),
         "allow_tools": existing.allow_tools if existing else True,
         "max_tool_iterations": existing.max_tool_iterations if existing else 8,
@@ -131,13 +144,49 @@ def _agent_from_payload(payload: dict[str, Any], existing: AgentDefinition | Non
     for name, resource_type in (
         ("prompt_bindings", "prompt"),
         ("skill_bindings", "skill"),
+        ("memory_bindings", "memory"),
         ("mcp_bindings", "mcp"),
+        ("hook_bindings", "hook"),
     ):
         if name in payload:
             base[name] = _resolve_bindings(payload[name], resource_type)
     if not isinstance(base["enabled"], bool) or not isinstance(base["allow_tools"], bool):
         raise ValueError("enabled and allow_tools must be boolean")
     return AgentDefinition(**base)
+
+
+def _relations_from_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("relations must be an object")
+
+    channels = _string_list(payload, "channels", default=[])
+    sessions = _string_list(payload, "sessions", default=[])
+    is_default = payload.get("is_default", False)
+    if not isinstance(is_default, bool):
+        raise ValueError("relations.is_default must be boolean")
+
+    raw_accounts = payload.get("accounts", [])
+    if not isinstance(raw_accounts, list):
+        raise ValueError("relations.accounts must be a list")
+    accounts = []
+    for item in raw_accounts:
+        if not isinstance(item, dict):
+            raise ValueError("account relation must be an object")
+        values = tuple(
+            item.get(name)
+            for name in ("channel_type", "adapter_instance", "account_scope")
+        )
+        if any(not isinstance(value, str) or not value.strip() for value in values):
+            raise ValueError(
+                "channel_type, adapter_instance and account_scope are required"
+            )
+        accounts.append(tuple(value.strip() for value in values))
+    return {
+        "channels": channels,
+        "accounts": tuple(accounts),
+        "sessions": sessions,
+        "is_default": is_default,
+    }
 
 
 def _handle_error(error: Exception):
@@ -164,6 +213,36 @@ async def create_agent():
         agent = _agent_from_payload(payload)
         _registry().register(agent)
         return jsonify(_agent_payload(agent, _registry())), 201
+    except Exception as error:
+        return _handle_error(error)
+
+
+@agent_bp.route("/configuration", methods=["POST"])
+@require_auth
+async def create_agent_configuration():
+    try:
+        payload = await request.get_json(silent=True) or {}
+        agent = _agent_from_payload(payload)
+        relations = _relations_from_payload(payload.get("relations", {}))
+        registry = _registry()
+        registry.configure(agent, create=True, **relations)
+        return jsonify(_agent_payload(registry.get(agent.agent_id), registry)), 201
+    except Exception as error:
+        return _handle_error(error)
+
+
+@agent_bp.route("/<agent_id>/configuration", methods=["PUT"])
+@require_auth
+async def update_agent_configuration(agent_id: str):
+    try:
+        payload = await request.get_json(silent=True) or {}
+        if "agent_id" in payload and payload["agent_id"] != agent_id:
+            raise ValueError("agent_id cannot change")
+        registry = _registry()
+        agent = _agent_from_payload(payload, registry.get(agent_id))
+        relations = _relations_from_payload(payload.get("relations", {}))
+        registry.configure(agent, create=False, **relations)
+        return jsonify(_agent_payload(registry.get(agent_id), registry))
     except Exception as error:
         return _handle_error(error)
 
@@ -297,7 +376,9 @@ async def add_agent_resources(agent_id: str):
             agent_id,
             prompt_bindings=updated.prompt_bindings,
             skill_bindings=updated.skill_bindings,
+            memory_bindings=updated.memory_bindings,
             mcp_bindings=updated.mcp_bindings,
+            hook_bindings=updated.hook_bindings,
             mcp_allowlist=updated.mcp_allowlist,
         )
         return jsonify(_agent_payload(registry.get(agent_id), registry))

@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Union
 
 from typing_extensions import deprecated
 
@@ -227,11 +227,22 @@ class LLMManager:
         # TODO: 后续考虑支持更多的选择策略
         return random.choice(backends)
 
-    def get_provider_candidates(self, model_id: str) -> List[LLMBackendAdapter]:
+    def get_provider_candidates(
+        self,
+        model_id: str,
+        provider_allowlist: Optional[Iterable[str]] = None,
+    ) -> List[LLMBackendAdapter]:
         """Return enabled providers in deterministic priority order."""
+        allowed = {
+            str(provider).strip()
+            for provider in (provider_allowlist or ())
+            if str(provider).strip()
+        }
         candidates = []
         for index, adapter in enumerate(self.active_backends.get(model_id, [])):
             backend_name = getattr(adapter, "backend_name", None)
+            if allowed and backend_name not in allowed:
+                continue
             backend = self._backend_config(backend_name) if backend_name else None
             if not backend or not backend.enable or not backend.participate_in_failover:
                 continue
@@ -252,8 +263,12 @@ class LLMManager:
         retry_delay: Optional[float] = None,
         deadline_seconds: Optional[float] = None,
         cancellation_event: Optional[threading.Event] = None,
+        provider_allowlist: Optional[Iterable[str]] = None,
     ) -> ChatExecutionResult:
-        candidates = self.get_provider_candidates(request.model or "")
+        candidates = self.get_provider_candidates(
+            request.model or "",
+            provider_allowlist=provider_allowlist,
+        )
         tracer = self._get_llm_tracer()
         trace_id = self._start_logical_trace(tracer, request, candidates)
         requested_at = datetime.now(timezone.utc)
@@ -266,6 +281,7 @@ class LLMManager:
                 deadline_seconds=deadline_seconds,
                 cancellation_event=cancellation_event,
                 trace_id=trace_id,
+                candidates=candidates,
             )
         except RequestCancelledError as error:
             self._fail_logical_trace(
@@ -316,13 +332,19 @@ class LLMManager:
         deadline_seconds: Optional[float] = None,
         cancellation_event: Optional[threading.Event] = None,
         trace_id: Optional[str] = None,
+        candidates: Optional[List[LLMBackendAdapter]] = None,
+        provider_allowlist: Optional[Iterable[str]] = None,
     ) -> ChatExecutionResult:
         """Execute one synchronous chat request through a bounded provider queue."""
         model_id = request.model or ""
         trace_id = trace_id or uuid.uuid4().hex
         if self._is_cancelled(cancellation_event):
             raise RequestCancelledError(trace_id=trace_id)
-        candidates = self.get_provider_candidates(model_id)
+        if candidates is None:
+            candidates = self.get_provider_candidates(
+                model_id,
+                provider_allowlist=provider_allowlist,
+            )
         attempts: List[ProviderAttempt] = []
         if not candidates:
             raise FailoverExecutionError(
@@ -489,11 +511,15 @@ class LLMManager:
         retry_delay: Optional[float] = None,
         deadline_seconds: Optional[float] = None,
         cancellation_event: Optional[threading.Event] = None,
+        provider_allowlist: Optional[Iterable[str]] = None,
     ) -> StreamExecutionResult:
         """Execute a stream without joining output from different providers."""
         model_id = request.model or ""
         attempts: List[ProviderAttempt] = []
-        candidates = self.get_provider_candidates(model_id)
+        candidates = self.get_provider_candidates(
+            model_id,
+            provider_allowlist=provider_allowlist,
+        )
         tracer = self._get_llm_tracer()
         trace_id = self._start_logical_trace(tracer, request, candidates)
         requested_at = datetime.now(timezone.utc)

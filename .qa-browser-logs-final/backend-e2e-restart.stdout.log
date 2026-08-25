@@ -1,0 +1,138 @@
+[32m2026-08-25 17:29:09.076[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mInitializing application...[0m
+[32m2026-08-25 17:29:09.076[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mLoading configuration from E:\output\kirara-ai\kirara-ai3.3.0b8\.qa-browser-data-20260825-e2e\config.yaml[0m
+[32m2026-08-25 17:29:09.092[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mConfiguration loaded successfully[0m
+[32m2026-08-25 17:29:09.142[0m | [1mINFO    [0m | [36mDB          [0m | [1mDatabase schema is up to date[0m
+[32m2026-08-25 17:29:09.142[0m | [1mINFO    [0m | [36mDB          [0m | [1mDatabase initialized at sqlite:///E:/output/kirara-ai/kirara-ai3.3.0b8/.qa-browser-data-20260825-e2e/db/kirara.db[0m
+new MediaManager
+[32m2026-08-25 17:29:09.427[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mInitializing memory system...[0m
+[32m2026-08-25 17:29:09.427[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mInitializing tracing system...[0m
+[32m2026-08-25 17:29:09.427[0m | [1mINFO    [0m | [36mTracingManager[0m | [1mInitializing tracing manager[0m
+[32m2026-08-25 17:29:09.427[0m | [1mINFO    [0m | [36mTracking    [0m | [1mInitializing llm tracer[0m
+[32m2026-08-25 17:29:09.427[0m | [1mINFO    [0m | [36mTracking    [0m | [1mllm tracer initialized[0m
+[32m2026-08-25 17:29:09.442[0m | [1mINFO    [0m | [36mTracingManager[0m | [1mTracing manager initialized[0m
+[32m2026-08-25 17:29:09.442[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mTracing system initialized[0m
+[32m2026-08-25 17:29:09.442[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mDiscovering internal plugins...[0m
+[32m2026-08-25 17:29:09.442[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mDiscovering internal plugins from directory: E:\output\kirara-ai\kirara-ai3.3.0b8\kirara_ai\plugins[0m
+[32m2026-08-25 17:29:09.442[0m | [34m[1mDEBUG   [0m | [36mPluginLoader[0m | [34m[1mFound plugin directory: bundled_frpc[0m
+[32m2026-08-25 17:29:09.442[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mLoading plugin: bundled_frpc[0m
+[32m2026-08-25 17:29:09.459[0m | [34m[1mDEBUG   [0m | [36mPluginLoader[0m | [34m[1mInstantiating plugin class: FrpcPlugin[0m
+[32m2026-08-25 17:29:09.459[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mInternal plugin bundled_frpc loaded successfully[0m
+[32m2026-08-25 17:29:09.459[0m | [34m[1mDEBUG   [0m | [36mPluginLoader[0m | [34m[1mFound plugin directory: im_http_legacy_adapter[0m
+[32m2026-08-25 17:29:09.460[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mLoading plugin: im_http_legacy_adapter[0m
+[32m2026-08-25 17:29:09.465[0m | [34m[1mDEBUG   [0m | [36mPluginLoader[0m | [34m[1mInstantiating plugin class: HttpLegacyAdapterPlugin[0m
+[32m2026-08-25 17:29:09.467[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mInternal plugin im_http_legacy_adapter loaded successfully[0m
+[32m2026-08-25 17:29:09.467[0m | [34m[1mDEBUG   [0m | [36mPluginLoader[0m | [34m[1mFound plugin directory: im_onebot_adapter[0m
+[32m2026-08-25 17:29:09.467[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mLoading plugin: im_onebot_adapter[0m
+[32m2026-08-25 17:29:09.508[0m | [34m[1mDEBUG   [0m | [36mPluginLoader[0m | [34m[1mInstantiating plugin class: OneBotAdapterPlugin[0m
+[32m2026-08-25 17:29:09.508[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mInternal plugin im_onebot_adapter loaded successfully[0m
+[32m2026-08-25 17:29:09.508[0m | [34m[1mDEBUG   [0m | [36mPluginLoader[0m | [34m[1mFound plugin directory: im_qqbot_adapter[0m
+[32m2026-08-25 17:29:09.508[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mLoading plugin: im_qqbot_adapter[0m
+[32m2026-08-25 17:29:09.703[0m | [34m[1mDEBUG   [0m | [36mPluginLoader[0m | [34m[1mInstantiating plugin class: QQBotAdapterPlugin[0m
+[32m2026-08-25 17:29:09.703[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mInternal plugin im_qqbot_adapter loaded successfully[0m
+[32m2026-08-25 17:29:09.704[0m | [34m[1mDEBUG   [0m | [36mPluginLoader[0m | [34m[1mFound plugin directory: im_telegram_adapter[0m
+[32m2026-08-25 17:29:09.704[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mLoading plugin: im_telegram_adapter[0m
+[32m2026-08-25 17:29:10.270[0m | [34m[1mDEBUG   [0m | [36mPluginLoader[0m | [34m[1mInstantiating plugin class: TelegramAdapterPlugin[0m
+[32m2026-08-25 17:29:10.272[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mInternal plugin im_telegram_adapter loaded successfully[0m
+[32m2026-08-25 17:29:10.272[0m | [34m[1mDEBUG   [0m | [36mPluginLoader[0m | [34m[1mFound plugin directory: im_wecom_adapter[0m
+[32m2026-08-25 17:29:10.272[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mLoading plugin: im_wecom_adapter[0m
+[32m2026-08-25 17:29:10.586[0m | [34m[1mDEBUG   [0m | [36mPluginLoader[0m | [34m[1mInstantiating plugin class: WecomAdapterPlugin[0m
+[32m2026-08-25 17:29:10.586[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mInternal plugin im_wecom_adapter loaded successfully[0m
+[32m2026-08-25 17:29:10.586[0m | [34m[1mDEBUG   [0m | [36mPluginLoader[0m | [34m[1mFound plugin directory: llm_preset_adapters[0m
+[32m2026-08-25 17:29:10.586[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mLoading plugin: llm_preset_adapters[0m
+[32m2026-08-25 17:29:10.630[0m | [34m[1mDEBUG   [0m | [36mPluginLoader[0m | [34m[1mInstantiating plugin class: LLMPresetAdaptersPlugin[0m
+[32m2026-08-25 17:29:10.630[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mInternal plugin llm_preset_adapters loaded successfully[0m
+[32m2026-08-25 17:29:10.630[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mDiscovering external plugins...[0m
+[32m2026-08-25 17:29:10.630[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mDiscovering external plugins...[0m
+[32m2026-08-25 17:29:10.639[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mLoading plugins[0m
+[32m2026-08-25 17:29:10.639[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mInitializing plugins...[0m
+[32m2026-08-25 17:29:10.639[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mPlugin FrpcPlugin initialized[0m
+[32m2026-08-25 17:29:10.639[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mPlugin HttpLegacyAdapterPlugin initialized[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mPlugin OneBotAdapterPlugin initialized[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mPlugin QQBotAdapterPlugin initialized[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mPlugin TelegramAdapterPlugin initialized[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mPlugin WecomAdapterPlugin initialized[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mkirara_ai.llm.llm_registry[0m | [1mRegistered LLM backend adapter: OpenAI[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mkirara_ai.llm.llm_registry[0m | [1mRegistered LLM backend adapter: DeepSeek[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mkirara_ai.llm.llm_registry[0m | [1mRegistered LLM backend adapter: Gemini[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mkirara_ai.llm.llm_registry[0m | [1mRegistered LLM backend adapter: Ollama[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mkirara_ai.llm.llm_registry[0m | [1mRegistered LLM backend adapter: Claude[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mkirara_ai.llm.llm_registry[0m | [1mRegistered LLM backend adapter: SiliconFlow[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mkirara_ai.llm.llm_registry[0m | [1mRegistered LLM backend adapter: TencentCloud[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mkirara_ai.llm.llm_registry[0m | [1mRegistered LLM backend adapter: AlibabaCloud[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mkirara_ai.llm.llm_registry[0m | [1mRegistered LLM backend adapter: Moonshot[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mkirara_ai.llm.llm_registry[0m | [1mRegistered LLM backend adapter: OpenRouter[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mkirara_ai.llm.llm_registry[0m | [1mRegistered LLM backend adapter: Minimax[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mkirara_ai.llm.llm_registry[0m | [1mRegistered LLM backend adapter: Volcengine[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mkirara_ai.llm.llm_registry[0m | [1mRegistered LLM backend adapter: Mistral[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mkirara_ai.llm.llm_registry[0m | [1mRegistered LLM backend adapter: Voyage[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mLLMPresetAdapters[0m | [1mLLMPresetAdaptersPlugin loaded[0m
+[32m2026-08-25 17:29:10.646[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mPlugin LLMPresetAdaptersPlugin initialized[0m
+[32m2026-08-25 17:29:10.663[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered workflow: chat:custom_script[0m
+[32m2026-08-25 17:29:10.680[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered workflow: chat:dsr_thinking[0m
+[32m2026-08-25 17:29:10.694[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered workflow: chat:function_calling[0m
+[32m2026-08-25 17:29:10.725[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered workflow: chat:group_mention[0m
+[32m2026-08-25 17:29:10.749[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered workflow: chat:long_reply_split[0m
+[32m2026-08-25 17:29:10.763[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered workflow: chat:mcp_tools[0m
+[32m2026-08-25 17:29:10.773[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered workflow: chat:memory_store[0m
+[32m2026-08-25 17:29:10.789[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered workflow: chat:normal[0m
+[32m2026-08-25 17:29:10.963[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered workflow: chat:normal_multimodal[0m
+[32m2026-08-25 17:29:10.983[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered workflow: chat:plain_text[0m
+[32m2026-08-25 17:29:10.995[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered workflow: chat:sensitive_word_filter[0m
+[32m2026-08-25 17:29:11.027[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered workflow: chat:talk_break[0m
+[32m2026-08-25 17:29:11.044[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered workflow: chat:time_aware[0m
+[32m2026-08-25 17:29:11.044[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered preset workflow: game:dice[0m
+[32m2026-08-25 17:29:11.044[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered preset workflow: game:gacha[0m
+[32m2026-08-25 17:29:11.044[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered preset workflow: system:help[0m
+[32m2026-08-25 17:29:11.044[0m | [1mINFO    [0m | [36mWorkflowRegistry[0m | [1mRegistered preset workflow: system:clear_memory[0m
+[32m2026-08-25 17:29:11.044[0m | [34m[1mDEBUG   [0m | [36mWorkflowRegistry[0m | [34m[1mPreset workflow chat:normal already registered, skipping[0m
+[32m2026-08-25 17:29:11.044[0m | [34m[1mDEBUG   [0m | [36mWorkflowRegistry[0m | [34m[1mPreset workflow chat:memory_store already registered, skipping[0m
+[32m2026-08-25 17:29:11.063[0m | [1mINFO    [0m | [36mDispatchRuleRegistry[0m | [1mRegistered dispatch rule: rule_id='system_help' name='°ïÖúÃüÁî' description='·¢ËÍ /help ²é¿´µ±Ç°¿ÉÓÃµÄÈ«²¿¹¦ÄÜÓë´¥·¢·½Ê½¡£' workflow_id='system:help' agent_id=None priority=100 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='prefix', config={'prefix': '/help'})])] metadata={'category': 'system', 'permission': 'user'}[0m
+[32m2026-08-25 17:29:11.063[0m | [34m[1mDEBUG   [0m | [36mDispatchRuleRegistry[0m | [34m[1mLoaded rule: rule_id='system_help' name='°ïÖúÃüÁî' description='·¢ËÍ /help ²é¿´µ±Ç°¿ÉÓÃµÄÈ«²¿¹¦ÄÜÓë´¥·¢·½Ê½¡£' workflow_id='system:help' agent_id=None priority=100 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='prefix', config={'prefix': '/help'})])] metadata={'category': 'system', 'permission': 'user'}[0m
+[32m2026-08-25 17:29:11.063[0m | [1mINFO    [0m | [36mDispatchRuleRegistry[0m | [1mRegistered dispatch rule: rule_id='system_clear_memory' name='Çå¿Õ¼ÇÒä' description='·¢ËÍ /Çå¿Õ¼ÇÒä Çå³ýµ±Ç°»á»°µÄÁÄÌì¼ÇÒä£¬ÈÃ»úÆ÷ÈËÖØÐÂ¿ªÊ¼¡£' workflow_id='system:clear_memory' agent_id=None priority=100 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='prefix', config={'prefix': '/Çå¿Õ¼ÇÒä'})])] metadata={'category': 'system', 'permission': 'user'}[0m
+[32m2026-08-25 17:29:11.063[0m | [34m[1mDEBUG   [0m | [36mDispatchRuleRegistry[0m | [34m[1mLoaded rule: rule_id='system_clear_memory' name='Çå¿Õ¼ÇÒä' description='·¢ËÍ /Çå¿Õ¼ÇÒä Çå³ýµ±Ç°»á»°µÄÁÄÌì¼ÇÒä£¬ÈÃ»úÆ÷ÈËÖØÐÂ¿ªÊ¼¡£' workflow_id='system:clear_memory' agent_id=None priority=100 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='prefix', config={'prefix': '/Çå¿Õ¼ÇÒä'})])] metadata={'category': 'system', 'permission': 'user'}[0m
+[32m2026-08-25 17:29:11.063[0m | [1mINFO    [0m | [36mDispatchRuleRegistry[0m | [1mRegistered dispatch rule: rule_id='game_dice' name='÷»×Ó' description='·¢ËÍ .roll 1d100 Ö®ÀàµÄÖ¸ÁîÖÀ÷»£¬Ö§³Ö XdY ¸ñÊ½¡£' workflow_id='game:dice' agent_id=None priority=60 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='regex', config={'pattern': '^[.¡£]roll\\s*(\\d+)?d(\\d+)'})])] metadata={'category': 'game', 'permission': 'user'}[0m
+[32m2026-08-25 17:29:11.063[0m | [34m[1mDEBUG   [0m | [36mDispatchRuleRegistry[0m | [34m[1mLoaded rule: rule_id='game_dice' name='÷»×Ó' description='·¢ËÍ .roll 1d100 Ö®ÀàµÄÖ¸ÁîÖÀ÷»£¬Ö§³Ö XdY ¸ñÊ½¡£' workflow_id='game:dice' agent_id=None priority=60 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='regex', config={'pattern': '^[.¡£]roll\\s*(\\d+)?d(\\d+)'})])] metadata={'category': 'game', 'permission': 'user'}[0m
+[32m2026-08-25 17:29:11.063[0m | [1mINFO    [0m | [36mDispatchRuleRegistry[0m | [1mRegistered dispatch rule: rule_id='game_gacha' name='³é¿¨' description='µ¥¶À·¢ËÍ¡¸³é¿¨¡¹¡¸Ê®Á¬¡¹»ò¡¸µ¥³é¡¹ÌåÑé³é¿¨Ä£ÄâÆ÷¡£×¢Òâ±ØÐëÕûÌõÏûÏ¢Ö»ÓÐ¸ÃÖ¸Áî²Å»á´¥·¢£¬¡¸½ñÌì³é¿¨Âð¡¹ÕâÀà¼ÐÔÚ¾ä×ÓÀïµÄÐ´·¨²»Ëã¡£' workflow_id='game:gacha' agent_id=None priority=60 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='regex', config={'pattern': '^\\s*(?:[/.¡£])?(?:³é¿¨|Ê®Á¬|µ¥³é)\\s*$'})])] metadata={'category': 'game', 'permission': 'user'}[0m
+[32m2026-08-25 17:29:11.063[0m | [34m[1mDEBUG   [0m | [36mDispatchRuleRegistry[0m | [34m[1mLoaded rule: rule_id='game_gacha' name='³é¿¨' description='µ¥¶À·¢ËÍ¡¸³é¿¨¡¹¡¸Ê®Á¬¡¹»ò¡¸µ¥³é¡¹ÌåÑé³é¿¨Ä£ÄâÆ÷¡£×¢Òâ±ØÐëÕûÌõÏûÏ¢Ö»ÓÐ¸ÃÖ¸Áî²Å»á´¥·¢£¬¡¸½ñÌì³é¿¨Âð¡¹ÕâÀà¼ÐÔÚ¾ä×ÓÀïµÄÐ´·¨²»Ëã¡£' workflow_id='game:gacha' agent_id=None priority=60 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='regex', config={'pattern': '^\\s*(?:[/.¡£])?(?:³é¿¨|Ê®Á¬|µ¥³é)\\s*$'})])] metadata={'category': 'game', 'permission': 'user'}[0m
+[32m2026-08-25 17:29:11.063[0m | [1mINFO    [0m | [36mDispatchRuleRegistry[0m | [1mRegistered dispatch rule: rule_id='chat_normal' name='ÈºÁÄ AI ¶Ô»°' description='ÈºÁÄÖÐÒÔ /chat ¿ªÍ·»òÖ±½Ó @»úÆ÷ÈË ¼´¿É¶Ô»°¡£' workflow_id='chat:normal' agent_id=None priority=30 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='prefix', config={'prefix': '/chat'}), SimpleDispatchRule(type='bot_mention', config={})]), RuleGroup(operator='or', rules=[SimpleDispatchRule(type='chat_type', config={'chat_type': 'ÈºÁÄ'})])] metadata={'category': 'chat', 'permission': 'user', 'temperature': 0.7}[0m
+[32m2026-08-25 17:29:11.063[0m | [34m[1mDEBUG   [0m | [36mDispatchRuleRegistry[0m | [34m[1mLoaded rule: rule_id='chat_normal' name='ÈºÁÄ AI ¶Ô»°' description='ÈºÁÄÖÐÒÔ /chat ¿ªÍ·»òÖ±½Ó @»úÆ÷ÈË ¼´¿É¶Ô»°¡£' workflow_id='chat:normal' agent_id=None priority=30 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='prefix', config={'prefix': '/chat'}), SimpleDispatchRule(type='bot_mention', config={})]), RuleGroup(operator='or', rules=[SimpleDispatchRule(type='chat_type', config={'chat_type': 'ÈºÁÄ'})])] metadata={'category': 'chat', 'permission': 'user', 'temperature': 0.7}[0m
+[32m2026-08-25 17:29:11.063[0m | [1mINFO    [0m | [36mDispatchRuleRegistry[0m | [1mRegistered dispatch rule: rule_id='chat_creative' name='Ë½ÁÄ AI ¶Ô»°' description='Ë½ÁÄÊ±Ö±½Ó·¢ËÍÄÚÈÝ¼´¿É¶Ô»°£¬ÎÞÐèÈÎºÎÇ°×º¡£' workflow_id='chat:normal' agent_id=None priority=30 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='chat_type', config={'chat_type': 'Ë½ÁÄ'})])] metadata={'category': 'chat', 'permission': 'user', 'temperature': 0.9}[0m
+[32m2026-08-25 17:29:11.063[0m | [34m[1mDEBUG   [0m | [36mDispatchRuleRegistry[0m | [34m[1mLoaded rule: rule_id='chat_creative' name='Ë½ÁÄ AI ¶Ô»°' description='Ë½ÁÄÊ±Ö±½Ó·¢ËÍÄÚÈÝ¼´¿É¶Ô»°£¬ÎÞÐèÈÎºÎÇ°×º¡£' workflow_id='chat:normal' agent_id=None priority=30 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='chat_type', config={'chat_type': 'Ë½ÁÄ'})])] metadata={'category': 'chat', 'permission': 'user', 'temperature': 0.9}[0m
+[32m2026-08-25 17:29:11.063[0m | [1mINFO    [0m | [36mDispatchRuleRegistry[0m | [1mRegistered dispatch rule: rule_id='game_gacha_mention' name='³é¿¨£¨¿íËÉÌá¼°£©' description='ÈºÁÄÖÐÃ»ÓÐ /chat Ò²Ã» @»úÆ÷ÈËÊ±£¬¾ä×ÓÀïÌáµ½¡¸³é¿¨¡¹¡¸Ê®Á¬¡¹¡¸µ¥³é¡¹Ò²»á´¥·¢³é¿¨Ä£ÄâÆ÷¡£ÓÅÏÈ¼¶ 15 µÍÓÚ¶Ô»°¹æÔò£ºË½ÁÄ³¡¾°ÓÉ¡¸Ë½ÁÄ AI ¶Ô»°¡¹ÏÈÃüÖÐ£¬Ö»ÊÇÁÄµ½³é¿¨²»»á±»±¾¹æÔò½Ù³Ö¡£' workflow_id='game:gacha' agent_id=None priority=15 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='keyword', config={'keywords': ['³é¿¨', 'Ê®Á¬', 'µ¥³é']})])] metadata={'category': 'game', 'permission': 'user'}[0m
+[32m2026-08-25 17:29:11.063[0m | [34m[1mDEBUG   [0m | [36mDispatchRuleRegistry[0m | [34m[1mLoaded rule: rule_id='game_gacha_mention' name='³é¿¨£¨¿íËÉÌá¼°£©' description='ÈºÁÄÖÐÃ»ÓÐ /chat Ò²Ã» @»úÆ÷ÈËÊ±£¬¾ä×ÓÀïÌáµ½¡¸³é¿¨¡¹¡¸Ê®Á¬¡¹¡¸µ¥³é¡¹Ò²»á´¥·¢³é¿¨Ä£ÄâÆ÷¡£ÓÅÏÈ¼¶ 15 µÍÓÚ¶Ô»°¹æÔò£ºË½ÁÄ³¡¾°ÓÉ¡¸Ë½ÁÄ AI ¶Ô»°¡¹ÏÈÃüÖÐ£¬Ö»ÊÇÁÄµ½³é¿¨²»»á±»±¾¹æÔò½Ù³Ö¡£' workflow_id='game:gacha' agent_id=None priority=15 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='keyword', config={'keywords': ['³é¿¨', 'Ê®Á¬', 'µ¥³é']})])] metadata={'category': 'game', 'permission': 'user'}[0m
+[32m2026-08-25 17:29:11.063[0m | [1mINFO    [0m | [36mDispatchRuleRegistry[0m | [1mRegistered dispatch rule: rule_id='fallback' name='Ä¬ÈÏ¹æÔò' description='ÒÔÉÏ¹æÔò¶¼Ã»ÓÐÆ¥ÅäÊ±Ö´ÐÐ£¬Ä¬Ä¬¼ÇÂ¼ÁÄÌìÄÚÈÝ£¬²»»á»Ø¸´ÏûÏ¢¡£' workflow_id='chat:memory_store' agent_id=None priority=0 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='fallback', config={})])] metadata={'category': 'system', 'permission': 'user'}[0m
+[32m2026-08-25 17:29:11.063[0m | [34m[1mDEBUG   [0m | [36mDispatchRuleRegistry[0m | [34m[1mLoaded rule: rule_id='fallback' name='Ä¬ÈÏ¹æÔò' description='ÒÔÉÏ¹æÔò¶¼Ã»ÓÐÆ¥ÅäÊ±Ö´ÐÐ£¬Ä¬Ä¬¼ÇÂ¼ÁÄÌìÄÚÈÝ£¬²»»á»Ø¸´ÏûÏ¢¡£' workflow_id='chat:memory_store' agent_id=None priority=0 enabled=True rule_groups=[RuleGroup(operator='or', rules=[SimpleDispatchRule(type='fallback', config={})])] metadata={'category': 'system', 'permission': 'user'}[0m
+[32m2026-08-25 17:29:11.063[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mLoading LLMs[0m
+[32m2026-08-25 17:29:11.063[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mLoading MCP servers[0m
+[32m2026-08-25 17:29:11.075[0m | [1mINFO    [0m | [36mMCP         [0m | [1mInitializing MCP server context7[0m
+[32m2026-08-25 17:29:11.075[0m | [1mINFO    [0m | [36mMCP         [0m | [1mMCP server manager initialized, loaded 1 servers[0m
+[32m2026-08-25 17:29:11.075[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mStarting web server...[0m
+[32m2026-08-25 17:29:11.075[0m | [1mINFO    [0m | [36mWebServer   [0m | [1m¼àÌýµØÖ·£ºhttp://127.0.0.1:18082/[0m
+[32m2026-08-25 17:29:11.081[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mStarting plugins...[0m
+[32m2026-08-25 17:29:11.081[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mPlugin FrpcPlugin started[0m
+[32m2026-08-25 17:29:11.081[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mPlugin HttpLegacyAdapterPlugin started[0m
+[32m2026-08-25 17:29:11.081[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mPlugin OneBotAdapterPlugin started[0m
+[32m2026-08-25 17:29:11.081[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mPlugin QQBotAdapterPlugin started[0m
+[32m2026-08-25 17:29:11.081[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mPlugin TelegramAdapterPlugin started[0m
+[32m2026-08-25 17:29:11.081[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mPlugin WecomAdapterPlugin started[0m
+[32m2026-08-25 17:29:11.081[0m | [1mINFO    [0m | [36mLLMPresetAdapters[0m | [1mLLMPresetAdaptersPlugin started[0m
+[32m2026-08-25 17:29:11.081[0m | [1mINFO    [0m | [36mPluginLoader[0m | [1mPlugin LLMPresetAdaptersPlugin started[0m
+[32m2026-08-25 17:29:11.081[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mStarting adapters[0m
+[32m2026-08-25 17:29:11.081[0m | [33m[1mWARNING [0m | [36mIMManager   [0m | [33m[1mNo adapters to start, please check your config[0m
+[32m2026-08-25 17:29:11.081[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mConnecting to MCP servers[0m
+[32m2026-08-25 17:29:11.081[0m | [1mINFO    [0m | [36mMCP         [0m | [1mConnecting to MCP server context7[0m
+[32m2026-08-25 17:29:11.127[0m | [1mINFO    [0m | [36mWebServer   [0m | [1mRunning on http://127.0.0.1:18082 (CTRL + C to quit)[0m
+[32m2026-08-25 17:29:18.662[0m | [1mINFO    [0m | [36mMCP         [0m | [1mSuccessfully connected to MCP server context7[0m
+[32m2026-08-25 17:29:18.662[0m | [1mINFO    [0m | [36mTaskScheduler[0m | [1mAuto-detect scheduler started[0m
+[32m2026-08-25 17:29:18.662[0m | [32m[1mSUCCESS [0m | [36mEntrypoint  [0m | [32m[1mKirara AI Æô¶¯Íê±Ï£¬µÈ´ýÏûÏ¢ÖÐ...[0m
+[32m2026-08-25 17:29:18.662[0m | [32m[1mSUCCESS [0m | [36mEntrypoint  [0m | [32m[1mWebUI ¹ÜÀíÆ½Ì¨±¾µØ·ÃÎÊµØÖ·£ºhttp://127.0.0.1:18082/[0m
+[32m2026-08-25 17:29:18.662[0m | [32m[1mSUCCESS [0m | [36mEntrypoint  [0m | [32m[1mApplication started. Waiting for events...[0m
+[32m2026-08-25 17:29:18.662[0m | [34m[1mDEBUG   [0m | [36mTaskScheduler[0m | [34m[1mAuto-detect first run scheduled in 212s[0m
+[32m2026-08-25 17:29:18.662[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mChecking for updates...[0m
+[32m2026-08-25 17:29:19.633[0m | [1mINFO    [0m | [36mEntrypoint  [0m | [1mRunning version: 3.3.0b11, Latest version: 3.3.0a2[0m
+[32m2026-08-25 17:29:47.715[0m | [1mINFO    [0m | [36mWebServer   [0m | [1m127.0.0.1:53396 - - [25/Aug/2026:17:29:47 +0800] "GET /backend-api/api/auth/check-first-time 1.1" 200 24 "-" "Mozilla/5.0 (Windows NT 10.0; Microsoft Windows 10.0.28000; zh-CN) PowerShell/7.6.5"[0m
+[32m2026-08-25 17:30:27.792[0m | [1mINFO    [0m | [36mWebServer   [0m | [1m127.0.0.1:50194 - - [25/Aug/2026:17:30:27 +0800] "GET /backend-api/api/auth/check-first-time 1.1" 200 24 "http://127.0.0.1:15173/login" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/152.0.0.0 Safari/537.36"[0m
+[32m2026-08-25 17:33:07.029[0m | [1mINFO    [0m | [36mWebServer   [0m | [1m127.0.0.1:61143 - - [25/Aug/2026:17:33:07 +0800] "GET / 1.1" 200 793 "-" "Mozilla/5.0 (Windows NT 10.0; Microsoft Windows 10.0.28000; zh-CN) PowerShell/7.6.5"[0m
+[32m2026-08-25 17:37:12.402[0m | [1mINFO    [0m | [36mWebServer   [0m | [1m127.0.0.1:18027 - - [25/Aug/2026:17:37:12 +0800] "GET /backend-api/api/resources 1.1" 401 26 "http://127.0.0.1:15173/resources" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/152.0.0.0 Safari/537.36"[0m
+[32m2026-08-25 17:37:12.422[0m | [1mINFO    [0m | [36mWebServer   [0m | [1m127.0.0.1:18028 - - [25/Aug/2026:17:37:12 +0800] "GET /backend-api/api/system/check-update 1.1" - - "http://127.0.0.1:15173/resources" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/152.0.0.0 Safari/537.36"[0m
+[32m2026-08-25 17:37:12.423[0m | [1mINFO    [0m | [36mWebServer   [0m | [1m127.0.0.1:18028 - - [25/Aug/2026:17:37:12 +0800] "GET /backend-api/api/system/check-update 1.1" 401 26 "http://127.0.0.1:15173/resources" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/152.0.0.0 Safari/537.36"[0m

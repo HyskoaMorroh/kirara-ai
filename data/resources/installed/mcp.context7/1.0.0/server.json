@@ -1,0 +1,34 @@
+{
+  "id": "context7",
+  "name": "Context7",
+  "server": {
+    "type": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@upstash/context7-mcp"
+    ],
+    "env": {}
+  },
+  "apps": {
+    "claude": false,
+    "claude-desktop": false,
+    "codex": true,
+    "gemini": false,
+    "grokbuild": false,
+    "opencode": false,
+    "openclaw": false,
+    "hermes": false
+  },
+  "description": "Context7 documentation lookup MCP server",
+  "tags": [
+    "documentation",
+    "debugging"
+  ],
+  "homepage": "https://context7.com",
+  "docs": "https://context7.com/docs",
+  "metadata": {
+    "catalog_id": "mcp:context7",
+    "managed": true
+  }
+}

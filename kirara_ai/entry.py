@@ -1,9 +1,11 @@
 import asyncio
+from collections.abc import Mapping
 import os
 import secrets
 import signal
 import time
 from pathlib import Path
+from typing import Any
 
 from kirara_ai.config import DATA_PATH
 from kirara_ai.config.config_loader import ConfigLoader
@@ -27,6 +29,7 @@ from kirara_ai.memory.scopes import GlobalScope, GroupScope, MemberScope
 from kirara_ai.plugin_manager.plugin_loader import PluginLoader
 from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
 from kirara_ai.plugin_manager.resource_sources import ResourceSourceService
+from kirara_ai.plugin_manager.resource_catalog import ResourceCatalogService
 from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
 from kirara_ai.plugin_manager.models import LifecycleName
 from kirara_ai.scheduler import TaskScheduler
@@ -146,24 +149,156 @@ def _config_path() -> Path:
     return Path(DATA_PATH) / "config.yaml"
 
 
+def _agent_debug_hook(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return bounded state metadata without exposing Hook input or host data."""
+
+    allowed_fields = {"event", "tool_name", "is_error", "message_count"}
+    return {
+        "status": "ok",
+        "fields": sorted(str(key) for key in payload if str(key) in allowed_fields),
+        "field_count": min(len(payload), len(allowed_fields)),
+    }
+
+
+def _agent_audit_hook(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return bounded metadata for the built-in Agent audit declarations."""
+
+    allowed_fields = {
+        "agent_id",
+        "confirmed",
+        "estimated_chars",
+        "has_images",
+        "is_error",
+        "iteration",
+        "message_count",
+        "model_id",
+        "session_key",
+        "tool_name",
+    }
+    return {
+        "status": "recorded",
+        "fields": sorted(str(key) for key in payload if str(key) in allowed_fields),
+        "field_count": min(len(payload), len(allowed_fields)),
+    }
+
+
+def _agent_runtime_audit_sink(record: Mapping[str, Any]) -> None:
+    """Write only a small, recursively redacted Agent runtime audit summary."""
+
+    sensitive_parts = (
+        "password",
+        "token",
+        "secret",
+        "cookie",
+        "authorization",
+        "credential",
+        "api_key",
+        "private_key",
+    )
+    private_value_keys = {
+        "prompt",
+        "payload",
+        "input",
+        "output",
+        "result",
+        "content",
+        "message",
+    }
+
+    def redact(value: Any, key: str = "") -> Any:
+        if key.lower() in private_value_keys or any(
+            part in key.lower() for part in sensitive_parts
+        ):
+            return "[redacted]"
+        if isinstance(value, Mapping):
+            return {str(item): redact(child, str(item)) for item, child in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [redact(item, key) for item in value[:32]]
+        if isinstance(value, str):
+            return value[:256]
+        if isinstance(value, (bool, int, float)) or value is None:
+            return value
+        return type(value).__name__
+
+    summary = redact(record)
+    logger.info("Agent runtime audit: {}", summary)
+
+
 def init_agent_runtime(container: DependencyContainer):
     """Register the shared Agent runtime against the application's services."""
     # Import lazily because Runtime imports the message package, whose package
     # initialisation also loads plugin-facing IM interfaces.
-    from kirara_ai.agent_runtime import AgentRegistry, AgentRuntimeExecutor
+    from kirara_ai.agent_runtime import (
+        AgentHookRuntime,
+        AgentRegistry,
+        AgentRuntimeExecutor,
+        HookHandler,
+        SessionStore,
+    )
 
     agent_registry = AgentRegistry(DATA_PATH)
+    session_store = SessionStore(DATA_PATH)
     resource_service = container.resolve(ResourceLifecycleService)
+    config = container.resolve(GlobalConfig) if container.has(GlobalConfig) else GlobalConfig()
+    runtime_config = config.agent_runtime
+    hook_handlers = {
+        name: HookHandler(_agent_audit_hook)
+        for name in (
+            "audit.agent_start",
+            "audit.user_prompt",
+            "audit.pre_tool",
+            "audit.permission_request",
+            "audit.post_tool",
+            "audit.pre_compact",
+            "audit.post_compact",
+            "audit.stop",
+        )
+    }
+    if runtime_config.debug_hooks_enabled:
+        hook_handlers["agent.debug"] = HookHandler(_agent_debug_hook)
+    hook_runtime = AgentHookRuntime(
+        resource_loader=resource_service.read_entry,
+        resource_service=resource_service,
+        handlers=hook_handlers,
+        audit_sink=_agent_runtime_audit_sink,
+    )
+    memory_manager = (
+        container.resolve(MemoryManager)
+        if container.has(MemoryManager)
+        else None
+    )
     runtime = AgentRuntimeExecutor(
         agent_registry=agent_registry,
         llm_manager=container.resolve(LLMManager),
         mcp_manager=container.resolve(MCPServerManager),
         resource_loader=resource_service.read_entry,
         resource_service=resource_service,
+        session_store=session_store,
+        memory_manager=memory_manager,
+        hook_runtime=hook_runtime,
+        context_char_threshold=runtime_config.context_char_threshold,
+        audit_sink=_agent_runtime_audit_sink,
     )
     container.register(AgentRegistry, agent_registry)
+    container.register(SessionStore, session_store)
     container.register(AgentRuntimeExecutor, runtime)
     return runtime
+
+
+def init_storage(container: DependencyContainer) -> tuple[DatabaseManager, MediaManager]:
+    """Initialize persistent services below the configured VPS data root."""
+
+    data_root = Path(DATA_PATH).resolve()
+    db = DatabaseManager(container, data_dir=data_root / "db")
+    db.initialize()
+    container.register(DatabaseManager, db)
+
+    media_manager = MediaManager(media_dir=data_root / "media")
+    container.register(MediaManager, media_manager)
+    container.register(MediaCarrierRegistry, MediaCarrierRegistry(container))
+    container.register(MediaCarrierService, MediaCarrierService(container, media_manager))
+    return db, media_manager
+
 
 def init_application() -> DependencyContainer:
     """初始化应用程序"""
@@ -213,16 +348,7 @@ def init_application() -> DependencyContainer:
     container.register(GlobalConfig, config)
     container.register(BlockRegistry, BlockRegistry())
 
-    # 初始化数据库管理器
-    db = DatabaseManager(container)
-    db.initialize()
-    container.register(DatabaseManager, db)
-
-    # 注册媒体管理器
-    media_manager = MediaManager()
-    container.register(MediaManager, media_manager)
-    container.register(MediaCarrierRegistry, MediaCarrierRegistry(container))
-    container.register(MediaCarrierService, MediaCarrierService(container, media_manager))
+    init_storage(container)
 
     # 注册工作流注册表
     workflow_registry = WorkflowRegistry(container)
@@ -233,7 +359,11 @@ def init_application() -> DependencyContainer:
             container=container,
         )
     container.register(ResourceLifecycleService, resource_service)
-    container.register(ResourceSourceService, ResourceSourceService(resource_service))
+    source_service = ResourceSourceService(resource_service)
+    container.register(ResourceSourceService, source_service)
+    catalog_service = ResourceCatalogService(resource_service, source_service)
+    container.register(ResourceCatalogService, catalog_service)
+    catalog_service.ensure_builtins()
 
     # 注册调度规则注册表
     dispatch_registry = DispatchRuleRegistry(container)

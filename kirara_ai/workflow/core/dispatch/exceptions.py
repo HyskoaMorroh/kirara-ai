@@ -5,3 +5,6 @@ class WorkflowNotFoundException(Exception):
         self.message = message
         super().__init__(self.message)
 
+
+class AgentConfigurationNotFound(LookupError):
+    """An Agent-only entry point has no matching runtime configuration."""

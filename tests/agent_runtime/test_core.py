@@ -140,6 +140,26 @@ def test_resource_snapshot_is_immutable_and_preserves_versions():
         snapshot.resources += ()
 
 
+def test_resource_binding_accepts_only_fixed_or_current_version_policy():
+    binding = ResourceBinding(
+        resource_id="prompt",
+        resource_type="prompt",
+        version="1.0.0",
+        content_sha256="a" * 64,
+        version_policy="current",
+    )
+
+    assert binding.version_policy == "current"
+    with pytest.raises(ValueError, match="version policy"):
+        ResourceBinding(
+            resource_id="prompt",
+            resource_type="prompt",
+            version="1.0.0",
+            content_sha256="a" * 64,
+            version_policy="floating",
+        )
+
+
 def test_mcp_tools_require_the_intersection_of_all_runtime_allowlists():
     assert effective_mcp_allowlist(
         agent_allowlist={"search", "write"},

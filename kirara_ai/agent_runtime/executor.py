@@ -8,15 +8,19 @@ view for one conversation turn.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import hashlib
 import json
 import uuid
 from collections.abc import Mapping as ABCMapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from kirara_ai.im.message import IMMessage
+from kirara_ai.im.sender import ChatSender
 from kirara_ai.llm.format.message import (
     LLMChatContentPartType,
     LLMChatImageContent,
@@ -27,7 +31,16 @@ from kirara_ai.llm.format.message import (
 from kirara_ai.llm.format.request import LLMChatRequest, Tool, ToolParameters
 from kirara_ai.llm.format.response import LLMChatResponse
 from kirara_ai.llm.format.tool import LLMToolResultContent, ToolCall
-from kirara_ai.llm.resilience import ChatExecutionResult
+from kirara_ai.llm.resilience import (
+    ChatExecutionResult,
+    ErrorCategory,
+    FailoverExecutionError,
+    RequestCancelledError,
+    RETRYABLE_ERROR_CATEGORIES,
+    StreamInterruptedError,
+    classify_llm_error,
+)
+from kirara_ai.memory.entry import MemoryEntry
 from kirara_ai.agent_runtime.core import (
     AgentDefinition,
     AgentRegistry,
@@ -36,6 +49,9 @@ from kirara_ai.agent_runtime.core import (
     effective_mcp_allowlist,
 )
 from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
+
+from .session_store import SessionStore
+from .hooks import AgentHookRuntime, HookOutcome
 
 
 class RuntimeStatus(str, Enum):
@@ -89,13 +105,38 @@ class AgentRuntimeExecutor:
         resource_loader: Optional[Callable[..., Any]] = None,
         resource_service: Optional[ResourceLifecycleService] = None,
         audit_sink: Optional[Callable[[dict[str, Any]], None]] = None,
+        session_store: Optional[SessionStore] = None,
+        memory_manager: Any = None,
+        hook_runtime: Optional[AgentHookRuntime] = None,
+        context_char_threshold: Optional[int] = None,
+        compactor: Optional[Callable[..., Any]] = None,
     ) -> None:
+        if context_char_threshold is not None:
+            if isinstance(context_char_threshold, bool) or not isinstance(
+                context_char_threshold, int
+            ) or context_char_threshold < 0:
+                raise ValueError("context_char_threshold must be a non-negative integer")
+        if compactor is not None and not callable(compactor):
+            raise TypeError("compactor must be callable")
         self.agent_registry = agent_registry
         self.llm_manager = llm_manager
         self.mcp_manager = mcp_manager
-        self.resource_loader = resource_loader or (lambda _resource_id: "")
         self.resource_service = resource_service
+        self.resource_loader = resource_loader or (
+            resource_service.read_entry
+            if resource_service is not None
+            else (lambda _resource_id: "")
+        )
         self.audit_sink = audit_sink
+        self.session_store = session_store
+        self.memory_manager = memory_manager
+        self.hook_runtime = hook_runtime or AgentHookRuntime(
+            resource_loader=self.resource_loader,
+            resource_service=self.resource_service,
+            audit_sink=self.audit_sink,
+        )
+        self.context_char_threshold = context_char_threshold or 0
+        self.compactor = compactor
         self._pending: dict[str, _PendingConfirmation] = {}
 
     async def run(
@@ -110,6 +151,9 @@ class AgentRuntimeExecutor:
     ) -> RuntimeResult:
         """Execute one inbound message and never perform an unconfirmed tool."""
 
+        agent: Optional[AgentDefinition] = None
+        snapshot: Optional[ResourceSnapshot] = None
+        result: Optional[RuntimeResult] = None
         try:
             agent = self._trusted_agent(self.agent_registry.resolve(context, session_agent_id))
             session_allowlist = self._optional_set(session_mcp_allowlist)
@@ -121,10 +165,40 @@ class AgentRuntimeExecutor:
                 session_allowlist,
                 workflow_allowlist,
             )
-            messages = self._build_messages(agent, message, history)
-            tools = self._build_tools(tool_entries, effective_tools) if agent.allow_tools else []
+            stored_history = history
+            memory_history: list[LLMChatMessage] = []
+            if history is None:
+                stored_history = None
+                if self.session_store is not None:
+                    stored_history = self.session_store.load_history(
+                        context.session_key,
+                        agent_id=agent.agent_id,
+                    )
+                if self.memory_manager is not None:
+                    memory_history = self._load_memory_history(
+                        context,
+                        agent.agent_id,
+                    )
+            if not stored_history:
+                stored_history = memory_history
             model_id = agent.model_priority[0]
             snapshot = agent.snapshot(model_id=model_id)
+            await self._run_hook(
+                "SessionStart",
+                agent=agent,
+                context=context,
+                snapshot=snapshot,
+                payload={"session_key": context.session_key, "agent_id": agent.agent_id},
+            )
+            await self._run_hook(
+                "UserPromptSubmit",
+                agent=agent,
+                context=context,
+                snapshot=snapshot,
+                payload={"text": message.content, "has_images": bool(message.images)},
+            )
+            messages = self._build_messages(agent, message, stored_history)
+            tools = self._build_tools(tool_entries, effective_tools) if agent.allow_tools else []
             result = await self._run_loop(
                 context=context,
                 agent=agent,
@@ -138,6 +212,9 @@ class AgentRuntimeExecutor:
                 tool_iterations=0,
                 trace_ids=(),
             )
+            if result.status is RuntimeStatus.COMPLETED:
+                self._persist_history(context.session_key, agent.agent_id, result)
+                self._persist_memory(context, agent.agent_id, result)
             self._audit("run", result)
             return result
         except Exception as error:
@@ -148,23 +225,90 @@ class AgentRuntimeExecutor:
             )
             self._audit("run", result)
             return result
+        finally:
+            if agent is not None and snapshot is not None:
+                await self._run_hook(
+                    "Stop",
+                    agent=agent,
+                    context=context,
+                    snapshot=snapshot,
+                    payload={
+                        "status": result.status.value if result is not None else "failed",
+                        "agent_id": agent.agent_id,
+                        "confirmation_pending": bool(
+                            result is not None
+                            and result.status is RuntimeStatus.AWAITING_CONFIRMATION
+                        ),
+                    },
+                )
 
-    async def confirm(self, confirmation_id: str) -> RuntimeResult:
+    async def confirm(
+        self,
+        confirmation_id: str,
+        context: ChannelContext,
+    ) -> RuntimeResult:
         """Approve one pending call and resume its original model turn."""
 
-        pending = self._pending.pop(confirmation_id, None)
+        pending: Optional[_PendingConfirmation] = None
+        if self.session_store is not None:
+            outcome, record = self.session_store.claim_pending(
+                confirmation_id,
+                context.session_key,
+            )
+            if outcome != "executing":
+                return self._confirmation_claim_failure(
+                    confirmation_id,
+                    context,
+                    outcome,
+                )
+            pending = self._pending.pop(confirmation_id, None)
+            if pending is None:
+                assert record is not None
+                try:
+                    pending = self._restore_pending(record, context)
+                except Exception as error:
+                    self.session_store.complete_pending(
+                        confirmation_id,
+                        "failed",
+                        error_type="InvalidConfirmationRecord",
+                    )
+                    result = RuntimeResult(
+                        status=RuntimeStatus.FAILED,
+                        context=context,
+                        confirmation_id=confirmation_id,
+                        error={
+                            "type": type(error).__name__,
+                            "message": self._safe_error(error),
+                        },
+                    )
+                    self._audit("confirm", result)
+                    return result
+        else:
+            pending = self._pending.get(confirmation_id)
+            if pending is not None and pending.context.session_key != context.session_key:
+                return self._confirmation_claim_failure(
+                    confirmation_id,
+                    context,
+                    "session_mismatch",
+                )
+            if pending is not None:
+                self._pending.pop(confirmation_id, None)
         if pending is None:
             return RuntimeResult(
                 status=RuntimeStatus.FAILED,
+                context=context,
                 confirmation_id=confirmation_id,
                 error={"type": "ConfirmationNotFound", "message": "confirmation is missing or expired"},
             )
+        stop_agent = pending.agent
+        stop_snapshot = pending.snapshot
         try:
             # A confirmation is a short-lived capability. Re-read the Agent,
             # tool cache and transport state before using it.
             current_agent = self._trusted_agent(
                 self.agent_registry.get(pending.agent.agent_id)
             )
+            stop_agent = current_agent
             current_entries = self._read_tool_entries()
             current_name = (
                 pending.pending_call.function.name
@@ -197,9 +341,46 @@ class AgentRuntimeExecutor:
                         "message": "Agent or MCP binding changed before confirmation",
                     },
                 )
+                if self.session_store is not None:
+                    self.session_store.complete_pending(
+                        confirmation_id,
+                        "expired",
+                        error_type="ConfirmationExpired",
+                    )
                 self._audit("confirm", result)
                 return result
-            result = await self._execute_tool_call(
+            pre_tool_outcome = await self._run_hook(
+                "PreToolUse",
+                agent=current_agent,
+                context=pending.context,
+                snapshot=pending.snapshot,
+                payload={
+                    "tool_name": current_name,
+                    "arguments": pending.pending_call.function.arguments or {},
+                    "confirmed": True,
+                },
+            )
+            if pre_tool_outcome.blocked:
+                if self.session_store is not None:
+                    self.session_store.complete_pending(
+                        confirmation_id,
+                        "failed",
+                        error_type="AgentHookDenied",
+                    )
+                result = RuntimeResult(
+                    status=RuntimeStatus.FAILED,
+                    context=pending.context,
+                    agent_id=current_agent.agent_id,
+                    snapshot=pending.snapshot,
+                    confirmation_id=confirmation_id,
+                    error={
+                        "type": "AgentHookDenied",
+                        "message": "tool call was denied by Agent Hook",
+                    },
+                )
+                self._audit("confirm", result)
+                return result
+            tool_result = await self._execute_tool_call(
                 pending.pending_call,
                 current_agent,
                 pending.session_allowlist,
@@ -207,9 +388,26 @@ class AgentRuntimeExecutor:
                 self._mcp_server_ids(current_agent),
                 confirmed=True,
             )
+            await self._run_hook(
+                "PostToolUse",
+                agent=current_agent,
+                context=pending.context,
+                snapshot=pending.snapshot,
+                payload={
+                    "tool_name": current_name,
+                    "is_error": tool_result.isError,
+                    "result": tool_result.content,
+                },
+            )
+            if self.session_store is not None:
+                self.session_store.complete_pending(
+                    confirmation_id,
+                    "failed" if tool_result.isError else "succeeded",
+                    error_type=("ToolExecutionFailed" if tool_result.isError else None),
+                )
             messages = list(pending.messages)
             messages.append(self._assistant_tool_message(pending.pending_call))
-            messages.append(LLMChatMessage(role="tool", content=[result]))
+            messages.append(LLMChatMessage(role="tool", content=[tool_result]))
             response = await self._run_loop(
                 context=pending.context,
                 agent=current_agent,
@@ -223,9 +421,29 @@ class AgentRuntimeExecutor:
                 tool_iterations=pending.tool_iterations + 1,
                 trace_ids=pending.trace_ids,
             )
+            result = response
+            if response.status is RuntimeStatus.COMPLETED and self.session_store is not None:
+                self._persist_history(
+                    pending.context.session_key,
+                    current_agent.agent_id,
+                    response,
+                )
+                self._persist_memory(
+                    pending.context,
+                    current_agent.agent_id,
+                    response,
+                )
             self._audit("confirm", response)
             return response
         except Exception as error:
+            if self.session_store is not None:
+                record = self.session_store.get_confirmation(confirmation_id)
+                if record is not None and record["status"] == "executing":
+                    self.session_store.complete_pending(
+                        confirmation_id,
+                        "failed",
+                        error_type=type(error).__name__,
+                    )
             result = RuntimeResult(
                 status=RuntimeStatus.FAILED,
                 context=pending.context,
@@ -236,6 +454,18 @@ class AgentRuntimeExecutor:
             )
             self._audit("confirm", result)
             return result
+        finally:
+            await self._run_hook(
+                "Stop",
+                agent=stop_agent,
+                context=pending.context,
+                snapshot=stop_snapshot,
+                payload={
+                    "status": result.status.value if "result" in locals() else "failed",
+                    "agent_id": stop_agent.agent_id,
+                    "confirmation_pending": False,
+                },
+            )
 
     async def _run_loop(
         self,
@@ -260,6 +490,14 @@ class AgentRuntimeExecutor:
         # One final model request is made with tool_choice=none after the
         # configured number of tool rounds, so a model cannot extend the loop.
         for iteration in range(tool_iterations, agent.max_tool_iterations + 1):
+            current_messages = await self._maybe_compact_messages(
+                current_messages,
+                context=context,
+                agent=agent,
+                snapshot=snapshot,
+                model_id=current_model,
+                iteration=iteration,
+            )
             request = LLMChatRequest(
                 messages=current_messages,
                 model=current_model,
@@ -267,7 +505,10 @@ class AgentRuntimeExecutor:
                 tool_choice=("none" if iteration >= agent.max_tool_iterations else None),
             )
             response, current_model, trace_id = await self._execute_model(
-                request, agent.model_priority, current_model
+                request,
+                agent.model_priority,
+                current_model,
+                provider_allowlist=agent.provider_allowlist,
             )
             if trace_id:
                 current_traces.append(trace_id)
@@ -298,6 +539,26 @@ class AgentRuntimeExecutor:
                     )
                     continue
                 if self._requires_confirmation(name):
+                    hook_outcome = await self._run_hook(
+                        "PreToolUse",
+                        agent=agent,
+                        context=context,
+                        snapshot=snapshot,
+                        payload={
+                            "tool_name": name,
+                            "arguments": call.function.arguments or {},
+                            "confirmed": False,
+                        },
+                    )
+                    if hook_outcome.blocked:
+                        current_messages.append(self._assistant_tool_message(call))
+                        current_messages.append(
+                            LLMChatMessage(
+                                role="tool",
+                                content=[self._error_result(call, "tool call was denied by Agent Hook")],
+                            )
+                        )
+                        continue
                     confirmation_id = uuid.uuid4().hex
                     self._pending[confirmation_id] = _PendingConfirmation(
                         confirmation_id=confirmation_id,
@@ -316,6 +577,20 @@ class AgentRuntimeExecutor:
                         tool_iterations=iteration,
                         trace_ids=tuple(current_traces),
                     )
+                    self._persist_pending(
+                        self._pending[confirmation_id],
+                    )
+                    await self._run_hook(
+                        "PermissionRequest",
+                        agent=agent,
+                        context=context,
+                        snapshot=snapshot,
+                        payload={
+                            "tool_name": name,
+                            "arguments": call.function.arguments or {},
+                            "confirmation_id": confirmation_id,
+                        },
+                    )
                     return RuntimeResult(
                         status=RuntimeStatus.AWAITING_CONFIRMATION,
                         context=context,
@@ -326,6 +601,26 @@ class AgentRuntimeExecutor:
                         confirmation_id=confirmation_id,
                         trace_ids=tuple(current_traces),
                     )
+                hook_outcome = await self._run_hook(
+                    "PreToolUse",
+                    agent=agent,
+                    context=context,
+                    snapshot=snapshot,
+                    payload={
+                        "tool_name": name,
+                        "arguments": call.function.arguments or {},
+                        "confirmed": False,
+                    },
+                )
+                if hook_outcome.blocked:
+                    current_messages.append(self._assistant_tool_message(call))
+                    current_messages.append(
+                        LLMChatMessage(
+                            role="tool",
+                            content=[self._error_result(call, "tool call was denied by Agent Hook")],
+                        )
+                    )
+                    continue
                 tool_result = await self._execute_tool_call(
                     call,
                     agent,
@@ -333,6 +628,17 @@ class AgentRuntimeExecutor:
                     workflow_allowlist,
                     self._mcp_server_ids(agent),
                     confirmed=False,
+                )
+                await self._run_hook(
+                    "PostToolUse",
+                    agent=agent,
+                    context=context,
+                    snapshot=snapshot,
+                    payload={
+                        "tool_name": name,
+                        "is_error": tool_result.isError,
+                        "result": tool_result.content,
+                    },
                 )
                 current_messages.append(self._assistant_tool_message(call))
                 current_messages.append(LLMChatMessage(role="tool", content=[tool_result]))
@@ -347,11 +653,299 @@ class AgentRuntimeExecutor:
             error={"type": "RuntimeLoopError", "message": "runtime loop ended without a model response"},
         )
 
+    async def _maybe_compact_messages(
+        self,
+        messages: Sequence[LLMChatMessage],
+        *,
+        context: ChannelContext,
+        agent: AgentDefinition,
+        snapshot: ResourceSnapshot,
+        model_id: str,
+        iteration: int,
+    ) -> list[LLMChatMessage]:
+        """Run ``PreCompact`` and reduce old context when the limit is reached.
+
+        The compaction boundary is deliberately before model request creation.
+        Hook output is an audit-only side effect, while a custom compactor can
+        only replace the historical prefix: the first system message, the
+        latest user turn, and every message in its tool chain remain intact.
+        """
+
+        current = list(messages)
+        threshold = self.context_char_threshold
+        estimated_before = self._estimate_messages_chars(current)
+        if threshold <= 0 or estimated_before <= threshold:
+            return current
+
+        await self._run_hook(
+            "PreCompact",
+            agent=agent,
+            context=context,
+            snapshot=snapshot,
+            payload={
+                "message_count": len(current),
+                "estimated_chars": estimated_before,
+                "model_id": model_id,
+                "iteration": iteration,
+            },
+        )
+
+        used_custom_compactor = False
+        compactor_error: Optional[str] = None
+        compacted: list[LLMChatMessage]
+        if self.compactor is not None:
+            try:
+                candidate = await self._invoke_compactor(
+                    self.compactor,
+                    [message.model_copy(deep=True) for message in current],
+                    context,
+                )
+                compacted = self._validate_compacted_messages(current, candidate)
+                used_custom_compactor = True
+            except Exception as error:
+                # A user supplied compactor is an optimization, not a reason
+                # to fail an otherwise valid Agent turn.
+                compactor_error = type(error).__name__
+                compacted = self._default_compact_messages(current, threshold)
+        else:
+            compacted = self._default_compact_messages(current, threshold)
+
+        estimated_after = self._estimate_messages_chars(compacted)
+        self._audit_compaction(
+            context=context,
+            agent=agent,
+            model_id=model_id,
+            iteration=iteration,
+            message_count_before=len(current),
+            message_count_after=len(compacted),
+            estimated_chars_before=estimated_before,
+            estimated_chars_after=estimated_after,
+            used_custom_compactor=used_custom_compactor,
+            compactor_error=compactor_error,
+        )
+        await self._run_hook(
+            "PostCompact",
+            agent=agent,
+            context=context,
+            snapshot=snapshot,
+            payload={
+                "message_count_before": len(current),
+                "message_count_after": len(compacted),
+                "estimated_chars_before": estimated_before,
+                "estimated_chars_after": estimated_after,
+                "model_id": model_id,
+                "iteration": iteration,
+            },
+        )
+        return compacted
+
+    @staticmethod
+    async def _invoke_compactor(
+        compactor: Callable[..., Any],
+        messages: list[LLMChatMessage],
+        context: ChannelContext,
+    ) -> Any:
+        """Call a sync or async compactor with one or two supported arguments."""
+
+        try:
+            signature = inspect.signature(compactor)
+        except (TypeError, ValueError):
+            signature = None
+
+        if signature is None:
+            arguments = (messages,)
+        else:
+            try:
+                signature.bind(messages, context)
+            except TypeError:
+                try:
+                    signature.bind(messages)
+                except TypeError as error:
+                    raise TypeError(
+                        "compactor must accept messages or messages and context"
+                    ) from error
+                arguments = (messages,)
+            else:
+                arguments = (messages, context)
+
+        if inspect.iscoroutinefunction(compactor):
+            return await compactor(*arguments)
+        result = await asyncio.to_thread(compactor, *arguments)
+        return await result if inspect.isawaitable(result) else result
+
+    @classmethod
+    def _validate_compacted_messages(
+        cls,
+        original: Sequence[LLMChatMessage],
+        candidate: Any,
+    ) -> list[LLMChatMessage]:
+        """Accept only a compactor result that preserves the protected suffix."""
+
+        if isinstance(candidate, (str, bytes)) or not isinstance(candidate, Sequence):
+            raise TypeError("compactor must return a sequence of LLM messages")
+        compacted = list(candidate)
+        if any(not isinstance(message, LLMChatMessage) for message in compacted):
+            raise TypeError("compactor returned an invalid LLM message")
+
+        first_system = next(
+            (message for message in original if message.role == "system"),
+            None,
+        )
+        latest_user_index = next(
+            (
+                index
+                for index in range(len(original) - 1, -1, -1)
+                if original[index].role == "user"
+            ),
+            None,
+        )
+        current_turn = (
+            list(original[latest_user_index:])
+            if latest_user_index is not None
+            else []
+        )
+
+        if first_system is not None:
+            if not compacted or compacted[0] != first_system:
+                raise ValueError("compactor removed or moved the first system message")
+        if current_turn:
+            if len(compacted) < len(current_turn) or compacted[-len(current_turn):] != current_turn:
+                raise ValueError("compactor changed the current user/tool turn")
+        if not compacted:
+            raise ValueError("compactor returned an empty message list")
+        cls._require_valid_tool_pairs(compacted)
+        return compacted
+
+    @staticmethod
+    def _require_valid_tool_pairs(messages: Sequence[LLMChatMessage]) -> None:
+        """Reject tool results without the assistant call they answer."""
+
+        for index, message in enumerate(messages):
+            if message.role != "tool":
+                continue
+            if index == 0 or messages[index - 1].role != "assistant":
+                raise ValueError("compactor returned an orphaned tool result")
+            calls = [
+                item
+                for item in messages[index - 1].content
+                if isinstance(item, LLMToolCallContent)
+            ]
+            results = [
+                item
+                for item in message.content
+                if isinstance(item, LLMToolResultContent)
+            ]
+            if not calls or any(
+                not any(
+                    (result.id and call.id == result.id)
+                    or (not result.id and call.name == result.name)
+                    for call in calls
+                )
+                for result in results
+            ):
+                raise ValueError("compactor changed a tool call/result pair")
+
+    @classmethod
+    def _default_compact_messages(
+        cls,
+        messages: Sequence[LLMChatMessage],
+        threshold: int,
+    ) -> list[LLMChatMessage]:
+        """Drop the oldest complete user turns before the current turn."""
+
+        original = list(messages)
+        system_index = next(
+            (index for index, message in enumerate(original) if message.role == "system"),
+            None,
+        )
+        latest_user_index = next(
+            (
+                index
+                for index in range(len(original) - 1, -1, -1)
+                if original[index].role == "user"
+            ),
+            None,
+        )
+        if latest_user_index is None:
+            return original
+
+        protected_system = [original[system_index]] if system_index is not None else []
+        history_start = (system_index + 1) if system_index is not None else 0
+        history = original[history_start:latest_user_index]
+        current_turn = original[latest_user_index:]
+
+        # Group history by user turns so a tool result is never left behind
+        # without the assistant tool-call message that introduced it.
+        turns: list[list[LLMChatMessage]] = []
+        turn: Optional[list[LLMChatMessage]] = None
+        for message in history:
+            if message.role == "user":
+                if turn:
+                    turns.append(turn)
+                turn = [message]
+            elif turn is not None:
+                turn.append(message)
+        if turn:
+            turns.append(turn)
+
+        while turns:
+            candidate = protected_system + [item for group in turns for item in group] + current_turn
+            if cls._estimate_messages_chars(candidate) <= threshold:
+                return candidate
+            turns.pop(0)
+
+        return protected_system + current_turn
+
+    @classmethod
+    def _estimate_messages_chars(cls, messages: Sequence[LLMChatMessage]) -> int:
+        return sum(len(cls._message_text(message)) for message in messages)
+
+    def _audit_compaction(
+        self,
+        *,
+        context: ChannelContext,
+        agent: AgentDefinition,
+        model_id: str,
+        iteration: int,
+        message_count_before: int,
+        message_count_after: int,
+        estimated_chars_before: int,
+        estimated_chars_after: int,
+        used_custom_compactor: bool,
+        compactor_error: Optional[str],
+    ) -> None:
+        if self.audit_sink is None:
+            return
+        record: dict[str, Any] = {
+            "component": "agent_runtime",
+            "operation": "compact",
+            "event": "PreCompact",
+            "status": "success",
+            "agent_id": agent.agent_id,
+            "model_id": model_id,
+            "iteration": iteration,
+            "message_count_before": message_count_before,
+            "message_count_after": message_count_after,
+            "estimated_chars_before": estimated_chars_before,
+            "estimated_chars_after": estimated_chars_after,
+            "used_custom_compactor": used_custom_compactor,
+            "session": context.redacted(),
+        }
+        if compactor_error:
+            record["compactor_error_type"] = compactor_error
+            record["status"] = "fallback"
+        try:
+            self.audit_sink(record)
+        except Exception:
+            pass
+
     async def _execute_model(
         self,
         request: LLMChatRequest,
         model_priority: Sequence[str],
         current_model: str,
+        *,
+        provider_allowlist: Iterable[str] = (),
     ) -> tuple[LLMChatResponse, str, str]:
         candidates = list(dict.fromkeys([current_model, *model_priority]))
         last_error: Optional[BaseException] = None
@@ -361,7 +955,23 @@ class AgentRuntimeExecutor:
             else:
                 candidate_request = request.copy(update={"model": model_id})
             try:
-                result = self.llm_manager.execute_chat(candidate_request)
+                execute_chat = self.llm_manager.execute_chat
+                options: dict[str, Any] = {}
+                try:
+                    signature = inspect.signature(execute_chat)
+                except (TypeError, ValueError):
+                    signature = None
+                if signature is not None:
+                    parameters = signature.parameters.values()
+                    if (
+                        "provider_allowlist" in signature.parameters
+                        or any(
+                            parameter.kind == inspect.Parameter.VAR_KEYWORD
+                            for parameter in parameters
+                        )
+                    ):
+                        options["provider_allowlist"] = provider_allowlist
+                result = execute_chat(candidate_request, **options)
                 if inspect.isawaitable(result):
                     result = await result
                 response = result.response if isinstance(result, ChatExecutionResult) else getattr(result, "response", result)
@@ -371,10 +981,101 @@ class AgentRuntimeExecutor:
                 return response, model_id, trace_id
             except Exception as error:
                 last_error = error
-                continue
+                if self._can_failover_to_next_model(error):
+                    continue
+                raise
         if last_error is not None:
             raise last_error
         raise LookupError("Agent has no available model")
+
+    @staticmethod
+    def _can_failover_to_next_model(error: BaseException) -> bool:
+        """Allow model failover only for failures that are safe to replay.
+
+        ``LLMManager`` already applies this policy between providers.  The
+        Agent layer must preserve it when it advances to the next model in the
+        configured chain; otherwise an authentication or policy failure could
+        be replayed against unrelated upstreams.
+        """
+
+        if isinstance(error, (RequestCancelledError, StreamInterruptedError)):
+            return False
+        if isinstance(error, FailoverExecutionError):
+            attempts = tuple(error.attempts)
+            if not attempts:
+                cause = error.cause
+                return cause is None or AgentRuntimeExecutor._can_failover_to_next_model(cause)
+            categories = {
+                str(attempt.error_category or "").strip().lower()
+                for attempt in attempts
+            }
+            return bool(categories) and categories.issubset(
+                {category.value for category in RETRYABLE_ERROR_CATEGORIES}
+                | {"circuit_open"}
+            )
+        return classify_llm_error(error) in RETRYABLE_ERROR_CATEGORIES
+
+    async def _run_hook(
+        self,
+        event: str,
+        *,
+        agent: AgentDefinition,
+        context: ChannelContext,
+        snapshot: ResourceSnapshot,
+        payload: Optional[Mapping[str, Any]] = None,
+    ) -> HookOutcome:
+        """Run a Hook event as an isolated policy side effect.
+
+        Hook output is deliberately reduced to ``HookOutcome`` here.  The
+        model only receives normal tool results, never Hook output or errors.
+        A runtime defect is audited and treated as non-blocking; only an
+        explicit ``PreToolUse`` denial can stop a tool call.
+        """
+
+        try:
+            outcome = await self.hook_runtime.run_event(
+                event,
+                agent=agent,
+                context=context,
+                snapshot=snapshot,
+                payload=payload,
+            )
+            if not isinstance(outcome, HookOutcome):
+                raise TypeError("Agent Hook runtime returned an invalid outcome")
+        except Exception as error:
+            outcome = HookOutcome(
+                event=event,
+                status="error",
+                reasons=(type(error).__name__,),
+            )
+        if self.audit_sink is not None:
+            try:
+                self.audit_sink(
+                    {
+                        "component": "agent_hook_runtime",
+                        "operation": "run_event",
+                        "event": event,
+                        "status": outcome.status,
+                        "blocked": bool(outcome.blocked and event == "PreToolUse"),
+                        "executed": outcome.executed,
+                        "resource_count": len(outcome.resource_ids),
+                        "reason_count": len(outcome.reasons),
+                        "session": context.redacted(),
+                    }
+                )
+            except Exception:
+                pass
+        if event != "PreToolUse" and outcome.blocked:
+            return HookOutcome(
+                event=outcome.event,
+                status=outcome.status,
+                blocked=False,
+                executed=outcome.executed,
+                resource_ids=outcome.resource_ids,
+                reasons=outcome.reasons,
+                output_bytes=outcome.output_bytes,
+            )
+        return outcome
 
     async def _execute_tool_call(
         self,
@@ -421,7 +1122,11 @@ class AgentRuntimeExecutor:
         history: Optional[Sequence[LLMChatMessage]],
     ) -> list[LLMChatMessage]:
         sections: list[str] = []
-        for binding in (*agent.prompt_bindings, *agent.skill_bindings):
+        for binding in (
+            *agent.prompt_bindings,
+            *agent.skill_bindings,
+            *agent.memory_bindings,
+        ):
             if not binding.enabled:
                 continue
             content = self._load_resource(binding.resource_id, binding.version)
@@ -494,8 +1199,13 @@ class AgentRuntimeExecutor:
                     self.resource_service.resolve_binding(
                         binding.resource_id,
                         resource_type,
-                        version=binding.version,
+                        version=(
+                            None
+                            if binding.version_policy == "current"
+                            else binding.version
+                        ),
                         enabled=binding.enabled,
+                        version_policy=binding.version_policy,
                     )
                 )
             return tuple(resolved)
@@ -510,7 +1220,9 @@ class AgentRuntimeExecutor:
             capabilities=agent.capabilities,
             prompt_bindings=resolve_bindings(agent.prompt_bindings, "prompt"),
             skill_bindings=resolve_bindings(agent.skill_bindings, "skill"),
+            memory_bindings=resolve_bindings(agent.memory_bindings, "memory"),
             mcp_bindings=resolve_bindings(agent.mcp_bindings, "mcp"),
+            hook_bindings=resolve_bindings(agent.hook_bindings, "hook"),
             mcp_allowlist=agent.mcp_allowlist,
             allow_tools=agent.allow_tools,
             max_tool_iterations=agent.max_tool_iterations,
@@ -525,8 +1237,16 @@ class AgentRuntimeExecutor:
 
     @staticmethod
     def _mcp_server_ids(agent: AgentDefinition) -> frozenset[str]:
+        """Return MCP runtime IDs while preserving resource IDs in snapshots.
+
+        Managed MCP resources use the ``mcp.<server_id>`` namespace so they
+        cannot collide with prompts, skills, or legacy configuration entries.
+        The MCP manager itself indexes live servers by the inner server ID.
+        """
         return frozenset(
-            binding.resource_id for binding in agent.mcp_bindings if binding.enabled
+            binding.resource_id.removeprefix("mcp.")
+            for binding in agent.mcp_bindings
+            if binding.enabled
         )
 
     @classmethod
@@ -575,6 +1295,7 @@ class AgentRuntimeExecutor:
                 item.resource_type,
                 item.resource_id,
                 item.version,
+                item.version_policy,
                 item.content_sha256,
                 item.enabled,
             )
@@ -583,6 +1304,9 @@ class AgentRuntimeExecutor:
         return (
             agent.enabled,
             tuple(agent.model_priority),
+            tuple(sorted(agent.provider_allowlist)),
+            tuple(sorted(agent.capabilities)),
+            agent.max_tool_iterations,
             bindings,
             tuple(sorted(agent.mcp_allowlist)),
             agent.allow_tools,
@@ -720,3 +1444,333 @@ class AgentRuntimeExecutor:
             self.audit_sink(record)
         except Exception:
             return
+
+    def _persist_history(
+        self,
+        session_key: str,
+        agent_id: str,
+        result: RuntimeResult,
+    ) -> None:
+        if self.session_store is None or result.response is None:
+            return
+        messages = [message for message in result.messages if message.role != "system"]
+        messages.append(result.response.message)
+        self.session_store.save_history(session_key, messages, agent_id=agent_id)
+
+    @staticmethod
+    def _history_key(context: ChannelContext, agent_id: str) -> str:
+        """Return the compatibility lookup key; Agent isolation is in the record."""
+
+        return context.session_key
+
+    @classmethod
+    def _memory_key(cls, context: ChannelContext, agent_id: str) -> str:
+        payload = "\x1f".join(
+            (
+                context.channel_type,
+                context.adapter_instance,
+                context.account_scope,
+                context.conversation_scope,
+                context.sender_scope,
+                str(agent_id),
+            )
+        )
+        return f"agent-runtime:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+    def _memory_scope(self) -> Any:
+        registry = getattr(self.memory_manager, "scope_registry", None)
+        getter = getattr(registry, "get_scope", None)
+        if not callable(getter):
+            return None
+        config = getattr(self.memory_manager, "config", None)
+        scope_name = getattr(config, "default_scope", "member")
+        return getter(scope_name)
+
+    def _load_memory_history(
+        self,
+        context: ChannelContext,
+        agent_id: str,
+    ) -> list[LLMChatMessage]:
+        try:
+            entries = self.memory_manager.query(
+                self._memory_scope(),
+                self._memory_sender(context),
+                extra_identifier=self._memory_key(context, agent_id),
+            )
+            messages: list[LLMChatMessage] = []
+            for entry in entries or ():
+                metadata = getattr(entry, "metadata", {}) or {}
+                runtime_metadata = metadata.get("agent_runtime")
+                if isinstance(runtime_metadata, dict):
+                    if str(runtime_metadata.get("agent_id", "")) != str(agent_id):
+                        continue
+                    serialized = runtime_metadata.get("message")
+                    if isinstance(serialized, dict):
+                        try:
+                            messages.append(LLMChatMessage.model_validate(serialized))
+                        except (TypeError, ValueError):
+                            continue
+                        continue
+                content = str(getattr(entry, "content", "") or "").strip()
+                if content:
+                    messages.append(
+                        LLMChatMessage(
+                            role="user",
+                            content=[LLMChatTextContent(text=content)],
+                        )
+                    )
+            return messages
+        except Exception as error:
+            self._audit_memory_error("load", error, context)
+            return []
+
+    def _persist_memory(
+        self,
+        context: ChannelContext,
+        agent_id: str,
+        result: RuntimeResult,
+    ) -> None:
+        if self.memory_manager is None or result.response is None:
+            return
+        try:
+            scope = self._memory_scope()
+            memory_key = self._memory_key(context, agent_id)
+            turn_messages = self._current_turn_messages(result.messages)
+            turn_messages.append(result.response.message)
+            for message in turn_messages:
+                if message.role == "system":
+                    continue
+                sender = self._memory_sender(context)
+                serialized = self._redact_memory_message(message)
+                self.memory_manager.store(
+                    scope,
+                    MemoryEntry(
+                        sender=sender,
+                        content=self._message_text(serialized),
+                        timestamp=datetime.now(timezone.utc),
+                        metadata={
+                            "agent_runtime": {
+                                "version": 1,
+                                "agent_id": agent_id,
+                                "message": serialized.model_dump(mode="json"),
+                            }
+                        },
+                    ),
+                    extra_identifier=memory_key,
+                )
+        except Exception as error:
+            self._audit_memory_error("store", error, context)
+
+    @staticmethod
+    def _memory_sender(context: ChannelContext) -> ChatSender:
+        """Build one sender identity for every message in the conversation."""
+
+        if context.conversation_scope.startswith("group:"):
+            group_id = context.conversation_scope.partition(":")[2]
+            return ChatSender.from_group_chat(
+                context.sender_scope,
+                group_id or "unknown-group",
+                context.sender_scope,
+            )
+        return ChatSender.from_c2c_chat(
+            context.sender_scope,
+            context.sender_scope,
+        )
+
+    @staticmethod
+    def _current_turn_messages(messages: Sequence[LLMChatMessage]) -> list[LLMChatMessage]:
+        start = 0
+        for index in range(len(messages) - 1, -1, -1):
+            if messages[index].role == "user":
+                start = index
+                break
+        return list(messages[start:])
+
+    @classmethod
+    def _redact_memory_message(cls, message: LLMChatMessage) -> LLMChatMessage:
+        payload = message.model_dump(mode="python")
+        return LLMChatMessage.model_validate(cls._redact_memory_value(payload))
+
+    @classmethod
+    def _redact_memory_value(cls, value: Any, key: str = "") -> Any:
+        sensitive = (
+            "password",
+            "token",
+            "secret",
+            "cookie",
+            "authorization",
+            "credential",
+            "api_key",
+        )
+        if any(item in key.lower() for item in sensitive):
+            return "[redacted]"
+        if isinstance(value, dict):
+            return {
+                str(item): cls._redact_memory_value(child, str(item))
+                for item, child in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._redact_memory_value(item, key) for item in value]
+        return value
+
+    @staticmethod
+    def _message_text(message: LLMChatMessage) -> str:
+        parts = []
+        for content in message.content:
+            if isinstance(content, LLMChatTextContent):
+                parts.append(content.text)
+            elif isinstance(content, LLMChatImageContent):
+                parts.append(f"[image:{content.media_id}]")
+            else:
+                parts.append(content.model_dump_json())
+        return "\n".join(parts)
+
+    def _audit_memory_error(
+        self,
+        operation: str,
+        error: BaseException,
+        context: ChannelContext,
+    ) -> None:
+        if self.audit_sink is None:
+            return
+        try:
+            self.audit_sink(
+                {
+                    "component": "agent_runtime_memory",
+                    "operation": operation,
+                    "status": "failed",
+                    "session": context.redacted(),
+                    "error_type": type(error).__name__,
+                }
+            )
+        except Exception:
+            return
+
+    def _persist_pending(self, pending: _PendingConfirmation) -> None:
+        if self.session_store is None:
+            return
+        self.session_store.save_pending(
+            {
+                "confirmation_id": pending.confirmation_id,
+                "agent_id": pending.agent.agent_id,
+                "snapshot": pending.snapshot.to_dict(),
+                "messages": [message.model_dump(mode="json") for message in pending.messages],
+                "pending_call": pending.pending_call.model_dump(mode="json"),
+                "tool_names": sorted(pending.tool_names),
+                "mcp_server_ids": sorted(pending.mcp_server_ids),
+                "agent_policy_signature": pending.agent_policy_signature,
+                "tool_signature": pending.tool_signature,
+                "session_allowlist": sorted(pending.session_allowlist or ()),
+                "workflow_allowlist": sorted(pending.workflow_allowlist or ()),
+                "model_id": pending.model_id,
+                "tool_iterations": pending.tool_iterations,
+                "trace_ids": list(pending.trace_ids),
+            },
+            session_key=pending.context.session_key,
+        )
+
+    def _restore_pending(
+        self,
+        record: Mapping[str, Any],
+        context: ChannelContext,
+    ) -> _PendingConfirmation:
+        try:
+            snapshot_payload = record["snapshot"]
+            from datetime import datetime
+            from .core import ResourceBinding
+
+            snapshot = ResourceSnapshot(
+                resources=tuple(
+                    ResourceBinding(**item)
+                    for item in snapshot_payload["resources"]
+                ),
+                model_id=snapshot_payload.get("model_id"),
+                agent_id=snapshot_payload.get("agent_id"),
+                model_priority=tuple(snapshot_payload.get("model_priority", ())),
+                provider_allowlist=tuple(snapshot_payload.get("provider_allowlist", ())),
+                created_at=datetime.fromisoformat(snapshot_payload["created_at"]),
+                content_sha256=snapshot_payload["content_sha256"],
+            )
+            agent = self.agent_registry.get(str(record["agent_id"]))
+            messages = [
+                LLMChatMessage.model_validate(item) for item in record["messages"]
+            ]
+            pending_call = ToolCall.model_validate(record["pending_call"])
+            return _PendingConfirmation(
+                confirmation_id=str(record["confirmation_id"]),
+                context=context,
+                agent=agent,
+                snapshot=snapshot,
+                messages=messages,
+                pending_call=pending_call,
+                tool_names=frozenset(record.get("tool_names", ())),
+                mcp_server_ids=frozenset(record.get("mcp_server_ids", ())),
+                agent_policy_signature=self._tupleize(record.get("agent_policy_signature", ())),
+                tool_signature=tuple(record.get("tool_signature", ())),
+                session_allowlist=(
+                    frozenset(record["session_allowlist"])
+                    if record.get("session_allowlist")
+                    else None
+                ),
+                workflow_allowlist=(
+                    frozenset(record["workflow_allowlist"])
+                    if record.get("workflow_allowlist")
+                    else None
+                ),
+                model_id=str(record["model_id"]),
+                tool_iterations=int(record["tool_iterations"]),
+                trace_ids=tuple(record.get("trace_ids", ())),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("pending confirmation record is invalid") from error
+
+    @staticmethod
+    def _confirmation_claim_failure(
+        confirmation_id: str,
+        context: ChannelContext,
+        outcome: str,
+    ) -> RuntimeResult:
+        errors = {
+            "not_found": (
+                "ConfirmationNotFound",
+                "confirmation is missing or expired",
+            ),
+            "session_mismatch": (
+                "ConfirmationSessionMismatch",
+                "confirmation belongs to a different session",
+            ),
+            "executing": (
+                "ConfirmationInProgress",
+                "confirmation is already executing",
+            ),
+            "succeeded": (
+                "ConfirmationAlreadyProcessed",
+                "confirmation was already processed",
+            ),
+            "failed": (
+                "ConfirmationAlreadyProcessed",
+                "confirmation was already processed",
+            ),
+            "expired": (
+                "ConfirmationExpired",
+                "confirmation has expired",
+            ),
+        }
+        error_type, message = errors.get(
+            outcome,
+            ("ConfirmationUnavailable", "confirmation is unavailable"),
+        )
+        return RuntimeResult(
+            status=RuntimeStatus.FAILED,
+            context=context,
+            confirmation_id=confirmation_id,
+            error={"type": error_type, "message": message},
+        )
+
+    @classmethod
+    def _tupleize(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return tuple(cls._tupleize(item) for item in value)
+        if isinstance(value, dict):
+            return tuple(sorted((key, cls._tupleize(item)) for key, item in value.items()))
+        return value

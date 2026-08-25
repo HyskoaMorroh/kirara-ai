@@ -3,23 +3,41 @@ import { http } from '@/utils/http'
 import { useMessage, useDialog } from 'naive-ui'
 import { useRouter } from 'vue-router'
 
-// MCP服务器接口定义
+export type MCPTransportType = 'stdio' | 'http' | 'sse'
+
+export interface MCPTransport {
+  type: MCPTransportType
+  command?: string | null
+  args: string[]
+  env: Record<string, string>
+  cwd?: string | null
+  url?: string | null
+  headers: Record<string, string>
+}
+
+export interface MCPApps {
+  [key: string]: unknown
+}
+
+// MCP server uses the same canonical shape as the backend and CC Switch.
 export interface MCPServer {
   id: string
-  description: string | null
-  connection_type: 'stdio' | 'sse'
-  command: string | null
-  args: string
-  url: string | null
+  name: string
+  server: MCPTransport
+  apps: MCPApps
+  description: string
+  tags: string[]
+  homepage?: string | null
+  docs?: string | null
+  metadata: Record<string, unknown>
   connection_state: string
-  env: Record<string, string> | null
-  headers: Record<string, string> | null
 }
 
 // MCP服务器统计信息
 export interface MCPStatistics {
   total_servers: number
   stdio_servers: number
+  http_servers: number
   sse_servers: number
   connected_servers: number
   disconnected_servers: number
@@ -72,13 +90,20 @@ export function useMCPViewModel() {
   // 表单
   const formModel = ref({
     id: '',
+    name: '',
     description: '',
+    transportType: 'stdio' as MCPTransportType,
     command: '',
-    args: '',
-    connection_type: 'stdio' as 'stdio' | 'sse',
+    args: [] as string[],
+    cwd: '',
     url: '',
     env: [] as { key: string; value: string }[],
-    headers: [] as { key: string; value: string }[]
+    headers: [] as { key: string; value: string }[],
+    tags: '',
+    homepage: '',
+    docs: '',
+    appsJson: '{}',
+    metadataJson: '{}'
   })
 
   // 模态框状态
@@ -89,6 +114,7 @@ export function useMCPViewModel() {
   const filterOptions = computed(() => ({
     connectionType: [
       { label: '标准IO', value: 'stdio' },
+      { label: 'HTTP', value: 'http' },
       { label: 'SSE', value: 'sse' }
     ],
     status: [
@@ -109,7 +135,8 @@ export function useMCPViewModel() {
       { label: '已连接', value: statistics.value.connected_servers, type: 'success' },
       { label: '已断开', value: statistics.value.disconnected_servers, type: 'warning' },
       { label: '错误', value: statistics.value.error_servers, type: 'error' },
-      { label: '工具总数', value: statistics.value.total_tools, type: 'info' }
+      { label: '工具总数', value: statistics.value.total_tools, type: 'info' },
+      { label: 'HTTP服务器', value: statistics.value.http_servers }
     ]
   })
 
@@ -120,7 +147,7 @@ export function useMCPViewModel() {
       const params = {
         page: currentPage.value,
         page_size: pageSize.value,
-        connection_type: filterParams.value.connectionType,
+        type: filterParams.value.connectionType,
         status: filterParams.value.status,
         query: filterParams.value.query || undefined
       }
@@ -193,24 +220,7 @@ export function useMCPViewModel() {
         return
       }
 
-      // 将环境变量和请求头从数组转换为对象格式
-      const serverData = {
-        ...formModel.value,
-        env:
-          formModel.value.env.length > 0
-            ? formModel.value.env.reduce((acc, { key, value }) => {
-                if (key.trim()) acc[key.trim()] = value
-                return acc
-              }, {} as Record<string, string>)
-            : null,
-        headers:
-          formModel.value.headers.length > 0
-            ? formModel.value.headers.reduce((acc, { key, value }) => {
-                if (key.trim()) acc[key.trim()] = value
-                return acc
-              }, {} as Record<string, string>)
-            : null
-      }
+      const serverData = toCanonicalPayload()
 
       await http.post('/mcp/servers', serverData)
       message.success('MCP服务器创建成功')
@@ -232,24 +242,7 @@ export function useMCPViewModel() {
     try {
       isLoading.value = true
 
-      // 将环境变量和请求头从数组转换为对象格式
-      const serverData = {
-        ...formModel.value,
-        env:
-          formModel.value.env.length > 0
-            ? formModel.value.env.reduce((acc, { key, value }) => {
-                if (key.trim()) acc[key.trim()] = value
-                return acc
-              }, {} as Record<string, string>)
-            : null,
-        headers:
-          formModel.value.headers.length > 0
-            ? formModel.value.headers.reduce((acc, { key, value }) => {
-                if (key.trim()) acc[key.trim()] = value
-                return acc
-              }, {} as Record<string, string>)
-            : null
-      }
+      const serverData = toCanonicalPayload()
 
       await http.put(`/mcp/servers/${formModel.value.id}`, serverData)
       message.success('MCP服务器更新成功')
@@ -321,28 +314,57 @@ export function useMCPViewModel() {
     showServerModal.value = true
   }
 
+  // Context7 follows the canonical CC Switch/MCP stdio entry shape.
+  const openContext7Template = () => {
+    modalMode.value = 'create'
+    formModel.value = {
+      id: 'context7',
+      name: 'Context7',
+      description: 'Context7 文档检索 MCP 服务器',
+      transportType: 'stdio',
+      command: 'npx',
+      args: ['-y', '@upstash/context7-mcp'],
+      cwd: '',
+      url: '',
+      env: [],
+      headers: [],
+      tags: 'context7, documentation',
+      homepage: 'https://context7.com',
+      docs: 'https://github.com/upstash/context7',
+      appsJson: '{}',
+      metadataJson: '{\n  "provider": "context7"\n}'
+    }
+    showServerModal.value = true
+  }
+
   // 打开编辑模态框
   const openEditModal = (server: MCPServer) => {
     modalMode.value = 'edit'
 
-    // 将环境变量和请求头从对象转换为数组格式
-    const envArray = server.env
-      ? Object.entries(server.env).map(([key, value]) => ({ key, value }))
+    const envArray = server.server.env
+      ? Object.entries(server.server.env).map(([key, value]) => ({ key, value }))
       : []
 
-    const headersArray = server.headers
-      ? Object.entries(server.headers).map(([key, value]) => ({ key, value }))
+    const headersArray = server.server.headers
+      ? Object.entries(server.server.headers).map(([key, value]) => ({ key, value }))
       : []
 
     formModel.value = {
       id: server.id,
+      name: server.name || '',
       description: server.description || '',
-      command: server.command || '',
-      args: server.args,
-      connection_type: server.connection_type as 'stdio' | 'sse',
-      url: server.url || '',
+      transportType: server.server.type,
+      command: server.server.command || '',
+      args: [...(server.server.args || [])],
+      cwd: server.server.cwd || '',
+      url: server.server.url || '',
       env: envArray,
-      headers: headersArray
+      headers: headersArray,
+      tags: server.tags.join(', '),
+      homepage: server.homepage || '',
+      docs: server.docs || '',
+      appsJson: JSON.stringify(server.apps || {}, null, 2),
+      metadataJson: JSON.stringify(server.metadata || {}, null, 2)
     }
     showServerModal.value = true
   }
@@ -360,15 +382,64 @@ export function useMCPViewModel() {
   const resetForm = () => {
     formModel.value = {
       id: '',
+      name: '',
       description: '',
+      transportType: 'stdio',
       command: '',
-      args: '',
-      connection_type: 'stdio',
+      args: [],
+      cwd: '',
       url: '',
       env: [],
-      headers: []
+      headers: [],
+      tags: '',
+      homepage: '',
+      docs: '',
+      appsJson: '{}',
+      metadataJson: '{}'
     }
   }
+
+  const pairsToRecord = (pairs: { key: string; value: string }[]) =>
+    pairs.reduce((result, pair) => {
+      if (pair.key.trim()) result[pair.key.trim()] = pair.value
+      return result
+    }, {} as Record<string, string>)
+
+  const parseJsonObject = (value: string, label: string) => {
+    try {
+      const parsed = JSON.parse(value || '{}')
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+        throw new Error(`${label}必须是对象`)
+      }
+      return parsed as Record<string, unknown>
+    } catch (error) {
+      throw new Error(`${label} JSON 格式不正确`)
+    }
+  }
+
+  const toCanonicalPayload = () => ({
+    id: formModel.value.id,
+    name: formModel.value.name || formModel.value.id,
+    description: formModel.value.description,
+    server: {
+      type: formModel.value.transportType,
+      command: formModel.value.transportType === 'stdio' ? formModel.value.command : null,
+      args: formModel.value.transportType === 'stdio' ? formModel.value.args : [],
+      cwd: formModel.value.transportType === 'stdio' ? formModel.value.cwd || null : null,
+      env: formModel.value.transportType === 'stdio' ? pairsToRecord(formModel.value.env) : {},
+      url: formModel.value.transportType !== 'stdio' ? formModel.value.url : null,
+      headers:
+        formModel.value.transportType !== 'stdio' ? pairsToRecord(formModel.value.headers) : {}
+    },
+    apps: parseJsonObject(formModel.value.appsJson, 'apps'),
+    tags: formModel.value.tags
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean),
+    homepage: formModel.value.homepage || null,
+    docs: formModel.value.docs || null,
+    metadata: parseJsonObject(formModel.value.metadataJson, 'metadata')
+  })
 
   // 过滤器操作
   const resetFilter = () => {
@@ -463,6 +534,7 @@ export function useMCPViewModel() {
     startServer,
     stopServer,
     openCreateModal,
+    openContext7Template,
     openEditModal,
     saveServer,
     resetForm,

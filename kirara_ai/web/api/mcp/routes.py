@@ -306,7 +306,8 @@ async def get_server_tools(server_id: str):
                 tool_list.append(MCPToolInfo(
                     name=tool.original_name,
                     description=tool.tool_info.description,
-                    input_schema=tool.tool_info.inputSchema
+                    input_schema=tool.tool_info.inputSchema,
+                    server_id=tool.server_id,
                 ))
 
         # 返回响应
@@ -548,7 +549,8 @@ async def get_all_tools():
             tool_list.append(MCPToolInfo(
                 name=name,
                 description=tool_info.tool_info.description,
-                input_schema=tool_info.tool_info.inputSchema
+                input_schema=tool_info.tool_info.inputSchema,
+                server_id=tool_info.server_id,
             ))
 
         # 返回响应

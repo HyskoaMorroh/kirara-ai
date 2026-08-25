@@ -17,6 +17,7 @@ web:
   host: "127.0.0.1"         # Web 服务器监听地址
   port: 8080                # Web 服务器端口
   secret_key: "please-change-this-to-a-secure-secret-key"  # Web 服务器安全密钥，请修改为安全的值
+  password_file: "web/password.hash"  # 相对路径存储在 DATA_PATH 内
 
 # LLM (大语言模型) 配置
 llms:
@@ -59,3 +60,8 @@ memory:
       db: 0                   # Redis 数据库编号
   max_entries: 100            # 最大记忆条目数
   default_scope: member       # 默认记忆作用域
+
+# 统一 Agent 运行时配置
+agent_runtime:
+  context_char_threshold: 0  # 上下文压缩阈值，0 表示保持默认行为
+  debug_hooks_enabled: true  # 注册受控的 Agent 调试 Hook Handler

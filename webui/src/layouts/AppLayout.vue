@@ -48,12 +48,12 @@
   <!-- 移动端布局 -->
   <n-layout position="absolute" v-else>
     <!-- 顶部导航栏 -->
-    <n-layout-header bordered class="mobile-header">
+    <n-layout-header bordered class="mobile-header" role="banner">
       <div class="mobile-header-content">
         <div class="mobile-logo">Kirara AI</div>
-        <n-button quaternary circle @click="() => appStore.setShowDrawer(true)">
+        <n-button quaternary circle aria-label="打开导航菜单" @click="() => appStore.setShowDrawer(true)">
           <template #icon>
-            <n-icon><menu-outline /></n-icon>
+            <n-icon aria-hidden="true"><menu-outline /></n-icon>
           </template>
         </n-button>
       </div>
@@ -131,13 +131,13 @@ const handleHasSecondarySiderContentUpdate = (hasContent: boolean) => {
 
 <style scoped>
 .main-sider {
-  height: 100vh;
+  height: calc(100vh - 28px);
   background: var(--sidebar-bg-color);
   box-shadow: 0 0 10px rgba(0, 0, 0, 0.05);
 }
 
 .secondary-sider {
-  height: 100vh;
+  height: calc(100vh - 28px);
   background: var(--sidebar-bg-color);
   box-shadow: 0 0 10px rgba(0, 0, 0, 0.05);
   z-index: 0;

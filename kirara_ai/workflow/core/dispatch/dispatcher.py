@@ -1,3 +1,5 @@
+import re
+
 from kirara_ai.im.adapter import IMAdapter
 from kirara_ai.im.message import IMMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
@@ -17,11 +19,16 @@ from kirara_ai.workflow.core.execution.executor import WorkflowExecutor
 from kirara_ai.workflow.core.workflow.base import Workflow
 from kirara_ai.workflow.core.workflow.registry import WorkflowRegistry
 
-from .exceptions import WorkflowNotFoundException
+from .exceptions import AgentConfigurationNotFound, WorkflowNotFoundException
 
 
 class WorkflowDispatcher:
     """工作流调度器"""
+
+    _CONFIRMATION_PATTERN = re.compile(
+        r"^\s*\u786e\u8ba4\s+([0-9a-f]{32})\s*$",
+        re.IGNORECASE,
+    )
 
     def __init__(self, container: DependencyContainer):
         self.container = container
@@ -36,13 +43,33 @@ class WorkflowDispatcher:
         self.dispatch_registry.register(rule)
         self.logger.info(f"Registered dispatch rule: {rule}")
 
-    async def dispatch(self, source: IMAdapter, message: IMMessage):
+    async def dispatch(
+        self,
+        source: IMAdapter,
+        message: IMMessage,
+        *,
+        require_agent: bool = False,
+    ):
         """
-        根据消息内容选择第一个匹配的规则进行处理
+        根据消息内容选择第一个匹配的规则进行处理。
+
+        ``require_agent`` 用于已经声明为 Agent 入口的调用方（例如 WebUI
+        统一对话入口）。这类入口不能在 Agent 未配置时静默降级到旧工作流；
+        传统 IM 适配器保持默认的兼容行为。
         """
         with self.container.scoped() as scoped_container:
             scoped_container.register(IMAdapter, source)
             scoped_container.register(IMMessage, message)
+
+            confirmation_id = self._parse_confirmation(message.content)
+            if confirmation_id is not None and self.container.has(
+                AgentRuntimeExecutor
+            ):
+                return await self._dispatch_confirmation(
+                    source,
+                    message,
+                    confirmation_id,
+                )
 
             # 获取所有已启用的规则，按优先级排序
             active_rules = self.dispatch_registry.get_active_rules()
@@ -53,7 +80,11 @@ class WorkflowDispatcher:
                     try:
                         agent_id = rule.bound_agent_id
                         if agent_id is None:
-                            agent_id = self._resolve_automatic_agent(source, message)
+                            agent_id = self._resolve_automatic_agent(
+                                source,
+                                message,
+                                require_agent=require_agent,
+                            )
                         if agent_id is not None:
                             return await self._dispatch_agent(
                                 source,
@@ -73,6 +104,9 @@ class WorkflowDispatcher:
                         self.logger.error(f"Workflow execution timed out: {e}")
                         # 向上抛出，让 IM 适配器把失败原因回复给用户
                         raise
+                    except AgentConfigurationNotFound as e:
+                        self.logger.debug(f"Agent configuration is incomplete: {e}")
+                        raise
                     except Exception as e:
                         self.logger.opt(exception=e).error(f"Workflow execution failed: {e}", exc_info=True)
                         # 向上抛出，让 IM 适配器把失败原因回复给用户
@@ -84,6 +118,8 @@ class WorkflowDispatcher:
         self,
         source: IMAdapter,
         message: IMMessage,
+        *,
+        require_agent: bool = False,
     ) -> str | None:
         """Resolve a registry binding while preserving the legacy workflow path.
 
@@ -93,15 +129,33 @@ class WorkflowDispatcher:
         """
 
         if not self.container.has(AgentRegistry):
+            if require_agent:
+                raise AgentConfigurationNotFound(
+                    "No Agent is configured for this channel identity"
+                )
             return None
         if not self.container.has(AgentRuntimeExecutor):
+            if require_agent:
+                raise AgentConfigurationNotFound(
+                    "No Agent is configured for this channel identity"
+                )
             return None
 
         registry = self.container.resolve(AgentRegistry)
         context = ChannelContext.from_message(source, message)
+        requested_agent_id = getattr(source, "session_agent_id", None)
         try:
-            return registry.resolve(context).agent_id
+            return registry.resolve(
+                context,
+                requested_agent_id,
+            ).agent_id
         except LookupError:
+            if requested_agent_id is not None:
+                raise
+            if require_agent:
+                raise AgentConfigurationNotFound(
+                    "No Agent is configured for this channel identity"
+                )
             self.logger.debug(
                 "No Agent binding matched channel context; keeping workflow compatibility path"
             )
@@ -131,6 +185,36 @@ class WorkflowDispatcher:
             session_agent_id=agent_id,
         )
 
+        return await self._deliver_runtime_result(source, message, result)
+
+    async def _dispatch_confirmation(
+        self,
+        source: IMAdapter,
+        message: IMMessage,
+        confirmation_id: str,
+    ):
+        """Resume a pending operation only from its originating channel context."""
+
+        runtime = self.container.resolve(AgentRuntimeExecutor)
+        context = ChannelContext.from_message(source, message)
+        result = await runtime.confirm(confirmation_id, context)
+        return await self._deliver_runtime_result(
+            source,
+            message,
+            result,
+            confirmation_flow=True,
+        )
+
+    async def _deliver_runtime_result(
+        self,
+        source: IMAdapter,
+        message: IMMessage,
+        result,
+        *,
+        confirmation_flow: bool = False,
+    ):
+        """Deliver one sanitized runtime result through the originating adapter."""
+
         if result.status is RuntimeStatus.COMPLETED:
             if result.text:
                 await source.send_message(
@@ -149,8 +233,8 @@ class WorkflowDispatcher:
                     sender=ChatSender.get_bot_sender(),
                     message_elements=[
                         TextMessage(
-                            "该操作需要确认后才能继续。"
-                            f"确认编号：{confirmation_id}"
+                            "\u8be5\u64cd\u4f5c\u9700\u8981\u786e\u8ba4\u540e\u624d\u80fd\u7ee7\u7eed\u3002"
+                            f"\u8bf7\u56de\u590d\uff1a\u786e\u8ba4 {confirmation_id}"
                         )
                     ],
                 ),
@@ -159,4 +243,29 @@ class WorkflowDispatcher:
             return result
 
         error_type = (result.error or {}).get("type", "RuntimeError")
+        if confirmation_flow:
+            safe_messages = {
+                "ConfirmationSessionMismatch": "\u8be5\u786e\u8ba4\u53ea\u80fd\u5728\u539f\u4f1a\u8bdd\u4e2d\u6267\u884c\u3002",
+                "ConfirmationExpired": "\u8be5\u786e\u8ba4\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u53d1\u8d77\u64cd\u4f5c\u3002",
+                "ConfirmationInProgress": "\u8be5\u64cd\u4f5c\u6b63\u5728\u6267\u884c\uff0c\u8bf7\u52ff\u91cd\u590d\u786e\u8ba4\u3002",
+                "ConfirmationAlreadyProcessed": "\u8be5\u786e\u8ba4\u5df2\u5904\u7406\uff0c\u4e0d\u4f1a\u91cd\u590d\u6267\u884c\u3002",
+                "ConfirmationNotFound": "\u672a\u627e\u5230\u8be5\u786e\u8ba4\uff0c\u53ef\u80fd\u5df2\u8fc7\u671f\u3002",
+            }
+            text = safe_messages.get(
+                error_type,
+                "\u786e\u8ba4\u64cd\u4f5c\u672a\u5b8c\u6210\uff0c\u8bf7\u91cd\u65b0\u53d1\u8d77\u3002",
+            )
+            await source.send_message(
+                IMMessage(
+                    sender=ChatSender.get_bot_sender(),
+                    message_elements=[TextMessage(text)],
+                ),
+                message.sender,
+            )
+            return result
         raise RuntimeError(f"Agent runtime failed: {error_type}")
+
+    @classmethod
+    def _parse_confirmation(cls, content: str) -> str | None:
+        match = cls._CONFIRMATION_PATTERN.fullmatch(content or "")
+        return match.group(1).lower() if match else None

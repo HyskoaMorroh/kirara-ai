@@ -13,8 +13,8 @@
 
       <!-- 统计卡片 -->
       <div class="stats-section">
-        <n-grid :cols="15" :x-gap="16" responsive="screen">
-          <n-grid-item span="5 s:15 m:1">
+        <n-grid :cols="24" :x-gap="16" responsive="screen">
+          <n-grid-item span="24 s:24 m:8">
             <n-card embedded :bordered="false">
               <div class="stat-card">
                 <div class="stat-icon">
@@ -27,7 +27,7 @@
               </div>
             </n-card>
           </n-grid-item>
-          <n-grid-item span="5 s:15 m:1">
+          <n-grid-item span="24 s:24 m:8">
             <n-card embedded :bordered="false">
               <div class="stat-card">
                 <div class="stat-icon success">
@@ -40,7 +40,7 @@
               </div>
             </n-card>
           </n-grid-item>
-          <n-grid-item span="5 s:15 m:1">
+          <n-grid-item span="24 s:24 m:8">
             <n-card :bordered="false" embedded>
               <div class="stat-card">
                 <div class="stat-icon info">
@@ -49,6 +49,19 @@
                 <div class="stat-content">
                   <div class="stat-value info">{{ formattedStatistics?.[6]?.value || 0 }}</div>
                   <div class="stat-label">工具数</div>
+                </div>
+              </div>
+            </n-card>
+          </n-grid-item>
+          <n-grid-item span="24 s:24 m:8">
+            <n-card embedded :bordered="false">
+              <div class="stat-card">
+                <div class="stat-icon info">
+                  <n-icon size="24"><globe-outline /></n-icon>
+                </div>
+                <div class="stat-content">
+                  <div class="stat-value info">{{ formattedStatistics?.[7]?.value || 0 }}</div>
+                  <div class="stat-label">HTTP服务器</div>
                 </div>
               </div>
             </n-card>
@@ -64,6 +77,12 @@
               <n-icon><add-outline /></n-icon>
             </template>
             添加服务器
+          </n-button>
+          <n-button secondary @click="openContext7Template" class="action-button">
+            <template #icon>
+              <n-icon><download-outline /></n-icon>
+            </template>
+            Context7 模板
           </n-button>
           <n-button @click="refreshData" class="action-button" :loading="isLoading">
             <template #icon>
@@ -144,7 +163,7 @@
                   <n-space align="center">
                     <n-icon size="20" :color="getStateColor(server.connection_state)">
                       <component
-                        :is="server.connection_type === 'stdio' ? TerminalOutline : GlobeOutline"
+                        :is="server.server.type === 'stdio' ? TerminalOutline : GlobeOutline"
                       />
                     </n-icon>
                     <span>{{ server.id }}</span>
@@ -243,9 +262,9 @@
                     <div class="info-value">
                       <n-tag
                         size="small"
-                        :type="server.connection_type === 'stdio' ? 'success' : 'info'"
+                        :type="server.server.type === 'stdio' ? 'success' : 'info'"
                       >
-                        {{ server.connection_type }}
+                        {{ server.server.type }}
                       </n-tag>
                     </div>
                   </div>
@@ -255,7 +274,7 @@
                       命令:
                     </div>
                     <div class="info-value">
-                      <code class="command-code">{{ server.command || '' }} {{ server.args }}</code>
+                      <code class="command-code">{{ formatCommand(server) }}</code>
                       <n-button text size="tiny" @click="copyCommand(server)" class="copy-button">
                         <template #icon>
                           <n-icon><copy-outline /></n-icon>
@@ -270,13 +289,13 @@
                     </div>
                     <div class="info-value">{{ server.description }}</div>
                   </div>
-                  <div class="server-info-item" v-if="server.url">
+                  <div class="server-info-item" v-if="server.server.url">
                     <div class="info-label">
                       <n-icon size="14"><link-outline /></n-icon>
                       URL:
                     </div>
                     <div class="info-value">
-                      <code class="url-code">{{ server.url }}</code>
+                      <code class="url-code">{{ server.server.url }}</code>
                       <n-button text size="tiny" @click="copyUrl(server)" class="copy-button">
                         <template #icon>
                           <n-icon><copy-outline /></n-icon>
@@ -341,11 +360,11 @@
           </template>
         </n-form-item>
 
-        <n-form-item label="连接类型" path="connection_type" required>
+        <n-form-item label="连接类型" path="transportType" required>
           <div class="connection-type-buttons">
             <n-button
-              :type="formModel.connection_type === 'stdio' ? 'primary' : 'default'"
-              @click="formModel.connection_type = 'stdio'"
+              :type="formModel.transportType === 'stdio' ? 'primary' : 'default'"
+              @click="formModel.transportType = 'stdio'"
               class="connection-type-button"
               :disabled="modalMode === 'edit' && isServerRunning"
             >
@@ -355,8 +374,19 @@
               stdio
             </n-button>
             <n-button
-              :type="formModel.connection_type === 'sse' ? 'primary' : 'default'"
-              @click="formModel.connection_type = 'sse'"
+              :type="formModel.transportType === 'http' ? 'primary' : 'default'"
+              @click="formModel.transportType = 'http'"
+              class="connection-type-button"
+              :disabled="modalMode === 'edit' && isServerRunning"
+            >
+              <template #icon>
+                <n-icon><globe-outline /></n-icon>
+              </template>
+              http
+            </n-button>
+            <n-button
+              :type="formModel.transportType === 'sse' ? 'primary' : 'default'"
+              @click="formModel.transportType = 'sse'"
               class="connection-type-button"
               :disabled="modalMode === 'edit' && isServerRunning"
             >
@@ -368,8 +398,12 @@
           </div>
         </n-form-item>
 
+        <n-form-item label="名称" path="name">
+          <n-input v-model:value="formModel.name" placeholder="例如：Context7" />
+        </n-form-item>
+
         <!-- stdio 连接类型表单项 -->
-        <template v-if="formModel.connection_type === 'stdio'">
+        <template v-if="formModel.transportType === 'stdio'">
           <n-form-item label="命令" path="command" required>
             <n-input
               v-model:value="formModel.command"
@@ -381,14 +415,15 @@
             </template>
           </n-form-item>
 
-          <n-form-item label="参数" path="args" required>
-            <n-input
+          <n-form-item label="参数" path="args">
+            <n-dynamic-input
               v-model:value="formModel.args"
-              placeholder="例如：path/to/script.py"
+              placeholder="命令参数，例如：path/to/script.py"
+              show-sort-button
               :disabled="modalMode === 'edit' && isServerRunning"
             />
             <template #feedback>
-              <n-text depth="3">命令的参数，如脚本路径 path/to/script.py</n-text>
+              <n-text depth="3">每个输入框是一项参数，系统会按原数组顺序传给进程</n-text>
             </template>
           </n-form-item>
 
@@ -404,18 +439,22 @@
               <n-text depth="3">命令执行时的环境变量</n-text>
             </template>
           </n-form-item>
+
+          <n-form-item label="工作目录" path="cwd">
+            <n-input v-model:value="formModel.cwd" placeholder="可选，例如：/opt/mcp" />
+          </n-form-item>
         </template>
 
-        <!-- sse 连接类型表单项 -->
+        <!-- HTTP 和 SSE 连接类型共用远程传输字段 -->
         <template v-else>
           <n-form-item label="URL" path="url" required>
             <n-input
               v-model:value="formModel.url"
-              placeholder="例如：http://localhost:8000/sse"
+              :placeholder="formModel.transportType === 'sse' ? '例如：http://localhost:8000/sse' : '例如：https://example.com/mcp'"
               :disabled="modalMode === 'edit' && isServerRunning"
             />
             <template #feedback>
-              <n-text depth="3">SSE 服务器的 URL 地址</n-text>
+              <n-text depth="3">远程 MCP 服务器的 URL 地址</n-text>
             </template>
           </n-form-item>
 
@@ -432,6 +471,26 @@
             </template>
           </n-form-item>
         </template>
+
+        <n-form-item label="应用配置" path="appsJson">
+          <n-input v-model:value="formModel.appsJson" type="textarea" placeholder="JSON 对象，例如：{}" />
+        </n-form-item>
+
+        <n-form-item label="标签" path="tags">
+          <n-input v-model:value="formModel.tags" placeholder="用逗号分隔，例如：docs, research" />
+        </n-form-item>
+
+        <n-form-item label="主页" path="homepage">
+          <n-input v-model:value="formModel.homepage" placeholder="可选的项目主页 URL" />
+        </n-form-item>
+
+        <n-form-item label="文档" path="docs">
+          <n-input v-model:value="formModel.docs" placeholder="可选的文档 URL" />
+        </n-form-item>
+
+        <n-form-item label="Metadata" path="metadataJson">
+          <n-input v-model:value="formModel.metadataJson" type="textarea" placeholder="JSON 对象，例如：{}" />
+        </n-form-item>
 
         <n-form-item label="描述" path="description">
           <n-input
@@ -533,6 +592,7 @@ const {
   fetchServers,
   fetchStatistics,
   openCreateModal,
+  openContext7Template,
   openEditModal,
   saveServer: originalSaveServer,
   deleteServer,
@@ -575,15 +635,18 @@ const saveServer = async () => {
 
 // 复制命令到剪贴板
 const copyCommand = (server: MCPServer) => {
-  const command = `${server.command || ''} ${server.args}`
+  const command = formatCommand(server)
   navigator.clipboard.writeText(command)
   message.success('命令已复制到剪贴板')
 }
 
+const formatCommand = (server: MCPServer) =>
+  [server.server.command || '', ...(server.server.args || [])].filter(Boolean).join(' ')
+
 // 复制URL到剪贴板
 const copyUrl = (server: MCPServer) => {
-  if (server.url) {
-    navigator.clipboard.writeText(server.url)
+  if (server.server.url) {
+    navigator.clipboard.writeText(server.server.url)
     message.success('URL已复制到剪贴板')
   }
 }

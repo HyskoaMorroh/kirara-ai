@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import Optional
 
 from alembic import command
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.logger import get_logger
+from kirara_ai.config import DATA_PATH
 
 logger = get_logger("DB")
 
@@ -20,25 +22,31 @@ metadata = MetaData()
 class DatabaseManager:
     """数据库管理器，负责管理数据库连接和会话"""
 
-    def __init__(self, container: DependencyContainer, database_url: Optional[str] = None, is_debug: bool = False):
+    def __init__(
+        self,
+        container: DependencyContainer,
+        database_url: Optional[str] = None,
+        is_debug: bool = False,
+        data_dir: str | os.PathLike[str] | None = None,
+    ):
         self.container = container
         self.engine = None
         self.session_factory = None
-        self.data_dir = "./data/db"
-        self.db_path = os.path.join(self.data_dir, "kirara.db")
+        self.data_dir = Path(data_dir or Path(DATA_PATH) / "db").resolve()
+        self.db_path = self.data_dir / "kirara.db"
         self.database_url = database_url
         self.is_debug = is_debug
 
     def initialize(self):
         """初始化数据库连接"""
         # 确保数据目录存在
-        os.makedirs(self.data_dir, exist_ok=True)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
 
         # 创建数据库引擎
         if self.database_url:
             db_url = self.database_url
         else:
-            db_url = f"sqlite:///{self.db_path}"
+            db_url = f"sqlite:///{self.db_path.as_posix()}"
 
         self.engine = create_engine(db_url, echo=self.is_debug)
 

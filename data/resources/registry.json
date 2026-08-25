@@ -1,0 +1,150 @@
+{
+  "format_version": 2,
+  "repositories": [],
+  "resources": {
+    "hook.ai-debug": {
+      "confirmation_required": true,
+      "content_sha256": "6c06a796e3cd4203a6fe74607fae121467f2e27dc15f78a841cfccf793c9254c",
+      "current_version": "1.0.0",
+      "enabled": false,
+      "entry": "hook.json",
+      "installed_at": "2026-08-25T08:21:56.304523Z",
+      "permissions": [
+        "workflow.read"
+      ],
+      "resource_id": "hook.ai-debug",
+      "source": "catalog://kirara/hook/ai-debug",
+      "source_key": "hook:ai-debug",
+      "source_metadata": {
+        "catalog_id": "hook:ai-debug",
+        "provider": "catalog",
+        "tags": [
+          "debugging",
+          "audit",
+          "hooks"
+        ]
+      },
+      "type": "hook",
+      "updated_at": "2026-08-25T08:21:56.304523Z",
+      "versions": [
+        {
+          "content_sha256": "6c06a796e3cd4203a6fe74607fae121467f2e27dc15f78a841cfccf793c9254c",
+          "entry": "hook.json",
+          "installed_at": "2026-08-25T08:21:56.304523Z",
+          "permissions": [
+            "workflow.read"
+          ],
+          "source": "catalog://kirara/hook/ai-debug",
+          "source_key": "hook:ai-debug",
+          "source_metadata": {
+            "catalog_id": "hook:ai-debug",
+            "provider": "catalog",
+            "tags": [
+              "debugging",
+              "audit",
+              "hooks"
+            ]
+          },
+          "version": "1.0.0"
+        }
+      ],
+      "workflow_id": null
+    },
+    "mcp.context7": {
+      "confirmation_required": true,
+      "content_sha256": "482fa55df423ebbe5c227223aa2f6d8cbdd3b10af10028cc149c34f1e8381a9d",
+      "current_version": "1.0.0",
+      "enabled": false,
+      "entry": "server.json",
+      "installed_at": "2026-08-25T08:21:56.278872Z",
+      "permissions": [
+        "workflow.read"
+      ],
+      "resource_id": "mcp.context7",
+      "source": "catalog://mcp/context7",
+      "source_key": "mcp:context7",
+      "source_metadata": {
+        "catalog_id": "mcp:context7",
+        "provider": "catalog",
+        "tags": [
+          "documentation",
+          "debugging",
+          "stdio"
+        ]
+      },
+      "type": "mcp",
+      "updated_at": "2026-08-25T08:21:56.278872Z",
+      "versions": [
+        {
+          "content_sha256": "482fa55df423ebbe5c227223aa2f6d8cbdd3b10af10028cc149c34f1e8381a9d",
+          "entry": "server.json",
+          "installed_at": "2026-08-25T08:21:56.278872Z",
+          "permissions": [
+            "workflow.read"
+          ],
+          "source": "catalog://mcp/context7",
+          "source_key": "mcp:context7",
+          "source_metadata": {
+            "catalog_id": "mcp:context7",
+            "provider": "catalog",
+            "tags": [
+              "documentation",
+              "debugging",
+              "stdio"
+            ]
+          },
+          "version": "1.0.0"
+        }
+      ],
+      "workflow_id": null
+    },
+    "prompt.office-research": {
+      "confirmation_required": true,
+      "content_sha256": "27fc4c657ca734c8ae613fa097d7c896257eb5262e00448dd04741f693d7f524",
+      "current_version": "1.0.0",
+      "enabled": false,
+      "entry": "PROMPT.md",
+      "installed_at": "2026-08-25T08:21:56.251467Z",
+      "permissions": [
+        "workflow.read"
+      ],
+      "resource_id": "prompt.office-research",
+      "source": "catalog://kirara/prompt/office-research",
+      "source_key": "prompt:office-research",
+      "source_metadata": {
+        "catalog_id": "prompt:office-research",
+        "provider": "catalog",
+        "tags": [
+          "office",
+          "research",
+          "chinese"
+        ]
+      },
+      "type": "prompt",
+      "updated_at": "2026-08-25T08:21:56.251467Z",
+      "versions": [
+        {
+          "content_sha256": "27fc4c657ca734c8ae613fa097d7c896257eb5262e00448dd04741f693d7f524",
+          "entry": "PROMPT.md",
+          "installed_at": "2026-08-25T08:21:56.251467Z",
+          "permissions": [
+            "workflow.read"
+          ],
+          "source": "catalog://kirara/prompt/office-research",
+          "source_key": "prompt:office-research",
+          "source_metadata": {
+            "catalog_id": "prompt:office-research",
+            "provider": "catalog",
+            "tags": [
+              "office",
+              "research",
+              "chinese"
+            ]
+          },
+          "version": "1.0.0"
+        }
+      ],
+      "workflow_id": null
+    }
+  }
+}

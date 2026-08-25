@@ -285,7 +285,7 @@ class WebConfig(BaseModel):
     port: int = Field(default=8080, description="Web服务端口号")
     secret_key: str = Field(default="", description="Web服务的密钥，用于JWT等加密")
     password_file: str = Field(
-        default="./data/web/password.hash", description="密码哈希存储路径"
+        default="web/password.hash", description="密码哈希存储路径"
     )
 
 
@@ -331,6 +331,21 @@ class MediaConfig(BaseModel):
     auto_remove_unreferenced: bool = Field(default=True, description="是否自动删除未引用的媒体文件")
     last_cleanup_time: int = Field(default=0, description="上次清理时间")
 
+
+class AgentRuntimeConfig(BaseModel):
+    """统一 Agent 运行时配置。"""
+
+    context_char_threshold: int = Field(
+        default=0,
+        ge=0,
+        description="触发 Agent 上下文压缩的字符阈值，0 表示保持默认行为",
+    )
+    debug_hooks_enabled: bool = Field(
+        default=True,
+        description="是否注册受控的 Agent 调试 Hook Handler",
+    )
+
+
 class GlobalConfig(BaseModel):
     ims: List[IMConfig] = Field(default=[], description="IM配置列表")
     llms: LLMConfig = LLMConfig()
@@ -344,5 +359,6 @@ class GlobalConfig(BaseModel):
     system: SystemConfig = SystemConfig()
     tracing: TracingConfig = TracingConfig()
     media: MediaConfig = MediaConfig()
+    agent_runtime: AgentRuntimeConfig = AgentRuntimeConfig()
 
     model_config = ConfigDict(extra="allow")

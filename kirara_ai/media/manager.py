@@ -4,11 +4,13 @@ import hashlib
 import json
 import shutil
 import time
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Dict, List, Optional
 
 import aiofiles
 
+from kirara_ai.config import DATA_PATH
 from kirara_ai.config.config_loader import CONFIG_FILE, ConfigLoader
 from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.ioc.container import DependencyContainer
@@ -27,8 +29,8 @@ class MediaManager:
 
     _instance: ClassVar[Optional["MediaManager"]] = None
     
-    def __init__(self, media_dir: str = "data/media"):
-        self.media_dir = Path(media_dir)
+    def __init__(self, media_dir: str | os.PathLike[str] | None = None):
+        self.media_dir = Path(media_dir or Path(DATA_PATH) / "media").resolve()
         self.metadata_dir = self.media_dir / "metadata"
         self.files_dir = self.media_dir / "files"
         self.metadata_cache: Dict[str, MediaMetadata] = {}

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -107,3 +108,47 @@ def test_registry_rejects_removing_agent_with_session_binding(tmp_path: Path):
     with pytest.raises(ValueError, match="session binding"):
         registry.remove("research")
 
+
+def test_registry_persists_resource_version_policy(tmp_path: Path):
+    agent = AgentDefinition(
+        agent_id="current-agent",
+        model_priority=("primary",),
+        prompt_bindings=(
+            ResourceBinding(
+                resource_id="prompt-main",
+                resource_type="prompt",
+                version="1.0.0",
+                content_sha256="a" * 64,
+                version_policy="current",
+            ),
+        ),
+    )
+    registry = AgentRegistry(tmp_path)
+    registry.register(agent)
+
+    restored = AgentRegistry(tmp_path)
+
+    assert restored.get(agent.agent_id).prompt_bindings[0].version_policy == "current"
+    assert restored.to_dict()["agents"][0]["prompt_bindings"][0]["version_policy"] == "current"
+
+
+def test_registry_defaults_missing_resource_version_policy_to_fixed(tmp_path: Path):
+    registry = AgentRegistry(tmp_path)
+    registry.register(make_agent())
+    path = tmp_path / "agents" / "registry.json"
+    payload = registry.to_dict()
+    for agent in payload["agents"]:
+        for field_name in (
+            "prompt_bindings",
+            "skill_bindings",
+            "memory_bindings",
+            "mcp_bindings",
+            "hook_bindings",
+        ):
+            for binding in agent[field_name]:
+                binding.pop("version_policy", None)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restored = AgentRegistry(tmp_path)
+
+    assert restored.get("research").prompt_bindings[0].version_policy == "fixed"

@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import socket
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
 from kirara_ai.plugin_manager.resource_sources import (
     ResourceSourceError,
     ResourceSourceService,
+    _ValidatedRedirectHandler,
 )
 
 
@@ -32,6 +35,28 @@ def _github_archive(*, body: str = "Use sources carefully.") -> bytes:
     return payload.getvalue()
 
 
+def _archive_with_skill_directories(*directories: str) -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for directory in directories:
+            archive.writestr(
+                f"demo-repo-main/{directory}/SKILL.md",
+                f"---\nname: {Path(directory).name}\ndescription: test skill\n---\nbody",
+            )
+    return payload.getvalue()
+
+
+def _root_skill_archive() -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "demo-repo-main/SKILL.md",
+            "---\nname: Root skill\ndescription: root repository skill\n---\nbody",
+        )
+        archive.writestr("demo-repo-main/scripts/run.js", "console.log('root skill')")
+    return payload.getvalue()
+
+
 def test_remote_source_validation_rejects_unsafe_coordinates_and_urls(tmp_path: Path):
     service = ResourceSourceService(_service(tmp_path))
 
@@ -43,6 +68,98 @@ def test_remote_source_validation_rejects_unsafe_coordinates_and_urls(tmp_path: 
         service.validate_remote_url("http://github.com/owner/repo")
     with pytest.raises(ResourceSourceError):
         service.validate_remote_url("https://127.0.0.1/private")
+
+
+def test_remote_download_rejects_private_address_after_dns_resolution(
+    tmp_path: Path, monkeypatch
+):
+    service = ResourceSourceService(_service(tmp_path))
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.8", 443))
+        ],
+    )
+
+    with pytest.raises(ResourceSourceError, match="address is not public"):
+        service._download_bytes("https://github.com/owner/repo/archive/main.zip")
+
+
+def test_remote_source_accepts_transparent_proxy_dns_for_allowlisted_host(
+    tmp_path: Path, monkeypatch
+):
+    service = ResourceSourceService(_service(tmp_path))
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.223", 443))
+        ],
+    )
+
+    assert (
+        service._validate_network_target("https://skills.sh/api/search?q=research")
+        == "https://skills.sh/api/search?q=research"
+    )
+
+
+def test_transparent_proxy_dns_exception_is_limited_to_allowlisted_hosts(
+    tmp_path: Path, monkeypatch
+):
+    service = ResourceSourceService(_service(tmp_path))
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.223", 443))
+        ],
+    )
+
+    with pytest.raises(ResourceSourceError, match="address is not public"):
+        service._validate_resolved_addresses("example.com", 443)
+
+
+def test_transparent_proxy_dns_does_not_hide_private_resolution(
+    tmp_path: Path, monkeypatch
+):
+    service = ResourceSourceService(_service(tmp_path))
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.223", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.8", 443)),
+        ],
+    )
+
+    with pytest.raises(ResourceSourceError, match="address is not public"):
+        service._validate_network_target("https://skills.sh/api/search?q=research")
+
+
+def test_redirect_target_is_revalidated_for_each_hop(tmp_path: Path, monkeypatch):
+    service = ResourceSourceService(_service(tmp_path))
+    request = urllib.request.Request("https://github.com/owner/repo/archive/main.zip")
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.9", 443))
+        ],
+    )
+
+    handler = _ValidatedRedirectHandler(service)
+    with pytest.raises(ResourceSourceError, match="address is not public"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://raw.githubusercontent.com/owner/repo/main/SKILL.md",
+        )
 
 
 def test_repository_discovery_is_anchored_on_skill_md_and_uses_stable_source_key(
@@ -96,6 +213,120 @@ def test_skills_sh_results_are_normalized_and_remote_install_generates_server_ma
     manifest = lifecycle.get_resource(installed["resource_id"])["versions"][0]
     assert manifest["source_key"] == "owner/demo-repo:skills/research"
     assert lifecycle.read_entry(installed["resource_id"]) == "---\nname: Research helper\ndescription: Finds reliable evidence\n---\nUse sources carefully."
+
+
+def test_skills_sh_leaf_directory_is_resolved_to_nested_skill_and_persisted(
+    tmp_path: Path, monkeypatch
+):
+    lifecycle = _service(tmp_path)
+    service = ResourceSourceService(lifecycle)
+    monkeypatch.setattr(
+        service,
+        "_download_bytes",
+        lambda _url: _archive_with_skill_directories("skills/agent-browser"),
+    )
+
+    installed = service.install_skill(
+        owner="owner",
+        name="demo-repo",
+        branch="main",
+        directory="agent-browser",
+        source_key="owner/demo-repo:agent-browser",
+    )
+
+    assert installed["source_key"] == "owner/demo-repo:skills/agent-browser"
+    assert installed["source"] == "https://github.com/owner/demo-repo/tree/main/skills/agent-browser"
+    assert installed["source_metadata"]["directory"] == "skills/agent-browser"
+    manifest = lifecycle.get_resource(installed["resource_id"])["versions"][0]
+    assert manifest["source_key"] == "owner/demo-repo:skills/agent-browser"
+    assert manifest["source_metadata"]["directory"] == "skills/agent-browser"
+
+
+def test_leaf_resolution_skips_same_name_wrapper_without_skill_md(tmp_path: Path, monkeypatch):
+    lifecycle = _service(tmp_path)
+    service = ResourceSourceService(lifecycle)
+    monkeypatch.setattr(
+        service,
+        "_download_bytes",
+        lambda _url: _archive_with_skill_directories("agent-browser/skills/agent-browser"),
+    )
+
+    installed = service.install_skill(
+        owner="owner", name="demo-repo", branch="main", directory="agent-browser"
+    )
+
+    assert installed["source_metadata"]["directory"] == "agent-browser/skills/agent-browser"
+
+
+def test_leaf_resolution_rejects_multiple_matching_skill_directories(
+    tmp_path: Path, monkeypatch
+):
+    service = ResourceSourceService(_service(tmp_path))
+    monkeypatch.setattr(
+        service,
+        "_download_bytes",
+        lambda _url: _archive_with_skill_directories("skills/agent-browser", "catalog/agent-browser"),
+    )
+
+    with pytest.raises(ResourceSourceError, match="ambiguous"):
+        service.install_skill(
+            owner="owner", name="demo-repo", branch="main", directory="agent-browser"
+        )
+
+
+def test_complete_directory_is_preferred_over_leaf_fallback(tmp_path: Path, monkeypatch):
+    lifecycle = _service(tmp_path)
+    service = ResourceSourceService(lifecycle)
+    monkeypatch.setattr(
+        service,
+        "_download_bytes",
+        lambda _url: _archive_with_skill_directories("skills/agent-browser", "catalog/agent-browser"),
+    )
+
+    installed = service.install_skill(
+        owner="owner", name="demo-repo", branch="main", directory="skills/agent-browser"
+    )
+
+    assert installed["source_metadata"]["directory"] == "skills/agent-browser"
+
+
+def test_root_repository_skill_uses_root_identity_and_includes_nested_files(
+    tmp_path: Path, monkeypatch
+):
+    lifecycle = _service(tmp_path)
+    service = ResourceSourceService(lifecycle)
+    monkeypatch.setattr(service, "_download_bytes", lambda _url: _root_skill_archive())
+
+    installed = service.install_skill(
+        owner="owner", name="demo-repo", branch="main", directory="root-skill"
+    )
+
+    assert installed["source_key"] == "owner/demo-repo:."
+    assert installed["source"] == "https://github.com/owner/demo-repo/tree/main"
+    assert installed["source_metadata"]["directory"] == "."
+    version_path = (
+        lifecycle.installed_path / installed["resource_id"] / installed["current_version"]
+    )
+    assert (version_path / "SKILL.md").is_file()
+    assert (version_path / "scripts" / "run.js").is_file()
+
+
+def test_update_reuses_resolved_nested_directory_metadata(tmp_path: Path, monkeypatch):
+    lifecycle = _service(tmp_path)
+    service = ResourceSourceService(lifecycle)
+    monkeypatch.setattr(
+        service,
+        "_download_bytes",
+        lambda _url: _archive_with_skill_directories("skills/agent-browser"),
+    )
+    installed = service.install_skill(
+        owner="owner", name="demo-repo", branch="main", directory="agent-browser"
+    )
+
+    updated = service.check_updates(installed["resource_id"])
+
+    assert updated[0]["source_key"] == "owner/demo-repo:skills/agent-browser"
+    assert updated[0]["source_metadata"]["directory"] == "skills/agent-browser"
 
 
 def test_repository_sources_are_persisted_as_server_state(tmp_path: Path):

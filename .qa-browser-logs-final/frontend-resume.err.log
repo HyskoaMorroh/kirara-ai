@@ -1,0 +1,33 @@
+(node:9292) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated. Please use Object.assign() instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+[1m[33m[@vue/compiler-sfc][0m[33m `defineProps` is a compiler macro and no longer needs to be imported.[0m
+
+[1m[33m[@vue/compiler-sfc][0m[33m `defineEmits` is a compiler macro and no longer needs to be imported.[0m
+
+16:20:34 [vite] http proxy error at /backend-api/api/system/status:
+Error: connect ECONNREFUSED 127.0.0.1:18082
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)
+16:20:44 [vite] http proxy error at /backend-api/api/system/status:
+Error: connect ECONNREFUSED 127.0.0.1:18082
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)
+16:20:54 [vite] http proxy error at /backend-api/api/system/status:
+Error: connect ECONNREFUSED 127.0.0.1:18082
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)
+16:21:04 [vite] http proxy error at /backend-api/api/system/status:
+Error: connect ECONNREFUSED 127.0.0.1:18082
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)
+16:21:14 [vite] http proxy error at /backend-api/api/system/status:
+Error: connect ECONNREFUSED 127.0.0.1:18082
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)
+16:21:24 [vite] http proxy error at /backend-api/api/system/status:
+Error: connect ECONNREFUSED 127.0.0.1:18082
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)
+16:21:34 [vite] http proxy error at /backend-api/api/system/status:
+Error: connect ECONNREFUSED 127.0.0.1:18082
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)
+16:21:44 [vite] http proxy error at /backend-api/api/system/status:
+Error: connect ECONNREFUSED 127.0.0.1:18082
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)
+16:21:54 [vite] http proxy error at /backend-api/api/system/status:
+Error: connect ECONNREFUSED 127.0.0.1:18082
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)

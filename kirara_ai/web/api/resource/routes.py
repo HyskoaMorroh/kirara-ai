@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import tempfile
 import uuid
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -15,6 +15,8 @@ from kirara_ai.plugin_manager.resource_lifecycle import (
     ResourceValidationError,
 )
 from kirara_ai.plugin_manager.resource_sources import ResourceSourceError, ResourceSourceService
+from kirara_ai.plugin_manager.resource_catalog import ResourceCatalogError, ResourceCatalogService
+from kirara_ai.mcp_module.manager import MCPServerManager
 from kirara_ai.web.auth.middleware import require_auth
 
 
@@ -31,12 +33,57 @@ def _sources() -> ResourceSourceService:
     return g.container.resolve(ResourceSourceService)
 
 
+def _catalog() -> ResourceCatalogService:
+    return g.container.resolve(ResourceCatalogService)
+
+
 def _error(message: str, status_code: int):
     return jsonify({"error": message}), status_code
 
 
+def _runtime_status(resource: dict[str, Any]) -> dict[str, Any]:
+    """Project ephemeral runtime state without mutating lifecycle data."""
+
+    if resource.get("type") == "mcp":
+        server_id = str(resource.get("resource_id", "")).removeprefix("mcp.")
+        if server_id and g.container.has(MCPServerManager):
+            return g.container.resolve(MCPServerManager).get_runtime_status(server_id)
+        return {
+            "status": "stopped",
+            "running": False,
+            "failed": False,
+            "last_error": None,
+            "last_checked_at": None,
+        }
+
+    enabled = resource.get("enabled") is True
+    return {
+        "status": "running" if enabled else "stopped",
+        "running": enabled,
+        "failed": False,
+        "last_error": None,
+        "last_checked_at": None,
+    }
+
+
+def _resource_response(resource: Any) -> Any:
+    """Add runtime fields only to lifecycle resource objects."""
+
+    if not isinstance(resource, dict) or not {"resource_id", "type"}.issubset(resource):
+        return resource
+    projected = deepcopy(resource)
+    projected.update(_runtime_status(projected))
+    return projected
+
+
+def _resource_list_response(resources: Any) -> Any:
+    if not isinstance(resources, list):
+        return resources
+    return [_resource_response(resource) for resource in resources]
+
+
 def _lifecycle_error(error: Exception):
-    if isinstance(error, (ResourceValidationError, ResourceSourceError)):
+    if isinstance(error, (ResourceValidationError, ResourceSourceError, ResourceCatalogError)):
         return _error(str(error), 400)
     if isinstance(error, ResourceStateError):
         status_code = 404 if str(error) == "resource is not installed" else 409
@@ -63,11 +110,8 @@ async def _save_uploaded_archive():
     if uploaded_file is None or not uploaded_file.filename:
         return None, _error("resource archive is required", 400)
 
-    temporary_file = tempfile.NamedTemporaryFile(
-        prefix="kirara-resource-upload-", suffix=".zip", delete=False
-    )
-    temporary_file.close()
-    archive_path = Path(temporary_file.name)
+    lifecycle = _service()
+    archive_path = lifecycle.imports_path / f"upload-{uuid.uuid4().hex}.zip"
     try:
         await uploaded_file.save(archive_path)
         if archive_path.stat().st_size > MAX_RESOURCE_UPLOAD_SIZE:
@@ -112,7 +156,7 @@ async def _with_uploaded_archive(
     if upload_error is not None:
         return upload_error
     try:
-        return jsonify(operation(archive_path)), success_status
+        return jsonify(_resource_response(operation(archive_path))), success_status
     except Exception as error:
         return _lifecycle_error(error)
     finally:
@@ -124,7 +168,7 @@ async def _with_import_archive():
     if upload_error is not None:
         return upload_error
     try:
-        return jsonify(_service().import_archive(archive_path)), 201
+        return jsonify(_resource_response(_service().import_archive(archive_path))), 201
     except Exception as error:
         return _lifecycle_error(error)
     finally:
@@ -135,7 +179,7 @@ async def _state_change(
     operation: Callable[[dict[str, Any]], dict[str, Any]],
 ):
     try:
-        return jsonify(operation(await _json_object()))
+        return jsonify(_resource_response(operation(await _json_object())))
     except Exception as error:
         return _lifecycle_error(error)
 
@@ -201,12 +245,56 @@ async def search_skills_sh():
         return _lifecycle_error(error)
 
 
+@resource_bp.route("/catalog/search", methods=["GET"])
+@require_auth
+async def search_catalog():
+    try:
+        return jsonify(
+            _catalog().search(
+                request.args.get("type"),
+                request.args.get("q", ""),
+                limit=int(request.args.get("limit", 20)),
+                offset=int(request.args.get("offset", 0)),
+            )
+        )
+    except (TypeError, ValueError):
+        return _error("catalog pagination values must be integers", 400)
+    except Exception as error:
+        return _lifecycle_error(error)
+
+
+@resource_bp.route("/catalog/<path:catalog_id>", methods=["GET"])
+@require_auth
+async def get_catalog_item(catalog_id: str):
+    try:
+        return jsonify(_catalog().get(catalog_id))
+    except Exception as error:
+        return _lifecycle_error(error)
+
+
+@resource_bp.route("/catalog/install", methods=["POST"])
+@require_auth
+async def install_catalog_item():
+    try:
+        payload = await _json_object()
+        catalog_id = payload.get("catalog_id")
+        if not isinstance(catalog_id, str) or not catalog_id.strip():
+            raise ResourceCatalogError("catalog_id is required")
+        return jsonify(
+            _resource_response(
+                _catalog().install(catalog_id.strip(), branch=payload.get("branch", "main"))
+            )
+        ), 201
+    except Exception as error:
+        return _lifecycle_error(error)
+
+
 @resource_bp.route("/remote-install", methods=["POST"])
 @require_auth
 async def install_remote_skill():
     try:
         payload = await _json_object()
-        return jsonify(_sources().install_skill(**payload)), 201
+        return jsonify(_resource_response(_sources().install_skill(**payload))), 201
     except Exception as error:
         return _lifecycle_error(error)
 
@@ -283,7 +371,9 @@ async def get_storage_status():
 @require_auth
 async def list_resources():
     try:
-        return jsonify(_service().list_resources(request.args.get("type")))
+        return jsonify(
+            _resource_list_response(_service().list_resources(request.args.get("type")))
+        )
     except Exception as error:
         return _lifecycle_error(error)
 
@@ -307,7 +397,7 @@ async def import_resource():
 @require_auth
 async def get_resource(resource_id: str):
     try:
-        return jsonify(_service().get_resource(resource_id))
+        return jsonify(_resource_response(_service().get_resource(resource_id)))
     except Exception as error:
         return _lifecycle_error(error)
 
@@ -328,7 +418,7 @@ async def update_resource(resource_id: str):
 @require_auth
 async def update_remote_resource(resource_id: str):
     try:
-        return jsonify(_sources().update_skill(resource_id))
+        return jsonify(_resource_response(_sources().update_skill(resource_id)))
     except Exception as error:
         return _lifecycle_error(error)
 
@@ -336,18 +426,26 @@ async def update_remote_resource(resource_id: str):
 @resource_bp.route("/<resource_id>/enable", methods=["POST"])
 @require_auth
 async def enable_resource(resource_id: str):
-    return await _state_change(
-        lambda payload: _service().enable(
-            resource_id,
-            confirmed=payload.get("confirmed") is True,
-        )
-    )
+    try:
+        payload = await _json_object()
+        resource = _service().enable(resource_id, confirmed=payload.get("confirmed") is True)
+        if resource.get("type") == "mcp" and g.container.has(MCPServerManager):
+            await g.container.resolve(MCPServerManager).refresh_managed_servers()
+        return jsonify(_resource_response(resource))
+    except Exception as error:
+        return _lifecycle_error(error)
 
 
 @resource_bp.route("/<resource_id>/disable", methods=["POST"])
 @require_auth
 async def disable_resource(resource_id: str):
-    return await _state_change(lambda _payload: _service().disable(resource_id))
+    try:
+        resource = _service().disable(resource_id)
+        if resource.get("type") == "mcp" and g.container.has(MCPServerManager):
+            await g.container.resolve(MCPServerManager).refresh_managed_servers()
+        return jsonify(_resource_response(resource))
+    except Exception as error:
+        return _lifecycle_error(error)
 
 
 @resource_bp.route("/<resource_id>/workflow", methods=["POST"])

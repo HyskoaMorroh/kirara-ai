@@ -222,6 +222,50 @@ def test_execute_chat_uses_stable_priority_and_switches_on_transient_failure():
     assert result.trace_id
 
 
+def test_execute_chat_provider_allowlist_filters_candidates_before_failover():
+    blocked = FakeAdapter(response("blocked"))
+    allowed_primary = FakeAdapter(HttpError(503))
+    allowed_backup = FakeAdapter(response("allowed"))
+    manager = make_manager([
+        ("blocked", 1, blocked),
+        ("allowed-primary", 2, allowed_primary),
+        ("allowed-backup", 3, allowed_backup),
+    ])
+
+    result = manager.execute_chat(
+        request(),
+        provider_allowlist={"allowed-primary", "allowed-backup"},
+    )
+
+    assert result.response == response("allowed")
+    assert blocked.calls == 0
+    assert [attempt.provider for attempt in result.attempts] == [
+        "allowed-primary",
+        "allowed-backup",
+    ]
+
+
+def test_execute_chat_empty_provider_allowlist_preserves_legacy_behavior():
+    primary = FakeAdapter(response("legacy"))
+    manager = make_manager([("primary", 1, primary)])
+
+    result = manager.execute_chat(request(), provider_allowlist=set())
+
+    assert result.response == response("legacy")
+    assert primary.calls == 1
+
+
+def test_execute_chat_provider_allowlist_with_no_candidates_keeps_attempts_empty():
+    blocked = FakeAdapter(response("blocked"))
+    manager = make_manager([("blocked", 1, blocked)])
+
+    with pytest.raises(FailoverExecutionError) as error:
+        manager.execute_chat(request(), provider_allowlist={"missing"})
+
+    assert error.value.attempts == []
+    assert blocked.calls == 0
+
+
 def test_execute_chat_persists_one_logical_trace_for_all_provider_attempts():
     primary = FakeAdapter(HttpError(503))
     secondary = FakeAdapter(response())
@@ -459,6 +503,25 @@ def test_execute_stream_switches_provider_before_first_visible_chunk():
     assert execution.attempts[0].partial_output is False
     assert execution.attempts[1].first_byte_at is not None
     assert execution.attempts[1].partial_output is False
+
+
+def test_execute_stream_provider_allowlist_matches_synchronous_filtering():
+    blocked = StreamingAdapter([response("blocked")])
+    allowed = StreamingAdapter([response("allowed")])
+    manager = make_manager([
+        ("blocked", 1, blocked),
+        ("allowed", 2, allowed),
+    ])
+
+    execution = manager.execute_stream(
+        request(),
+        provider_allowlist={"allowed"},
+        deadline_seconds=1,
+    )
+
+    assert list(execution) == [response("allowed")]
+    assert blocked.calls == 0
+    assert [attempt.provider for attempt in execution.attempts] == ["allowed"]
 
 
 def test_execute_stream_persists_one_logical_trace_with_final_provider_and_usage():

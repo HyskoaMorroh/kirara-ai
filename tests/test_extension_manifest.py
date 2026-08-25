@@ -331,6 +331,111 @@ async def test_mcp_stop_clears_all_server_caches():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state",
+    [MCPConnectionState.DISCONNECTED, MCPConnectionState.ERROR],
+)
+async def test_mcp_stop_clears_all_server_caches_when_server_is_not_connected(state):
+    container = DependencyContainer()
+    container.register(GlobalConfig, GlobalConfig())
+    manager = MCPServerManager(container)
+
+    server = MagicMock()
+    server.state = state
+    manager.servers["local-tools"] = server
+    manager.tools_cache["search"] = ToolCacheEntry("local-tools", "search", MagicMock())
+    manager.prompts_cache["local-tools"] = [MagicMock()]
+    manager.resources_cache["local-tools"] = [MagicMock()]
+
+    assert await manager.stop_server("local-tools") is True
+    assert not manager.tools_cache
+    assert "local-tools" not in manager.prompts_cache
+    assert "local-tools" not in manager.resources_cache
+
+
+@pytest.mark.asyncio
+async def test_mcp_stop_clears_caches_even_when_disconnect_fails():
+    container = DependencyContainer()
+    container.register(GlobalConfig, GlobalConfig())
+    manager = MCPServerManager(container)
+
+    server = MagicMock()
+    server.state = MCPConnectionState.CONNECTED
+    server.disconnect = AsyncMock(return_value=False)
+    manager.servers["local-tools"] = server
+    manager.tools_cache["search"] = ToolCacheEntry("local-tools", "search", MagicMock())
+    manager.prompts_cache["local-tools"] = [MagicMock()]
+    manager.resources_cache["local-tools"] = [MagicMock()]
+
+    assert await manager.stop_server("local-tools") is False
+    assert not manager.tools_cache
+    assert "local-tools" not in manager.prompts_cache
+    assert "local-tools" not in manager.resources_cache
+
+
+@pytest.mark.asyncio
+async def test_mcp_connect_failure_does_not_leave_stale_server_caches():
+    container = DependencyContainer()
+    container.register(GlobalConfig, GlobalConfig())
+    manager = MCPServerManager(container)
+
+    server = MagicMock()
+    server.state = MCPConnectionState.DISCONNECTED
+    server.connect = AsyncMock(return_value=False)
+    manager.servers["failed"] = server
+    manager.tools_cache["old"] = ToolCacheEntry("failed", "old", MagicMock())
+    manager.prompts_cache["failed"] = [MagicMock()]
+    manager.resources_cache["failed"] = [MagicMock()]
+
+    assert await manager.connect_server("failed") is False
+    assert not manager.tools_cache
+    assert "failed" not in manager.prompts_cache
+    assert "failed" not in manager.resources_cache
+
+
+@pytest.mark.asyncio
+async def test_mcp_runtime_status_records_safe_connection_failure():
+    container = DependencyContainer()
+    container.register(GlobalConfig, GlobalConfig())
+    manager = MCPServerManager(container)
+
+    server = MagicMock()
+    server.state = MCPConnectionState.DISCONNECTED
+    server.connect = AsyncMock(return_value=False)
+    manager.servers["failed"] = server
+
+    assert await manager.connect_server("failed") is False
+
+    runtime = manager.get_runtime_status("failed")
+    assert runtime["status"] == "failed"
+    assert runtime["running"] is False
+    assert runtime["failed"] is True
+    assert runtime["last_error"]
+    assert runtime["last_checked_at"]
+    assert "private" not in repr(runtime)
+
+
+def test_mcp_runtime_status_maps_connection_states():
+    container = DependencyContainer()
+    container.register(GlobalConfig, GlobalConfig())
+    manager = MCPServerManager(container)
+    server = MagicMock()
+    manager.servers["docs"] = server
+
+    server.state = MCPConnectionState.DISCONNECTED
+    assert manager.get_runtime_status("docs")["status"] == "stopped"
+
+    server.state = MCPConnectionState.CONNECTED
+    assert manager.get_runtime_status("docs")["status"] == "running"
+
+    server.state = MCPConnectionState.ERROR
+    runtime = manager.get_runtime_status("docs")
+    assert runtime["status"] == "failed"
+    assert runtime["failed"] is True
+    assert runtime["last_error"]
+
+
+@pytest.mark.asyncio
 async def test_mcp_tool_call_requires_runtime_allowlist_intersection():
     container = DependencyContainer()
     container.register(GlobalConfig, GlobalConfig())

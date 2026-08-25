@@ -28,7 +28,32 @@ export interface ConfigSchema {
   required?: string[]
 }
 
+export interface WebUIChatRequest {
+  message: string
+  session_id: string
+  username: string
+  chat_type: 'c2c' | 'group'
+  group_id?: string
+  agent_id?: string
+}
+
+export interface WebUIChatResponse {
+  status: 'completed' | 'awaiting_confirmation'
+  text: string
+  agent_id: string | null
+  session_id: string
+  session_key: string
+  confirmation_id: string | null
+}
+
 export const llmApi = {
+  /**
+   * 通过统一渠道调度链发送 WebUI 消息
+   */
+  chat(payload: WebUIChatRequest) {
+    return http.post<WebUIChatResponse>('/llm/chat', payload)
+  },
+
   /**
    * 获取适配器类型列表
    */

@@ -24,7 +24,10 @@ from kirara_ai.im.sender import ChatType
 
 
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9._:@/-]+$")
-_RESOURCE_TYPES = frozenset({"prompt", "skill", "mcp"})
+_RESOURCE_TYPES = frozenset({"prompt", "skill", "memory", "mcp", "hook"})
+SUPPORTED_CHANNEL_TYPES = frozenset(
+    {"webui", "onebot", "qqbot", "telegram", "wecom"}
+)
 _AGENT_REGISTRY_FORMAT_VERSION = 1
 
 
@@ -181,7 +184,7 @@ class ChannelContext:
 
 @dataclass(frozen=True)
 class ResourceBinding:
-    """A versioned Prompt, Skill or MCP binding included in a runtime snapshot."""
+    """A versioned runtime resource binding included in one Agent snapshot."""
 
     resource_id: str
     resource_type: str
@@ -190,6 +193,7 @@ class ResourceBinding:
     enabled: bool = True
     permissions: tuple[str, ...] = ()
     source: str = "local"
+    version_policy: str = "fixed"
 
     def __post_init__(self) -> None:
         resource_type = str(self.resource_type).strip().lower()
@@ -200,12 +204,16 @@ class ResourceBinding:
         content_sha256 = str(self.content_sha256).strip().lower()
         if not re.fullmatch(r"[0-9a-f]{64}", content_sha256):
             raise ValueError("Resource content hash must be a SHA-256 hexadecimal digest")
+        version_policy = str(self.version_policy).strip().lower()
+        if version_policy not in {"fixed", "current"}:
+            raise ValueError("Resource version policy must be fixed or current")
         object.__setattr__(self, "resource_id", resource_id)
         object.__setattr__(self, "resource_type", resource_type)
         object.__setattr__(self, "version", version)
         object.__setattr__(self, "content_sha256", content_sha256)
         object.__setattr__(self, "permissions", _as_tuple(self.permissions))
         object.__setattr__(self, "source", _clean_identifier(self.source, "local"))
+        object.__setattr__(self, "version_policy", version_policy)
 
 
 @dataclass(frozen=True)
@@ -214,12 +222,17 @@ class ResourceSnapshot:
 
     resources: tuple[ResourceBinding, ...]
     model_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    model_priority: tuple[str, ...] = ()
+    provider_allowlist: tuple[str, ...] = ()
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     content_sha256: str = ""
 
     def __post_init__(self) -> None:
         resources = _ImmutableTuple(self.resources)
         object.__setattr__(self, "resources", resources)
+        object.__setattr__(self, "model_priority", _ImmutableTuple(_as_tuple(self.model_priority)))
+        object.__setattr__(self, "provider_allowlist", _ImmutableTuple(_as_tuple(self.provider_allowlist)))
         if self.created_at.tzinfo is None:
             object.__setattr__(
                 self, "created_at", self.created_at.replace(tzinfo=timezone.utc)
@@ -235,22 +248,32 @@ class ResourceSnapshot:
         resources: Sequence[ResourceBinding],
         model_id: Optional[str] = None,
         *,
+        agent_id: Optional[str] = None,
+        model_priority: Optional[Iterable[str]] = None,
+        provider_allowlist: Optional[Iterable[str]] = None,
         created_at: Optional[datetime] = None,
     ) -> "ResourceSnapshot":
         return cls(
             resources=tuple(resources),
             model_id=model_id,
+            agent_id=agent_id,
+            model_priority=_as_tuple(model_priority),
+            provider_allowlist=_as_tuple(provider_allowlist),
             created_at=created_at or datetime.now(timezone.utc),
         )
 
     def _calculate_hash(self) -> str:
         payload = {
+            "agent_id": self.agent_id,
             "model_id": self.model_id,
+            "model_priority": list(self.model_priority),
+            "provider_allowlist": list(self.provider_allowlist),
             "resources": [
                 {
                     "resource_id": item.resource_id,
                     "resource_type": item.resource_type,
                     "version": item.version,
+                    "version_policy": item.version_policy,
                     "content_sha256": item.content_sha256,
                     "enabled": item.enabled,
                     "permissions": list(item.permissions),
@@ -264,7 +287,10 @@ class ResourceSnapshot:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "agent_id": self.agent_id,
             "model_id": self.model_id,
+            "model_priority": list(self.model_priority),
+            "provider_allowlist": list(self.provider_allowlist),
             "created_at": self.created_at.isoformat(),
             "content_sha256": self.content_sha256,
             "resources": [
@@ -272,6 +298,7 @@ class ResourceSnapshot:
                     "resource_id": item.resource_id,
                     "resource_type": item.resource_type,
                     "version": item.version,
+                    "version_policy": item.version_policy,
                     "content_sha256": item.content_sha256,
                     "enabled": item.enabled,
                     "permissions": list(item.permissions),
@@ -355,7 +382,9 @@ class AgentDefinition:
     capabilities: frozenset[str] = frozenset()
     prompt_bindings: tuple[ResourceBinding, ...] = ()
     skill_bindings: tuple[ResourceBinding, ...] = ()
+    memory_bindings: tuple[ResourceBinding, ...] = ()
     mcp_bindings: tuple[ResourceBinding, ...] = ()
+    hook_bindings: tuple[ResourceBinding, ...] = ()
     mcp_allowlist: frozenset[str] = frozenset()
     allow_tools: bool = True
     max_tool_iterations: int = 8
@@ -371,7 +400,13 @@ class AgentDefinition:
         object.__setattr__(self, "provider_allowlist", _as_frozenset(self.provider_allowlist))
         object.__setattr__(self, "capabilities", _as_frozenset(self.capabilities))
         object.__setattr__(self, "mcp_allowlist", _as_frozenset(self.mcp_allowlist))
-        for field_name in ("prompt_bindings", "skill_bindings", "mcp_bindings"):
+        for field_name in (
+            "prompt_bindings",
+            "skill_bindings",
+            "memory_bindings",
+            "mcp_bindings",
+            "hook_bindings",
+        ):
             bindings = tuple(getattr(self, field_name))
             expected_type = field_name.removesuffix("_bindings")
             if any(item.resource_type != expected_type for item in bindings):
@@ -380,12 +415,21 @@ class AgentDefinition:
 
     @property
     def resource_bindings(self) -> tuple[ResourceBinding, ...]:
-        return self.prompt_bindings + self.skill_bindings + self.mcp_bindings
+        return (
+            self.prompt_bindings
+            + self.skill_bindings
+            + self.memory_bindings
+            + self.mcp_bindings
+            + self.hook_bindings
+        )
 
     def snapshot(self, model_id: Optional[str] = None) -> ResourceSnapshot:
         return ResourceSnapshot.create(
             self.resource_bindings,
             model_id=model_id or self.model_priority[0],
+            agent_id=self.agent_id,
+            model_priority=self.model_priority,
+            provider_allowlist=sorted(self.provider_allowlist),
         )
 
 
@@ -482,13 +526,87 @@ class AgentRegistry:
             next_state["default_agent_id"] = agent_id
             self._commit(next_state)
 
+    def configure(
+        self,
+        agent: AgentDefinition,
+        *,
+        channels: Sequence[str] = (),
+        accounts: Sequence[tuple[str, str, str]] = (),
+        sessions: Sequence[str] = (),
+        is_default: bool = False,
+        create: bool = False,
+    ) -> None:
+        """Atomically replace an Agent definition and all relations it owns."""
+
+        with self._lock:
+            exists = agent.agent_id in self._agents
+            if create and exists:
+                raise ValueError(f"Agent already registered: {agent.agent_id}")
+            if not create and not exists:
+                raise KeyError(agent.agent_id)
+
+            normalized_channels = tuple(
+                self._normalize_channel_type(channel) for channel in channels
+            )
+            normalized_accounts = tuple(
+                (
+                    self._normalize_channel_type(channel),
+                    _clean_identifier(adapter, "default"),
+                    _clean_identifier(account, "default"),
+                )
+                for channel, adapter, account in accounts
+            )
+            normalized_sessions = tuple(str(session).strip() for session in sessions)
+            if any(not session for session in normalized_sessions):
+                raise ValueError("session relation cannot be empty")
+            for session in normalized_sessions:
+                channel = session.split("/", 1)[0]
+                self._normalize_channel_type(channel)
+
+            has_relations = bool(
+                is_default
+                or normalized_channels
+                or normalized_accounts
+                or normalized_sessions
+            )
+            if not agent.enabled and has_relations:
+                raise ValueError(f"Agent is disabled: {agent.agent_id}")
+
+            next_state = self._capture_state()
+            next_state["agents"][agent.agent_id] = agent
+            next_state["channel_bindings"] = {
+                key: value
+                for key, value in next_state["channel_bindings"].items()
+                if value != agent.agent_id
+            }
+            next_state["account_bindings"] = {
+                key: value
+                for key, value in next_state["account_bindings"].items()
+                if value != agent.agent_id
+            }
+            next_state["session_bindings"] = {
+                key: value
+                for key, value in next_state["session_bindings"].items()
+                if value != agent.agent_id
+            }
+            for channel in normalized_channels:
+                next_state["channel_bindings"][channel] = agent.agent_id
+            for account in normalized_accounts:
+                next_state["account_bindings"][account] = agent.agent_id
+            for session in normalized_sessions:
+                next_state["session_bindings"][session] = agent.agent_id
+
+            if is_default:
+                next_state["default_agent_id"] = agent.agent_id
+            elif next_state["default_agent_id"] == agent.agent_id:
+                next_state["default_agent_id"] = None
+            self._commit(next_state)
+
     def bind_channel(self, channel_type: str, agent_id: str) -> None:
         with self._lock:
             self._require_enabled(agent_id)
             next_state = self._capture_state()
-            next_state["channel_bindings"][
-                _clean_identifier(channel_type, "unknown").lower()
-            ] = agent_id
+            next_state["channel_bindings"][self._normalize_channel_type(channel_type)] = agent_id
             self._commit(next_state)
 
     def unbind_channel(self, channel_type: str) -> None:
@@ -508,7 +626,7 @@ class AgentRegistry:
         with self._lock:
             self._require_enabled(agent_id)
             key = (
-                _clean_identifier(channel_type, "unknown").lower(),
+                self._normalize_channel_type(channel_type),
                 _clean_identifier(adapter_instance, "default"),
                 _clean_identifier(account_scope, "default"),
             )
@@ -531,6 +649,7 @@ class AgentRegistry:
         with self._lock:
             self._require_enabled(agent_id)
             key = session_key.session_key if isinstance(session_key, ChannelContext) else str(session_key)
+            self._normalize_channel_type(key.split("/", 1)[0])
             next_state = self._capture_state()
             next_state["session_bindings"][key] = agent_id
             self._commit(next_state)
@@ -549,6 +668,8 @@ class AgentRegistry:
         prompt_bindings: Sequence[ResourceBinding],
         skill_bindings: Sequence[ResourceBinding],
         mcp_bindings: Sequence[ResourceBinding],
+        memory_bindings: Sequence[ResourceBinding] | None = None,
+        hook_bindings: Sequence[ResourceBinding] | None = None,
         mcp_allowlist: Iterable[str] | None = None,
     ) -> AgentDefinition:
         with self._lock:
@@ -557,7 +678,9 @@ class AgentRegistry:
                 agent,
                 prompt_bindings=tuple(prompt_bindings),
                 skill_bindings=tuple(skill_bindings),
+                memory_bindings=(agent.memory_bindings if memory_bindings is None else tuple(memory_bindings)),
                 mcp_bindings=tuple(mcp_bindings),
+                hook_bindings=(agent.hook_bindings if hook_bindings is None else tuple(hook_bindings)),
                 mcp_allowlist=agent.mcp_allowlist if mcp_allowlist is None else frozenset(mcp_allowlist),
             )
             next_state = self._capture_state()
@@ -620,6 +743,13 @@ class AgentRegistry:
             raise ValueError(f"Agent is disabled: {agent_id}")
         return agent
 
+    @staticmethod
+    def _normalize_channel_type(channel_type: Any) -> str:
+        channel = _clean_identifier(channel_type, "unknown").lower()
+        if channel not in SUPPORTED_CHANNEL_TYPES:
+            raise ValueError(f"Unsupported channel type: {channel}")
+        return channel
+
     def _capture_state(self) -> dict[str, Any]:
         return {
             "agents": dict(self._agents),
@@ -662,6 +792,7 @@ class AgentRegistry:
             "resource_id": binding.resource_id,
             "resource_type": binding.resource_type,
             "version": binding.version,
+            "version_policy": binding.version_policy,
             "content_sha256": binding.content_sha256,
             "enabled": binding.enabled,
             "permissions": list(binding.permissions),
@@ -680,7 +811,9 @@ class AgentRegistry:
             "capabilities": sorted(agent.capabilities),
             "prompt_bindings": [cls._binding_to_dict(item) for item in agent.prompt_bindings],
             "skill_bindings": [cls._binding_to_dict(item) for item in agent.skill_bindings],
+            "memory_bindings": [cls._binding_to_dict(item) for item in agent.memory_bindings],
             "mcp_bindings": [cls._binding_to_dict(item) for item in agent.mcp_bindings],
+            "hook_bindings": [cls._binding_to_dict(item) for item in agent.hook_bindings],
             "mcp_allowlist": sorted(agent.mcp_allowlist),
             "allow_tools": agent.allow_tools,
             "max_tool_iterations": agent.max_tool_iterations,
@@ -718,7 +851,10 @@ class AgentRegistry:
     def _load_binding(payload: Any, expected_type: str) -> ResourceBinding:
         if not isinstance(payload, dict):
             raise ValueError("Agent resource binding is invalid")
-        binding = ResourceBinding(**payload)
+        values = dict(payload)
+        # Older registries represented only pinned versions.
+        values.setdefault("version_policy", "fixed")
+        binding = ResourceBinding(**values)
         if binding.resource_type != expected_type:
             raise ValueError("Agent resource binding has the wrong type")
         return binding
@@ -731,7 +867,9 @@ class AgentRegistry:
         for field_name, resource_type in (
             ("prompt_bindings", "prompt"),
             ("skill_bindings", "skill"),
+            ("memory_bindings", "memory"),
             ("mcp_bindings", "mcp"),
+            ("hook_bindings", "hook"),
         ):
             raw_bindings = values.get(field_name, [])
             if not isinstance(raw_bindings, list):

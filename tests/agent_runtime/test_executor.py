@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -7,22 +8,36 @@ import pytest
 from kirara_ai.agent_runtime import (
     AgentDefinition,
     AgentRegistry,
+    AgentHookRuntime,
     AgentRuntimeExecutor,
     ChannelContext,
     ResourceBinding,
     RuntimeStatus,
+    HOOK_EVENTS,
 )
 from kirara_ai.im.message import IMMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
-from kirara_ai.llm.format.message import LLMChatTextContent
+from kirara_ai.llm.format.message import LLMChatMessage, LLMChatTextContent
 from kirara_ai.llm.format.response import LLMChatResponse, Message
 from kirara_ai.llm.format.tool import Function, ToolCall
 from kirara_ai.llm.resilience import ChatExecutionResult, FailoverExecutionError
+from kirara_ai.memory.entry import MemoryEntry
 
 
 HASH_PROMPT = "a" * 64
 HASH_SKILL = "b" * 64
 HASH_MCP = "c" * 64
+HASH_MEMORY = "d" * 64
+HASH_HOOK = "e" * 64
+
+
+def hook_binding(resource_id: str = "hook-main", digest: str = HASH_HOOK) -> ResourceBinding:
+    return ResourceBinding(
+        resource_id=resource_id,
+        resource_type="hook",
+        version="1.0.0",
+        content_sha256=digest,
+    )
 
 
 def make_context(channel: str = "telegram") -> ChannelContext:
@@ -52,9 +67,11 @@ class FakeLLMManager:
     def __init__(self, responses: dict[str, list[LLMChatResponse | BaseException]]):
         self.responses = {model: list(values) for model, values in responses.items()}
         self.requests = []
+        self.execute_options = []
 
-    def execute_chat(self, request, **_options):
+    def execute_chat(self, request, **options):
         self.requests.append(request)
+        self.execute_options.append(options)
         values = self.responses[request.model]
         value = values.pop(0)
         if isinstance(value, BaseException):
@@ -107,6 +124,45 @@ class FakeMCPManager:
         )
 
 
+class Context7MCPManager(FakeMCPManager):
+    """Local Context7-shaped transport used to verify the runtime contract."""
+
+    def __init__(self):
+        super().__init__()
+        self.tools = {
+            "query-docs": SimpleNamespace(
+                server_id="context7",
+                tool_info=SimpleNamespace(
+                    name="query-docs",
+                    description="Query current library documentation",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "libraryId": {"type": "string"},
+                            "query": {"type": "string"},
+                        },
+                        "required": ["libraryId", "query"],
+                    },
+                ),
+            )
+        }
+
+
+class CombinedMemoryManager:
+    def __init__(self, entries):
+        self.entries = list(entries)
+        self.queries = []
+        self.stores = []
+
+    def query(self, scope, sender, extra_identifier=None):
+        self.queries.append((scope, sender, extra_identifier))
+        return list(self.entries)
+
+    def store(self, scope, entry, extra_identifier=None):
+        self.stores.append((scope, entry, extra_identifier))
+        self.entries.append(entry)
+
+
 def make_agent(*, allowlist: set[str] | None = None) -> AgentDefinition:
     return AgentDefinition(
         agent_id="research-agent",
@@ -155,6 +211,48 @@ def make_executor(llm, mcp, *, agent=None):
     )
 
 
+def make_hook_executor(
+    llm,
+    mcp,
+    hook_content,
+    *,
+    agent=None,
+    handlers=None,
+    audit=None,
+    context_char_threshold=None,
+    compactor=None,
+):
+    base = agent or make_agent()
+    if not base.hook_bindings:
+        base = AgentDefinition(**{**base.__dict__, "hook_bindings": (hook_binding(),)})
+    registry = AgentRegistry()
+    registry.register(base)
+    registry.set_default(base.agent_id)
+    runtime = AgentHookRuntime(
+        resource_loader={
+            "prompt-main": "prompt",
+            "skill-search": "skill",
+            "hook-main": hook_content,
+        }.__getitem__,
+        handlers=handlers,
+        audit_sink=audit.append if audit is not None else None,
+    )
+    return AgentRuntimeExecutor(
+        agent_registry=registry,
+        llm_manager=llm,
+        mcp_manager=mcp,
+        resource_loader={
+            "prompt-main": "prompt",
+            "skill-search": "skill",
+            "hook-main": hook_content,
+        }.__getitem__,
+        audit_sink=audit.append if audit is not None else None,
+        hook_runtime=runtime,
+        context_char_threshold=context_char_threshold,
+        compactor=compactor,
+    )
+
+
 def make_versioned_executor(llm, mcp, calls, *, agent=None):
     registry = AgentRegistry()
     registry.register(agent or make_agent())
@@ -173,6 +271,206 @@ def make_versioned_executor(llm, mcp, calls, *, agent=None):
         mcp_manager=mcp,
         resource_loader=load,
     )
+
+
+@pytest.mark.asyncio
+async def test_one_agent_turn_composes_prompt_skill_memory_context7_failover_and_hooks():
+    prompt_text = "prompt body for the research agent"
+    skill_text = "skill body: use Context7 when documentation evidence is needed"
+    memory_resource_text = "memory resource policy: preserve the research thread"
+    hook_text = json_hook(
+        {
+            "SessionStart": "record",
+            "UserPromptSubmit": "record",
+            "PreToolUse": "record",
+            "PostToolUse": "record",
+            "Stop": "record",
+        }
+    )
+    audit = []
+    memory = CombinedMemoryManager(
+        [
+            MemoryEntry(
+                sender=ChatSender.from_c2c_chat("old-user", "Researcher"),
+                content="old question",
+                metadata={
+                    "agent_runtime": {
+                        "version": 1,
+                        "agent_id": "research-agent",
+                        "message": LLMChatMessage(
+                            role="user",
+                            content=[LLMChatTextContent(text="old question")],
+                        ).model_dump(mode="json"),
+                    }
+                },
+            ),
+            MemoryEntry(
+                sender=ChatSender.get_bot_sender(),
+                content="old answer",
+                metadata={
+                    "agent_runtime": {
+                        "version": 1,
+                        "agent_id": "research-agent",
+                        "message": LLMChatMessage(
+                            role="assistant",
+                            content=[LLMChatTextContent(text="old answer")],
+                        ).model_dump(mode="json"),
+                    }
+                },
+            ),
+        ]
+    )
+    llm = FakeLLMManager(
+        {
+            "model-primary": [
+                FailoverExecutionError("primary unavailable", attempts=[])
+            ],
+            "model-backup": [
+                LLMChatResponse(
+                    model="model-backup",
+                    message=Message(
+                        role="assistant",
+                        content=[],
+                        tool_calls=[
+                            tool_call(
+                                "query-docs",
+                                {
+                                    "libraryId": "/vercel/next.js",
+                                    "query": "route handlers",
+                                },
+                            )
+                        ],
+                    ),
+                ),
+                LLMChatResponse(
+                    model="model-backup",
+                    message=Message(
+                        role="assistant",
+                        content=[LLMChatTextContent(text="documented answer")],
+                    ),
+                ),
+            ],
+        }
+    )
+    agent = AgentDefinition(
+        agent_id="research-agent",
+        model_priority=("model-primary", "model-backup"),
+        prompt_bindings=(
+            ResourceBinding(
+                resource_id="prompt-main",
+                resource_type="prompt",
+                version="1.0.0",
+                content_sha256=HASH_PROMPT,
+            ),
+        ),
+        skill_bindings=(
+            ResourceBinding(
+                resource_id="skill-search",
+                resource_type="skill",
+                version="2.0.0",
+                content_sha256=HASH_SKILL,
+            ),
+        ),
+        memory_bindings=(
+            ResourceBinding(
+                resource_id="memory-main",
+                resource_type="memory",
+                version="1.0.0",
+                content_sha256=HASH_MEMORY,
+            ),
+        ),
+        mcp_bindings=(
+            ResourceBinding(
+                resource_id="mcp.context7",
+                resource_type="mcp",
+                version="1.0.0",
+                content_sha256=HASH_MCP,
+            ),
+        ),
+        hook_bindings=(hook_binding(),),
+        mcp_allowlist={"query-docs"},
+        max_tool_iterations=2,
+    )
+    registry = AgentRegistry()
+    registry.register(agent)
+    registry.set_default(agent.agent_id)
+    handlers = {"record": lambda payload: None}
+    resources = {
+        "prompt-main": prompt_text,
+        "skill-search": skill_text,
+        "memory-main": memory_resource_text,
+        "hook-main": hook_text,
+    }
+    executor = AgentRuntimeExecutor(
+        agent_registry=registry,
+        llm_manager=llm,
+        mcp_manager=Context7MCPManager(),
+        resource_loader=resources.__getitem__,
+        memory_manager=memory,
+        audit_sink=audit.append,
+        hook_runtime=AgentHookRuntime(
+            resource_loader=resources.__getitem__,
+            handlers=handlers,
+            audit_sink=audit.append,
+        ),
+    )
+
+    result = await executor.run(
+        make_context("telegram"),
+        make_message("find the current route handler documentation"),
+        session_mcp_allowlist={"query-docs"},
+        workflow_mcp_allowlist={"query-docs"},
+    )
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert result.text == "documented answer"
+    assert [request.model for request in llm.requests] == [
+        "model-primary",
+        "model-backup",
+        "model-backup",
+    ]
+    first_system_text = llm.requests[1].messages[0].content[0].text
+    assert prompt_text in first_system_text
+    assert skill_text in first_system_text
+    assert memory_resource_text in first_system_text
+    assert [
+        item.content[0].text
+        for item in llm.requests[1].messages
+        if item.role in {"user", "assistant"}
+    ] == ["old question", "old answer", "find the current route handler documentation"]
+    assert "query-docs" in {tool.name for tool in llm.requests[1].tools}
+    assert len(executor.mcp_manager.calls) == 1
+    tool_name, tool_args, options = executor.mcp_manager.calls[0]
+    assert tool_name == "query-docs"
+    assert tool_args["libraryId"] == "/vercel/next.js"
+    assert options["agent_allowlist"] == frozenset({"query-docs"})
+    assert options["agent_mcp_server_ids"] == frozenset({"context7"})
+    assert options["session_allowlist"] == frozenset({"query-docs"})
+    assert options["workflow_allowlist"] == frozenset({"query-docs"})
+    assert [
+        item["event"]
+        for item in audit
+        if item.get("component") == "agent_hook" and item.get("outcome") == "success"
+    ] == ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
+    serialized_audit = json.dumps(audit, ensure_ascii=True)
+    assert "user-a" not in serialized_audit
+    assert prompt_text not in serialized_audit
+    assert result.snapshot is not None
+    assert result.snapshot.agent_id == "research-agent"
+    assert result.snapshot.model_priority == ("model-primary", "model-backup")
+    assert [item.resource_id for item in result.snapshot.resources] == [
+        "prompt-main",
+        "skill-search",
+        "memory-main",
+        "mcp.context7",
+        "hook-main",
+    ]
+    assert len(memory.queries) == 1
+    assert len(memory.stores) == 4
+    assert [
+        call[1].metadata["agent_runtime"]["message"]["role"]
+        for call in memory.stores
+    ] == ["user", "assistant", "tool", "assistant"]
 
 
 @pytest.mark.asyncio
@@ -223,6 +521,142 @@ async def test_runtime_injects_resources_runs_tool_in_same_turn_and_uses_model_f
     assert mcp.calls[0][0] == "search"
     assert result.snapshot is not None
     assert result.snapshot.resources[0].content_sha256 == HASH_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_runtime_passes_agent_provider_allowlist_to_llm_manager():
+    final = LLMChatResponse(
+        model="model-primary",
+        message=Message(
+            role="assistant",
+            content=[LLMChatTextContent(text="provider constrained")],
+        ),
+    )
+    llm = FakeLLMManager({"model-primary": [final]})
+    base = make_agent()
+    agent = AgentDefinition(
+        **{**base.__dict__, "provider_allowlist": frozenset({"openai"})}
+    )
+
+    result = await make_executor(llm, FakeMCPManager(), agent=agent).run(
+        make_context(), make_message()
+    )
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert llm.execute_options[0]["provider_allowlist"] == frozenset({"openai"})
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_switch_models_after_non_retryable_failure():
+    primary_error = RuntimeError("invalid request: unsupported model parameter")
+    llm = FakeLLMManager(
+        {
+            "model-primary": [primary_error],
+            "model-backup": [
+                LLMChatResponse(
+                    model="model-backup",
+                    message=Message(
+                        role="assistant",
+                        content=[LLMChatTextContent(text="must not run")],
+                    ),
+                )
+            ],
+        }
+    )
+
+    result = await make_executor(llm, FakeMCPManager()).run(
+        make_context(), make_message()
+    )
+
+    assert result.status is RuntimeStatus.FAILED
+    assert [request.model for request in llm.requests] == ["model-primary"]
+    assert result.error is not None
+    assert result.error["type"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_runtime_switches_models_after_transient_failure():
+    llm = FakeLLMManager(
+        {
+            "model-primary": [TimeoutError("upstream timed out")],
+            "model-backup": [
+                LLMChatResponse(
+                    model="model-backup",
+                    message=Message(
+                        role="assistant",
+                        content=[LLMChatTextContent(text="backup used")],
+                    ),
+                )
+            ],
+        }
+    )
+
+    result = await make_executor(llm, FakeMCPManager()).run(
+        make_context(), make_message()
+    )
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert result.text == "backup used"
+    assert [request.model for request in llm.requests] == [
+        "model-primary",
+        "model-backup",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_injects_memory_as_context_but_never_hook_content_into_model_messages():
+    final = LLMChatResponse(
+        model="model-primary",
+        message=Message(
+            role="assistant",
+            content=[LLMChatTextContent(text="context loaded")],
+        ),
+    )
+    llm = FakeLLMManager({"model-primary": [final]})
+    base = make_agent()
+    agent = AgentDefinition(
+        **{
+            **base.__dict__,
+            "memory_bindings": (
+                ResourceBinding(
+                    resource_id="memory-main",
+                    resource_type="memory",
+                    version="1.0.0",
+                    content_sha256=HASH_MEMORY,
+                ),
+            ),
+            "hook_bindings": (
+                ResourceBinding(
+                    resource_id="hook-main",
+                    resource_type="hook",
+                    version="1.0.0",
+                    content_sha256=HASH_HOOK,
+                ),
+            ),
+        }
+    )
+    registry = AgentRegistry()
+    registry.register(agent)
+    registry.set_default(agent.agent_id)
+    executor = AgentRuntimeExecutor(
+        agent_registry=registry,
+        llm_manager=llm,
+        mcp_manager=FakeMCPManager(),
+        resource_loader={
+            "prompt-main": "prompt",
+            "skill-search": "skill",
+            "memory-main": "memory context",
+            "hook-main": "hook implementation must stay outside model messages",
+        }.__getitem__,
+    )
+
+    result = await executor.run(make_context(), make_message())
+
+    assert result.status is RuntimeStatus.COMPLETED
+    system_text = llm.requests[0].messages[0].content[0].text
+    assert "[memory:memory-main]" in system_text
+    assert "memory context" in system_text
+    assert "hook implementation" not in system_text
 
 
 @pytest.mark.asyncio
@@ -298,11 +732,396 @@ async def test_runtime_requires_confirmation_without_executing_external_tool_the
     assert waiting.confirmation_id
     assert mcp.calls == []
 
-    resumed = await executor.confirm(waiting.confirmation_id)
+    resumed = await executor.confirm(waiting.confirmation_id, make_context())
 
     assert resumed.status is RuntimeStatus.COMPLETED
     assert resumed.text == "The document was updated."
     assert [call[0] for call in mcp.calls] == ["write"]
+
+
+@pytest.mark.asyncio
+async def test_hook_runtime_exposes_the_complete_agent_lifecycle_event_set():
+    assert HOOK_EVENTS == frozenset(
+        {
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "PreCompact",
+            "PostCompact",
+            "SessionStart",
+            "SessionEnd",
+            "UserPromptSubmit",
+            "SubagentStart",
+            "SubagentStop",
+            "Stop",
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_dispatches_permission_request_before_waiting_and_stop_after_waiting():
+    final = LLMChatResponse(
+        model="model-primary",
+        message=Message(
+            role="assistant",
+            content=[],
+            tool_calls=[tool_call("write", {"text": "publish"})],
+        ),
+    )
+    llm = FakeLLMManager({"model-primary": [final]})
+    audit = []
+    executor = make_hook_executor(
+        llm,
+        FakeMCPManager(confirmation_tools={"write"}),
+        json_hook(
+            {
+                "PreToolUse": "pre_tool",
+                "PermissionRequest": "permission",
+                "Stop": "stop",
+            }
+        ),
+        agent=make_agent(allowlist={"write"}),
+        handlers={
+            "pre_tool": lambda payload: None,
+            "permission": lambda payload: None,
+            "stop": lambda payload: None,
+        },
+        audit=audit,
+    )
+
+    result = await executor.run(make_context(), make_message("publish"))
+
+    assert result.status is RuntimeStatus.AWAITING_CONFIRMATION
+    events = [
+        item["event"]
+        for item in audit
+        if item.get("component") == "agent_hook" and item.get("outcome") == "success"
+    ]
+    assert events == ["PreToolUse", "PermissionRequest", "Stop"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_dispatches_stop_after_a_normal_tool_turn():
+    llm = FakeLLMManager(
+        {
+            "model-primary": [
+                LLMChatResponse(
+                    model="model-primary",
+                    message=Message(
+                        role="assistant",
+                        content=[],
+                        tool_calls=[tool_call("search", {"query": "docs"})],
+                    ),
+                ),
+                LLMChatResponse(
+                    model="model-primary",
+                    message=Message(
+                        role="assistant",
+                        content=[LLMChatTextContent(text="done")],
+                    ),
+                ),
+            ]
+        }
+    )
+    audit = []
+    executor = make_hook_executor(
+        llm,
+        FakeMCPManager(),
+        json_hook(
+            {
+                "PreToolUse": "pre_tool",
+                "PostToolUse": "post_tool",
+                "Stop": "stop",
+            }
+        ),
+        handlers={
+            "pre_tool": lambda payload: None,
+            "post_tool": lambda payload: None,
+            "stop": lambda payload: None,
+        },
+        audit=audit,
+    )
+
+    result = await executor.run(make_context(), make_message("search"))
+
+    assert result.status is RuntimeStatus.COMPLETED
+    events = [
+        item["event"]
+        for item in audit
+        if item.get("component") == "agent_hook" and item.get("outcome") == "success"
+    ]
+    assert events == ["PreToolUse", "PostToolUse", "Stop"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_dispatches_postcompact_after_compaction_and_stop_after_completion():
+    final = LLMChatResponse(
+        model="model-primary",
+        message=Message(
+            role="assistant",
+            content=[LLMChatTextContent(text="compacted")],
+        ),
+    )
+    llm = FakeLLMManager({"model-primary": [final]})
+    audit = []
+    executor = make_hook_executor(
+        llm,
+        FakeMCPManager(),
+        json_hook(
+            {
+                "PreCompact": "precompact",
+                "PostCompact": "postcompact",
+                "Stop": "stop",
+            }
+        ),
+        handlers={
+            "precompact": lambda payload: None,
+            "postcompact": lambda payload: None,
+            "stop": lambda payload: None,
+        },
+        audit=audit,
+        context_char_threshold=20,
+    )
+
+    result = await executor.run(make_context(), make_message("a very long current request"))
+
+    assert result.status is RuntimeStatus.COMPLETED
+    events = [
+        item["event"]
+        for item in audit
+        if item.get("component") == "agent_hook" and item.get("outcome") == "success"
+    ]
+    assert events == ["PreCompact", "PostCompact", "Stop"]
+
+
+@pytest.mark.asyncio
+async def test_postcompact_handler_failure_does_not_change_completed_result():
+    final = LLMChatResponse(
+        model="model-primary",
+        message=Message(
+            role="assistant",
+            content=[LLMChatTextContent(text="compacted")],
+        ),
+    )
+    audit = []
+
+    def fail_postcompact(_payload):
+        raise RuntimeError("post compact audit unavailable")
+
+    executor = make_hook_executor(
+        FakeLLMManager({"model-primary": [final]}),
+        FakeMCPManager(),
+        json_hook({"PostCompact": "postcompact", "Stop": "stop"}),
+        handlers={
+            "postcompact": fail_postcompact,
+            "stop": lambda payload: None,
+        },
+        audit=audit,
+        context_char_threshold=20,
+    )
+
+    result = await executor.run(make_context(), make_message("a very long current request"))
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert any(
+        item.get("event") == "PostCompact" and item.get("outcome") == "error"
+        for item in audit
+    )
+    assert any(
+        item.get("event") == "Stop" and item.get("outcome") == "success"
+        for item in audit
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_handler_failure_does_not_change_original_result():
+    final = LLMChatResponse(
+        model="model-primary",
+        message=Message(
+            role="assistant",
+            content=[LLMChatTextContent(text="done")],
+        ),
+    )
+    audit = []
+
+    def fail_stop(_payload):
+        raise RuntimeError("stop audit unavailable")
+
+    executor = make_hook_executor(
+        FakeLLMManager({"model-primary": [final]}),
+        FakeMCPManager(),
+        json_hook({"Stop": "stop"}),
+        handlers={"stop": fail_stop},
+        audit=audit,
+    )
+
+    result = await executor.run(make_context(), make_message("complete"))
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert any(
+        item.get("event") == "Stop" and item.get("outcome") == "error"
+        for item in audit
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_dispatches_stop_when_model_execution_fails():
+    llm = FakeLLMManager({"model-primary": [RuntimeError("provider unavailable")]})
+    audit = []
+    executor = make_hook_executor(
+        llm,
+        FakeMCPManager(),
+        json_hook({"Stop": "stop"}),
+        handlers={"stop": lambda payload: None},
+        audit=audit,
+    )
+
+    result = await executor.run(make_context(), make_message("fail"))
+
+    assert result.status is RuntimeStatus.FAILED
+    assert [
+        item["event"]
+        for item in audit
+        if item.get("component") == "agent_hook" and item.get("outcome") == "success"
+    ] == ["Stop"]
+
+
+@pytest.mark.asyncio
+async def test_non_pretool_hook_denial_is_observational_only():
+    llm = FakeLLMManager(
+        {
+            "model-primary": [
+                LLMChatResponse(
+                    model="model-primary",
+                    message=Message(
+                        role="assistant",
+                        content=[],
+                        tool_calls=[tool_call("search", {"query": "docs"})],
+                    ),
+                ),
+                LLMChatResponse(
+                    model="model-primary",
+                    message=Message(
+                        role="assistant",
+                        content=[LLMChatTextContent(text="done")],
+                    ),
+                )
+            ]
+        }
+    )
+    audit = []
+    executor = make_hook_executor(
+        llm,
+        FakeMCPManager(),
+        json_hook({"PostToolUse": "deny_post"}),
+        handlers={"deny_post": lambda payload: False},
+        audit=audit,
+    )
+
+    result = await executor.run(make_context(), make_message("complete"))
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert [call[0] for call in executor.mcp_manager.calls] == ["search"]
+    assert any(
+        item.get("event") == "PostToolUse" and item.get("outcome") == "success"
+        for item in audit
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirm_dispatches_only_resume_tool_events_and_stop():
+    llm = FakeLLMManager(
+        {
+            "model-primary": [
+                LLMChatResponse(
+                    model="model-primary",
+                    message=Message(
+                        role="assistant",
+                        content=[],
+                        tool_calls=[tool_call("write", {"text": "publish"})],
+                    ),
+                ),
+                LLMChatResponse(
+                    model="model-primary",
+                    message=Message(
+                        role="assistant",
+                        content=[LLMChatTextContent(text="published")],
+                    ),
+                ),
+            ]
+        }
+    )
+    audit = []
+    executor = make_hook_executor(
+        llm,
+        FakeMCPManager(confirmation_tools={"write"}),
+        json_hook(
+            {
+                "PreToolUse": "pre_tool",
+                "PermissionRequest": "permission",
+                "PostToolUse": "post_tool",
+                "Stop": "stop",
+            }
+        ),
+        agent=make_agent(allowlist={"write"}),
+        handlers={
+            "pre_tool": lambda payload: None,
+            "permission": lambda payload: None,
+            "post_tool": lambda payload: None,
+            "stop": lambda payload: None,
+        },
+        audit=audit,
+    )
+
+    waiting = await executor.run(make_context(), make_message("publish"))
+    first_event_count = len(audit)
+    resumed = await executor.confirm(waiting.confirmation_id, make_context())
+
+    assert resumed.status is RuntimeStatus.COMPLETED
+    resume_events = [
+        item["event"]
+        for item in audit[first_event_count:]
+        if item.get("component") == "agent_hook" and item.get("outcome") == "success"
+    ]
+    assert resume_events == ["PreToolUse", "PostToolUse", "Stop"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_emit_session_end_or_subagent_events_without_lifecycle_actions():
+    final = LLMChatResponse(
+        model="model-primary",
+        message=Message(
+            role="assistant",
+            content=[LLMChatTextContent(text="done")],
+        ),
+    )
+    audit = []
+    executor = make_hook_executor(
+        FakeLLMManager({"model-primary": [final]}),
+        FakeMCPManager(),
+        json_hook(
+            {
+                "SessionStart": "record",
+                "SessionEnd": "record",
+                "SubagentStart": "record",
+                "SubagentStop": "record",
+                "UserPromptSubmit": "record",
+                "Stop": "record",
+            }
+        ),
+        handlers={"record": lambda payload: None},
+        audit=audit,
+    )
+
+    result = await executor.run(make_context(), make_message("complete"))
+
+    assert result.status is RuntimeStatus.COMPLETED
+    events = [
+        item["event"]
+        for item in audit
+        if item.get("component") == "agent_hook" and item.get("outcome") == "success"
+    ]
+    assert events == ["SessionStart", "UserPromptSubmit", "Stop"]
 
 
 @pytest.mark.asyncio
@@ -377,6 +1196,150 @@ async def test_runtime_loads_prompt_and_skill_using_the_bound_versions():
 
 
 @pytest.mark.asyncio
+async def test_current_binding_refreshes_between_turns_but_keeps_each_turn_snapshot_fixed():
+    class MutableResourceService:
+        def __init__(self):
+            self.current_version = "1.0.0"
+
+        def resolve_binding(
+            self,
+            resource_id,
+            resource_type,
+            *,
+            version=None,
+            enabled=True,
+            version_policy="fixed",
+        ):
+            selected = version or self.current_version
+            digests = {"1.0.0": "1" * 64, "2.0.0": "2" * 64}
+            return ResourceBinding(
+                resource_id=resource_id,
+                resource_type=resource_type,
+                version=selected,
+                content_sha256=digests.get(selected, "3" * 64),
+                enabled=enabled,
+                version_policy=version_policy,
+            )
+
+    service = MutableResourceService()
+    agent = make_agent()
+    agent = AgentDefinition(
+        **{
+            **agent.__dict__,
+            "prompt_bindings": (
+                ResourceBinding(
+                    resource_id="prompt-main",
+                    resource_type="prompt",
+                    version="1.0.0",
+                    content_sha256="1" * 64,
+                    version_policy="current",
+                ),
+            ),
+        }
+    )
+    registry = AgentRegistry()
+    registry.register(agent)
+    registry.set_default(agent.agent_id)
+    loaded = []
+
+    def load(resource_id, version):
+        loaded.append((resource_id, version))
+        if resource_id == "prompt-main" and version == "1.0.0":
+            service.current_version = "2.0.0"
+        return f"{resource_id}@{version}"
+
+    final = LLMChatResponse(
+        model="model-primary",
+        message=Message(role="assistant", content=[LLMChatTextContent(text="ok")]),
+    )
+    executor = AgentRuntimeExecutor(
+        agent_registry=registry,
+        llm_manager=FakeLLMManager({"model-primary": [final, final]}),
+        mcp_manager=FakeMCPManager(),
+        resource_loader=load,
+        resource_service=service,
+    )
+
+    first = await executor.run(make_context(), make_message("first"))
+    second = await executor.run(make_context(), make_message("second"))
+
+    assert first.status is RuntimeStatus.COMPLETED
+    assert second.status is RuntimeStatus.COMPLETED
+    assert first.snapshot.resources[0].version == "1.0.0"
+    assert first.snapshot.resources[0].version_policy == "current"
+    assert second.snapshot.resources[0].version == "2.0.0"
+    assert second.snapshot.resources[0].version_policy == "current"
+    assert loaded[0] == ("prompt-main", "1.0.0")
+    assert ("prompt-main", "2.0.0") in loaded
+
+
+@pytest.mark.asyncio
+async def test_fixed_binding_remains_on_selected_version_after_resource_update():
+    class UpdatedResourceService:
+        def resolve_binding(
+            self,
+            resource_id,
+            resource_type,
+            *,
+            version=None,
+            enabled=True,
+            version_policy="fixed",
+        ):
+            selected = version or "2.0.0"
+            return ResourceBinding(
+                resource_id=resource_id,
+                resource_type=resource_type,
+                version=selected,
+                content_sha256=("1" if selected == "1.0.0" else "2") * 64,
+                enabled=enabled,
+                version_policy=version_policy,
+            )
+
+    agent = make_agent()
+    agent = AgentDefinition(
+        **{
+            **agent.__dict__,
+            "prompt_bindings": (
+                ResourceBinding(
+                    resource_id="prompt-main",
+                    resource_type="prompt",
+                    version="1.0.0",
+                    content_sha256="1" * 64,
+                    version_policy="fixed",
+                ),
+            ),
+        }
+    )
+    registry = AgentRegistry()
+    registry.register(agent)
+    registry.set_default(agent.agent_id)
+    loaded = []
+
+    def load(resource_id, version):
+        loaded.append((resource_id, version))
+        return f"{resource_id}@{version}"
+
+    final = LLMChatResponse(
+        model="model-primary",
+        message=Message(role="assistant", content=[LLMChatTextContent(text="ok")]),
+    )
+    executor = AgentRuntimeExecutor(
+        agent_registry=registry,
+        llm_manager=FakeLLMManager({"model-primary": [final, final]}),
+        mcp_manager=FakeMCPManager(),
+        resource_loader=load,
+        resource_service=UpdatedResourceService(),
+    )
+
+    first = await executor.run(make_context(), make_message("first"))
+    second = await executor.run(make_context(), make_message("second"))
+
+    assert first.snapshot.resources[0].version == "1.0.0"
+    assert second.snapshot.resources[0].version == "1.0.0"
+    assert all(version != "2.0.0" for resource_id, version in loaded if resource_id == "prompt-main")
+
+
+@pytest.mark.asyncio
 async def test_runtime_accepts_legacy_single_argument_resource_loader():
     final = LLMChatResponse(
         model="model-primary",
@@ -392,3 +1355,155 @@ async def test_runtime_accepts_legacy_single_argument_resource_loader():
 
     assert result.status is RuntimeStatus.COMPLETED
     assert "You are a careful research assistant." in llm.requests[0].messages[0].content[0].text
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_run_precompact_when_context_is_below_threshold():
+    final = LLMChatResponse(
+        model="model-primary",
+        message=Message(
+            role="assistant",
+            content=[LLMChatTextContent(text="no compaction")],
+        ),
+    )
+    llm = FakeLLMManager({"model-primary": [final]})
+    audit = []
+    executor = make_hook_executor(
+        llm,
+        FakeMCPManager(),
+        json_hook({"PreCompact": "precompact"}),
+        handlers={"precompact": lambda payload: {"note": "must stay in audit"}},
+        audit=audit,
+        context_char_threshold=10_000,
+    )
+
+    result = await executor.run(make_context(), make_message("short"))
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert not any(item.get("event") == "PreCompact" for item in audit)
+
+
+@pytest.mark.asyncio
+async def test_runtime_runs_precompact_without_leaking_hook_output_and_audits_counts():
+    final = LLMChatResponse(
+        model="model-primary",
+        message=Message(
+            role="assistant",
+            content=[LLMChatTextContent(text="compacted")],
+        ),
+    )
+    llm = FakeLLMManager({"model-primary": [final]})
+    audit = []
+    hook_output = "hook output must never become model context"
+    executor = make_hook_executor(
+        llm,
+        FakeMCPManager(),
+        json_hook({"PreCompact": "precompact"}),
+        handlers={"precompact": lambda payload: {"output": hook_output}},
+        audit=audit,
+        context_char_threshold=20,
+    )
+
+    result = await executor.run(make_context(), make_message("a very long current request"))
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert len(llm.requests) == 1
+    model_text = "\n".join(
+        executor._message_text(message)
+        for message in llm.requests[0].messages
+    )
+    assert hook_output not in model_text
+    compact_audits = [
+        item for item in audit
+        if item.get("operation") == "compact"
+    ]
+    assert len(compact_audits) == 1
+    assert compact_audits[0]["event"] == "PreCompact"
+    assert compact_audits[0]["message_count_after"] <= compact_audits[0]["message_count_before"]
+    assert compact_audits[0]["estimated_chars_after"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_compactor_failure_falls_back_without_failing_agent_turn():
+    final = LLMChatResponse(
+        model="model-primary",
+        message=Message(
+            role="assistant",
+            content=[LLMChatTextContent(text="fallback compacted")],
+        ),
+    )
+    llm = FakeLLMManager({"model-primary": [final]})
+    audit = []
+
+    def broken_compactor(messages):
+        raise RuntimeError("compactor failure")
+
+    executor = make_hook_executor(
+        llm,
+        FakeMCPManager(),
+        json_hook({}),
+        audit=audit,
+        context_char_threshold=1,
+        compactor=broken_compactor,
+    )
+
+    result = await executor.run(make_context(), make_message("current"))
+
+    assert result.status is RuntimeStatus.COMPLETED
+    compact_audit = next(item for item in audit if item.get("operation") == "compact")
+    assert compact_audit["status"] == "fallback"
+    assert compact_audit["compactor_error_type"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_runtime_compaction_preserves_current_tool_chain():
+    llm = FakeLLMManager(
+        {
+            "model-primary": [
+                LLMChatResponse(
+                    model="model-primary",
+                    message=Message(
+                        role="assistant",
+                        content=[],
+                        tool_calls=[tool_call("search", {"query": "compact"})],
+                    ),
+                ),
+                LLMChatResponse(
+                    model="model-primary",
+                    message=Message(
+                        role="assistant",
+                        content=[LLMChatTextContent(text="tool chain preserved")],
+                    ),
+                ),
+            ]
+        }
+    )
+    executor = AgentRuntimeExecutor(
+        agent_registry=(registry := AgentRegistry()),
+        llm_manager=llm,
+        mcp_manager=FakeMCPManager(),
+        resource_loader={"prompt-main": "p", "skill-search": "s"}.__getitem__,
+        context_char_threshold=100,
+    )
+    registry.register(make_agent())
+    registry.set_default("research-agent")
+
+    result = await executor.run(make_context(), make_message("tool chain"))
+
+    assert result.status is RuntimeStatus.COMPLETED
+    second_request = llm.requests[1]
+    roles = [message.role for message in second_request.messages]
+    assert roles[-3:] == ["user", "assistant", "tool"]
+    assert second_request.messages[-2].content[0].name == "search"
+    assert second_request.messages[-1].content[0].name == "search"
+
+
+def json_hook(events: dict[str, str]) -> str:
+    return json.dumps(
+        {
+            "events": {
+                event: {"handler": handler}
+                for event, handler in events.items()
+            }
+        }
+    )

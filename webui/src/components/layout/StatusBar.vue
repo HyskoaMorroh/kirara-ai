@@ -162,7 +162,7 @@ onUnmounted(() => {
           @click="themeStore.toggleScheme"
         >
           <template #icon>
-            <n-icon>
+            <n-icon aria-hidden="true">
               <MoonOutline v-if="themeStore.isDark" />
               <SunnyOutline v-else />
             </n-icon>
@@ -173,7 +173,7 @@ onUnmounted(() => {
     </n-tooltip>
 
     <!-- 移动版布局 - 只显示关键信息 -->
-    <div class="mobile-view">
+    <div class="mobile-view" role="status" aria-label="系统状态">
       <n-space align="center" :size="8">
         <n-space align="center" :size="4">
           <n-badge dot :type="appStore.systemStatus.apiConnected ? 'success' : 'error'" />

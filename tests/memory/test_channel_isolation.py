@@ -20,6 +20,9 @@ class InMemoryPersistence(MemoryPersistence):
     def save(self, scope_key, entries):
         self.storage[scope_key] = list(entries)
 
+    def flush(self):
+        pass
+
 
 def test_memory_query_does_not_cross_channel_scopes():
     container = DependencyContainer()

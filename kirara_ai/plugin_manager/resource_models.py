@@ -4,7 +4,10 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
-RESOURCE_TYPES = frozenset({"skill", "prompt", "session", "mcp"})
+# ``session`` remains readable for old registries, but new installs and Agent
+# bindings use the five explicit runtime resource kinds below.
+RESOURCE_TYPES = frozenset({"skill", "prompt", "session", "memory", "mcp", "hook"})
+INSTALLABLE_RESOURCE_TYPES = frozenset({"skill", "prompt", "memory", "mcp", "hook"})
 RESOURCE_PERMISSIONS = frozenset({"workflow.read", "workflow.write"})
 
 
