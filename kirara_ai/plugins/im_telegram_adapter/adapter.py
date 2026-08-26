@@ -1,14 +1,19 @@
 import asyncio
-import random
+import base64
+import hashlib
+import json
+from dataclasses import dataclass
 from functools import lru_cache
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 from telegram import Bot, ChatFullInfo, Update, User
 from telegram.constants import MessageEntityType
+from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegramify_markdown import markdownify
 
+from kirara_ai.database import DatabaseManager
 from kirara_ai.im.adapter import BotProfileAdapter, EditStateAdapter, IMAdapter, UserProfileAdapter
 from kirara_ai.im.message import (FileElement, ImageMessage, IMMessage, MentionElement, MessageElement, TextMessage,
                                   VideoMessage, VoiceMessage)
@@ -17,6 +22,12 @@ from kirara_ai.im.sender import ChatSender, ChatType
 from kirara_ai.im.text_render import convert_markdown_tables
 from kirara_ai.logger import get_logger
 from kirara_ai.workflow.core.dispatch import WorkflowDispatcher
+
+from .outbox import (
+    TelegramDeliveryResult,
+    TelegramOutboxService,
+    TelegramRetryableError,
+)
 
 
 def get_display_name(user: User | ChatFullInfo):
@@ -30,6 +41,13 @@ def get_display_name(user: User | ChatFullInfo):
 
 # Telegram 单条消息上限 4096 字符，留出安全余量
 TELEGRAM_MESSAGE_LIMIT = 3900
+TELEGRAM_MESSAGE_FILTER = (
+    filters.TEXT
+    | filters.VOICE
+    | filters.PHOTO
+    | filters.VIDEO
+    | filters.Document.ALL
+)
 
 
 def split_telegram_message(text: str, max_length: int = TELEGRAM_MESSAGE_LIMIT) -> List[str]:
@@ -122,11 +140,48 @@ class TelegramConfig(BaseModel):
     Telegram 配置文件模型。
     """
 
-    token: str = Field(description="Telegram 机器人的 Token，从 @BotFather 获取。")
+    token: str = Field(
+        description="Telegram 机器人的 Token，从 @BotFather 获取。",
+        repr=False,
+    )
+    drop_pending_updates: bool = Field(
+        default=False,
+        description="启动轮询时是否丢弃 Telegram 服务端尚未处理的消息。",
+    )
+    send_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        le=120,
+        description="等待 Telegram API 返回的最长秒数；结果未知时不会自动重发。",
+    )
+    outbox_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Telegram 明确拒绝请求时的最大投递尝试次数。",
+    )
+    outbox_retry_delay_seconds: float = Field(
+        default=1.0,
+        ge=0,
+        le=60,
+        description="Telegram 明确瞬态失败后的基础重试间隔。",
+    )
     model_config = ConfigDict(extra="allow")
 
     def __repr__(self):
-        return f"TelegramConfig(token={self.token})"
+        return (
+            "TelegramConfig(token=<redacted>, "
+            f"drop_pending_updates={self.drop_pending_updates})"
+        )
+
+    def __str__(self):
+        return repr(self)
+
+
+@dataclass(frozen=True)
+class _TelegramSendUnit:
+    action: str
+    params: dict[str, Any]
 
 
 class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfileAdapter):
@@ -135,6 +190,8 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
     """
 
     dispatcher: WorkflowDispatcher
+    database_manager: DatabaseManager
+
     def __init__(self, config: TelegramConfig):
         self.me = None
         self.config = config
@@ -145,28 +202,85 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
             CommandHandler("start", self.command_start))
         self.application.add_handler(
             MessageHandler(
-                filters.TEXT | filters.VOICE | filters.PHOTO | filters.VIDEO, self.handle_message
+                TELEGRAM_MESSAGE_FILTER, self.handle_message
             )
         )
         self.logger = get_logger("Telegram-Adapter")
+        self._outbox: Optional[TelegramOutboxService] = None
+        self._recovery_task: Optional[asyncio.Task[Any]] = None
+
+    def _ensure_outbox(self) -> TelegramOutboxService:
+        outbox = getattr(self, "_outbox", None)
+        if outbox is not None:
+            return outbox
+        database = getattr(self, "database_manager", None)
+        if database is None:
+            raise RuntimeError("Telegram persistent outbox requires DatabaseManager")
+        self._outbox = TelegramOutboxService(
+            database,
+            self._send_outbox_payload,
+            adapter_instance=str(getattr(self, "adapter_instance", "telegram")),
+            max_attempts=self.config.outbox_max_attempts,
+            retry_delay_seconds=self.config.outbox_retry_delay_seconds,
+        )
+        return self._outbox
+
+    @staticmethod
+    def _update_payload(update: Update) -> Optional[dict[str, Any]]:
+        to_dict = getattr(update, "to_dict", None)
+        if not callable(to_dict):
+            return None
+        payload = to_dict()
+        return payload if isinstance(payload, dict) else None
+
+    def _chat_key(self, update: Update) -> str:
+        message = update.message
+        chat_id = getattr(message, "chat_id", "unknown") if message else "unknown"
+        return f"{getattr(self, 'adapter_instance', 'telegram')}:chat:{chat_id}"
+
+    async def _process_update(self, update: Update) -> None:
+        if not update.message:
+            return
+        update_id = getattr(update, "update_id", None)
+        outbox: Optional[TelegramOutboxService] = None
+        if getattr(self, "database_manager", None) is not None and update_id is not None:
+            outbox = self._ensure_outbox()
+            if not outbox.claim_inbound(
+                update_id,
+                self._chat_key(update),
+                payload=self._update_payload(update),
+            ):
+                return
+        try:
+            message = await self.convert_to_message(update)
+            await self.dispatcher.dispatch(self, message, require_agent=True)
+        except asyncio.CancelledError:
+            if outbox is not None:
+                outbox.retry_inbound(update_id)
+            raise
+        except Exception as exc:
+            if outbox is not None:
+                outbox.retry_inbound(update_id)
+            try:
+                await update.message.reply_text(
+                    "Workflow execution failed, please try again later: "
+                    f"{str(exc)}"
+                )
+            except Exception:
+                self.logger.opt(exception=True).error(
+                    "Failed to send Telegram workflow error reply"
+                )
+            return
+        if outbox is not None:
+            outbox.complete_inbound(update_id)
 
     async def command_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理 /start 命令"""
-        if update.message:
-            await update.message.reply_text("Welcome! I am ready to receive your messages.")
+        await self._process_update(update)
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理接收到的消息"""
-        # 将 Telegram 消息转换为 Message 对象
-        if not update.message:
-            return
-        message = await self.convert_to_message(update)
-        try:
-            await self.dispatcher.dispatch(self, message)
-        except Exception as e:
-            await update.message.reply_text(
-                f"Workflow execution failed, please try again later: {str(e)}"
-            )
+        await self._process_update(update)
 
     async def convert_to_message(self, raw_message: Update) -> IMMessage:
         """
@@ -272,82 +386,273 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
         )
         return message
 
-    async def send_message(self, message: IMMessage, recipient: ChatSender):
-        """
-        发送消息到 Telegram。
-        :param message: 要发送的消息对象。
-        :param recipient: 接收消息的目标对象，这里应该是 chat_id。
-        """
+    def _recipient(self, recipient: ChatSender) -> tuple[str, str]:
         if recipient.chat_type == ChatType.C2C:
-            chat_id = recipient.user_id
-        elif recipient.chat_type == ChatType.GROUP:
-            assert recipient.group_id
-            chat_id = recipient.group_id
-        else:
-            raise ValueError(f"Unsupported chat type: {recipient.chat_type}")
+            return (
+                f"{getattr(self, 'adapter_instance', 'telegram')}:c2c:{recipient.user_id}",
+                str(recipient.user_id),
+            )
+        if recipient.chat_type == ChatType.GROUP:
+            if recipient.group_id is None:
+                raise ValueError("Telegram group recipient is missing group_id")
+            return (
+                f"{getattr(self, 'adapter_instance', 'telegram')}:group:{recipient.group_id}",
+                str(recipient.group_id),
+            )
+        raise ValueError(f"Unsupported chat type: {recipient.chat_type}")
 
+    async def _render_send_units(
+        self,
+        message: IMMessage,
+        recipient: ChatSender,
+    ) -> tuple[str, list[_TelegramSendUnit]]:
+        recipient_key, chat_id = self._recipient(recipient)
+        units: list[_TelegramSendUnit] = []
         for element in message.message_elements:
             if isinstance(element, TextMessage):
-                await self.application.bot.send_chat_action(
-                    chat_id=chat_id, action="typing"
-                )
-                # Telegram 用可变宽字体渲染普通文本，Markdown 表格的竖线会完全错位。
-                # 这里先把表格渲染成等宽框线表格并放进 ``` 围栏，保证表格完整且对齐。
                 text = markdownify(convert_markdown_tables(element.text, fenced=True))
-                # 如果是非首条消息，适当停顿，模拟打字
-                if message.message_elements.index(element) > 0:
-                    # 停顿通常和字数有关，但是会带一些随机
-                    duration = max(len(element.text) * 0.1, 1) + random.uniform(0, 1) * 0.1
-                    await asyncio.sleep(duration)
-                # 超长消息按段落/代码块结构分条发送，避免触发 4096 字符上限
                 for chunk in split_telegram_message(text):
-                    await self.application.bot.send_message(
-                        chat_id=chat_id, text=chunk, parse_mode="MarkdownV2"
+                    units.append(
+                        _TelegramSendUnit(
+                            "text",
+                            {
+                                "_action": "text",
+                                "chat_id": chat_id,
+                                "text": chunk,
+                                "parse_mode": "MarkdownV2",
+                            },
+                        )
                     )
+                continue
+            media_action = (
+                "photo"
+                if isinstance(element, ImageMessage)
+                else "voice"
+                if isinstance(element, VoiceMessage)
+                else "video"
+                if isinstance(element, VideoMessage)
+                else "document"
+                if isinstance(element, FileElement)
+                else None
+            )
+            if media_action is not None:
+                units.append(
+                    _TelegramSendUnit(
+                        media_action,
+                        {
+                            "_action": media_action,
+                            "chat_id": chat_id,
+                            "media_data": base64.b64encode(
+                                await element.get_data()
+                            ).decode("ascii"),
+                        },
+                    )
+                )
+        return recipient_key, units
 
-            elif isinstance(element, ImageMessage):
-                await self.application.bot.send_chat_action(
-                    chat_id=chat_id, action="upload_photo"
+    async def _send_outbox_payload(self, params: dict[str, Any]) -> Any:
+        payload = dict(params)
+        action = str(payload.pop("_action"))
+        method_name = {
+            "text": "send_message",
+            "photo": "send_photo",
+            "voice": "send_voice",
+            "video": "send_video",
+            "document": "send_document",
+        }.get(action)
+        if method_name is None:
+            raise ValueError(f"Unsupported Telegram delivery action: {action}")
+        if action != "text":
+            payload[action] = base64.b64decode(str(payload.pop("media_data")))
+        method = getattr(self.application.bot, method_name)
+        try:
+            return await asyncio.wait_for(
+                method(**payload),
+                timeout=self.config.send_timeout_seconds,
+            )
+        except TimedOut as exc:
+            raise asyncio.TimeoutError(str(exc)) from exc
+        except RetryAfter as exc:
+            raise TelegramRetryableError(str(exc)) from exc
+        except NetworkError as exc:
+            raise ConnectionError(str(exc)) from exc
+
+    @staticmethod
+    def _unit_delivery_id(logical_delivery_id: str, unit_index: int) -> str:
+        return hashlib.sha256(
+            f"{logical_delivery_id}:{unit_index}".encode("utf-8")
+        ).hexdigest()
+
+    def _implicit_delivery_id(
+        self,
+        recipient_key: str,
+        units: list[_TelegramSendUnit],
+    ) -> str:
+        encoded = json.dumps(
+            {
+                "adapter_instance": str(getattr(self, "adapter_instance", "")),
+                "recipient_key": recipient_key,
+                "units": [
+                    {"action": unit.action, "params": unit.params}
+                    for unit in units
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _delivery_error(result: TelegramDeliveryResult) -> BaseException:
+        if result.error is not None:
+            return result.error
+        message = result.error_message or f"Telegram delivery {result.status}"
+        if result.status == "ambiguous":
+            return asyncio.TimeoutError(message)
+        return RuntimeError(message)
+
+    async def send_message(
+        self,
+        message: IMMessage,
+        recipient: ChatSender,
+        delivery_id: Optional[str] = None,
+    ) -> None:
+        """Persist every Telegram page before making any message API call."""
+        recipient_key, units = await self._render_send_units(message, recipient)
+        if not units:
+            return
+        if delivery_id is None:
+            delivery_id = getattr(message, "_telegram_delivery_id", None)
+        if delivery_id is None:
+            delivery_id = self._implicit_delivery_id(recipient_key, units)
+            setattr(message, "_telegram_delivery_id", delivery_id)
+        if len(delivery_id) > 64:
+            raise ValueError("Telegram delivery_id cannot exceed 64 characters")
+
+        if getattr(self, "database_manager", None) is None:
+            for unit in units:
+                await self._send_outbox_payload(unit.params)
+            return
+
+        outbox = self._ensure_outbox()
+        unit_ids: list[str] = []
+        for unit_index, unit in enumerate(units):
+            unit_id = self._unit_delivery_id(delivery_id, unit_index)
+            unit_ids.append(unit_id)
+            outbox.enqueue(
+                unit_id,
+                recipient_key,
+                unit.action,
+                unit.params,
+                page_index=unit_index,
+                page_count=len(units),
+                logical_delivery_id=delivery_id,
+            )
+
+        for unit_id in unit_ids:
+            result = await outbox.deliver(unit_id)
+            if result.status != "accepted":
+                raise self._delivery_error(result)
+
+    def _deserialize_update(self, payload: dict[str, Any]) -> Update:
+        return Update.de_json(payload, self.application.bot)
+
+    async def _recover_persisted_work(self) -> None:
+        outbox = self._ensure_outbox()
+        for update_id, payload in outbox.pending_inbound():
+            try:
+                update = self._deserialize_update(payload)
+                await self._process_update(update)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                outbox.retry_inbound(update_id)
+                self.logger.opt(exception=True).error(
+                    f"Failed to recover Telegram update {update_id}"
                 )
-                await self.application.bot.send_photo(
-                    chat_id=chat_id, photo=await element.get_data(), parse_mode="MarkdownV2"
-                )
-            elif isinstance(element, VoiceMessage):
-                await self.application.bot.send_chat_action(
-                    chat_id=chat_id, action="upload_voice"
-                )
-                await self.application.bot.send_voice(
-                    chat_id=chat_id, voice=await element.get_data(), parse_mode="MarkdownV2"
-                )
-            elif isinstance(element, VideoMessage):
-                await self.application.bot.send_chat_action(
-                    chat_id=chat_id, action="upload_video"
-                )
-                await self.application.bot.send_video(
-                    chat_id=chat_id, video=await element.get_data(), parse_mode="MarkdownV2"
-                )    
+        results = await outbox.resume_pending()
+        failed = sum(result.status != "accepted" for result in results)
+        if failed:
+            self.logger.warning(
+                f"Telegram recovery left {failed} delivery units for manual review"
+            )
 
     async def start(self):
         """启动 Bot"""
         await self.application.initialize()
         await self.application.start()
         self.me = await self.bot.get_me()
-        
+
+        if getattr(self, "database_manager", None) is not None:
+            outbox = self._ensure_outbox()
+            outbox.recover_on_startup()
+            outbox.recover_inbound()
+
         assert self.application.updater
-        
-        await self.application.updater.start_polling(drop_pending_updates=True)
+
+        await self.application.updater.start_polling(
+            drop_pending_updates=self.config.drop_pending_updates
+        )
+        if getattr(self, "database_manager", None) is not None:
+            self._recovery_task = asyncio.create_task(
+                self._recover_persisted_work()
+            )
 
     async def stop(self):
         """停止 Bot"""
+        recovery_task = getattr(self, "_recovery_task", None)
+        if recovery_task is not None and not recovery_task.done():
+            recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
+        self._recovery_task = None
+
         assert self.application.updater
-        try:
-            if self.application.updater.running:
+        if self.application.updater.running:
+            try:
                 await self.application.updater.stop()
-            if self.application.running:
+            except asyncio.CancelledError:
+                raise
+            except RuntimeError:
+                # python-telegram-bot can observe a concurrent stop between
+                # the state check and the operation. Only that state race is benign.
+                if self.application.updater.running:
+                    self.logger.opt(exception=True).error(
+                        "Failed to stop Telegram updater"
+                    )
+                    raise
+            except Exception:
+                self.logger.opt(exception=True).error(
+                    "Failed to stop Telegram updater"
+                )
+                raise
+
+        if self.application.running:
+            try:
                 await self.application.stop()
+            except asyncio.CancelledError:
+                raise
+            except RuntimeError:
+                if self.application.running:
+                    self.logger.opt(exception=True).error(
+                        "Failed to stop Telegram application"
+                    )
+                    raise
+            except Exception:
+                self.logger.opt(exception=True).error(
+                    "Failed to stop Telegram application"
+                )
+                raise
+
+        try:
             await self.application.shutdown()
-        except:
-            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.logger.opt(exception=True).error(
+                "Failed to shut down Telegram application"
+            )
+            raise
 
     async def set_chat_editing_state(
         self, chat_sender: ChatSender, is_editing: bool = True

@@ -9,6 +9,7 @@ from .core import (
     SessionPolicy,
     SUPPORTED_CHANNEL_TYPES,
     effective_mcp_allowlist,
+    resolve_mcp_tool_allowlist,
 )
 from .executor import AgentRuntimeExecutor, RuntimeResult, RuntimeStatus
 from .hooks import AgentHookRuntime, HookHandler, HookOutcome, HOOK_EVENTS
@@ -31,4 +32,5 @@ __all__ = [
     "SessionPolicy",
     "SUPPORTED_CHANNEL_TYPES",
     "effective_mcp_allowlist",
+    "resolve_mcp_tool_allowlist",
 ]

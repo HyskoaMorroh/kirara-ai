@@ -252,6 +252,11 @@ def project_mcp_server(entry: MCPServerConfig, client: str) -> Dict[str, Any]:
     """Project the canonical transport into a client-specific live shape."""
     entry = normalize_mcp_server_entry(entry)
     transport = _transport_dict(entry)
+    # This is a Kirara connection-lifecycle budget.  It must not be copied
+    # into downstream client configs where the field has different semantics.
+    transport.pop("startup_timeout_ms", None)
+    if not entry.server.roots:
+        transport.pop("roots", None)
 
     if client in {"claude", "claude-desktop", "gemini", "hermes"}:
         return transport

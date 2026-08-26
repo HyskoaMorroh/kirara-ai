@@ -111,6 +111,18 @@ class WorkflowDispatcher:
                         self.logger.opt(exception=e).error(f"Workflow execution failed: {e}", exc_info=True)
                         # 向上抛出，让 IM 适配器把失败原因回复给用户
                         raise
+            if require_agent:
+                # Agent-required channels are keyed by channel identity, not by
+                # the presence of a legacy Workflow rule.  Rules may still bind
+                # a specific Agent when they match, but a standalone channel,
+                # account, session, or default binding must also be routable.
+                agent_id = self._resolve_automatic_agent(
+                    source,
+                    message,
+                    require_agent=True,
+                )
+                if agent_id is not None:
+                    return await self._dispatch_agent(source, message, agent_id)
             self.logger.debug("No matching rule found for message")
             return None
 

@@ -13,7 +13,7 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from packaging.version import InvalidVersion, Version
@@ -285,6 +285,8 @@ class ResourceLifecycleService:
                 except Exception:
                     self._remove_path(final_version)
                     raise
+                finally:
+                    self._remove_path(staged_version.parents[1])
                 self._registry = next_registry
                 self._audit(manifest, "install", "success")
                 return copy.deepcopy(resource)
@@ -365,6 +367,8 @@ class ResourceLifecycleService:
                 except Exception:
                     self._remove_path(final_version)
                     raise
+                finally:
+                    self._remove_path(staged_version.parents[1])
                 self._registry = next_registry
                 self._audit(manifest, "update", "success")
                 return copy.deepcopy(next_resource)
@@ -500,6 +504,15 @@ class ResourceLifecycleService:
         offset: int = 0,
         limit: int = 50,
         resource_id: str | None = None,
+        correlation_id: str | None = None,
+        component: str | None = None,
+        event: str | None = None,
+        operation: str | None = None,
+        outcome: str | None = None,
+        status: str | None = None,
+        agent_id: str | None = None,
+        model_id: str | None = None,
+        server: str | None = None,
     ) -> dict[str, Any]:
         if offset < 0:
             raise ResourceValidationError("audit offset cannot be negative")
@@ -514,8 +527,35 @@ class ResourceLifecycleService:
                             record = json.loads(line)
                         except json.JSONDecodeError:
                             continue
-                        if resource_id is None or record.get("resource_id") == resource_id:
-                            records.append(record)
+                        record["component"] = self._normalize_audit_component(
+                            record.get("component")
+                        )
+                        normalized_outcome = record.get("outcome", record.get("result"))
+                        if "outcome" not in record and normalized_outcome is not None:
+                            record["outcome"] = normalized_outcome
+                        if "result" not in record and normalized_outcome is not None:
+                            record["result"] = normalized_outcome
+                        if resource_id is not None and record.get("resource_id") != resource_id:
+                            continue
+                        if correlation_id is not None and record.get("correlation_id") != correlation_id:
+                            continue
+                        if component is not None and record.get("component") != component:
+                            continue
+                        if event is not None and record.get("event") != event:
+                            continue
+                        if operation is not None and record.get("operation") != operation:
+                            continue
+                        if outcome is not None and normalized_outcome != outcome:
+                            continue
+                        if status is not None and record.get("status") != status:
+                            continue
+                        if agent_id is not None and record.get("agent_id") != agent_id:
+                            continue
+                        if model_id is not None and record.get("model_id") != model_id:
+                            continue
+                        if server is not None and record.get("server") != server:
+                            continue
+                        records.append(record)
         records.reverse()
         return {
             "items": records[offset : offset + limit],
@@ -523,6 +563,92 @@ class ResourceLifecycleService:
             "offset": offset,
             "limit": limit,
         }
+
+    def append_runtime_audit(self, record: Mapping[str, Any]) -> None:
+        """Persist a redacted runtime event in the unified audit stream.
+
+        Runtime components may report rich internal objects to their local
+        sink.  Only bounded metadata crosses this persistence boundary so a
+        Hook, Agent, or MCP implementation cannot accidentally store prompt
+        text, tool payloads, credentials, or provider error details.
+        """
+
+        if not isinstance(record, Mapping):
+            return
+
+        allowed_keys = {
+            "component",
+            "operation",
+            "event",
+            "status",
+            "outcome",
+            "blocked",
+            "executed",
+            "resource_id",
+            "resource_version",
+            "resource_sha256",
+            "snapshot_sha256",
+            "agent_id",
+            "model_id",
+            "correlation_id",
+            "resource_count",
+            "reason_count",
+            "iteration",
+            "message_count",
+            "message_count_before",
+            "message_count_after",
+            "estimated_chars_before",
+            "estimated_chars_after",
+            "used_custom_compactor",
+            "confirmation_id",
+            "session",
+            "server",
+            "duration_ms",
+        }
+        sanitized: dict[str, Any] = {}
+        for key in allowed_keys:
+            if key not in record:
+                continue
+            value = record[key]
+            if key == "session":
+                if isinstance(value, Mapping):
+                    sanitized[key] = {
+                        str(session_key): str(session_value)[:128]
+                        for session_key, session_value in value.items()
+                        if isinstance(session_value, (str, int, float, bool))
+                    }
+                continue
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                sanitized[key] = str(value)[:256] if isinstance(value, str) else value
+
+        if not sanitized.get("component") or not sanitized.get("operation"):
+            return
+        sanitized["component"] = self._normalize_audit_component(
+            sanitized["component"]
+        )
+        normalized_outcome = sanitized.get("outcome", sanitized.get("result"))
+        if normalized_outcome is not None:
+            sanitized["outcome"] = normalized_outcome
+            sanitized["result"] = normalized_outcome
+        sanitized["timestamp"] = self._timestamp()
+        with self._lock:
+            self.resource_path.mkdir(parents=True, exist_ok=True)
+            try:
+                with self.audit_path.open("a", encoding="utf-8", newline="\n") as audit_file:
+                    audit_file.write(
+                        json.dumps(sanitized, ensure_ascii=False, sort_keys=True) + "\n"
+                    )
+                    audit_file.flush()
+                    os.fsync(audit_file.fileno())
+            except OSError:
+                # Runtime audit failure must not interrupt a user turn.
+                pass
+
+    @staticmethod
+    def _normalize_audit_component(value: Any) -> Any:
+        if value == "agent_hook_runtime":
+            return "agent_hook"
+        return value
 
     def upsert_source_repository(
         self, owner: str, name: str, branch: str, *, enabled: bool
@@ -1124,20 +1250,23 @@ class ResourceLifecycleService:
     ) -> None:
         event = {
             **record,
+            "component": "resource_lifecycle",
             "operation": operation,
             "result": result,
+            "outcome": result,
             "timestamp": self._timestamp(),
             "error_category": type(error).__name__ if error is not None else None,
         }
-        try:
-            self.resource_path.mkdir(parents=True, exist_ok=True)
-            with self.audit_path.open("a", encoding="utf-8", newline="\n") as audit_file:
-                audit_file.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
-                audit_file.flush()
-                os.fsync(audit_file.fileno())
-        except OSError:
-            # Audit failure cannot expose resource content or undo a completed atomic publish.
-            pass
+        with self._lock:
+            try:
+                self.resource_path.mkdir(parents=True, exist_ok=True)
+                with self.audit_path.open("a", encoding="utf-8", newline="\n") as audit_file:
+                    audit_file.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+                    audit_file.flush()
+                    os.fsync(audit_file.fileno())
+            except OSError:
+                # Audit failure cannot expose resource content or undo a completed atomic publish.
+                pass
 
     @staticmethod
     def _sanitize_source(source: str) -> str:

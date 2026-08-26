@@ -39,6 +39,8 @@ async def get_llm_traces():
     model_id = data.get("model_id")
     backend_name = data.get("backend_name")
     status = data.get("status")
+    correlation_id = data.get("correlation_id")
+    query = data.get("query")
 
     # 构建过滤条件
     filters = {}
@@ -48,6 +50,8 @@ async def get_llm_traces():
         filters["backend_name"] = backend_name
     if status:
         filters["status"] = status
+    if correlation_id:
+        filters["correlation_id"] = correlation_id
 
     container: DependencyContainer = g.container
     tracing_manager = container.resolve(TracingManager)
@@ -59,6 +63,14 @@ async def get_llm_traces():
     # 使用统一的查询接口
     records, total = llm_tracer.get_traces(
         filters=filters,
+        query=query,
+        search_fields=(
+            "trace_id",
+            "correlation_id",
+            "model_id",
+            "backend_name",
+            "status",
+        ),
         page=page,
         page_size=page_size
     )

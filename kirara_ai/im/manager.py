@@ -192,6 +192,10 @@ class IMManager:
         with self.container.scoped() as scoped_container:
             scoped_container.register(adapter_config.__class__, adapter_config)
             adapter = Inject(scoped_container).create(adapter_class)()
+            # The persisted IM name is the stable instance identity used by
+            # Agent routing.  Keep it on the adapter so multiple instances of
+            # the same provider cannot share a session namespace.
+            adapter.adapter_instance = name
             adapter.is_running = False
         self.adapters[name] = adapter
         return adapter

@@ -1,6 +1,8 @@
 import asyncio
 from contextlib import AsyncExitStack
+from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote, urlparse
 
 import anyio
 import anyio.lowlevel
@@ -71,7 +73,10 @@ class MCPServer:
             
             # 等待连接完成或超时
             try:
-                await asyncio.wait_for(self._connected_event.wait(), timeout=30.0)
+                await asyncio.wait_for(
+                    self._connected_event.wait(),
+                    timeout=self.server_config.server.startup_timeout_ms / 1000.0,
+                )
                 if self.state != MCPConnectionState.CONNECTED:
                     # 连接失败
                     return False
@@ -160,7 +165,14 @@ class MCPServer:
             # Streamable HTTP returns a third session-id callback; ClientSession
             # consumes the same read/write pair as stdio and SSE.
             read, write = client_streams[:2]
-            self.session = await exit_stack.enter_async_context(ClientSession(read, write, message_handler=self.message_handler_callback))
+            self.session = await exit_stack.enter_async_context(
+                ClientSession(
+                    read,
+                    write,
+                    list_roots_callback=self.list_client_roots_callback,
+                    message_handler=self.message_handler_callback,
+                )
+            )
             
             # 初始化会话
             await self.session.initialize()
@@ -324,9 +336,51 @@ class MCPServer:
         Returns:
             types.ListRootsResult: 资源根目录列表
         """
-        # 这个需要kirara-agent做出较大支持，webApi 中设定允许的资源根，最好弄个单独的目录。
-        # 文件根格式为file:///myResource/, 也可以为一个url.
-        raise NotImplementedError("list_client_roots_callback 未实现")
+        roots: list[types.Root] = []
+        for configured_root in self.server_config.server.roots:
+            try:
+                path = self._root_path(configured_root)
+                if path.is_symlink() or not path.exists():
+                    logger.warning(
+                        "Skipping unavailable or symlinked MCP root for %s",
+                        self.server_config.id,
+                    )
+                    continue
+                roots.append(types.Root(uri=path.as_uri(), name=path.name or str(path)))
+            except (OSError, ValueError, TypeError):
+                logger.warning(
+                    "Skipping invalid MCP root for %s",
+                    self.server_config.id,
+                )
+        return types.ListRootsResult(roots=roots)
+
+    @staticmethod
+    def _root_path(value: str) -> Path:
+        """Resolve one explicitly configured root without accepting remote URIs."""
+
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("MCP root must be a non-empty string")
+        candidate = value.strip()
+        parsed = urlparse(candidate)
+        is_windows_drive_path = (
+            len(candidate) >= 2
+            and candidate[0].isalpha()
+            and candidate[1] == ":"
+        )
+        if parsed.scheme and parsed.scheme != "file" and not is_windows_drive_path:
+            raise ValueError("MCP roots must use local paths or file URLs")
+        if parsed.scheme == "file":
+            if parsed.netloc not in ("", "localhost"):
+                raise ValueError("MCP file root host is not supported")
+            candidate = unquote(parsed.path)
+            if len(candidate) >= 3 and candidate[0] == "/" and candidate[2] == ":":
+                candidate = candidate[1:]
+        path = Path(candidate).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        # ``resolve()`` follows links, which would turn a forbidden link into
+        # an apparently safe target before the caller can inspect it.
+        return Path(path.absolute())
 
     async def send_ping(self) -> None:
         assert self.session is not None

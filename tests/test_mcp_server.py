@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -76,6 +77,63 @@ def test_init(stdio_config):
     assert not server._shutdown_event.is_set()
     assert not server._connected_event.is_set()
 
+
+def test_transport_startup_timeout_uses_cc_switch_compatible_default(stdio_config):
+    assert stdio_config.server.startup_timeout_ms == 120_000
+
+
+def test_transport_startup_timeout_is_configurable():
+    config = MCPServerConfig(
+        id="custom-timeout",
+        server={
+            "type": "stdio",
+            "command": "python",
+            "args": [],
+            "startup_timeout_ms": 7_500,
+        },
+    )
+
+    assert config.server.startup_timeout_ms == 7_500
+
+
+@pytest.mark.asyncio
+async def test_list_client_roots_returns_only_explicit_local_roots(stdio_config, tmp_path: Path):
+    allowed = tmp_path / "workspace"
+    allowed.mkdir()
+    symlink_target = tmp_path / "outside"
+    symlink_target.mkdir()
+    symlink = tmp_path / "linked"
+    try:
+        symlink.symlink_to(symlink_target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are unavailable in this environment")
+
+    stdio_config.server.roots = [
+        str(allowed),
+        symlink.as_uri(),
+        "https://example.invalid/remote-root",
+        str(tmp_path / "missing"),
+    ]
+    result = await MCPServer(stdio_config).list_client_roots_callback(None)
+
+    assert [str(root.uri) for root in result.roots] == [allowed.resolve().as_uri()]
+    assert result.roots[0].name == "workspace"
+
+
+@pytest.mark.asyncio
+async def test_connect_declares_roots_callback(stdio_config):
+    with patch("kirara_ai.mcp_module.server.stdio_client") as mock_stdio_client, \
+         patch("kirara_ai.mcp_module.server.ClientSession", return_value=MockClientSession()) as mock_session:
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_stdio_client.return_value = mock_client
+
+        server = MCPServer(stdio_config)
+        assert await server.connect() is True
+        assert mock_session.call_args.kwargs["list_roots_callback"] == server.list_client_roots_callback
+        assert await server.disconnect() is True
+
 # 测试连接和断开连接
 @pytest.mark.asyncio
 async def test_connect_disconnect_stdio(stdio_config):
@@ -99,6 +157,32 @@ async def test_connect_disconnect_stdio(stdio_config):
         disconnect_result = await server.disconnect()
         assert disconnect_result is True
         assert server.state == MCPConnectionState.DISCONNECTED
+
+
+@pytest.mark.asyncio
+async def test_connect_waits_using_configured_startup_timeout(stdio_config):
+    stdio_config.server.startup_timeout_ms = 7_500
+    wait_timeouts = []
+
+    with patch("kirara_ai.mcp_module.server.stdio_client") as mock_stdio_client, \
+         patch("kirara_ai.mcp_module.server.ClientSession", return_value=MockClientSession()):
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_stdio_client.return_value = mock_client
+
+        original_wait_for = asyncio.wait_for
+
+        async def record_wait_for(awaitable, timeout):
+            wait_timeouts.append(timeout)
+            return await original_wait_for(awaitable, timeout)
+
+        server = MCPServer(stdio_config)
+        with patch.object(asyncio, "wait_for", new=record_wait_for):
+            assert await server.connect() is True
+
+        assert wait_timeouts[0] == pytest.approx(7.5)
+        assert await server.disconnect() is True
 
 @pytest.mark.asyncio
 async def test_connect_disconnect_sse(sse_config):

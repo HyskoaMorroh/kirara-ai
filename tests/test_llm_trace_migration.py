@@ -23,4 +23,7 @@ def test_old_llm_trace_schema_upgrades_with_usage_attempt_and_cost_columns(tmp_p
         "attempt_count",
         "attempts_json",
         "cost_snapshot_json",
+        "correlation_id",
     } <= columns
+    indexes = {index["name"] for index in inspect(engine).get_indexes("llm_request_traces")}
+    assert "ix_llm_request_traces_correlation_id" in indexes

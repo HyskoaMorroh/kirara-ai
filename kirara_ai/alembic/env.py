@@ -18,6 +18,15 @@ if config.config_file_name is not None:
 # target_metadata = mymodel.Base.metadata
 from kirara_ai.database.manager import Base
 from kirara_ai.plugins.im_onebot_adapter.outbox import OneBotDelivery  # noqa: F401
+from kirara_ai.plugins.im_qqbot_adapter.outbox import QQBotDelivery  # noqa: F401
+from kirara_ai.plugins.im_wecom_adapter.outbox import (  # noqa: F401
+    WecomDelivery,
+    WecomInboundReceipt,
+)
+from kirara_ai.plugins.im_telegram_adapter.outbox import (  # noqa: F401
+    TelegramDelivery,
+    TelegramInboundReceipt,
+)
 from kirara_ai.tracing.models import LLMRequestTrace  # noqa: F401
 
 target_metadata = Base.metadata

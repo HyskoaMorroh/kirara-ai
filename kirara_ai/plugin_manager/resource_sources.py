@@ -79,8 +79,7 @@ class ResourceSourceService:
         owner = str(owner or "").strip()
         name = str(name or "").strip()
         branch = str(branch or "").strip()
-        if not _GITHUB_PART.fullmatch(owner) or not _GITHUB_PART.fullmatch(name):
-            raise ResourceSourceError("GitHub repository coordinates are invalid")
+        ResourceSourceService._validate_repository_identity(owner, name)
         if (
             not _BRANCH_PART.fullmatch(branch)
             or ".." in branch
@@ -90,6 +89,14 @@ class ResourceSourceService:
         ):
             raise ResourceSourceError("GitHub branch is invalid")
         return owner, name, branch
+
+    @staticmethod
+    def _validate_repository_identity(owner: str, name: str) -> tuple[str, str]:
+        owner = str(owner or "").strip()
+        name = str(name or "").strip()
+        if not _GITHUB_PART.fullmatch(owner) or not _GITHUB_PART.fullmatch(name):
+            raise ResourceSourceError("GitHub repository coordinates are invalid")
+        return owner, name
 
     @classmethod
     def source_key(cls, owner: str, name: str, directory: str) -> str:
@@ -206,7 +213,7 @@ class ResourceSourceService:
         root = self._repository_root(members)
         discovered: list[dict[str, Any]] = []
         for member_name, content in sorted(members.items()):
-            if PurePosixPath(member_name).name != "SKILL.md":
+            if PurePosixPath(member_name).name.casefold() != "skill.md":
                 continue
             relative = PurePosixPath(member_name).relative_to(root)
             directory_path = relative.parent
@@ -249,11 +256,12 @@ class ResourceSourceService:
         *,
         owner: str,
         name: str,
-        branch: str = "main",
+        branch: str | None = None,
         directory: str,
         source_key: str | None = None,
     ) -> dict[str, Any]:
-        owner, name, branch = self.validate_repository(owner, name, branch)
+        owner, name = self._validate_repository_identity(owner, name)
+        branch = self._resolve_repository_branch(owner, name, branch)
         directory = self._validate_directory(directory)
         requested_source_key = self.source_key(owner, name, directory)
         if source_key is not None and source_key != requested_source_key:
@@ -405,6 +413,24 @@ class ResourceSourceService:
             f"https://codeload.github.com/{owner}/{name}/zip/refs/heads/{urllib.parse.quote(branch, safe='/')}"
         )
 
+    def _resolve_repository_branch(
+        self, owner: str, name: str, branch: str | None
+    ) -> str:
+        owner, name = self._validate_repository_identity(owner, name)
+        if branch is not None and str(branch).strip():
+            _, _, validated_branch = self.validate_repository(owner, name, branch)
+            return validated_branch
+
+        metadata_url = self.validate_remote_url(
+            f"https://api.github.com/repos/{owner}/{name}"
+        )
+        metadata = self._request_json(metadata_url)
+        default_branch = metadata.get("default_branch")
+        if not isinstance(default_branch, str) or not default_branch.strip():
+            raise ResourceSourceError("GitHub repository default branch is unavailable")
+        _, _, validated_branch = self.validate_repository(owner, name, default_branch)
+        return validated_branch
+
     def _fetch_skill_files(
         self, owner: str, name: str, branch: str, directory: str
     ) -> tuple[dict[str, bytes], dict[str, str], str]:
@@ -429,8 +455,11 @@ class ResourceSourceService:
                 and member_name != prefix
                 and not member_name.endswith("/")
             }
-        if "SKILL.md" not in selected:
+        entry_names = [path for path in selected if PurePosixPath(path).name.casefold() == "skill.md"]
+        if len(entry_names) != 1:
             raise ResourceSourceError("the requested directory does not contain SKILL.md")
+        entry_name = entry_names[0]
+        selected["SKILL.md"] = selected.pop(entry_name)
         return selected, self._parse_skill_front_matter(selected["SKILL.md"]), resolved_directory
 
     @classmethod
@@ -447,15 +476,19 @@ class ResourceSourceService:
         """
 
         requested = cls._validate_directory(raw_directory)
-        direct_document = f"{repository_root}/{requested}/SKILL.md"
-        if direct_document in members:
+        direct_prefix = PurePosixPath(repository_root, requested)
+        if any(
+            PurePosixPath(member_name).parent == direct_prefix
+            and PurePosixPath(member_name).name.casefold() == "skill.md"
+            for member_name in members
+        ):
             return requested
 
         target_name = PurePosixPath(requested).name.casefold()
         candidates: set[str] = set()
         for member_name in members:
             path = PurePosixPath(member_name)
-            if path.name != "SKILL.md" or len(path.parts) < 2:
+            if path.name.casefold() != "skill.md" or len(path.parts) < 2:
                 continue
             try:
                 relative = path.relative_to(repository_root)
@@ -478,13 +511,19 @@ class ResourceSourceService:
         # stable source identity in _fetch_skill_files because there is no
         # repository-relative directory to store, while selecting the root
         # files for installation.
-        if f"{repository_root}/SKILL.md" in members:
+        if any(
+            PurePosixPath(member_name).parent == PurePosixPath(repository_root)
+            and PurePosixPath(member_name).name.casefold() == "skill.md"
+            for member_name in members
+        ):
             return None
 
         return requested
 
     @staticmethod
-    def _skill_source_url(owner: str, name: str, branch: str, directory: str) -> str:
+    def _skill_source_url(owner: str, name: str, branch: str | None, directory: str) -> str:
+        if not branch:
+            return f"https://github.com/{owner}/{name}"
         base = f"https://github.com/{owner}/{name}/tree/{urllib.parse.quote(branch, safe='/')}"
         return base if directory == "." else f"{base}/{directory}"
 
@@ -708,16 +747,22 @@ class ResourceSourceService:
             raw_id = str(item.get("id", "")).strip()
             source = str(item.get("source", "")).strip()
             skill_id = str(item.get("skillId", item.get("directory", ""))).strip().strip("/")
-            branch = str(item.get("branch", "main")).strip() or "main"
+            raw_branch = item.get("branch")
+            branch = str(raw_branch).strip() if raw_branch is not None else ""
+            branch = branch or None
             if not source and ":" in raw_id:
                 source, skill_id = raw_id.split(":", 1)
             if not source or "/" not in source or not skill_id:
                 continue
             owner, repository = source.split("/", 1)
             try:
-                owner, repository, branch = ResourceSourceService.validate_repository(
-                    owner, repository, branch
+                owner, repository = ResourceSourceService._validate_repository_identity(
+                    owner, repository
                 )
+                if branch is not None:
+                    _, _, branch = ResourceSourceService.validate_repository(
+                        owner, repository, branch
+                    )
                 source_key = ResourceSourceService.source_key(owner, repository, skill_id)
             except ResourceSourceError:
                 continue

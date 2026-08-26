@@ -220,6 +220,55 @@ def test_session_store_round_trips_history_without_raw_session_filename(tmp_path
     )
 
 
+def test_session_store_keeps_each_agents_history_for_the_same_session(tmp_path: Path):
+    store = SessionStore(tmp_path)
+    session_key = _context().session_key
+    first = [
+        LLMChatMessage(
+            role="user",
+            content=[LLMChatTextContent(text="agent-a history")],
+        )
+    ]
+    second = [
+        LLMChatMessage(
+            role="user",
+            content=[LLMChatTextContent(text="agent-b history")],
+        )
+    ]
+
+    store.save_history(session_key, first, agent_id="agent-a")
+    store.save_history(session_key, second, agent_id="agent-b")
+
+    assert store.load_history(session_key, agent_id="agent-a")[0].content[0].text == (
+        "agent-a history"
+    )
+    assert store.load_history(session_key, agent_id="agent-b")[0].content[0].text == (
+        "agent-b history"
+    )
+
+
+def test_session_store_reads_matching_legacy_agent_history(tmp_path: Path):
+    store = SessionStore(tmp_path)
+    session_key = _context().session_key
+    history = [
+        LLMChatMessage(
+            role="user",
+            content=[LLMChatTextContent(text="legacy history")],
+        )
+    ]
+    legacy_payload = {
+        "format_version": 1,
+        "agent_id": "research-agent",
+        "messages": [item.model_dump(mode="json") for item in history],
+    }
+    store._atomic_write(store._history_path(session_key), legacy_payload)
+
+    restored = store.load_history(session_key, agent_id="research-agent")
+
+    assert restored[0].content[0].text == "legacy history"
+    assert store.load_history(session_key, agent_id="other-agent") == []
+
+
 @pytest.mark.asyncio
 async def test_runtime_loads_and_persists_history_across_executor_instances(tmp_path: Path):
     context = _context()
@@ -243,7 +292,10 @@ async def test_runtime_loads_and_persists_history_across_executor_instances(tmp_
         "first question",
         "second question",
     ]
-    assert [item.content[0].text for item in store.load_history(context.session_key)] == [
+    assert [
+        item.content[0].text
+        for item in store.load_history(context.session_key, agent_id="research-agent")
+    ] == [
         "first question",
         "first reply",
         "second question",
@@ -360,7 +412,11 @@ async def test_session_history_wins_over_mirrored_memory_without_duplicates(
         store,
         memory,
     )
-    store.save_history(runtime._history_key(context, "research-agent"), session_history)
+    store.save_history(
+        runtime._history_key(context, "research-agent"),
+        session_history,
+        agent_id="research-agent",
+    )
 
     await runtime.run(context, _message("new question"))
 
@@ -682,6 +738,73 @@ def test_expired_confirmation_is_terminal_and_cannot_be_claimed(tmp_path: Path):
     assert record["status"] == "expired"
     assert store.load_pending() == []
     assert store.get_confirmation("confirm-expired")["status"] == "expired"
+
+
+def test_pre_correlation_confirmation_backfills_one_stable_id_before_session_check(
+    tmp_path: Path,
+):
+    store = SessionStore(tmp_path)
+    store.save_pending(
+        {"confirmation_id": "confirm-legacy", "payload": "opaque"},
+        session_key=_context().session_key,
+    )
+
+    mismatch_outcome, mismatch = store.claim_pending(
+        "confirm-legacy", _other_context().session_key
+    )
+    persisted_after_mismatch = store.get_confirmation("confirm-legacy")
+    executing_outcome, executing = store.claim_pending(
+        "confirm-legacy", _context().session_key
+    )
+    completed = store.complete_pending("confirm-legacy", "succeeded")
+    duplicate_outcome, duplicate = store.claim_pending(
+        "confirm-legacy", _context().session_key
+    )
+
+    assert mismatch_outcome == "session_mismatch"
+    assert mismatch is not None
+    correlation_id = mismatch["correlation_id"]
+    assert correlation_id
+    assert persisted_after_mismatch["correlation_id"] == correlation_id
+    assert executing_outcome == "executing"
+    assert executing["correlation_id"] == correlation_id
+    assert completed["correlation_id"] == correlation_id
+    assert duplicate_outcome == "succeeded"
+    assert duplicate["correlation_id"] == correlation_id
+
+
+def test_pre_correlation_expired_confirmation_keeps_one_id_across_repeated_claims(
+    tmp_path: Path,
+):
+    now = datetime(2026, 8, 24, tzinfo=timezone.utc)
+    current = [now]
+    store = SessionStore(
+        tmp_path,
+        confirmation_ttl_seconds=30,
+        clock=lambda: current[0],
+    )
+    store.save_pending(
+        {"confirmation_id": "confirm-legacy-expired", "payload": "opaque"},
+        session_key=_context().session_key,
+    )
+    current[0] = now + timedelta(seconds=31)
+
+    first_outcome, first = store.claim_pending(
+        "confirm-legacy-expired", _context().session_key
+    )
+    second_outcome, second = store.claim_pending(
+        "confirm-legacy-expired", _context().session_key
+    )
+    missing_outcome, missing = store.claim_pending(
+        "confirm-does-not-exist", _context().session_key
+    )
+
+    assert first_outcome == "expired"
+    assert second_outcome == "expired"
+    assert first["correlation_id"]
+    assert second["correlation_id"] == first["correlation_id"]
+    assert missing_outcome == "not_found"
+    assert missing is None
 
 
 def test_confirmation_store_rejects_corrupt_records(tmp_path: Path):

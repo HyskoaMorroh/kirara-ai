@@ -157,6 +157,21 @@ class TestIMAdapter:
         assert "types" in data
         assert TEST_ADAPTER_TYPE in data.get("types")
 
+    def test_create_adapter_preserves_persisted_instance_identity(self):
+        container = DependencyContainer()
+        manager = object.__new__(IMManager)
+        manager.container = container
+        manager.adapters = {}
+
+        adapter = manager.create_adapter(
+            "research-dummy",
+            DummyAdapter,
+            DummyConfig(**TEST_ADAPTER_CONFIG),
+        )
+
+        assert adapter.adapter_instance == "research-dummy"
+        assert manager.get_adapter("research-dummy") is adapter
+
     @pytest.mark.asyncio
     async def test_list_adapters(self, test_client, auth_headers):
         """测试获取适配器列表"""

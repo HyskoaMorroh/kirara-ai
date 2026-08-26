@@ -46,7 +46,7 @@ from kirara_ai.agent_runtime.core import (
     AgentRegistry,
     ChannelContext,
     ResourceSnapshot,
-    effective_mcp_allowlist,
+    resolve_mcp_tool_allowlist,
 )
 from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
 
@@ -70,6 +70,7 @@ class RuntimeResult:
     agent_id: Optional[str] = None
     snapshot: Optional[ResourceSnapshot] = None
     confirmation_id: Optional[str] = None
+    correlation_id: Optional[str] = None
     error: Optional[dict[str, str]] = None
     trace_ids: tuple[str, ...] = ()
 
@@ -91,6 +92,7 @@ class _PendingConfirmation:
     model_id: str
     tool_iterations: int
     trace_ids: tuple[str, ...]
+    correlation_id: str
 
 
 class AgentRuntimeExecutor:
@@ -151,6 +153,7 @@ class AgentRuntimeExecutor:
     ) -> RuntimeResult:
         """Execute one inbound message and never perform an unconfirmed tool."""
 
+        correlation_id = uuid.uuid4().hex
         agent: Optional[AgentDefinition] = None
         snapshot: Optional[ResourceSnapshot] = None
         result: Optional[RuntimeResult] = None
@@ -178,26 +181,33 @@ class AgentRuntimeExecutor:
                     memory_history = self._load_memory_history(
                         context,
                         agent.agent_id,
+                        correlation_id=correlation_id,
                     )
             if not stored_history:
                 stored_history = memory_history
             model_id = agent.model_priority[0]
             snapshot = agent.snapshot(model_id=model_id)
-            await self._run_hook(
+            session_hook = await self._run_hook(
                 "SessionStart",
                 agent=agent,
                 context=context,
                 snapshot=snapshot,
                 payload={"session_key": context.session_key, "agent_id": agent.agent_id},
+                correlation_id=correlation_id,
             )
-            await self._run_hook(
+            prompt_hook = await self._run_hook(
                 "UserPromptSubmit",
                 agent=agent,
                 context=context,
                 snapshot=snapshot,
                 payload={"text": message.content, "has_images": bool(message.images)},
+                correlation_id=correlation_id,
             )
             messages = self._build_messages(agent, message, stored_history)
+            messages = self._inject_hook_context(
+                messages,
+                (session_hook, prompt_hook),
+            )
             tools = self._build_tools(tool_entries, effective_tools) if agent.allow_tools else []
             result = await self._run_loop(
                 context=context,
@@ -211,16 +221,23 @@ class AgentRuntimeExecutor:
                 model_id=model_id,
                 tool_iterations=0,
                 trace_ids=(),
+                correlation_id=correlation_id,
             )
             if result.status is RuntimeStatus.COMPLETED:
                 self._persist_history(context.session_key, agent.agent_id, result)
-                self._persist_memory(context, agent.agent_id, result)
+                self._persist_memory(
+                    context,
+                    agent.agent_id,
+                    result,
+                    correlation_id=correlation_id,
+                )
             self._audit("run", result)
             return result
         except Exception as error:
             result = RuntimeResult(
                 status=RuntimeStatus.FAILED,
                 context=context,
+                correlation_id=correlation_id,
                 error={"type": type(error).__name__, "message": self._safe_error(error)},
             )
             self._audit("run", result)
@@ -240,6 +257,7 @@ class AgentRuntimeExecutor:
                             and result.status is RuntimeStatus.AWAITING_CONFIRMATION
                         ),
                     },
+                    correlation_id=correlation_id,
                 )
 
     async def confirm(
@@ -260,6 +278,11 @@ class AgentRuntimeExecutor:
                     confirmation_id,
                     context,
                     outcome,
+                    correlation_id=(
+                        self._record_correlation_id(record)
+                        if record is not None
+                        else None
+                    ),
                 )
             pending = self._pending.pop(confirmation_id, None)
             if pending is None:
@@ -276,6 +299,7 @@ class AgentRuntimeExecutor:
                         status=RuntimeStatus.FAILED,
                         context=context,
                         confirmation_id=confirmation_id,
+                        correlation_id=self._record_correlation_id(record),
                         error={
                             "type": type(error).__name__,
                             "message": self._safe_error(error),
@@ -290,15 +314,15 @@ class AgentRuntimeExecutor:
                     confirmation_id,
                     context,
                     "session_mismatch",
+                    correlation_id=pending.correlation_id,
                 )
             if pending is not None:
                 self._pending.pop(confirmation_id, None)
         if pending is None:
-            return RuntimeResult(
-                status=RuntimeStatus.FAILED,
-                context=context,
-                confirmation_id=confirmation_id,
-                error={"type": "ConfirmationNotFound", "message": "confirmation is missing or expired"},
+            return self._confirmation_claim_failure(
+                confirmation_id,
+                context,
+                "not_found",
             )
         stop_agent = pending.agent
         stop_snapshot = pending.snapshot
@@ -336,6 +360,7 @@ class AgentRuntimeExecutor:
                     agent_id=pending.agent.agent_id,
                     snapshot=pending.snapshot,
                     confirmation_id=confirmation_id,
+                    correlation_id=pending.correlation_id,
                     error={
                         "type": "ConfirmationExpired",
                         "message": "Agent or MCP binding changed before confirmation",
@@ -359,6 +384,7 @@ class AgentRuntimeExecutor:
                     "arguments": pending.pending_call.function.arguments or {},
                     "confirmed": True,
                 },
+                correlation_id=pending.correlation_id,
             )
             if pre_tool_outcome.blocked:
                 if self.session_store is not None:
@@ -373,6 +399,7 @@ class AgentRuntimeExecutor:
                     agent_id=current_agent.agent_id,
                     snapshot=pending.snapshot,
                     confirmation_id=confirmation_id,
+                    correlation_id=pending.correlation_id,
                     error={
                         "type": "AgentHookDenied",
                         "message": "tool call was denied by Agent Hook",
@@ -380,15 +407,42 @@ class AgentRuntimeExecutor:
                 )
                 self._audit("confirm", result)
                 return result
-            tool_result = await self._execute_tool_call(
+            pending_call, input_error = self._apply_hook_tool_input(
                 pending.pending_call,
+                pre_tool_outcome,
+                current_entry,
+            )
+            if input_error is not None:
+                if self.session_store is not None:
+                    self.session_store.complete_pending(
+                        confirmation_id,
+                        "failed",
+                        error_type="InvalidHookToolInput",
+                    )
+                result = RuntimeResult(
+                    status=RuntimeStatus.FAILED,
+                    context=pending.context,
+                    agent_id=current_agent.agent_id,
+                    snapshot=pending.snapshot,
+                    confirmation_id=confirmation_id,
+                    correlation_id=pending.correlation_id,
+                    error={
+                        "type": "InvalidHookToolInput",
+                        "message": input_error,
+                    },
+                )
+                self._audit("confirm", result)
+                return result
+            tool_result = await self._execute_tool_call(
+                pending_call,
                 current_agent,
                 pending.session_allowlist,
                 pending.workflow_allowlist,
                 self._mcp_server_ids(current_agent),
                 confirmed=True,
+                correlation_id=pending.correlation_id,
             )
-            await self._run_hook(
+            post_tool_outcome = await self._run_hook(
                 "PostToolUse",
                 agent=current_agent,
                 context=pending.context,
@@ -398,6 +452,12 @@ class AgentRuntimeExecutor:
                     "is_error": tool_result.isError,
                     "result": tool_result.content,
                 },
+                correlation_id=pending.correlation_id,
+            )
+            tool_result = self._post_tool_result(
+                pending_call,
+                tool_result,
+                post_tool_outcome,
             )
             if self.session_store is not None:
                 self.session_store.complete_pending(
@@ -406,7 +466,7 @@ class AgentRuntimeExecutor:
                     error_type=("ToolExecutionFailed" if tool_result.isError else None),
                 )
             messages = list(pending.messages)
-            messages.append(self._assistant_tool_message(pending.pending_call))
+            messages.append(self._assistant_tool_message(pending_call))
             messages.append(LLMChatMessage(role="tool", content=[tool_result]))
             response = await self._run_loop(
                 context=pending.context,
@@ -420,6 +480,7 @@ class AgentRuntimeExecutor:
                 model_id=pending.model_id,
                 tool_iterations=pending.tool_iterations + 1,
                 trace_ids=pending.trace_ids,
+                correlation_id=pending.correlation_id,
             )
             result = response
             if response.status is RuntimeStatus.COMPLETED and self.session_store is not None:
@@ -432,6 +493,7 @@ class AgentRuntimeExecutor:
                     pending.context,
                     current_agent.agent_id,
                     response,
+                    correlation_id=pending.correlation_id,
                 )
             self._audit("confirm", response)
             return response
@@ -450,6 +512,7 @@ class AgentRuntimeExecutor:
                 agent_id=pending.agent.agent_id,
                 snapshot=pending.snapshot,
                 confirmation_id=confirmation_id,
+                correlation_id=pending.correlation_id,
                 error={"type": type(error).__name__, "message": self._safe_error(error)},
             )
             self._audit("confirm", result)
@@ -465,6 +528,7 @@ class AgentRuntimeExecutor:
                     "agent_id": stop_agent.agent_id,
                     "confirmation_pending": False,
                 },
+                correlation_id=pending.correlation_id,
             )
 
     async def _run_loop(
@@ -481,6 +545,7 @@ class AgentRuntimeExecutor:
         model_id: str,
         tool_iterations: int,
         trace_ids: tuple[str, ...],
+        correlation_id: str,
     ) -> RuntimeResult:
         current_messages = list(messages)
         current_model = model_id
@@ -497,6 +562,7 @@ class AgentRuntimeExecutor:
                 snapshot=snapshot,
                 model_id=current_model,
                 iteration=iteration,
+                correlation_id=correlation_id,
             )
             request = LLMChatRequest(
                 messages=current_messages,
@@ -509,12 +575,19 @@ class AgentRuntimeExecutor:
                 agent.model_priority,
                 current_model,
                 provider_allowlist=agent.provider_allowlist,
+                correlation_id=correlation_id,
             )
             if trace_id:
                 current_traces.append(trace_id)
             if not response.message.tool_calls or iteration >= agent.max_tool_iterations:
                 return self._completed_result(
-                    context, agent, snapshot, current_messages, response, tuple(current_traces)
+                    context,
+                    agent,
+                    snapshot,
+                    current_messages,
+                    response,
+                    tuple(current_traces),
+                    correlation_id,
                 )
 
             calls = list(response.message.tool_calls)
@@ -549,6 +622,7 @@ class AgentRuntimeExecutor:
                             "arguments": call.function.arguments or {},
                             "confirmed": False,
                         },
+                        correlation_id=correlation_id,
                     )
                     if hook_outcome.blocked:
                         current_messages.append(self._assistant_tool_message(call))
@@ -559,7 +633,48 @@ class AgentRuntimeExecutor:
                             )
                         )
                         continue
+                    call, input_error = self._apply_hook_tool_input(
+                        call,
+                        hook_outcome,
+                        self._read_tool_entries().get(name),
+                    )
+                    if input_error is not None:
+                        current_messages.append(self._assistant_tool_message(call))
+                        current_messages.append(
+                            LLMChatMessage(
+                                role="tool",
+                                content=[self._error_result(call, input_error)],
+                            )
+                        )
+                        continue
                     confirmation_id = uuid.uuid4().hex
+                    permission_outcome = await self._run_hook(
+                        "PermissionRequest",
+                        agent=agent,
+                        context=context,
+                        snapshot=snapshot,
+                        payload={
+                            "tool_name": name,
+                            "arguments": call.function.arguments or {},
+                            "confirmation_id": confirmation_id,
+                        },
+                        correlation_id=correlation_id,
+                    )
+                    if permission_outcome.blocked or permission_outcome.permission_behavior == "deny":
+                        current_messages.append(self._assistant_tool_message(call))
+                        current_messages.append(
+                            LLMChatMessage(
+                                role="tool",
+                                content=[
+                                    self._error_result(
+                                        call,
+                                        permission_outcome.permission_decision_reason
+                                        or "confirmation was denied by Agent Hook",
+                                    )
+                                ],
+                            )
+                        )
+                        continue
                     self._pending[confirmation_id] = _PendingConfirmation(
                         confirmation_id=confirmation_id,
                         context=context,
@@ -576,20 +691,10 @@ class AgentRuntimeExecutor:
                         model_id=current_model,
                         tool_iterations=iteration,
                         trace_ids=tuple(current_traces),
+                        correlation_id=correlation_id,
                     )
                     self._persist_pending(
                         self._pending[confirmation_id],
-                    )
-                    await self._run_hook(
-                        "PermissionRequest",
-                        agent=agent,
-                        context=context,
-                        snapshot=snapshot,
-                        payload={
-                            "tool_name": name,
-                            "arguments": call.function.arguments or {},
-                            "confirmation_id": confirmation_id,
-                        },
                     )
                     return RuntimeResult(
                         status=RuntimeStatus.AWAITING_CONFIRMATION,
@@ -599,6 +704,7 @@ class AgentRuntimeExecutor:
                         response=response,
                         messages=current_messages,
                         confirmation_id=confirmation_id,
+                        correlation_id=correlation_id,
                         trace_ids=tuple(current_traces),
                     )
                 hook_outcome = await self._run_hook(
@@ -611,6 +717,7 @@ class AgentRuntimeExecutor:
                         "arguments": call.function.arguments or {},
                         "confirmed": False,
                     },
+                    correlation_id=correlation_id,
                 )
                 if hook_outcome.blocked:
                     current_messages.append(self._assistant_tool_message(call))
@@ -621,6 +728,20 @@ class AgentRuntimeExecutor:
                         )
                     )
                     continue
+                call, input_error = self._apply_hook_tool_input(
+                    call,
+                    hook_outcome,
+                    self._read_tool_entries().get(name),
+                )
+                if input_error is not None:
+                    current_messages.append(self._assistant_tool_message(call))
+                    current_messages.append(
+                        LLMChatMessage(
+                            role="tool",
+                            content=[self._error_result(call, input_error)],
+                        )
+                    )
+                    continue
                 tool_result = await self._execute_tool_call(
                     call,
                     agent,
@@ -628,8 +749,9 @@ class AgentRuntimeExecutor:
                     workflow_allowlist,
                     self._mcp_server_ids(agent),
                     confirmed=False,
+                    correlation_id=correlation_id,
                 )
-                await self._run_hook(
+                post_tool_outcome = await self._run_hook(
                     "PostToolUse",
                     agent=agent,
                     context=context,
@@ -639,6 +761,12 @@ class AgentRuntimeExecutor:
                         "is_error": tool_result.isError,
                         "result": tool_result.content,
                     },
+                    correlation_id=correlation_id,
+                )
+                tool_result = self._post_tool_result(
+                    call,
+                    tool_result,
+                    post_tool_outcome,
                 )
                 current_messages.append(self._assistant_tool_message(call))
                 current_messages.append(LLMChatMessage(role="tool", content=[tool_result]))
@@ -650,6 +778,7 @@ class AgentRuntimeExecutor:
             context=context,
             agent_id=agent.agent_id,
             snapshot=snapshot,
+            correlation_id=correlation_id,
             error={"type": "RuntimeLoopError", "message": "runtime loop ended without a model response"},
         )
 
@@ -662,6 +791,7 @@ class AgentRuntimeExecutor:
         snapshot: ResourceSnapshot,
         model_id: str,
         iteration: int,
+        correlation_id: str,
     ) -> list[LLMChatMessage]:
         """Run ``PreCompact`` and reduce old context when the limit is reached.
 
@@ -688,6 +818,7 @@ class AgentRuntimeExecutor:
                 "model_id": model_id,
                 "iteration": iteration,
             },
+            correlation_id=correlation_id,
         )
 
         used_custom_compactor = False
@@ -722,6 +853,7 @@ class AgentRuntimeExecutor:
             estimated_chars_after=estimated_after,
             used_custom_compactor=used_custom_compactor,
             compactor_error=compactor_error,
+            correlation_id=correlation_id,
         )
         await self._run_hook(
             "PostCompact",
@@ -736,6 +868,7 @@ class AgentRuntimeExecutor:
                 "model_id": model_id,
                 "iteration": iteration,
             },
+            correlation_id=correlation_id,
         )
         return compacted
 
@@ -913,6 +1046,7 @@ class AgentRuntimeExecutor:
         estimated_chars_after: int,
         used_custom_compactor: bool,
         compactor_error: Optional[str],
+        correlation_id: str,
     ) -> None:
         if self.audit_sink is None:
             return
@@ -922,6 +1056,7 @@ class AgentRuntimeExecutor:
             "event": "PreCompact",
             "status": "success",
             "agent_id": agent.agent_id,
+            "correlation_id": correlation_id,
             "model_id": model_id,
             "iteration": iteration,
             "message_count_before": message_count_before,
@@ -946,6 +1081,7 @@ class AgentRuntimeExecutor:
         current_model: str,
         *,
         provider_allowlist: Iterable[str] = (),
+        correlation_id: Optional[str] = None,
     ) -> tuple[LLMChatResponse, str, str]:
         candidates = list(dict.fromkeys([current_model, *model_priority]))
         last_error: Optional[BaseException] = None
@@ -971,6 +1107,11 @@ class AgentRuntimeExecutor:
                         )
                     ):
                         options["provider_allowlist"] = provider_allowlist
+                    if "correlation_id" in signature.parameters or any(
+                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                        for parameter in parameters
+                    ):
+                        options["correlation_id"] = correlation_id
                 result = execute_chat(candidate_request, **options)
                 if inspect.isawaitable(result):
                     result = await result
@@ -1023,13 +1164,13 @@ class AgentRuntimeExecutor:
         context: ChannelContext,
         snapshot: ResourceSnapshot,
         payload: Optional[Mapping[str, Any]] = None,
+        correlation_id: Optional[str] = None,
     ) -> HookOutcome:
         """Run a Hook event as an isolated policy side effect.
 
-        Hook output is deliberately reduced to ``HookOutcome`` here.  The
-        model only receives normal tool results, never Hook output or errors.
-        A runtime defect is audited and treated as non-blocking; only an
-        explicit ``PreToolUse`` denial can stop a tool call.
+        Hook runtime defects are audited and isolated from the Agent turn.
+        Valid structured outcomes remain intact so each lifecycle event can
+        apply only the fields permitted by its contract.
         """
 
         try:
@@ -1039,6 +1180,11 @@ class AgentRuntimeExecutor:
                 context=context,
                 snapshot=snapshot,
                 payload=payload,
+                **(
+                    {"correlation_id": correlation_id}
+                    if correlation_id is not None
+                    else {}
+                ),
             )
             if not isinstance(outcome, HookOutcome):
                 raise TypeError("Agent Hook runtime returned an invalid outcome")
@@ -1052,30 +1198,100 @@ class AgentRuntimeExecutor:
             try:
                 self.audit_sink(
                     {
-                        "component": "agent_hook_runtime",
+                        "component": "agent_hook",
                         "operation": "run_event",
                         "event": event,
                         "status": outcome.status,
-                        "blocked": bool(outcome.blocked and event == "PreToolUse"),
+                        "blocked": outcome.blocked,
                         "executed": outcome.executed,
                         "resource_count": len(outcome.resource_ids),
                         "reason_count": len(outcome.reasons),
+                        "correlation_id": correlation_id,
                         "session": context.redacted(),
                     }
                 )
             except Exception:
                 pass
-        if event != "PreToolUse" and outcome.blocked:
-            return HookOutcome(
-                event=outcome.event,
-                status=outcome.status,
-                blocked=False,
-                executed=outcome.executed,
-                resource_ids=outcome.resource_ids,
-                reasons=outcome.reasons,
-                output_bytes=outcome.output_bytes,
-            )
         return outcome
+
+    @staticmethod
+    def _inject_hook_context(
+        messages: list[LLMChatMessage],
+        outcomes: Iterable[HookOutcome],
+    ) -> list[LLMChatMessage]:
+        context_parts: list[str] = []
+        for outcome in outcomes:
+            context_parts.extend(outcome.system_messages)
+            context_parts.extend(outcome.additional_context)
+        if not context_parts:
+            return messages
+        hook_message = LLMChatMessage(
+            role="system",
+            content=[LLMChatTextContent(text="\n\n".join(context_parts))],
+        )
+        insert_at = 1 if messages and messages[0].role == "system" else 0
+        return [*messages[:insert_at], hook_message, *messages[insert_at:]]
+
+    @classmethod
+    def _apply_hook_tool_input(
+        cls,
+        call: ToolCall,
+        outcome: HookOutcome,
+        entry: Any,
+    ) -> tuple[ToolCall, Optional[str]]:
+        if outcome.updated_input is None:
+            return call, None
+        error = cls._validate_tool_arguments(entry, outcome.updated_input)
+        if error is not None:
+            return call, f"invalid arguments returned by PreToolUse Hook: {error}"
+        function = call.function
+        return ToolCall(
+            id=call.id,
+            type=call.type,
+            model=call.model,
+            function=(
+                None
+                if function is None
+                else function.model_copy(update={"arguments": dict(outcome.updated_input)})
+            ),
+        ), None
+
+    @staticmethod
+    def _validate_tool_arguments(entry: Any, arguments: Mapping[str, Any]) -> Optional[str]:
+        if entry is None:
+            return "tool definition is unavailable"
+        info = getattr(entry, "tool_info", entry)
+        schema = getattr(info, "inputSchema", None) or getattr(info, "input_schema", None)
+        if not isinstance(schema, dict):
+            return "tool input schema is invalid"
+        try:
+            from jsonschema import ValidationError, validate
+
+            # The normalized LLM tool contract is strict by default.  MCP
+            # schemas that omit the flag must therefore not become an escape
+            # hatch for Hook-supplied identity or routing fields.
+            validation_schema = dict(schema)
+            validation_schema.setdefault("additionalProperties", False)
+            validate(instance=dict(arguments), schema=validation_schema)
+        except ValidationError as error:
+            return error.message[:256]
+        except Exception as error:
+            return f"schema validation failed: {type(error).__name__}"
+        return None
+
+    @staticmethod
+    def _post_tool_result(
+        call: ToolCall,
+        result: LLMToolResultContent,
+        outcome: HookOutcome,
+    ) -> LLMToolResultContent:
+        if not outcome.blocked:
+            return result
+        reason = outcome.reasons[0] if outcome.reasons else "tool result requires review"
+        return AgentRuntimeExecutor._error_result(
+            call,
+            f"PostToolUse Hook blocked this result: {reason}",
+        )
 
     async def _execute_tool_call(
         self,
@@ -1086,6 +1302,7 @@ class AgentRuntimeExecutor:
         mcp_server_ids: frozenset[str],
         *,
         confirmed: bool,
+        correlation_id: Optional[str] = None,
     ) -> LLMToolResultContent:
         name = call.function.name if call.function else "unknown"
         args = (call.function.arguments or {}) if call.function else {}
@@ -1100,6 +1317,11 @@ class AgentRuntimeExecutor:
                 session_allowlist=session_allowlist,
                 workflow_allowlist=workflow_allowlist,
                 confirmed=confirmed,
+                **(
+                    {"correlation_id": correlation_id}
+                    if correlation_id is not None
+                    else {}
+                ),
             )
             if inspect.isawaitable(result):
                 result = await result
@@ -1258,16 +1480,12 @@ class AgentRuntimeExecutor:
         workflow_allowlist: Optional[frozenset[str]],
     ) -> frozenset[str]:
         bound_servers = cls._mcp_server_ids(agent)
-        bound_tools = frozenset(
-            name
-            for name, entry in entries.items()
-            if str(getattr(entry, "server_id", "")) in bound_servers
-        )
-        return effective_mcp_allowlist(
+        return resolve_mcp_tool_allowlist(
             agent_allowlist=agent.mcp_allowlist,
+            tool_entries=entries,
+            agent_mcp_server_ids=bound_servers,
             session_allowlist=session_allowlist,
             workflow_allowlist=workflow_allowlist,
-            connected_tools=bound_tools,
         )
 
     @staticmethod
@@ -1400,6 +1618,7 @@ class AgentRuntimeExecutor:
         messages: list[LLMChatMessage],
         response: LLMChatResponse,
         trace_ids: tuple[str, ...],
+        correlation_id: str,
     ) -> RuntimeResult:
         text = "".join(
             part.text
@@ -1414,6 +1633,7 @@ class AgentRuntimeExecutor:
             context=context,
             agent_id=agent.agent_id,
             snapshot=snapshot,
+            correlation_id=correlation_id,
             trace_ids=trace_ids,
         )
 
@@ -1435,6 +1655,7 @@ class AgentRuntimeExecutor:
             "operation": operation,
             "status": result.status.value,
             "agent_id": result.agent_id,
+            "correlation_id": result.correlation_id,
             "session": result.context.redacted() if result.context else None,
             "snapshot_sha256": result.snapshot.content_sha256 if result.snapshot else None,
             "confirmation_id": bool(result.confirmation_id),
@@ -1490,6 +1711,8 @@ class AgentRuntimeExecutor:
         self,
         context: ChannelContext,
         agent_id: str,
+        *,
+        correlation_id: Optional[str] = None,
     ) -> list[LLMChatMessage]:
         try:
             entries = self.memory_manager.query(
@@ -1521,7 +1744,12 @@ class AgentRuntimeExecutor:
                     )
             return messages
         except Exception as error:
-            self._audit_memory_error("load", error, context)
+            self._audit_memory_error(
+                "load",
+                error,
+                context,
+                correlation_id=correlation_id,
+            )
             return []
 
     def _persist_memory(
@@ -1529,6 +1757,8 @@ class AgentRuntimeExecutor:
         context: ChannelContext,
         agent_id: str,
         result: RuntimeResult,
+        *,
+        correlation_id: Optional[str] = None,
     ) -> None:
         if self.memory_manager is None or result.response is None:
             return
@@ -1559,7 +1789,12 @@ class AgentRuntimeExecutor:
                     extra_identifier=memory_key,
                 )
         except Exception as error:
-            self._audit_memory_error("store", error, context)
+            self._audit_memory_error(
+                "store",
+                error,
+                context,
+                correlation_id=correlation_id or result.correlation_id,
+            )
 
     @staticmethod
     def _memory_sender(context: ChannelContext) -> ChatSender:
@@ -1630,6 +1865,7 @@ class AgentRuntimeExecutor:
         operation: str,
         error: BaseException,
         context: ChannelContext,
+        correlation_id: Optional[str] = None,
     ) -> None:
         if self.audit_sink is None:
             return
@@ -1640,6 +1876,7 @@ class AgentRuntimeExecutor:
                     "operation": operation,
                     "status": "failed",
                     "session": context.redacted(),
+                    "correlation_id": correlation_id,
                     "error_type": type(error).__name__,
                 }
             )
@@ -1665,6 +1902,7 @@ class AgentRuntimeExecutor:
                 "model_id": pending.model_id,
                 "tool_iterations": pending.tool_iterations,
                 "trace_ids": list(pending.trace_ids),
+                "correlation_id": pending.correlation_id,
             },
             session_key=pending.context.session_key,
         )
@@ -1720,6 +1958,7 @@ class AgentRuntimeExecutor:
                 model_id=str(record["model_id"]),
                 tool_iterations=int(record["tool_iterations"]),
                 trace_ids=tuple(record.get("trace_ids", ())),
+                correlation_id=self._record_correlation_id(record),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("pending confirmation record is invalid") from error
@@ -1729,6 +1968,7 @@ class AgentRuntimeExecutor:
         confirmation_id: str,
         context: ChannelContext,
         outcome: str,
+        correlation_id: Optional[str] = None,
     ) -> RuntimeResult:
         errors = {
             "not_found": (
@@ -1764,8 +2004,16 @@ class AgentRuntimeExecutor:
             status=RuntimeStatus.FAILED,
             context=context,
             confirmation_id=confirmation_id,
+            correlation_id=correlation_id,
             error={"type": error_type, "message": message},
         )
+
+    @staticmethod
+    def _record_correlation_id(record: Mapping[str, Any]) -> str:
+        """Read or backfill the turn ID for a pre-correlation pending record."""
+
+        value = record.get("correlation_id")
+        return str(value) if value else uuid.uuid4().hex
 
     @classmethod
     def _tupleize(cls, value: Any) -> Any:

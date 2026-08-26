@@ -17,10 +17,12 @@ class LLMTraceEvent(TraceEvent):
     def __init__(self,
                 trace_id: str,
                 model_id: str,
-                backend_name: str):
+                backend_name: str,
+                correlation_id: Optional[str] = None):
         super().__init__(trace_id)
         self.model_id = model_id
         self.backend_name = backend_name
+        self.correlation_id = correlation_id
 
     def __repr__(self):
         return f"{self.__class__.__name__}(trace_id={self.trace_id}, model={self.model_id}, backend={self.backend_name})"
@@ -33,8 +35,9 @@ class LLMRequestStartEvent(LLMTraceEvent, TraceStartEvent):
                 trace_id: str,
                 model_id: str,
                 backend_name: str,
-                request: LLMChatRequest):
-        super().__init__(trace_id, model_id, backend_name)
+                request: LLMChatRequest,
+                correlation_id: Optional[str] = None):
+        super().__init__(trace_id, model_id, backend_name, correlation_id)
         self.request = request
         self.start_time = time.time()
 
@@ -51,8 +54,9 @@ class LLMRequestCompleteEvent(LLMTraceEvent, TraceCompleteEvent):
                 start_time: float,
                 attempts: Optional[Iterable["ProviderAttempt"]] = None,
                 cost_snapshot: Optional["CostSnapshot"] = None,
-                ttft_ms: Optional[int] = None):
-        super().__init__(trace_id, model_id, backend_name)
+                ttft_ms: Optional[int] = None,
+                correlation_id: Optional[str] = None):
+        super().__init__(trace_id, model_id, backend_name, correlation_id)
         self.request = request
         self.response = response
         self.start_time = start_time
@@ -73,8 +77,9 @@ class LLMRequestFailEvent(LLMTraceEvent, TraceFailEvent):
                 error: Union[str, Exception],
                 start_time: float,
                 attempts: Optional[Iterable["ProviderAttempt"]] = None,
-                ttft_ms: Optional[int] = None):
-        super().__init__(trace_id, model_id, backend_name)
+                ttft_ms: Optional[int] = None,
+                correlation_id: Optional[str] = None):
+        super().__init__(trace_id, model_id, backend_name, correlation_id)
         self.request = request
         self.error = str(error)
         self.start_time = start_time

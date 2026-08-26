@@ -264,7 +264,7 @@ class OneBotAdapter(
 
     async def _handle_message(self, event: Event) -> None:
         message = await self.convert_to_message(event)
-        await self.dispatcher.dispatch(self, message)
+        await self.dispatcher.dispatch(self, message, require_agent=True)
 
     async def convert_to_message(self, event: Event) -> IMMessage:
         event_self_id = self._event_value(event, "self_id")

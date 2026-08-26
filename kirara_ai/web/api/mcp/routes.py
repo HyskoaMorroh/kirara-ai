@@ -3,12 +3,17 @@
 
 
 from collections.abc import Mapping
+import hashlib
+import json
+import secrets
+import time
 from typing import Any, Dict, Optional
 
 from quart import Blueprint, g, jsonify, request
 
 from kirara_ai.config.config_loader import CONFIG_FILE, ConfigLoader
 from kirara_ai.config.global_config import GlobalConfig, MCPServerConfig, MCPTransportConfig
+from kirara_ai.agent_runtime import AgentRegistry, resolve_mcp_tool_allowlist
 from kirara_ai.logger import get_logger
 from kirara_ai.mcp_module import MCPConnectionState, MCPServer, MCPServerManager
 from kirara_ai.mcp_module.compat import normalize_mcp_server_entry
@@ -18,6 +23,7 @@ from .models import (
     REDACTED_SECRET,
     MCPPromptInfo,
     MCPPromptSampleRequest,
+    MCPAuditPage,
     MCPResourceInfo,
     MCPServerCreateRequest,
     MCPServerInfo,
@@ -31,6 +37,9 @@ from .models import (
 # 创建蓝图
 mcp_bp = Blueprint("mcp", __name__)
 logger = get_logger("WebServer.MCP")
+
+
+_TOOL_CONFIRMATION_TTL_SECONDS = 90
 
 _SECRET_KEY_PARTS = (
     "key",
@@ -86,6 +95,99 @@ def _merge_secret_map(current: Mapping[str, str], incoming: Mapping[str, str]) -
 def _public_error(message: str = "MCP operation failed") -> Dict[str, str]:
     """Keep transport credentials and remote exception details out of API errors."""
     return {"message": message}
+
+
+def _invalid_request(message: str = "Invalid MCP request") -> Dict[str, str]:
+    """Return a bounded input error without serializing validation payloads."""
+    return {"message": message}
+
+
+def _digest_json(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _tool_digest(entry: Any) -> str:
+    info = getattr(entry, "tool_info", entry)
+    if hasattr(info, "model_dump"):
+        info = info.model_dump(mode="python", by_alias=True)
+    return _digest_json(
+        {
+            "server_id": getattr(entry, "server_id", None),
+            "original_name": getattr(entry, "original_name", None),
+            "tool": info,
+        }
+    )
+
+
+def _mcp_agent_policy(manager: MCPServerManager, agent_id: Optional[str], tool_name: str):
+    """Resolve management-tool authority from the persisted Agent registry."""
+    if not agent_id or not agent_id.strip():
+        raise ValueError("agent_id is required")
+    registry: AgentRegistry = manager.container.resolve(AgentRegistry)
+    agent = registry.get(agent_id.strip())
+    if not agent.enabled:
+        raise PermissionError("Agent is disabled")
+    bound_servers = frozenset(
+        binding.resource_id.removeprefix("mcp.")
+        for binding in agent.mcp_bindings
+        if binding.enabled
+    )
+    allowed = resolve_mcp_tool_allowlist(
+        agent_allowlist=agent.mcp_allowlist,
+        tool_entries=manager.get_tools(),
+        agent_mcp_server_ids=bound_servers,
+    )
+    if tool_name not in allowed:
+        raise PermissionError("Tool is not allowed for this Agent")
+    entry = manager.get_tools().get(tool_name)
+    if entry is None:
+        raise LookupError("Tool is unavailable")
+    return agent, bound_servers, entry
+
+
+def _issue_tool_confirmation(
+    manager: MCPServerManager,
+    *,
+    agent_id: str,
+    server_id: str,
+    tool_name: str,
+    params: dict[str, Any],
+    entry: Any,
+) -> str:
+    token = secrets.token_urlsafe(32)
+    manager.confirmation_store.issue(
+        token,
+        agent_id=agent_id,
+        server_id=server_id,
+        tool_name=tool_name,
+        params_digest=_digest_json(params),
+        tool_digest=_tool_digest(entry),
+        expires_at=time.time() + _TOOL_CONFIRMATION_TTL_SECONDS,
+    )
+    return token
+
+
+def _consume_tool_confirmation(
+    manager: MCPServerManager,
+    token: Optional[str],
+    *,
+    agent_id: str,
+    server_id: str,
+    tool_name: str,
+    params: dict[str, Any],
+    entry: Any,
+) -> bool:
+    if not token:
+        return False
+    return manager.confirmation_store.consume(
+        token,
+        agent_id=agent_id,
+        server_id=server_id,
+        tool_name=tool_name,
+        params_digest=_digest_json(params),
+        tool_digest=_tool_digest(entry),
+    )
 
 
 def _api_tool_name(manager: MCPServerManager, server_id: str, original_name: str) -> Optional[str]:
@@ -155,7 +257,7 @@ def _convert_to_resource_info(resource) -> MCPResourceInfo:
 
 
 @mcp_bp.route("/servers", methods=["GET"])
-@require_auth
+@require_auth("mcp.read")
 async def list_servers():
     """获取所有MCP服务器列表"""
     try:
@@ -222,11 +324,11 @@ async def list_servers():
         ).model_dump(mode="json", by_alias=True)
     except Exception as e:
         logger.opt(exception=e).error("获取MCP服务器列表失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500
 
 
 @mcp_bp.route("/statistics", methods=["GET"])
-@require_auth
+@require_auth("mcp.read")
 async def get_statistics():
     """获取MCP服务器统计信息"""
     try:
@@ -256,8 +358,31 @@ async def get_statistics():
         return jsonify(_public_error()), 500
 
 
+@mcp_bp.route("/audit", methods=["GET"])
+@require_auth("mcp.read")
+async def list_audit():
+    """List redacted MCP operation records from the current process."""
+    try:
+        offset = int(request.args.get("offset", 0))
+        limit = int(request.args.get("limit", 50))
+        manager: MCPServerManager = g.container.resolve(MCPServerManager)
+        page = manager.list_audit(
+            offset=offset,
+            limit=limit,
+            server_id=request.args.get("server_id"),
+            operation=request.args.get("operation"),
+            outcome=request.args.get("outcome"),
+        )
+        return jsonify(MCPAuditPage.model_validate(page).model_dump(mode="json"))
+    except (TypeError, ValueError):
+        return jsonify(_invalid_request("audit pagination or filter values are invalid")), 400
+    except Exception as e:
+        logger.opt(exception=e).error("获取MCP审计记录失败")
+        return jsonify(_public_error()), 500
+
+
 @mcp_bp.route("/servers/<server_id>", methods=["GET"])
-@require_auth
+@require_auth("mcp.read")
 async def get_server(server_id: str):
     """获取特定MCP服务器的详情"""
     try:
@@ -276,11 +401,11 @@ async def get_server(server_id: str):
         return _server_payload(server_info)
     except Exception as e:
         logger.opt(exception=e).error(f"获取MCP服务器 {server_id} 详情失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500
 
 
 @mcp_bp.route("/servers/<server_id>/tools", methods=["GET"])
-@require_auth
+@require_auth("mcp.read")
 async def get_server_tools(server_id: str):
     """获取MCP服务器提供的工具列表"""
     try:
@@ -314,11 +439,11 @@ async def get_server_tools(server_id: str):
         return [tool.model_dump() for tool in tool_list]
     except Exception as e:
         logger.opt(exception=e).error(f"获取MCP服务器 {server_id} 工具列表失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500
 
 
 @mcp_bp.route("/servers/check/<server_id>", methods=["GET"])
-@require_auth
+@require_auth("mcp.read")
 async def check_server_id(server_id: str):
     """检查服务器ID是否可用"""
     try:
@@ -334,11 +459,11 @@ async def check_server_id(server_id: str):
         })
     except Exception as e:
         logger.opt(exception=e).error(f"检查服务器ID {server_id} 可用性失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500
 
 
 @mcp_bp.route("/servers", methods=["POST"])
-@require_auth
+@require_auth("mcp.manage")
 async def create_server():
     """创建新的MCP服务器"""
     try:
@@ -372,16 +497,16 @@ async def create_server():
 
         # 返回响应
         return _server_payload(server_info)
-    except (ValueError, TypeError) as e:
+    except (ValueError, TypeError):
         logger.warning("Rejected invalid MCP server payload")
-        return jsonify(_public_error(str(e))), 400
+        return jsonify(_invalid_request("Invalid MCP server configuration")), 400
     except Exception as e:
         logger.opt(exception=e).error("创建MCP服务器失败")
         return jsonify(_public_error()), 500
 
 
 @mcp_bp.route("/servers/<server_id>", methods=["PUT"])
-@require_auth
+@require_auth("mcp.manage")
 async def update_server(server_id: str):
     """更新MCP服务器配置"""
     try:
@@ -443,16 +568,16 @@ async def update_server(server_id: str):
 
         # 返回响应
         return _server_payload(server_info)
-    except (ValueError, TypeError) as e:
+    except (ValueError, TypeError):
         logger.warning("Rejected invalid MCP server update")
-        return jsonify(_public_error(str(e))), 400
+        return jsonify(_invalid_request("Invalid MCP server configuration")), 400
     except Exception as e:
         logger.opt(exception=e).error(f"更新MCP服务器 {server_id} 失败")
         return jsonify(_public_error()), 500
 
 
 @mcp_bp.route("/servers/<server_id>", methods=["DELETE"])
-@require_auth
+@require_auth("mcp.manage")
 async def delete_server(server_id: str):
     """删除MCP服务器"""
     try:
@@ -487,11 +612,11 @@ async def delete_server(server_id: str):
         return jsonify({})
     except Exception as e:
         logger.opt(exception=e).error(f"删除MCP服务器 {server_id} 失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500
 
 
 @mcp_bp.route("/servers/<server_id>/start", methods=["POST"])
-@require_auth
+@require_auth("mcp.manage")
 async def start_server(server_id: str):
     """连接 MCP 服务器"""
     try:
@@ -508,11 +633,11 @@ async def start_server(server_id: str):
         return jsonify({})
     except Exception as e:
         logger.opt(exception=e).error(f"连接 MCP 服务器 {server_id} 失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500
 
 
 @mcp_bp.route("/servers/<server_id>/stop", methods=["POST"])
-@require_auth
+@require_auth("mcp.manage")
 async def stop_server(server_id: str):
     """断开 MCP 服务器"""
     try:
@@ -529,11 +654,11 @@ async def stop_server(server_id: str):
         return jsonify({})
     except Exception as e:
         logger.opt(exception=e).error(f"断开 MCP 服务器 {server_id} 失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500
 
 
 @mcp_bp.route("/tools", methods=["GET"])
-@require_auth
+@require_auth("mcp.read")
 async def get_all_tools():
     """获取所有可用工具"""
     try:
@@ -557,10 +682,10 @@ async def get_all_tools():
         return [tool.model_dump() for tool in tool_list]
     except Exception as e:
         logger.opt(exception=e).error("获取所有工具失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500
 
 @mcp_bp.route("/servers/<server_id>/tools/call", methods=["POST"])
-@require_auth
+@require_auth("mcp.execute")
 async def call_tool(server_id: str):
     """调用工具"""
     tool_name = "unknown"
@@ -581,33 +706,72 @@ async def call_tool(server_id: str):
         if manager_tool_name is None:
             return jsonify({"message": f"工具 '{request_data.toolName}' 不存在"}), 404
 
+        try:
+            agent, bound_servers, entry = _mcp_agent_policy(
+                manager, request_data.agent_id, manager_tool_name
+            )
+        except LookupError:
+            return jsonify({"message": "Agent 或工具不存在"}), 404
+        except PermissionError:
+            return jsonify({"message": "Agent 无权调用该工具"}), 403
+        except ValueError:
+            return jsonify(_invalid_request("agent_id is required")), 400
+
+        if entry.server_id != server_id or server_id not in bound_servers:
+            return jsonify({"message": "Agent 未绑定该 MCP 服务器"}), 403
+
+        requires_confirmation = manager._tool_requires_confirmation(entry.tool_info)
+        confirmed = False
+        if requires_confirmation:
+            if request_data.confirmation_id:
+                confirmed = _consume_tool_confirmation(
+                    manager,
+                    request_data.confirmation_id,
+                    agent_id=agent.agent_id,
+                    server_id=server_id,
+                    tool_name=manager_tool_name,
+                    params=request_data.params,
+                    entry=entry,
+                )
+                if not confirmed:
+                    return jsonify({"message": "确认令牌无效、已过期或已使用"}), 403
+            else:
+                confirmation_id = _issue_tool_confirmation(
+                    manager,
+                    agent_id=agent.agent_id,
+                    server_id=server_id,
+                    tool_name=manager_tool_name,
+                    params=request_data.params,
+                    entry=entry,
+                )
+                return jsonify(
+                    {
+                        "message": "该工具需要明确确认",
+                        "confirmation_id": confirmation_id,
+                        "expires_in": _TOOL_CONFIRMATION_TTL_SECONDS,
+                    }
+                ), 409
+
         result = await manager.call_tool(
             manager_tool_name,
             request_data.params,
-            agent_allowlist=set(request_data.agent_allowlist)
-            if request_data.agent_allowlist is not None
-            else None,
-            session_allowlist=set(request_data.session_allowlist)
-            if request_data.session_allowlist is not None
-            else None,
-            workflow_allowlist=set(request_data.workflow_allowlist)
-            if request_data.workflow_allowlist is not None
-            else None,
-            confirmed=request_data.confirmed,
+            agent_allowlist=frozenset(agent.mcp_allowlist),
+            agent_mcp_server_ids=bound_servers,
+            confirmed=confirmed,
         )
         if result is None:
             return jsonify({"message": "工具调用未获准或服务器未连接"}), 403
 
         return jsonify({"result": result.model_dump(mode="json")})
-    except ValueError as e:
+    except ValueError:
         logger.warning("Rejected invalid MCP tool call")
-        return jsonify(_public_error(str(e))), 400
+        return jsonify(_invalid_request("Invalid MCP tool request")), 400
     except Exception as e:
         logger.opt(exception=e).error(f"调用工具 {tool_name} 失败")
         return jsonify(_public_error()), 500
 
 @mcp_bp.route("/servers/<server_id>/prompts", methods=["GET"])
-@require_auth
+@require_auth("mcp.read")
 async def get_server_prompts(server_id: str):
     """获取MCP服务器提供的提示词列表"""
     try:
@@ -626,10 +790,10 @@ async def get_server_prompts(server_id: str):
         return jsonify([_convert_to_prompt_info(prompt).model_dump() for prompt in prompts])
     except Exception as e:
         logger.opt(exception=e).error(f"获取MCP服务器 {server_id} 提示词列表失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500
 
 @mcp_bp.route("/servers/<server_id>/resources", methods=["GET"])
-@require_auth
+@require_auth("mcp.read")
 async def get_server_resources(server_id: str):
     """获取MCP服务器提供的资源列表"""
     try:
@@ -648,11 +812,11 @@ async def get_server_resources(server_id: str):
         return jsonify([_convert_to_resource_info(resource).model_dump() for resource in resources])
     except Exception as e:
         logger.opt(exception=e).error(f"获取MCP服务器 {server_id} 资源列表失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500
 
 
 @mcp_bp.route("/servers/<server_id>/resources/<path:resource_id>", methods=["GET"])
-@require_auth
+@require_auth("mcp.read")
 async def read_server_resource(server_id: str, resource_id: str):
     """读取MCP服务器上指定资源的内容
 
@@ -689,17 +853,16 @@ async def read_server_resource(server_id: str, resource_id: str):
         return jsonify(result.model_dump(mode="json"))
     except Exception as e:
         logger.opt(exception=e).error(f"读取MCP服务器 {server_id} 资源 {resource_id} 失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500
 
 
 @mcp_bp.route("/servers/<server_id>/prompts/sample", methods=["POST"])
-@require_auth
+@require_auth("mcp.execute")
 async def sample_server_prompt(server_id: str):
     """按给定参数取回MCP服务器上的提示词内容
 
-    WebUI 传入 promptId（即提示词 name）、text 和 temperature。MCP 的
-    prompts/get 只接受字符串参数字典，因此这里只透传非空参数，并把结果里的
-    文本片段拼成 text 字段，同时保留原始 messages 供前端展示。
+    WebUI 传入 promptId 和按 prompts/list 声明生成的 arguments。旧版 text 与
+    temperature 字段仍兼容；所有参数在校验 required 声明后原样传给 prompts/get。
     """
     try:
         data = await request.get_json()
@@ -711,11 +874,37 @@ async def sample_server_prompt(server_id: str):
         if not server:
             return jsonify({"message": f"服务器 {server_id} 不存在"}), 404
 
-        prompt_args: Dict[str, str] = {}
+        prompts = await manager.get_prompt_list(server_id)
+        if prompts is None:
+            return jsonify({"message": f"服务器 {server_id} 未连接"}), 404
+        prompt = next(
+            (item for item in prompts if item.name == request_data.promptId), None
+        )
+        if prompt is None:
+            return jsonify({"message": "提示词不存在"}), 404
+
+        declarations = {
+            argument.name: argument
+            for argument in (getattr(prompt, "arguments", None) or [])
+        }
+        prompt_args = dict(request_data.arguments)
         if request_data.text:
-            prompt_args["text"] = request_data.text
+            prompt_args.setdefault("text", request_data.text)
         if request_data.temperature is not None:
-            prompt_args["temperature"] = str(request_data.temperature)
+            prompt_args.setdefault("temperature", str(request_data.temperature))
+
+        missing = sorted(
+            name
+            for name, argument in declarations.items()
+            if bool(getattr(argument, "required", False))
+            and not prompt_args.get(name, "").strip()
+        )
+        if missing:
+            return jsonify(
+                _invalid_request(
+                    f"缺少必填提示词参数: {', '.join(name[:64] for name in missing[:16])}"
+                )
+            ), 400
 
         result = await manager.get_prompt(
             server_id, request_data.promptId, prompt_args or None
@@ -733,6 +922,9 @@ async def sample_server_prompt(server_id: str):
         if texts:
             payload["text"] = "\n".join(texts)
         return jsonify(payload)
+    except (ValueError, TypeError):
+        logger.warning(f"拒绝无效的 MCP 提示词采样请求: {server_id}")
+        return jsonify(_invalid_request("Invalid MCP prompt request")), 400
     except Exception as e:
         logger.opt(exception=e).error(f"采样MCP服务器 {server_id} 提示词失败")
-        return jsonify({"message": str(e)}), 500
+        return jsonify(_public_error()), 500

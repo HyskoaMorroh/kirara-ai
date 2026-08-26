@@ -1,0 +1,140 @@
+{
+  "events": {
+    "SessionStart": {
+      "type": "command",
+      "command": [
+        "{python}",
+        "-m",
+        "kirara_ai.agent_runtime.audit_hook_command",
+        "SessionStart"
+      ],
+      "timeout_ms": 5000,
+      "max_output_bytes": 4096,
+      "required_permissions": [
+        "process.execute"
+      ],
+      "required_capabilities": [
+        "process.execute"
+      ]
+    },
+    "UserPromptSubmit": {
+      "type": "command",
+      "command": [
+        "{python}",
+        "-m",
+        "kirara_ai.agent_runtime.audit_hook_command",
+        "UserPromptSubmit"
+      ],
+      "timeout_ms": 5000,
+      "max_output_bytes": 4096,
+      "required_permissions": [
+        "process.execute"
+      ],
+      "required_capabilities": [
+        "process.execute"
+      ]
+    },
+    "PreToolUse": {
+      "type": "command",
+      "command": [
+        "{python}",
+        "-m",
+        "kirara_ai.agent_runtime.audit_hook_command",
+        "PreToolUse"
+      ],
+      "timeout_ms": 5000,
+      "max_output_bytes": 4096,
+      "required_permissions": [
+        "process.execute"
+      ],
+      "required_capabilities": [
+        "process.execute"
+      ]
+    },
+    "PermissionRequest": {
+      "type": "command",
+      "command": [
+        "{python}",
+        "-m",
+        "kirara_ai.agent_runtime.audit_hook_command",
+        "PermissionRequest"
+      ],
+      "timeout_ms": 5000,
+      "max_output_bytes": 4096,
+      "required_permissions": [
+        "process.execute"
+      ],
+      "required_capabilities": [
+        "process.execute"
+      ]
+    },
+    "PostToolUse": {
+      "type": "command",
+      "command": [
+        "{python}",
+        "-m",
+        "kirara_ai.agent_runtime.audit_hook_command",
+        "PostToolUse"
+      ],
+      "timeout_ms": 5000,
+      "max_output_bytes": 4096,
+      "required_permissions": [
+        "process.execute"
+      ],
+      "required_capabilities": [
+        "process.execute"
+      ]
+    },
+    "PreCompact": {
+      "type": "command",
+      "command": [
+        "{python}",
+        "-m",
+        "kirara_ai.agent_runtime.audit_hook_command",
+        "PreCompact"
+      ],
+      "timeout_ms": 5000,
+      "max_output_bytes": 4096,
+      "required_permissions": [
+        "process.execute"
+      ],
+      "required_capabilities": [
+        "process.execute"
+      ]
+    },
+    "PostCompact": {
+      "type": "command",
+      "command": [
+        "{python}",
+        "-m",
+        "kirara_ai.agent_runtime.audit_hook_command",
+        "PostCompact"
+      ],
+      "timeout_ms": 5000,
+      "max_output_bytes": 4096,
+      "required_permissions": [
+        "process.execute"
+      ],
+      "required_capabilities": [
+        "process.execute"
+      ]
+    },
+    "Stop": {
+      "type": "command",
+      "command": [
+        "{python}",
+        "-m",
+        "kirara_ai.agent_runtime.audit_hook_command",
+        "Stop"
+      ],
+      "timeout_ms": 5000,
+      "max_output_bytes": 4096,
+      "required_permissions": [
+        "process.execute"
+      ],
+      "required_capabilities": [
+        "process.execute"
+      ]
+    }
+  }
+}

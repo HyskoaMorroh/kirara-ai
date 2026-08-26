@@ -1,0 +1,8 @@
+(node:8716) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated. Please use Object.assign() instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+22:04:37 [vite] http proxy error at /backend-api/api/system/status:
+Error: connect ECONNREFUSED 127.0.0.1:18083
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)
+23:32:28 [vite] http proxy error at /backend-api/api/system/status:
+Error: connect ECONNREFUSED 127.0.0.1:18083
+    at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)

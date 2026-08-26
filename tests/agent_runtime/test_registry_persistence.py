@@ -109,6 +109,26 @@ def test_registry_rejects_removing_agent_with_session_binding(tmp_path: Path):
         registry.remove("research")
 
 
+def test_registry_resolves_and_unbinds_legacy_session_key(tmp_path: Path):
+    context = ChannelContext(
+        channel_type="telegram",
+        adapter_instance="gateway/a",
+        account_scope="bot-1",
+        conversation_scope="c2c:user-1",
+        sender_scope="user-1",
+    )
+    registry = AgentRegistry(tmp_path)
+    registry.register(make_agent())
+    registry.bind_session(context.legacy_session_key, "research")
+
+    restored = AgentRegistry(tmp_path)
+    assert restored.resolve(context).agent_id == "research"
+
+    restored.unbind_session(context)
+    with pytest.raises(LookupError, match="default Agent"):
+        restored.resolve(context)
+
+
 def test_registry_persists_resource_version_policy(tmp_path: Path):
     agent = AgentDefinition(
         agent_id="current-agent",

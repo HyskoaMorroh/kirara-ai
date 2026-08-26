@@ -1,8 +1,11 @@
 import asyncio
 import base64
+import hashlib
+import json
 import os
 import time
 import uuid
+from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, List, Optional
 
@@ -15,6 +18,7 @@ from wechatpy.exceptions import InvalidSignatureException
 from wechatpy.messages import BaseMessage
 from wechatpy.replies import create_reply
 
+from kirara_ai.database import DatabaseManager
 from kirara_ai.im.adapter import IMAdapter
 from kirara_ai.im.message import (FileElement, ImageMessage, IMMessage, MessageElement, TextMessage, VideoElement,
                                   VoiceMessage)
@@ -24,6 +28,7 @@ from kirara_ai.web.app import WebServer
 from kirara_ai.workflow.core.dispatch.dispatcher import WorkflowDispatcher
 
 from .delegates import CorpWechatApiDelegate, PublicWechatApiDelegate, WechatApiDelegate, markdown_to_plain_text, split_long_message
+from .outbox import WecomDeliveryResult, WecomOutboxService
 
 WECOM_TEMP_DIR = os.path.join(os.getcwd(), 'data', 'temp', 'wecom')
 
@@ -62,6 +67,13 @@ class WecomConfig(BaseModel):
                                 default=None, json_schema_extra={"hidden_unset": True})
     port: Optional[int] = Field(title="HTTP 服务端口", description="已过时，请删除并使用 webhook_url 代替。",
                                 default=None, json_schema_extra={"hidden_unset": True})
+    send_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        le=120,
+        title="企业微信 API 操作超时",
+        description="等待企业微信主动发送或媒体上传返回的最长秒数；结果未知时不自动重发。",
+    )
 
     model_config = ConfigDict(extra="allow")
 
@@ -112,11 +124,18 @@ class WeComUtils:
         return None
 
 
+@dataclass(frozen=True)
+class _WecomSendUnit:
+    action: str
+    params: dict[str, Any]
+
+
 class WecomAdapter(IMAdapter):
     """企业微信适配器"""
 
     dispatcher: WorkflowDispatcher
     web_server: WebServer
+    database_manager: DatabaseManager
 
     def __init__(self, config: WecomConfig):
         self.wecom_utils = None
@@ -138,6 +157,8 @@ class WecomAdapter(IMAdapter):
             self.config.webhook_url = make_webhook_url()
 
         self.reply_tasks: dict[str, asyncio.Future[Any]] = {}
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._outbox: Optional[WecomOutboxService] = None
 
         # 根据配置选择合适的API代理
         self.setup_wechat_api()
@@ -153,6 +174,153 @@ class WecomAdapter(IMAdapter):
 
         # 设置工具类
         self.wecom_utils = WeComUtils(self.api_delegate.client)
+
+    def _ensure_outbox(self) -> WecomOutboxService:
+        outbox = getattr(self, "_outbox", None)
+        if outbox is not None:
+            return outbox
+        database = getattr(self, "database_manager", None)
+        if database is None:
+            raise RuntimeError("WeCom persistent outbox requires DatabaseManager")
+        self._outbox = WecomOutboxService(database, self._send_outbox_payload)
+        return self._outbox
+
+    def _outbox_counts(self) -> Optional[dict[str, int]]:
+        if getattr(self, "database_manager", None) is None:
+            return None
+        try:
+            return self._ensure_outbox().status_counts()
+        except Exception as exc:
+            self.logger.warning(f"WeCom 投递队列状态读取失败：{exc}")
+            return None
+
+    @staticmethod
+    def _unit_delivery_id(logical_delivery_id: str, unit_index: int) -> str:
+        return hashlib.sha256(
+            f"{logical_delivery_id}:{unit_index}".encode("utf-8")
+        ).hexdigest()
+
+    def _recipient_key(self, recipient: ChatSender) -> str:
+        return f"{getattr(self, 'adapter_instance', 'wecom')}:{recipient.user_id}"
+
+    def _implicit_delivery_id(
+        self, recipient_key: str, units: list[_WecomSendUnit]
+    ) -> str:
+        encoded = json.dumps(
+            {
+                "adapter_instance": str(getattr(self, "adapter_instance", "")),
+                "recipient_key": recipient_key,
+                "units": [
+                    {"action": unit.action, "params": unit.params}
+                    for unit in units
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    async def _send_outbox_payload(self, params: dict[str, Any]) -> Any:
+        payload = dict(params)
+        action = str(payload.pop("_action"))
+        try:
+            if action == "text":
+                return await asyncio.wait_for(
+                    self._send_text(str(payload["user_id"]), str(payload["text"])),
+                    timeout=self.config.send_timeout_seconds,
+                )
+            if action == "media":
+                return await asyncio.wait_for(
+                    self._send_media(
+                        str(payload["user_id"]),
+                        str(payload["media_data"]),
+                        str(payload["media_type"]),
+                    ),
+                    timeout=self.config.send_timeout_seconds,
+                )
+        except asyncio.TimeoutError:
+            raise
+        raise ValueError(f"不支持的企业微信投递动作：{action}")
+
+    async def _render_send_units(
+        self, message: IMMessage, recipient: ChatSender
+    ) -> tuple[str, list[_WecomSendUnit], Optional[str]]:
+        recipient_key = self._recipient_key(recipient)
+        units: list[_WecomSendUnit] = []
+        text_reply: Optional[str] = None
+        for element in message.message_elements:
+            if isinstance(element, TextMessage) and element.text:
+                plain_text = markdown_to_plain_text(element.text)
+                chunks = split_long_message(plain_text)
+                if text_reply is None and chunks:
+                    text_reply = chunks[0]
+                units.extend(
+                    _WecomSendUnit(
+                        "text",
+                        {
+                            "_action": "text",
+                            "user_id": str(recipient.user_id),
+                            "text": chunk,
+                        },
+                    )
+                    for chunk in chunks
+                )
+                continue
+
+            if isinstance(element, (ImageMessage, VoiceMessage, VideoElement, FileElement)):
+                media_type = (
+                    "image"
+                    if isinstance(element, ImageMessage)
+                    else "voice"
+                    if isinstance(element, VoiceMessage)
+                    else "video"
+                    if isinstance(element, VideoElement)
+                    else "file"
+                )
+                data = await element.get_data()
+                units.append(
+                    _WecomSendUnit(
+                        "media",
+                        {
+                            "_action": "media",
+                            "user_id": str(recipient.user_id),
+                            "media_type": media_type,
+                            "media_data": base64.b64encode(data).decode("ascii"),
+                        },
+                    )
+                )
+        return recipient_key, units, text_reply
+
+    @staticmethod
+    def _delivery_error(result: WecomDeliveryResult) -> BaseException:
+        if result.error is not None:
+            return result.error
+        message = result.error_message or f"WeCom delivery {result.status}"
+        if result.status == "ambiguous":
+            return asyncio.TimeoutError(message)
+        return RuntimeError(message)
+
+    def _track_background(self, coroutine: Any) -> asyncio.Task[Any]:
+        task = asyncio.create_task(coroutine)
+        tasks = getattr(self, "_background_tasks", None)
+        if tasks is None:
+            tasks = self._background_tasks = set()
+        tasks.add(task)
+
+        def discard(done: asyncio.Task[Any]) -> None:
+            tasks.discard(done)
+
+        task.add_done_callback(discard)
+        return task
+
+    async def _resume_outbox(self) -> None:
+        results = await self._ensure_outbox().resume_pending()
+        failed = sum(result.status != "accepted" for result in results)
+        if failed:
+            self.logger.warning(
+                f"WeCom 恢复投递完成，{failed} 个发送单元仍需人工核对"
+            )
 
     def setup_routes(self):
         if self.config.host:
@@ -253,6 +421,13 @@ class WecomAdapter(IMAdapter):
                     media_type="text/xml",
                 )
 
+            # Claim the callback before dispatching it.  The durable claim is
+            # required because WeCom can retry a callback after this process
+            # has restarted and an in-memory Future is no longer available.
+            if getattr(self, "database_manager", None) is not None:
+                if not self._ensure_outbox().claim_inbound(msg_id, str(msg.source)):
+                    return Response(content="", media_type="text/plain")
+
             loop = asyncio.get_running_loop()
             reply_task: asyncio.Future[Any] = loop.create_future()
             self.reply_tasks[msg_id] = reply_task
@@ -276,6 +451,10 @@ class WecomAdapter(IMAdapter):
                 message = await self.convert_to_message(msg, media_path)
             except Exception:
                 cleanup_reply_task()
+                if getattr(self, "database_manager", None) is not None:
+                    self._ensure_outbox().retry_inbound(
+                        msg_id, "failed to normalize WeCom callback"
+                    )
                 raise
 
             # raw_metadata 中只保存可 JSON 序列化的 MsgId，不再保存 Future
@@ -284,7 +463,15 @@ class WecomAdapter(IMAdapter):
             async def dispatch_message():
                 try:
                     # 分发消息
-                    await self.dispatcher.dispatch(self, message)
+                    await self.dispatcher.dispatch(self, message, require_agent=True)
+                    if getattr(self, "database_manager", None) is not None:
+                        self._ensure_outbox().complete_inbound(msg_id, None)
+                except asyncio.CancelledError:
+                    if getattr(self, "database_manager", None) is not None:
+                        self._ensure_outbox().retry_inbound(
+                            msg_id, "WeCom callback processing was cancelled"
+                        )
+                    raise
                 except Exception as e:
                     self.logger.error(f"Failed to dispatch message: {e}")
 
@@ -311,6 +498,8 @@ class WecomAdapter(IMAdapter):
                             )
                             if not reply_task.done():
                                 reply_task.set_result(None)
+                            if getattr(self, "database_manager", None) is not None:
+                                self._ensure_outbox().complete_inbound(msg_id, None)
                         except Exception as send_error:
                             self.logger.error(
                                 f"Failed to send error reply: {send_error}"
@@ -318,10 +507,12 @@ class WecomAdapter(IMAdapter):
                             if not reply_task.done():
                                 # 主动发送不可用时，尝试通过当前回调被动回复
                                 reply_task.set_result(error_reply)
+                            if getattr(self, "database_manager", None) is not None:
+                                self._ensure_outbox().complete_inbound(msg_id, error_reply)
                 finally:
                     message.sender.raw_metadata.pop("reply", None)
 
-            asyncio.create_task(dispatch_message())
+            self._track_background(dispatch_message())
 
             try:
                 # 企业微信通常会在约 5 秒后重试，因此最多等待 4.5 秒
@@ -434,54 +625,69 @@ class WecomAdapter(IMAdapter):
 
         return self.reply_tasks.get(str(reply_id))
 
-    async def send_message(self, message: IMMessage, recipient: ChatSender):
-        """发送消息到企业微信"""
-        user_id = recipient.user_id
-        res = None
-        reply_task = self._get_reply_task(recipient)
-        # 提取文本内容用于被动回复，避免单聊窗口显示空白消息
-        # 被动回复也需要转换 Markdown 并分段（取第一段），保持与主动发送格式一致
-        text_content = ""
-        for element in message.message_elements:
-            if isinstance(element, TextMessage) and element.text:
-                plain_text = markdown_to_plain_text(element.text)
-                chunks = split_long_message(plain_text)
-                # 被动回复只能发一条，取第一段
-                text_content = chunks[0] if chunks else ""
-                break
-        text_reply = text_content if text_content else None
-        try:
-            for element in message.message_elements:
-                if isinstance(element, TextMessage) and element.text:
-                    res = await self._send_text(user_id, element.text)
-                elif isinstance(element, ImageMessage) and element.url:
-                    res = await self._send_media(user_id, element.url, "image")
-                elif isinstance(element, VoiceMessage) and element.url:
-                    res = await self._send_media(user_id, element.url, "voice")
-                elif isinstance(element, VideoElement) and element.path:
-                    res = await self._send_media(user_id, element.path, "video")
-                elif isinstance(element, FileElement) and element.path:
-                    res = await self._send_media(user_id, element.path, "file")
-            if res:
-                print(res)
+    async def send_message(
+        self,
+        message: IMMessage,
+        recipient: ChatSender,
+        delivery_id: Optional[str] = None,
+    ):
+        """Render and persist every WeCom send unit before network I/O."""
+        recipient_key, units, text_reply = await self._render_send_units(message, recipient)
+        if not units:
+            reply_task = self._get_reply_task(recipient)
             if reply_task is not None and not reply_task.done():
                 reply_task.set_result(text_reply)
-        except Exception as e:
-            if 'Error code: 48001' in str(e):
-                # 未开通主动回复能力
-                if reply_task is not None and not reply_task.done():
-                    self.logger.warning("未开通主动回复能力，将采用被动回复消息 API，此模式下只能回复一条消息。")
-                    reply_task.set_result(text_reply)
-                else:
-                    self.logger.warning("未开通主动回复能力，且不在上下文中，无法发送消息。")
+            return
+
+        reply_task = self._get_reply_task(recipient)
+        if delivery_id is None:
+            delivery_id = getattr(message, "_wecom_delivery_id", None)
+        if delivery_id is None:
+            reply_id = (
+                recipient.raw_metadata.get("reply")
+                if recipient.raw_metadata
+                else None
+            )
+            if reply_id is not None:
+                delivery_id = f"{getattr(self, 'adapter_instance', 'wecom')}:inbound:{reply_id}"
             else:
-                self.logger.error(f"Failed to send message: {e}")
+                delivery_id = self._implicit_delivery_id(recipient_key, units)
+            setattr(message, "_wecom_delivery_id", delivery_id)
+        if len(delivery_id) > 64:
+            delivery_id = hashlib.sha256(delivery_id.encode("utf-8")).hexdigest()
 
-                # 其他主动发送异常也允许当前回调尝试被动回复
+        outbox = self._ensure_outbox()
+        unit_ids: list[str] = []
+        for index, unit in enumerate(units):
+            unit_id = self._unit_delivery_id(delivery_id, index)
+            unit_ids.append(unit_id)
+            outbox.enqueue(unit_id, recipient_key, unit.action, unit.params)
+
+        try:
+            for unit_id in unit_ids:
+                result = await outbox.deliver(unit_id)
+                if result.status != "accepted":
+                    raise self._delivery_error(result)
+            if reply_task is not None and not reply_task.done():
+                reply_task.set_result(text_reply)
+            if recipient.raw_metadata:
+                reply_id = recipient.raw_metadata.get("reply")
+                if reply_id is not None:
+                    outbox.complete_inbound(str(reply_id), text_reply)
+        except Exception as exc:
+            if "Error code: 48001" in str(exc):
                 if reply_task is not None and not reply_task.done():
+                    self.logger.warning(
+                        "未开通主动回复能力，将采用被动回复消息 API，此模式下只能回复一条消息。"
+                    )
                     reply_task.set_result(text_reply)
-
-                raise
+                    return
+                self.logger.warning("未开通主动回复能力，且不在上下文中，无法发送消息。")
+                return
+            self.logger.error(f"Failed to send message: {exc}")
+            if reply_task is not None and not reply_task.done():
+                reply_task.set_result(text_reply)
+            raise
 
     async def _start_standalone_server(self):
         """启动服务"""
@@ -511,15 +717,33 @@ class WecomAdapter(IMAdapter):
                 self.logger.error(f"Error during server shutdown: {e}")
 
     async def start(self):
+        self._background_tasks = getattr(self, "_background_tasks", set())
+        if getattr(self, "database_manager", None) is not None:
+            outbox = self._ensure_outbox()
+            outbox.recover_on_startup()
+            recovered_inbound = outbox.recover_inbound()
+            if recovered_inbound:
+                self.logger.warning(
+                    f"WeCom 恢复了 {recovered_inbound} 条未完成入站回调，允许重试"
+                )
         self.setup_wechat_api()
         if self.config.host:
             self.logger.warning("正在使用过时的启动模式，请尽快更新为 Webhook 模式。")
             await self._start_standalone_server()
         self.setup_routes()
         self.is_running = True
+        if getattr(self, "database_manager", None) is not None:
+            self._track_background(self._resume_outbox())
         self.logger.info("Wecom-Adapter 启动成功")
 
     async def stop(self):
+        tasks = list(getattr(self, "_background_tasks", set()))
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        getattr(self, "_background_tasks", set()).clear()
         if self.config.host:
             await self._stop_standalone_server()
         self.is_running = False

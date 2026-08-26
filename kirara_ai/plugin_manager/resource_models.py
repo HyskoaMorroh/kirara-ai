@@ -8,7 +8,12 @@ from typing import Any
 # bindings use the five explicit runtime resource kinds below.
 RESOURCE_TYPES = frozenset({"skill", "prompt", "session", "memory", "mcp", "hook"})
 INSTALLABLE_RESOURCE_TYPES = frozenset({"skill", "prompt", "memory", "mcp", "hook"})
-RESOURCE_PERMISSIONS = frozenset({"workflow.read", "workflow.write"})
+# Resource permissions describe what a binding may request.  ``process.execute``
+# is intentionally separate from workflow access: command Hooks need both the
+# Agent capability and this binding permission before a process can start.
+RESOURCE_PERMISSIONS = frozenset(
+    {"workflow.read", "workflow.write", "process.execute"}
+)
 
 
 @dataclass(frozen=True)

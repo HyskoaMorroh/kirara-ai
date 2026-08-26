@@ -88,6 +88,28 @@ def test_channel_context_uses_config_identifier_but_never_credentials():
     assert "token-value" not in context.session_key
 
 
+def test_channel_context_session_key_escapes_component_delimiters():
+    first = ChannelContext(
+        channel_type="telegram",
+        adapter_instance="gateway/a",
+        account_scope="bot",
+        conversation_scope="c2c:user",
+        sender_scope="user",
+    )
+    second = ChannelContext(
+        channel_type="telegram",
+        adapter_instance="gateway",
+        account_scope="a/bot",
+        conversation_scope="c2c:user",
+        sender_scope="user",
+    )
+
+    assert first.legacy_session_key == second.legacy_session_key
+    assert first.session_key != second.session_key
+    assert first.session_key == "telegram/gateway%2Fa/bot/c2c:user/user"
+    assert second.session_key == "telegram/gateway/a%2Fbot/c2c:user/user"
+
+
 def test_agent_selection_prefers_session_then_account_then_channel_then_default():
     registry = AgentRegistry()
     registry.register(AgentDefinition(agent_id="default", model_priority=("model-a",)))

@@ -1,0 +1,28 @@
+{
+  "resource_id": "mcp.context7",
+  "type": "mcp",
+  "version": "1.0.0",
+  "source": "catalog://mcp/context7",
+  "entry": "server.json",
+  "permissions": [
+    "workflow.read"
+  ],
+  "files": [
+    {
+      "path": "server.json",
+      "size": 648,
+      "sha256": "49ce3fb57584c2dc0a5067fe9dbcd4d0b0d67e2957dc13805728f049a80285cd"
+    }
+  ],
+  "content_sha256": "482fa55df423ebbe5c227223aa2f6d8cbdd3b10af10028cc149c34f1e8381a9d",
+  "source_key": "mcp:context7",
+  "source_metadata": {
+    "provider": "catalog",
+    "catalog_id": "mcp:context7",
+    "tags": [
+      "documentation",
+      "debugging",
+      "stdio"
+    ]
+  }
+}

@@ -96,6 +96,18 @@ const router = createRouter({
           meta: { title: '资源管理', requiresAuth: true }
         },
         {
+          path: '/resources/dependencies',
+          name: 'resource-dependencies',
+          redirect: { name: 'resources', query: { panel: 'dependencies' } },
+          meta: { title: '系统依赖', requiresAuth: true }
+        },
+        {
+          path: '/resources/dependency-tasks',
+          name: 'resource-dependency-tasks',
+          redirect: { name: 'resources', query: { panel: 'dependencies' } },
+          meta: { title: '依赖任务', requiresAuth: true }
+        },
+        {
           path: '/memory',
           name: 'memory',
           component: () => import('@/views/ComingSoon.vue')

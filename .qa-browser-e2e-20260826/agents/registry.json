@@ -1,0 +1,134 @@
+{
+  "account_bindings": [
+    {
+      "account_scope": "main",
+      "adapter_instance": "telegram-main",
+      "agent_id": "qa-unified-agent",
+      "channel_type": "telegram"
+    }
+  ],
+  "agents": [
+    {
+      "agent_id": "qa-unified-agent",
+      "allow_tools": true,
+      "capabilities": [
+        "browser",
+        "office",
+        "research"
+      ],
+      "display_name": "Unified QA Agent",
+      "enabled": true,
+      "hook_bindings": [
+        {
+          "content_sha256": "6c06a796e3cd4203a6fe74607fae121467f2e27dc15f78a841cfccf793c9254c",
+          "enabled": true,
+          "permissions": [
+            "workflow.read"
+          ],
+          "resource_id": "hook.ai-debug",
+          "resource_type": "hook",
+          "source": "catalog://kirara/hook/ai-debug",
+          "version": "1.0.0",
+          "version_policy": "current"
+        }
+      ],
+      "max_tool_iterations": 8,
+      "mcp_allowlist": [
+        "context7.query-docs",
+        "context7.resolve-library-id"
+      ],
+      "mcp_bindings": [
+        {
+          "content_sha256": "482fa55df423ebbe5c227223aa2f6d8cbdd3b10af10028cc149c34f1e8381a9d",
+          "enabled": true,
+          "permissions": [
+            "workflow.read"
+          ],
+          "resource_id": "mcp.context7",
+          "resource_type": "mcp",
+          "source": "catalog://mcp/context7",
+          "version": "1.0.0",
+          "version_policy": "current"
+        }
+      ],
+      "memory_bindings": [
+        {
+          "content_sha256": "99517d71a1645fef9c7f8182a4abf45ceec05ea23b3b7abfe4490512d6c64ebc",
+          "enabled": true,
+          "permissions": [
+            "workflow.read"
+          ],
+          "resource_id": "memory.research-context",
+          "resource_type": "memory",
+          "source": "catalog://kirara/memory/research-context",
+          "version": "1.0.0",
+          "version_policy": "current"
+        }
+      ],
+      "model_priority": [
+        "qa-primary",
+        "qa-fallback"
+      ],
+      "prompt_bindings": [
+        {
+          "content_sha256": "27fc4c657ca734c8ae613fa097d7c896257eb5262e00448dd04741f693d7f524",
+          "enabled": true,
+          "permissions": [
+            "workflow.read"
+          ],
+          "resource_id": "prompt.office-research",
+          "resource_type": "prompt",
+          "source": "catalog://kirara/prompt/office-research",
+          "version": "1.0.0",
+          "version_policy": "current"
+        }
+      ],
+      "provider_allowlist": [],
+      "skill_bindings": [
+        {
+          "content_sha256": "55043bcf6c8bb2563c58e407a243559f756058ab5671b2ab5d6fd9d0da22d838",
+          "enabled": true,
+          "permissions": [
+            "workflow.read"
+          ],
+          "resource_id": "skill.c914025169da0bca",
+          "resource_type": "skill",
+          "source": "https://github.com/vercel-labs/agent-browser/tree/main/skills/agent-browser",
+          "version": "1.0.0",
+          "version_policy": "current"
+        }
+      ],
+      "workflow_id": null
+    }
+  ],
+  "channel_bindings": [
+    {
+      "agent_id": "qa-unified-agent",
+      "channel_type": "onebot"
+    },
+    {
+      "agent_id": "qa-unified-agent",
+      "channel_type": "qqbot"
+    },
+    {
+      "agent_id": "qa-unified-agent",
+      "channel_type": "telegram"
+    },
+    {
+      "agent_id": "qa-unified-agent",
+      "channel_type": "webui"
+    },
+    {
+      "agent_id": "qa-unified-agent",
+      "channel_type": "wecom"
+    }
+  ],
+  "default_agent_id": null,
+  "format_version": 1,
+  "session_bindings": [
+    {
+      "agent_id": "qa-unified-agent",
+      "session_key": "telegram/telegram-main/main/c2c:user"
+    }
+  ]
+}

@@ -455,3 +455,91 @@ async def test_mcp_tool_call_requires_runtime_allowlist_intersection():
         session_allowlist={"other"},
     ) is None
     server.call_tool.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_call_resolves_qualified_policy_and_legacy_narrowing_aliases():
+    container = DependencyContainer()
+    container.register(GlobalConfig, GlobalConfig())
+    manager = MCPServerManager(container)
+
+    server = MagicMock()
+    server.state = MCPConnectionState.CONNECTED
+    server.call_tool = AsyncMock(return_value=MagicMock(isError=False, content=[]))
+    manager.servers["context7"] = server
+    manager.tools_cache["query-docs"] = ToolCacheEntry(
+        "context7", "query-docs", MagicMock()
+    )
+
+    result = await manager.call_tool(
+        "query-docs",
+        {"libraryId": "/pytest-dev/pytest", "query": "fixtures"},
+        agent_allowlist={"context7.query-docs"},
+        agent_mcp_server_ids={"context7"},
+        session_allowlist={"query-docs"},
+        workflow_allowlist={"context7.query-docs"},
+    )
+
+    assert result is not None
+    server.call_tool.assert_awaited_once_with(
+        "query-docs",
+        {"libraryId": "/pytest-dev/pytest", "query": "fixtures"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_call_does_not_resolve_policy_to_an_unbound_server():
+    container = DependencyContainer()
+    container.register(GlobalConfig, GlobalConfig())
+    manager = MCPServerManager(container)
+
+    context7 = MagicMock()
+    context7.state = MCPConnectionState.CONNECTED
+    context7.call_tool = AsyncMock()
+    other = MagicMock()
+    other.state = MCPConnectionState.CONNECTED
+    other.call_tool = AsyncMock()
+    manager.servers.update({"context7": context7, "other": other})
+    manager.tools_cache["query-docs"] = ToolCacheEntry(
+        "context7", "query-docs", MagicMock()
+    )
+    manager.tools_cache["other.query-docs"] = ToolCacheEntry(
+        "other", "query-docs", MagicMock()
+    )
+
+    assert await manager.call_tool(
+        "other.query-docs",
+        {},
+        agent_allowlist={"other.query-docs"},
+        agent_mcp_server_ids={"context7"},
+    ) is None
+    context7.call_tool.assert_not_awaited()
+    other.call_tool.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_call_rejects_ambiguous_legacy_name_for_bound_servers():
+    container = DependencyContainer()
+    container.register(GlobalConfig, GlobalConfig())
+    manager = MCPServerManager(container)
+
+    first = MagicMock()
+    first.state = MCPConnectionState.CONNECTED
+    first.call_tool = AsyncMock()
+    second = MagicMock()
+    second.state = MCPConnectionState.CONNECTED
+    second.call_tool = AsyncMock()
+    manager.servers.update({"first": first, "second": second})
+    manager.tools_cache["search"] = ToolCacheEntry("first", "search", MagicMock())
+    manager.tools_cache["second.search"] = ToolCacheEntry(
+        "second", "search", MagicMock()
+    )
+
+    assert await manager.call_tool(
+        "search",
+        {},
+        agent_allowlist={"search"},
+        agent_mcp_server_ids={"first", "second"},
+    ) is None
+    first.call_tool.assert_not_awaited()
+    second.call_tool.assert_not_awaited()

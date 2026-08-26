@@ -1,10 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  cancelDependencyTask,
   enableResource,
+  getDependencyTask,
   installResource,
+  installSystemDependency,
+  listDependencyTasks,
   listResourceAudit,
   listResources,
+  listSystemDependencies,
+  probeSystemDependency,
+  retryDependencyTask,
   restoreResource,
   updateResource
 } from '../src/api/resource'
@@ -79,5 +86,46 @@ describe('resource API client', () => {
     await updateResource('scope:demo', file)
 
     expect(postForm).toHaveBeenCalledWith('/resources/scope%3Ademo/versions', expect.any(FormData))
+  })
+
+  it('uses controlled system dependency endpoints without accepting command input', async () => {
+    const get = vi.spyOn(http, 'get').mockResolvedValue([])
+    const post = vi.spyOn(http, 'post').mockResolvedValue({})
+
+    await listSystemDependencies()
+    await probeSystemDependency('agent-browser-cli')
+    await installSystemDependency('agent-browser-cli', true)
+
+    expect(get).toHaveBeenCalledWith('/resources/dependencies')
+    expect(post).toHaveBeenNthCalledWith(
+      1,
+      '/resources/dependencies/agent-browser-cli/probe',
+      {}
+    )
+    expect(post).toHaveBeenNthCalledWith(
+      2,
+      '/resources/dependencies/agent-browser-cli/install',
+      { confirmed: true }
+    )
+  })
+
+  it('lists, reads, retries and cancels dependency tasks by server task ID', async () => {
+    const get = vi.spyOn(http, 'get').mockResolvedValue([])
+    const post = vi.spyOn(http, 'post').mockResolvedValue({})
+
+    await listDependencyTasks('agent-browser-cli')
+    await getDependencyTask('dep-123')
+    await retryDependencyTask('dep-123', true)
+    await cancelDependencyTask('dep-456')
+
+    expect(get).toHaveBeenNthCalledWith(
+      1,
+      '/resources/dependency-tasks?dependency_id=agent-browser-cli'
+    )
+    expect(get).toHaveBeenNthCalledWith(2, '/resources/dependency-tasks/dep-123')
+    expect(post).toHaveBeenNthCalledWith(1, '/resources/dependency-tasks/dep-123/retry', {
+      confirmed: true
+    })
+    expect(post).toHaveBeenNthCalledWith(2, '/resources/dependency-tasks/dep-456/cancel', {})
   })
 })

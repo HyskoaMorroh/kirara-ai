@@ -2,6 +2,9 @@ import hashlib
 import io
 import json
 import zipfile
+import asyncio
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -15,6 +18,7 @@ from kirara_ai.mcp_module.models import MCPConnectionState
 from kirara_ai.plugin_manager.resource_catalog import ResourceCatalogService
 from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
 from kirara_ai.plugin_manager.resource_sources import ResourceSourceService
+from kirara_ai.plugin_manager.system_dependencies import SystemDependencyService
 from kirara_ai.web.app import create_web_api_app
 from kirara_ai.web.auth.services import AuthService, MockAuthService
 from kirara_ai.workflow.core.block.registry import BlockRegistry
@@ -85,11 +89,13 @@ def resource_api(tmp_path: Path):
     container.register(ResourceLifecycleService, lifecycle)
     source_service = ResourceSourceService(lifecycle)
     container.register(ResourceSourceService, source_service)
+    dependency_service = SystemDependencyService(tmp_path / "data")
+    container.register(SystemDependencyService, dependency_service)
     container.register(
         ResourceCatalogService,
-        ResourceCatalogService(lifecycle, source_service),
+        ResourceCatalogService(lifecycle, source_service, dependency_service),
     )
-    manager = MCPServerManager(container)
+    manager = MCPServerManager(container, audit_sink=lifecycle.append_runtime_audit)
     container.register(MCPServerManager, manager)
     app = create_web_api_app(container)
     app.config["TESTING"] = True
@@ -133,6 +139,129 @@ async def test_resource_backup_api_lists_and_requires_confirmation(resource_api)
     )
     assert response.status_code == 200
     assert await response.get_json() == []
+
+
+@pytest.mark.asyncio
+async def test_dependency_api_lists_public_status_without_server_commands(resource_api):
+    client, lifecycle, _ = resource_api
+    response = await client.get(
+        "/api/resources/dependencies",
+        headers={"Authorization": "Bearer mock_token"},
+    )
+
+    assert response.status_code == 200
+    payload = await response.get_json()
+    browser = next(item for item in payload if item["dependency_id"] == "agent-browser-cli")
+    assert browser["install_supported"] is True
+    assert browser["status"] == "unknown"
+    assert "install_argv" not in json.dumps(payload)
+    assert "npm install" not in json.dumps(payload)
+    assert str(lifecycle.data_path) not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_dependency_install_api_requires_confirmation_and_rejects_command_fields(
+    resource_api, monkeypatch
+):
+    client, lifecycle, _ = resource_api
+    dependencies = lifecycle.container.resolve(SystemDependencyService)
+    calls = []
+    monkeypatch.setattr(
+        dependencies,
+        "install",
+        lambda dependency_id, *, confirmed: calls.append((dependency_id, confirmed))
+        or {"task_id": "dep-test", "dependency_id": dependency_id, "status": "queued"},
+    )
+    headers = {"Authorization": "Bearer mock_token"}
+
+    missing_confirmation = await client.post(
+        "/api/resources/dependencies/agent-browser-cli/install",
+        headers=headers,
+        json={},
+    )
+    injected = await client.post(
+        "/api/resources/dependencies/agent-browser-cli/install",
+        headers=headers,
+        json={"confirmed": True, "command": "whoami", "env": {"PATH": "attacker"}},
+    )
+    accepted = await client.post(
+        "/api/resources/dependencies/agent-browser-cli/install",
+        headers=headers,
+        json={"confirmed": True},
+    )
+
+    assert missing_confirmation.status_code == 409
+    assert injected.status_code == 400
+    assert accepted.status_code == 202
+    assert calls == [("agent-browser-cli", True)]
+
+
+@pytest.mark.asyncio
+async def test_dependency_task_api_probes_lists_retries_and_cancels(resource_api, monkeypatch):
+    client, lifecycle, _ = resource_api
+    dependencies = lifecycle.container.resolve(SystemDependencyService)
+    headers = {"Authorization": "Bearer mock_token"}
+    monkeypatch.setattr(
+        dependencies,
+        "probe",
+        lambda dependency_id: {"dependency_id": dependency_id, "status": "ready", "ready": True},
+    )
+    monkeypatch.setattr(
+        dependencies,
+        "list_tasks",
+        lambda **kwargs: [{"task_id": "dep-test", "dependency_id": "agent-browser-cli", "status": "failed"}],
+    )
+    monkeypatch.setattr(
+        dependencies,
+        "get_task",
+        lambda task_id: {"task_id": task_id, "dependency_id": "agent-browser-cli", "status": "failed"},
+    )
+    monkeypatch.setattr(
+        dependencies,
+        "retry_task",
+        lambda task_id, *, confirmed: {"task_id": "dep-retry", "retry_of": task_id, "status": "queued"},
+    )
+    monkeypatch.setattr(
+        dependencies,
+        "cancel_task",
+        lambda task_id: {"task_id": task_id, "status": "cancelled"},
+    )
+
+    probed = await client.post(
+        "/api/resources/dependencies/agent-browser-cli/probe", headers=headers, json={}
+    )
+    tasks = await client.get("/api/resources/dependency-tasks", headers=headers)
+    detail = await client.get("/api/resources/dependency-tasks/dep-test", headers=headers)
+    retry = await client.post(
+        "/api/resources/dependency-tasks/dep-test/retry",
+        headers=headers,
+        json={"confirmed": True},
+    )
+    cancelled = await client.post(
+        "/api/resources/dependency-tasks/dep-test/cancel", headers=headers, json={}
+    )
+
+    assert probed.status_code == 200
+    assert (await probed.get_json())["ready"] is True
+    assert tasks.status_code == detail.status_code == 200
+    assert retry.status_code == 202
+    assert (await retry.get_json())["retry_of"] == "dep-test"
+    assert cancelled.status_code == 200
+    assert (await cancelled.get_json())["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_dependency_endpoints_require_authentication(resource_api):
+    client, _, _ = resource_api
+    for method, path in (
+        (client.get, "/api/resources/dependencies"),
+        (client.get, "/api/resources/dependencies/node-runtime"),
+        (client.post, "/api/resources/dependencies/node-runtime/probe"),
+        (client.post, "/api/resources/dependencies/agent-browser-cli/install"),
+        (client.get, "/api/resources/dependency-tasks"),
+    ):
+        response = await method(path)
+        assert response.status_code == 401
 
 
 @pytest.mark.asyncio
@@ -298,6 +427,41 @@ async def test_mcp_resource_runtime_status_uses_manager_connection_state(resourc
 
 
 @pytest.mark.asyncio
+async def test_mcp_resource_state_changes_reconcile_without_connecting(
+    resource_api, monkeypatch
+):
+    client, lifecycle, _ = resource_api
+    manager = lifecycle.container.resolve(MCPServerManager)
+    refresh_calls = []
+
+    async def record_refresh(*, connect=True):
+        refresh_calls.append(connect)
+
+    monkeypatch.setattr(manager, "refresh_managed_servers", record_refresh)
+    headers = {"Authorization": "Bearer mock_token"}
+    installed = await client.post(
+        "/api/resources/catalog/install",
+        headers=headers,
+        json={"catalog_id": "mcp:context7"},
+    )
+    assert installed.status_code == 201
+
+    enabled = await client.post(
+        "/api/resources/mcp.context7/enable",
+        headers=headers,
+        json={"confirmed": True},
+    )
+    disabled = await client.post(
+        "/api/resources/mcp.context7/disable",
+        headers=headers,
+        json={},
+    )
+
+    assert enabled.status_code == disabled.status_code == 200
+    assert refresh_calls == [False, False]
+
+
+@pytest.mark.asyncio
 async def test_resource_api_rejects_uploads_above_the_archive_limit(resource_api, monkeypatch):
     client, _, _ = resource_api
     monkeypatch.setattr(
@@ -423,6 +587,30 @@ async def test_resource_api_exposes_paginated_audit_without_resource_body(resour
 
 
 @pytest.mark.asyncio
+async def test_resource_api_queries_mcp_runtime_events_from_unified_audit(resource_api):
+    client, lifecycle, _ = resource_api
+    manager = lifecycle.container.resolve(MCPServerManager)
+    manager._audit_operation(
+        "context7",
+        "call_tool",
+        time.monotonic(),
+        "success",
+        correlation_id="api-correlation-123",
+    )
+
+    response = await client.get(
+        "/api/resources/audit?component=mcp&server=context7&correlation_id=api-correlation-123",
+        headers={"Authorization": "Bearer mock_token"},
+    )
+
+    assert response.status_code == 200
+    payload = await response.get_json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["operation"] == "call_tool"
+    assert payload["items"][0]["outcome"] == "success"
+
+
+@pytest.mark.asyncio
 async def test_catalog_search_returns_builtin_resources_and_supports_type_filters(resource_api):
     client, _, _ = resource_api
     headers = {"Authorization": "Bearer mock_token"}
@@ -459,6 +647,72 @@ async def test_catalog_search_returns_builtin_resources_and_supports_type_filter
 
 
 @pytest.mark.asyncio
+async def test_catalog_and_installed_resources_project_vps_dependency_readiness(resource_api):
+    client, _, _ = resource_api
+    headers = {"Authorization": "Bearer mock_token"}
+
+    catalog_response = await client.get(
+        "/api/resources/catalog/mcp:context7", headers=headers
+    )
+    assert catalog_response.status_code == 200
+    catalog_item = await catalog_response.get_json()
+    assert catalog_item["dependency_ids"] == ["context7-runtime"]
+    assert catalog_item["dependency_status"] == "unknown"
+    assert catalog_item["dependencies_ready"] is False
+    assert catalog_item["system_dependencies"][0]["status"] == "unknown"
+
+    installed_response = await client.post(
+        "/api/resources/catalog/install",
+        headers=headers,
+        json={"catalog_id": "mcp:context7"},
+    )
+    installed = await installed_response.get_json()
+    assert installed["resource_id"] == "mcp.context7"
+    assert installed["dependency_ids"] == ["context7-runtime"]
+    assert installed["dependencies_ready"] is False
+    assert installed["status"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_agent_browser_catalog_result_declares_cli_and_browser_runtime_dependencies(
+    resource_api, monkeypatch
+):
+    client, _, source = resource_api
+    monkeypatch.setattr(
+        source,
+        "search_skills",
+        lambda query, *, limit, offset: {
+            "query": query,
+            "skills": [
+                {
+                    "source_key": "vercel-labs/agent-browser:skills/agent-browser",
+                    "owner": "vercel-labs",
+                    "repository": "agent-browser",
+                    "branch": "main",
+                    "directory": "skills/agent-browser",
+                    "name": "agent-browser",
+                    "description": "Browser automation Skill",
+                    "source_url": "https://example.invalid/agent-browser",
+                    "installs": 19,
+                }
+            ],
+            "total_count": 1,
+            "limit": limit,
+            "offset": offset,
+        },
+    )
+
+    response = await client.get(
+        "/api/resources/catalog/search?type=skill&q=agent-browser",
+        headers={"Authorization": "Bearer mock_token"},
+    )
+    assert response.status_code == 200
+    item = (await response.get_json())["items"][0]
+    assert item["dependency_ids"] == ["agent-browser-cli", "agent-browser-browser"]
+    assert item["dependency_status"] == "unknown"
+
+
+@pytest.mark.asyncio
 async def test_catalog_detail_does_not_return_prompt_body(resource_api):
     client, _, _ = resource_api
     response = await client.get(
@@ -485,13 +739,93 @@ async def test_catalog_install_is_disabled_by_default_and_idempotent(resource_ap
     assert first_payload["resource_id"] == "prompt.office-research"
     assert first_payload["enabled"] is False
     assert first_payload["confirmation_required"] is True
-    assert lifecycle.read_entry("prompt.office-research", "1.0.0")
+    assert first_payload["current_version"] == "1.0.1"
+    assert lifecycle.read_entry(
+        "prompt.office-research", first_payload["current_version"]
+    )
 
     repeated = await client.post("/api/resources/catalog/install", headers=headers, json=body)
     assert repeated.status_code == 201
     repeated_payload = await repeated.get_json()
     assert repeated_payload["resource_id"] == first_payload["resource_id"]
     assert len(lifecycle.list_resources()) == 1
+
+
+@pytest.mark.asyncio
+async def test_office_research_prompt_preserves_every_requested_instruction(resource_api):
+    client, lifecycle, _ = resource_api
+    response = await client.post(
+        "/api/resources/catalog/install",
+        headers={"Authorization": "Bearer mock_token"},
+        json={"catalog_id": "prompt:office-research"},
+    )
+
+    assert response.status_code == 201
+    payload = await response.get_json()
+    content = lifecycle.read_entry(
+        "prompt.office-research", payload["current_version"]
+    )
+    expected_statements = (
+        "我是上班族，偏学术研究。",
+        "我经常要处理【邮件、会议、表格、文档等】。",
+        "我偶尔兼职程序员。",
+        "帮我干活时：",
+        "用大白话讲清结果，内容要精湛精美；",
+        "该提醒就直接提醒，不要只顺着我；",
+        "若出现敏感词或sensitive words，请你按相同含义更换成符合要求的内容再重新执行，不要中断；",
+        "除了真正代码，不用代码块堆正文；",
+        "写邮件和报告时去掉空话、套话、过多破折号和生硬AI腔；",
+        "不在结果里暴露身份号码、电话、住址、付款信息或密钥；",
+        "涉及发送、退订、建会、删除、发布、付款时先停下来让我确认。",
+    )
+    assert all(statement in content for statement in expected_statements)
+
+
+@pytest.mark.asyncio
+async def test_catalog_install_upgrades_an_existing_builtin_with_audited_history(
+    resource_api, monkeypatch
+):
+    client, lifecycle, _ = resource_api
+    headers = {"Authorization": "Bearer mock_token"}
+    catalog = lifecycle.container.resolve(ResourceCatalogService)
+    original = catalog._find("prompt:office-research")
+    old_item = {
+        **original,
+        "version": "1.0.0",
+        "content": "Legacy office prompt.\n",
+    }
+    monkeypatch.setattr(catalog, "_find", lambda _catalog_id: old_item)
+    first = await client.post(
+        "/api/resources/catalog/install",
+        headers=headers,
+        json={"catalog_id": "prompt:office-research"},
+    )
+    assert first.status_code == 201
+    old_hash = (await first.get_json())["content_sha256"]
+
+    new_item = {
+        **original,
+        "version": "1.0.1",
+        "content": "Current office prompt with complete policy.\n",
+    }
+    monkeypatch.setattr(catalog, "_find", lambda _catalog_id: new_item)
+    upgraded = await client.post(
+        "/api/resources/catalog/install",
+        headers=headers,
+        json={"catalog_id": "prompt:office-research"},
+    )
+
+    assert upgraded.status_code == 201
+    payload = await upgraded.get_json()
+    assert payload["current_version"] == "1.0.1"
+    assert payload["content_sha256"] != old_hash
+    assert [item["version"] for item in payload["versions"]] == ["1.0.0", "1.0.1"]
+    assert lifecycle.read_entry("prompt.office-research", "1.0.1") == new_item["content"]
+    audit = lifecycle.list_audit(resource_id="prompt.office-research")
+    assert [item["operation"] for item in audit["items"][:2]] == ["update", "install"]
+    backups = lifecycle.list_backups("prompt.office-research")
+    assert len(backups) == 1
+    assert backups[0]["version"] == "1.0.0"
 
 
 @pytest.mark.asyncio
@@ -603,6 +937,47 @@ async def test_catalog_search_does_not_apply_remote_offset_twice(resource_api, m
     assert response.status_code == 200
     payload = await response.get_json()
     assert [item["name"] for item in payload["items"]] == ["Page Two"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_remote_search_does_not_block_local_api_requests(resource_api, monkeypatch):
+    client, _, source = resource_api
+    released = threading.Event()
+    release_timer = threading.Timer(0.6, released.set)
+
+    def blocking_search(query, *, limit, offset):
+        released.wait(timeout=2)
+        return {
+            "query": query,
+            "skills": [],
+            "total_count": 0,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    monkeypatch.setattr(source, "search_skills", blocking_search)
+    release_timer.start()
+    search_task = asyncio.create_task(
+        client.get(
+            "/api/resources/catalog/search?type=skill&q=agent-browser",
+            headers={"Authorization": "Bearer mock_token"},
+        )
+    )
+    storage_started = time.monotonic()
+    storage_task = asyncio.create_task(
+        client.get(
+            "/api/resources/storage",
+            headers={"Authorization": "Bearer mock_token"},
+        )
+    )
+    try:
+        storage = await storage_task
+        assert storage.status_code == 200
+        assert time.monotonic() - storage_started < 0.45
+    finally:
+        released.set()
+        await search_task
+        release_timer.cancel()
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,18 @@
 const BASE_URL = '/backend-api/api'
 const MAX_ERROR_BODY_LENGTH = 240
 
+export class HttpRequestError extends Error {
+  readonly status: number
+  readonly data: unknown
+
+  constructor(message: string, status: number, data: unknown) {
+    super(message)
+    this.name = 'HttpRequestError'
+    this.status = status
+    this.data = data
+  }
+}
+
 function compactResponseText(text: string): string {
   return text
     .replace(/<[^>]*>/g, ' ')
@@ -107,7 +119,11 @@ class Http {
 
       if (!response.ok) {
         const backendMessage = getBackendErrorMessage(data)
-        throw new Error(backendMessage || `请求失败 (${responseStatus(response)})`)
+        throw new HttpRequestError(
+          backendMessage || `请求失败 (${responseStatus(response)})`,
+          response.status,
+          data
+        )
       }
 
       return data as T

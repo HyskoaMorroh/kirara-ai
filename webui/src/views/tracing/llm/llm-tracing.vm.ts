@@ -89,6 +89,15 @@ class LLMTracerDelegate implements TracerDelegate<LLMTrace, LLMStatistics> {
         }
       },
       {
+        title: '回合 ID',
+        key: 'correlation_id',
+        width: 150,
+        ellipsis: {
+          tooltip: true
+        },
+        render: (row: LLMTrace) => row.correlation_id || '---'
+      },
+      {
         title: '模型',
         key: 'model_id',
         width: 160
@@ -161,6 +170,7 @@ class LLMTracerDelegate implements TracerDelegate<LLMTrace, LLMStatistics> {
 
   getDetailFields() {
     return [
+      { label: '回合 ID', key: 'correlation_id' },
       { label: '模型', key: 'model_id' },
       { label: '后端', key: 'backend_name' },
       { label: '提示Token', key: 'prompt_tokens' },

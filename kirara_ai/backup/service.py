@@ -32,17 +32,22 @@ DIRECTORY_COMPONENTS = frozenset(
     {
         "db",
         "dispatch_rules",
+        "agents",
         "fonts",
         "media",
         "memory",
         "plugins",
+        "resources",
+        "sessions",
         "web",
         "workflows",
     }
 )
 FILE_COMPONENTS = frozenset({"auto_detect_state.json", "config.yaml"})
 ALLOWED_COMPONENTS = DIRECTORY_COMPONENTS | FILE_COMPONENTS
-EXCLUDED_DIRECTORY_NAMES = frozenset({".git", ".venv", "__pycache__", "backups", "logs", "venv"})
+EXCLUDED_DIRECTORY_NAMES = frozenset(
+    {".git", ".staging", ".venv", "__pycache__", "backups", "logs", "venv"}
+)
 EXCLUDED_FILE_SUFFIXES = frozenset({".pyc", ".pyo"})
 
 

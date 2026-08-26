@@ -22,7 +22,28 @@
       </template>
 
       <!-- 统计信息卡片 -->
-      <div class="statistics-section">
+      <div v-if="statisticsStatus === 'loading'" class="statistics-section statistics-loading" data-test="statistics-loading" aria-busy="true">
+        <n-grid :cols="5" :x-gap="16" :y-gap="16">
+          <n-grid-item v-for="index in 5" :key="index"><n-skeleton height="120px" /></n-grid-item>
+        </n-grid>
+      </div>
+      <n-alert
+        v-else-if="statisticsStatus === 'error'"
+        type="error"
+        :show-icon="true"
+        class="statistics-section"
+        data-test="statistics-error"
+        role="alert"
+      >
+        {{ statisticsError }}
+      </n-alert>
+      <n-empty
+        v-else-if="statisticsStatus === 'ready' && formattedStatistics?.length === 0"
+        class="statistics-section"
+        data-test="statistics-empty"
+        description="暂无统计数据"
+      />
+      <div v-else-if="statisticsStatus === 'ready'" class="statistics-section">
         <n-grid :cols="5" :x-gap="16" :y-gap="16">
           <n-grid-item v-for="stat in formattedStatistics" :key="stat.label">
             <n-card :class="['stat-card', stat.type]">
@@ -38,7 +59,15 @@
       <!-- 过滤和搜索 -->
       <div class="filter-section">
         <n-card class="filter-card">
-          <n-grid :cols="4" :x-gap="16">
+          <n-grid :cols="5" :x-gap="16" :y-gap="16" responsive="screen">
+            <n-grid-item>
+              <n-input
+                v-model:value="filterParams.correlationId"
+                placeholder="回合 ID"
+                clearable
+                class="filter-input"
+              />
+            </n-grid-item>
             <n-grid-item>
               <n-select
                 v-model:value="filterParams.modelId"
@@ -136,7 +165,10 @@ import {
   NGrid,
   NGridItem,
   NSelect,
-  NInput
+  NInput,
+  NAlert,
+  NEmpty,
+  NSkeleton
 } from 'naive-ui'
 import { RefreshOutline, SearchOutline } from '@vicons/ionicons5'
 import { useLLMTracingViewModel } from './llm-tracing.vm'
@@ -145,6 +177,8 @@ import { formatLargeNumber } from '@/utils/formatters'
 const {
   traces,
   formattedStatistics,
+  statisticsStatus,
+  statisticsError,
   isConnected,
   isLoading,
   totalTraces,

@@ -7,6 +7,8 @@ import { format } from 'date-fns'
 export interface TracingViewModel<S extends TraceStatistics> {
   traces: Ref<TraceBase[]>
   formattedStatistics: Ref<{ label: string; value: string | number; type?: string }[] | null>
+  statisticsStatus: Ref<'idle' | 'loading' | 'ready' | 'error'>
+  statisticsError: Ref<string | null>
   traceDetail: Ref<TraceBase | null>
   isConnected: Ref<boolean>
   isLoading: Ref<boolean>
@@ -37,6 +39,7 @@ export interface TracingViewModel<S extends TraceStatistics> {
 export interface TraceBase {
   id: number
   trace_id: string
+  correlation_id: string | null
   request_time: string
   response_time: string | null
   duration: number | null
@@ -94,6 +97,8 @@ export function useTracingViewModel<S extends TraceStatistics>(
   // 状态
   const traces = ref<TraceBase[]>([])
   const statistics = ref<S | null>(null)
+  const statisticsStatus = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  const statisticsError = ref<string | null>(null)
   const traceDetail = ref<TraceBase | null>(null)
   const isConnected = ref(false)
   const isLoading = ref(false)
@@ -111,6 +116,7 @@ export function useTracingViewModel<S extends TraceStatistics>(
 
   // 过滤和搜索
   const filterParams = ref({
+    correlationId: null as string | null,
     modelId: null as string | null,
     backendName: null as string | null,
     status: null as string | null,
@@ -122,7 +128,7 @@ export function useTracingViewModel<S extends TraceStatistics>(
 
   // 统计信息格式化
   const formattedStatistics = computed(() => {
-    if (!statistics.value) return []
+    if (statisticsStatus.value !== 'ready' || !statistics.value) return null
     return delegate.formatStatistics(statistics.value as S)
   })
 
@@ -136,6 +142,7 @@ export function useTracingViewModel<S extends TraceStatistics>(
       const response = await http.post<PagedResponse<TraceBase>>(`${getApiPrefix()}/traces`, {
         page: currentPage.value,
         page_size: pageSize.value,
+        correlation_id: filterParams.value.correlationId,
         model_id: filterParams.value.modelId,
         backend_name: filterParams.value.backendName,
         status: filterParams.value.status,
@@ -154,17 +161,27 @@ export function useTracingViewModel<S extends TraceStatistics>(
   }
 
   // 获取统计信息
+  let statisticsRequestId = 0
   const fetchStatistics = async () => {
+    const requestId = ++statisticsRequestId
+    statisticsStatus.value = 'loading'
+    statisticsError.value = null
     try {
       const response = await http.get<S>(`${getApiPrefix()}/statistics`)
+      if (requestId !== statisticsRequestId) return
       statistics.value = response
+      statisticsStatus.value = 'ready'
 
       // 更新过滤选项
       if (delegate.updateFilterOptions) {
         delegate.updateFilterOptions(response as any)
       }
     } catch (error) {
-      console.error('获取统计信息失败:', error)
+      if (requestId !== statisticsRequestId) return
+      statistics.value = null
+      statisticsStatus.value = 'error'
+      statisticsError.value = '统计信息加载失败，请稍后重试。'
+      message.error('获取统计信息失败')
     }
   }
 
@@ -249,6 +266,7 @@ export function useTracingViewModel<S extends TraceStatistics>(
   // 检查是否有活动的过滤条件
   const hasActiveFilters = () => {
     return (
+      filterParams.value.correlationId ||
       filterParams.value.modelId ||
       filterParams.value.backendName ||
       filterParams.value.status ||
@@ -317,6 +335,7 @@ export function useTracingViewModel<S extends TraceStatistics>(
   // 过滤器操作
   const resetFilter = () => {
     filterParams.value = {
+      correlationId: null,
       modelId: null,
       backendName: null,
       status: null,
@@ -380,6 +399,9 @@ export function useTracingViewModel<S extends TraceStatistics>(
     if (query.model) {
       filterParams.value.modelId = query.model as string
     }
+    if (query.correlation) {
+      filterParams.value.correlationId = query.correlation as string
+    }
     if (query.backend) {
       filterParams.value.backendName = query.backend as string
     }
@@ -393,6 +415,8 @@ export function useTracingViewModel<S extends TraceStatistics>(
     // 状态
     traces,
     formattedStatistics,
+    statisticsStatus,
+    statisticsError,
     traceDetail,
     isConnected,
     isLoading,

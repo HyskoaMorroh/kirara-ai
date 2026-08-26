@@ -1,0 +1,6 @@
+
+  VITE v4.5.14  ready in 416 ms
+
+  ➜  Local:   http://127.0.0.1:15175/
+  ➜  press h to show help
+07:58:31 [vite] hmr update /src/components/layout/StatusBar.vue, /src/components/UpdateChecker.vue, /src/views/login/LoginView.vue, /src/components/LLMStatistics.vue, /src/views/resources/ResourceView.vue, /src/views/llm/AgentView.vue, /src/views/llm/LLMView.vue

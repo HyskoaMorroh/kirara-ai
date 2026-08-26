@@ -98,6 +98,56 @@
       ],
       "workflow_id": null
     },
+    "memory.research-context": {
+      "confirmation_required": true,
+      "content_sha256": "99517d71a1645fef9c7f8182a4abf45ceec05ea23b3b7abfe4490512d6c64ebc",
+      "current_version": "1.0.0",
+      "enabled": false,
+      "entry": "MEMORY.md",
+      "installed_at": "2026-08-25T21:52:43.432725Z",
+      "permissions": [
+        "workflow.read"
+      ],
+      "resource_id": "memory.research-context",
+      "source": "catalog://kirara/memory/research-context",
+      "source_key": "memory:research-context",
+      "source_metadata": {
+        "catalog_id": "memory:research-context",
+        "provider": "catalog",
+        "tags": [
+          "memory",
+          "research",
+          "privacy",
+          "isolation"
+        ]
+      },
+      "type": "memory",
+      "updated_at": "2026-08-25T21:52:43.432725Z",
+      "versions": [
+        {
+          "content_sha256": "99517d71a1645fef9c7f8182a4abf45ceec05ea23b3b7abfe4490512d6c64ebc",
+          "entry": "MEMORY.md",
+          "installed_at": "2026-08-25T21:52:43.432725Z",
+          "permissions": [
+            "workflow.read"
+          ],
+          "source": "catalog://kirara/memory/research-context",
+          "source_key": "memory:research-context",
+          "source_metadata": {
+            "catalog_id": "memory:research-context",
+            "provider": "catalog",
+            "tags": [
+              "memory",
+              "research",
+              "privacy",
+              "isolation"
+            ]
+          },
+          "version": "1.0.0"
+        }
+      ],
+      "workflow_id": null
+    },
     "prompt.office-research": {
       "confirmation_required": true,
       "content_sha256": "27fc4c657ca734c8ae613fa097d7c896257eb5262e00448dd04741f693d7f524",

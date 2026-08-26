@@ -1,10 +1,12 @@
 import json
+import re
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Dict, Optional
 
 from sqlalchemy import Column, DateTime, Float, Index, Integer, String, Text
+from sqlalchemy.orm import validates
 
 from kirara_ai.events.tracing import LLMRequestCompleteEvent, LLMRequestFailEvent, LLMRequestStartEvent
 from kirara_ai.tracing.core import TraceEvent, TraceRecord
@@ -20,6 +22,80 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
+_SENSITIVE_KEYS = frozenset({
+    "password",
+    "passwd",
+    "token",
+    "secret",
+    "cookie",
+    "set_cookie",
+    "authorization",
+    "proxy_authorization",
+    "credential",
+    "credentials",
+    "api_key",
+    "x_api_key",
+    "private_key",
+    "access_key",
+    "secret_key",
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "api_token",
+    "auth_token",
+    "bearer_token",
+    "session_token",
+    "csrf_token",
+    "client_secret",
+    "api_secret",
+    "webhook_secret",
+    "signing_secret",
+})
+_SENSITIVE_KEY_SUFFIXES = (
+    "_password",
+    "_passwd",
+    "_token",
+    "_secret",
+    "_cookie",
+    "_credential",
+    "_credentials",
+    "_api_key",
+    "_private_key",
+    "_access_key",
+    "_secret_key",
+)
+_INLINE_SECRET_PATTERN = re.compile(
+    r"(?i)\b(authorization|x-api-key|api[-_ ]?key|token|cookie|password|secret|credential)"
+    r"\s*[:=]\s*(?:(?:bearer|basic)\s+)?[^,;\s]+"
+)
+_AUTH_SCHEME_PATTERN = re.compile(
+    r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+"
+)
+
+
+def _redact_trace_value(value: Any, key: str = "") -> Any:
+    """Recursively remove credentials before trace data reaches storage or APIs."""
+    snake_key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
+    normalized_key = re.sub(r"[^a-zA-Z0-9]+", "_", snake_key).strip("_").lower()
+    if normalized_key in _SENSITIVE_KEYS or normalized_key.endswith(
+        _SENSITIVE_KEY_SUFFIXES
+    ):
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {
+            str(item): _redact_trace_value(child, str(item))
+            for item, child in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_trace_value(item, key) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_trace_value(item, key) for item in value]
+    if isinstance(value, str):
+        value = _INLINE_SECRET_PATTERN.sub(r"\1=[redacted]", value)
+        return _AUTH_SCHEME_PATTERN.sub(r"\1 [redacted]", value)
+    return value
+
+
 class LLMRequestTrace(TraceRecord):
     """LLM请求跟踪记录"""
     
@@ -27,6 +103,7 @@ class LLMRequestTrace(TraceRecord):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     trace_id = Column(String(64), nullable=False, index=True, unique=True)
+    correlation_id = Column(String(64), nullable=True, index=True)
     model_id = Column(String(64), nullable=False, index=True)
     backend_name = Column(String(64), nullable=False, index=True)
     
@@ -69,6 +146,7 @@ class LLMRequestTrace(TraceRecord):
         """从事件更新记录"""
         if isinstance(event, LLMRequestStartEvent):
             self.trace_id = event.trace_id
+            self.correlation_id = event.correlation_id
             self.model_id = event.model_id
             self.backend_name = event.backend_name
             self.request_time = datetime.fromtimestamp(event.start_time)
@@ -101,12 +179,12 @@ class LLMRequestTrace(TraceRecord):
                     self.ttft_ms = round(first_attempt.ttft_seconds * 1000)  # type: ignore[operator]
             self.attempt_count = len(event.attempts)
             self.attempts_json = json.dumps(
-                [attempt.to_dict() for attempt in event.attempts],
+                _redact_trace_value([attempt.to_dict() for attempt in event.attempts]),
                 ensure_ascii=False,
                 default=_json_default,
             ) if event.attempts else None
             self.cost_snapshot_json = json.dumps(
-                event.cost_snapshot.model_dump(mode="json"),
+                _redact_trace_value(event.cost_snapshot.model_dump(mode="json")),
                 ensure_ascii=False,
                 default=_json_default,
             ) if event.cost_snapshot is not None else None
@@ -124,16 +202,23 @@ class LLMRequestTrace(TraceRecord):
             self.ttft_ms = event.ttft_ms
             self.attempt_count = len(event.attempts)
             self.attempts_json = json.dumps(
-                [attempt.to_dict() for attempt in event.attempts],
+                _redact_trace_value([attempt.to_dict() for attempt in event.attempts]),
                 ensure_ascii=False,
                 default=_json_default,
             ) if event.attempts else None
+
+    @validates("error")
+    def _redact_error(self, _key: str, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        return str(_redact_trace_value(str(value)))
     
     def to_dict(self) -> Dict[str, Any]:
         """将记录转换为基本字典，用于JSON序列化"""
         return {
             "id": self.id,
             "trace_id": self.trace_id,
+            "correlation_id": self.correlation_id,
             "model_id": self.model_id,
             "backend_name": self.backend_name,
             "request_time": self.request_time.isoformat() if self.request_time else None, # type: ignore
@@ -150,7 +235,7 @@ class LLMRequestTrace(TraceRecord):
             "attempts": self.attempts,
             "cost_snapshot": self.cost_snapshot,
             "status": self.status,
-            "error": self.error
+            "error": _redact_trace_value(self.error)
         }
     
     def to_detail_dict(self) -> Dict[str, Any]:
@@ -163,29 +248,33 @@ class LLMRequestTrace(TraceRecord):
     @property
     def request(self) -> Optional[Dict[str, Any]]:
         """获取请求内容"""
-        return json.loads(self.request_json) if self.request_json else None  # type: ignore
+        return _redact_trace_value(json.loads(self.request_json)) if self.request_json else None  # type: ignore
     
     @request.setter
     def request(self, value: Any):
         """设置请求内容"""
         if value:
-            self.request_json = json.dumps(value, ensure_ascii=False, default=str)
+            self.request_json = json.dumps(
+                _redact_trace_value(value), ensure_ascii=False, default=_json_default
+            )
     
     @property
     def response(self) -> Optional[Dict[str, Any]]:
         """获取响应内容"""
-        return json.loads(self.response_json) if self.response_json else None  # type: ignore
+        return _redact_trace_value(json.loads(self.response_json)) if self.response_json else None  # type: ignore
     
     @response.setter
     def response(self, value: Any):
         """设置响应内容"""
         if value:
-            self.response_json = json.dumps(value, ensure_ascii=False, default=_json_default)
+            self.response_json = json.dumps(
+                _redact_trace_value(value), ensure_ascii=False, default=_json_default
+            )
 
     @property
     def attempts(self) -> Optional[list[Dict[str, Any]]]:
-        return json.loads(self.attempts_json) if self.attempts_json else None
+        return _redact_trace_value(json.loads(self.attempts_json)) if self.attempts_json else None
 
     @property
     def cost_snapshot(self) -> Optional[Dict[str, Any]]:
-        return json.loads(self.cost_snapshot_json) if self.cost_snapshot_json else None
+        return _redact_trace_value(json.loads(self.cost_snapshot_json)) if self.cost_snapshot_json else None

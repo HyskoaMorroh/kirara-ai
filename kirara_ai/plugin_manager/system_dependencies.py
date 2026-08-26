@@ -1,0 +1,934 @@
+"""Controlled VPS dependency probes and installation tasks.
+
+The browser submits only a server-known dependency ID. Commands, arguments,
+paths and environment variables are defined here and never accepted from API
+payloads.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import threading
+import time
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterable, Mapping, Sequence
+
+
+REGISTRY_FORMAT_VERSION = 1
+TASKS_FORMAT_VERSION = 1
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 300
+MAX_COMMAND_OUTPUT_BYTES = 256 * 1024
+MAX_PUBLIC_OUTPUT_CHARS = 12_000
+
+_DEPENDENCY_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
+_INLINE_SECRET_PATTERN = re.compile(
+    r"(?i)\b(authorization|cookie|password|secret|token|api[-_ ]?key)\s*[:=]\s*([^\s,;]+)"
+)
+_BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+_WINDOWS_PATH_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:\\[^\r\n\t\"']+")
+_POSIX_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9])/(?:[^\s/]+/)+[^\s,;:\"']+")
+
+_ALLOWED_ENVIRONMENT_KEYS = frozenset(
+    {
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "TMP",
+        "TEMP",
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "ALL_PROXY",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+    }
+)
+
+
+class SystemDependencyError(RuntimeError):
+    """Base error for system dependency operations."""
+
+
+class DependencyNotFoundError(SystemDependencyError):
+    """The submitted dependency ID is not in the server catalog."""
+
+
+class DependencyInstallConfirmationRequired(SystemDependencyError):
+    """A system-level installation was requested without confirmation."""
+
+
+class DependencyInstallUnsupported(SystemDependencyError):
+    """The current server catalog does not provide a controlled installer."""
+
+
+class DependencyTaskStateError(SystemDependencyError):
+    """The requested task transition is invalid."""
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    exit_code: int | None
+    output: str = ""
+    timed_out: bool = False
+    cancelled: bool = False
+
+
+@dataclass(frozen=True)
+class DependencyDefinition:
+    dependency_id: str
+    name: str
+    description: str
+    kind: str
+    required_by: tuple[str, ...]
+    probe_commands: tuple[tuple[str, ...], ...]
+    install_commands: tuple[tuple[str, ...], ...] = ()
+    prerequisites: tuple[str, ...] = ()
+    timeout_seconds: int = DEFAULT_COMMAND_TIMEOUT_SECONDS
+    operator_guidance: str | None = None
+
+    @property
+    def install_supported(self) -> bool:
+        return bool(self.install_commands)
+
+    def public(self, state: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "dependency_id": self.dependency_id,
+            "name": self.name,
+            "description": self.description,
+            "kind": self.kind,
+            "required_by": list(self.required_by),
+            "prerequisites": list(self.prerequisites),
+            "install_supported": self.install_supported,
+            "operator_guidance": self.operator_guidance,
+            "status": state.get("status", "unknown"),
+            "ready": state.get("ready") is True,
+            "version": state.get("version"),
+            "summary": state.get("summary"),
+            "checked_at": state.get("checked_at"),
+            "last_task_id": state.get("last_task_id"),
+        }
+
+
+@dataclass
+class DependencyProbe:
+    dependency_id: str
+    ready: bool
+    status: str
+    version: str | None
+    summary: str
+    checked_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dependency_id": self.dependency_id,
+            "ready": self.ready,
+            "status": self.status,
+            "version": self.version,
+            "summary": self.summary,
+            "checked_at": self.checked_at,
+        }
+
+
+@dataclass
+class DependencyInstallTask:
+    task_id: str
+    dependency_id: str
+    status: str
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    retry_of: str | None = None
+    cancel_requested: bool = False
+    error_code: str | None = None
+    error_summary: str | None = None
+    output_tail: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "dependency_id": self.dependency_id,
+            "operation": "install",
+            "status": self.status,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "retry_of": self.retry_of,
+            "cancel_requested": self.cancel_requested,
+            "error_code": self.error_code,
+            "error_summary": self.error_summary,
+            "output_tail": self.output_tail,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "DependencyInstallTask":
+        return cls(
+            task_id=str(value["task_id"]),
+            dependency_id=str(value["dependency_id"]),
+            status=str(value.get("status", "failed")),
+            created_at=str(value.get("created_at") or _timestamp()),
+            started_at=_optional_string(value.get("started_at")),
+            finished_at=_optional_string(value.get("finished_at")),
+            retry_of=_optional_string(value.get("retry_of")),
+            cancel_requested=value.get("cancel_requested") is True,
+            error_code=_optional_string(value.get("error_code")),
+            error_summary=_optional_string(value.get("error_summary")),
+            output_tail=_sanitize_output(str(value.get("output_tail") or "")),
+        )
+
+
+CommandRunner = Callable[..., CommandResult]
+
+
+def _definitions() -> tuple[DependencyDefinition, ...]:
+    return (
+        DependencyDefinition(
+            dependency_id="node-runtime",
+            name="Node.js Runtime",
+            description="Node.js、npm 和 npx，供 MCP 与 Node.js 工具使用。",
+            kind="runtime",
+            required_by=("Context7 MCP", "Agent Browser"),
+            probe_commands=(("node", "--version"), ("npm", "--version"), ("npx", "--version")),
+            operator_guidance="请由 VPS 运维使用系统软件源安装受支持的 Node.js LTS、npm 和 npx。",
+        ),
+        DependencyDefinition(
+            dependency_id="python-tooling",
+            name="Python Tooling",
+            description="uv 工具管理器，供 Python CLI 以隔离方式安装和升级。",
+            kind="runtime",
+            required_by=("Graphify",),
+            probe_commands=(("uv", "--version"),),
+            operator_guidance="请由 VPS 运维安装 uv，并确保服务进程的 PATH 可以访问它。",
+        ),
+        DependencyDefinition(
+            dependency_id="agent-browser-cli",
+            name="Agent Browser CLI",
+            description="Agent Browser 命令行程序。Skill 包与该可执行程序是两个独立状态。",
+            kind="cli",
+            required_by=("agent-browser Skill",),
+            probe_commands=(("agent-browser", "--version"),),
+            install_commands=(("npm", "install", "-g", "agent-browser"),),
+            prerequisites=("node-runtime",),
+        ),
+        DependencyDefinition(
+            dependency_id="agent-browser-browser",
+            name="Agent Browser Chromium",
+            description="Agent Browser 实际启动浏览器所需的 Chromium 运行环境。",
+            kind="browser-runtime",
+            required_by=("agent-browser Skill",),
+            probe_commands=(("agent-browser", "doctor", "--offline", "--quick", "--json"),),
+            install_commands=(("agent-browser", "install"),),
+            prerequisites=("agent-browser-cli",),
+            timeout_seconds=900,
+        ),
+        DependencyDefinition(
+            dependency_id="context7-runtime",
+            name="Context7 MCP Runtime",
+            description="运行 Context7 stdio MCP 所需的 npx 环境；MCP 连接状态另行展示。",
+            kind="mcp-runtime",
+            required_by=("mcp:context7",),
+            probe_commands=(("npx", "--version"),),
+            prerequisites=("node-runtime",),
+            operator_guidance="Context7 由 npx 按服务器登记的固定包名启动；请先修复 Node.js Runtime。",
+        ),
+        DependencyDefinition(
+            dependency_id="graphify-cli",
+            name="Graphify CLI",
+            description="Graphify 知识图谱命令行工具，PyPI 包名为 graphifyy。",
+            kind="cli",
+            required_by=("graphify Skill",),
+            probe_commands=(("graphify", "--version"),),
+            install_commands=(("uv", "tool", "install", "--upgrade", "graphifyy"),),
+            prerequisites=("python-tooling",),
+        ),
+    )
+
+
+class SystemDependencyService:
+    """Persist and execute a server-owned dependency installation catalog."""
+
+    def __init__(
+        self,
+        data_path: str | Path,
+        *,
+        command_runner: CommandRunner | None = None,
+    ) -> None:
+        self.data_path = Path(data_path).resolve()
+        self.root = self.data_path / "dependencies"
+        self.logs_path = self.root / "logs"
+        self.registry_path = self.root / "registry.json"
+        self.tasks_path = self.root / "tasks.json"
+        self.audit_path = self.root / "audit.jsonl"
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.logs_path.mkdir(parents=True, exist_ok=True)
+        self._definitions = {item.dependency_id: item for item in _definitions()}
+        self._runner = command_runner or self._run_command
+        self._lock = threading.RLock()
+        self._cancellation_events: dict[str, threading.Event] = {}
+        self._threads: dict[str, threading.Thread] = {}
+        self._registry = self._load_registry()
+        self._tasks = self._load_tasks()
+        self._recover_interrupted_tasks()
+        self._persist_registry()
+        self._persist_tasks()
+
+    def list_dependencies(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                definition.public(self._registry[dependency_id])
+                for dependency_id, definition in self._definitions.items()
+            ]
+
+    def get_dependency(self, dependency_id: str) -> dict[str, Any]:
+        definition = self._definition(dependency_id)
+        with self._lock:
+            return definition.public(self._registry[dependency_id])
+
+    def probe(self, dependency_id: str) -> dict[str, Any]:
+        definition = self._definition(dependency_id)
+        probe = self._probe_definition(definition)
+        with self._lock:
+            state = self._registry[dependency_id]
+            state.update(probe.to_dict())
+            self._persist_registry()
+        self._audit(dependency_id, "probe", "succeeded" if probe.ready else "failed")
+        return definition.public(state)
+
+    def list_tasks(self, *, dependency_id: str | None = None) -> list[dict[str, Any]]:
+        if dependency_id is not None:
+            self._definition(dependency_id)
+        with self._lock:
+            tasks = sorted(self._tasks.values(), key=lambda item: item.created_at, reverse=True)
+            return [
+                task.to_dict()
+                for task in tasks
+                if dependency_id is None or task.dependency_id == dependency_id
+            ]
+
+    def get_task(self, task_id: str) -> dict[str, Any]:
+        with self._lock:
+            return self._task(task_id).to_dict()
+
+    def install(
+        self,
+        dependency_id: str,
+        *,
+        confirmed: bool,
+        start: bool = True,
+        retry_of: str | None = None,
+    ) -> dict[str, Any]:
+        definition = self._definition(dependency_id)
+        if not confirmed:
+            raise DependencyInstallConfirmationRequired("dependency installation requires confirmation")
+        if not definition.install_supported:
+            raise DependencyInstallUnsupported("dependency installation is not supported by this server catalog")
+        if retry_of is not None:
+            with self._lock:
+                original = self._task(retry_of)
+                if original.dependency_id != dependency_id:
+                    raise DependencyTaskStateError("retry dependency does not match the original task")
+
+        task = DependencyInstallTask(
+            task_id=f"dep-{uuid.uuid4().hex}",
+            dependency_id=dependency_id,
+            status="queued",
+            created_at=_timestamp(),
+            retry_of=retry_of,
+        )
+        with self._lock:
+            self._tasks[task.task_id] = task
+            self._registry[dependency_id]["last_task_id"] = task.task_id
+            self._persist_tasks()
+            self._persist_registry()
+        self._audit(dependency_id, "install_queued", "succeeded", task_id=task.task_id)
+        if start:
+            self._start_task(task.task_id)
+        return task.to_dict()
+
+    def run_task(self, task_id: str) -> dict[str, Any]:
+        with self._lock:
+            task = self._task(task_id)
+            if task.status != "queued":
+                raise DependencyTaskStateError("only queued dependency tasks can run")
+            task.status = "running"
+            task.started_at = _timestamp()
+            cancellation_event = self._cancellation_events.setdefault(task_id, threading.Event())
+            self._persist_tasks()
+        self._audit(task.dependency_id, "install_started", "succeeded", task_id=task_id)
+
+        definition = self._definitions[task.dependency_id]
+        output_parts: list[str] = []
+
+        def output_sink(value: str) -> None:
+            sanitized = _sanitize_output(value)
+            if not sanitized:
+                return
+            output_parts.append(sanitized)
+            if sum(len(item) for item in output_parts) > MAX_PUBLIC_OUTPUT_CHARS * 2:
+                output_parts[:] = ["".join(output_parts)[-MAX_PUBLIC_OUTPUT_CHARS:]]
+            self._append_task_log(task_id, sanitized)
+
+        try:
+            current = self._probe_definition(definition, cancellation_event=cancellation_event)
+            if current.ready:
+                return self._finish_task(task, status="succeeded", output="dependency is already ready")
+
+            for prerequisite_id in definition.prerequisites:
+                prerequisite = self._probe_definition(
+                    self._definitions[prerequisite_id],
+                    cancellation_event=cancellation_event,
+                )
+                with self._lock:
+                    self._registry[prerequisite_id].update(prerequisite.to_dict())
+                    self._persist_registry()
+                if not prerequisite.ready:
+                    return self._finish_task(
+                        task,
+                        status="failed",
+                        error_code="prerequisite_missing",
+                        error_summary=f"required dependency is not ready: {prerequisite_id}",
+                        output="".join(output_parts),
+                    )
+
+            for argv in definition.install_commands:
+                streamed_output = False
+
+                def command_output_sink(value: str) -> None:
+                    nonlocal streamed_output
+                    streamed_output = True
+                    output_sink(value)
+
+                result = self._runner(
+                    argv,
+                    timeout=definition.timeout_seconds,
+                    cancellation_event=cancellation_event,
+                    output_sink=command_output_sink,
+                )
+                if not streamed_output:
+                    output_sink(result.output)
+                if result.cancelled or cancellation_event.is_set():
+                    return self._finish_task(
+                        task,
+                        status="cancelled",
+                        error_code="cancelled",
+                        error_summary="dependency installation was cancelled",
+                        output="".join(output_parts),
+                    )
+                if result.timed_out:
+                    return self._finish_task(
+                        task,
+                        status="failed",
+                        error_code="timeout",
+                        error_summary="dependency installation timed out",
+                        output="".join(output_parts),
+                    )
+                if result.exit_code != 0:
+                    return self._finish_task(
+                        task,
+                        status="failed",
+                        error_code="install_failed",
+                        error_summary="dependency installer returned a non-zero status",
+                        output="".join(output_parts),
+                    )
+
+            post_probe = self._probe_definition(definition, cancellation_event=cancellation_event)
+            with self._lock:
+                self._registry[definition.dependency_id].update(post_probe.to_dict())
+                self._persist_registry()
+            if not post_probe.ready:
+                return self._finish_task(
+                    task,
+                    status="failed",
+                    error_code="post_probe_failed",
+                    error_summary="dependency installer completed but readiness probe failed",
+                    output="".join(output_parts),
+                )
+            return self._finish_task(task, status="succeeded", output="".join(output_parts))
+        except Exception as error:
+            return self._finish_task(
+                task,
+                status="failed",
+                error_code="execution_error",
+                error_summary=_sanitize_output(str(error)) or type(error).__name__,
+                output="".join(output_parts),
+            )
+        finally:
+            with self._lock:
+                self._cancellation_events.pop(task_id, None)
+                self._threads.pop(task_id, None)
+
+    def retry_task(
+        self,
+        task_id: str,
+        *,
+        confirmed: bool,
+        start: bool = True,
+    ) -> dict[str, Any]:
+        with self._lock:
+            original = self._task(task_id)
+            if original.status not in {"failed", "cancelled"}:
+                raise DependencyTaskStateError("only failed or cancelled tasks can be retried")
+            dependency_id = original.dependency_id
+        retry = self.install(
+            dependency_id,
+            confirmed=confirmed,
+            start=start,
+            retry_of=task_id,
+        )
+        self._audit(dependency_id, "retry_created", "succeeded", task_id=retry["task_id"])
+        return retry
+
+    def cancel_task(self, task_id: str) -> dict[str, Any]:
+        with self._lock:
+            task = self._task(task_id)
+            if task.status == "queued":
+                task.cancel_requested = True
+                task.status = "cancelled"
+                task.finished_at = _timestamp()
+                task.error_code = "cancelled"
+                task.error_summary = "dependency installation was cancelled"
+            elif task.status == "running":
+                task.cancel_requested = True
+                self._cancellation_events.setdefault(task_id, threading.Event()).set()
+            elif task.status not in {"failed", "succeeded", "cancelled"}:
+                raise DependencyTaskStateError("dependency task cannot be cancelled")
+            self._persist_tasks()
+            result = task.to_dict()
+        self._audit(task.dependency_id, "cancel_requested", "succeeded", task_id=task_id)
+        return result
+
+    def _definition(self, dependency_id: Any) -> DependencyDefinition:
+        if not isinstance(dependency_id, str) or not _DEPENDENCY_ID_PATTERN.fullmatch(dependency_id):
+            raise DependencyNotFoundError("dependency is not available")
+        definition = self._definitions.get(dependency_id)
+        if definition is None:
+            raise DependencyNotFoundError("dependency is not available")
+        return definition
+
+    def _task(self, task_id: Any) -> DependencyInstallTask:
+        if not isinstance(task_id, str) or not task_id.startswith("dep-"):
+            raise DependencyTaskStateError("dependency task is not found")
+        task = self._tasks.get(task_id)
+        if task is None:
+            raise DependencyTaskStateError("dependency task is not found")
+        return task
+
+    def _probe_definition(
+        self,
+        definition: DependencyDefinition,
+        *,
+        cancellation_event: threading.Event | None = None,
+    ) -> DependencyProbe:
+        cancellation_event = cancellation_event or threading.Event()
+        outputs: list[str] = []
+        for argv in definition.probe_commands:
+            command_outputs: list[str] = []
+            result = self._runner(
+                argv,
+                timeout=min(definition.timeout_seconds, 60),
+                cancellation_event=cancellation_event,
+                output_sink=lambda value: command_outputs.append(_sanitize_output(value)),
+            )
+            outputs.extend(command_outputs or [_sanitize_output(result.output)])
+            if result.cancelled or cancellation_event.is_set():
+                return DependencyProbe(
+                    definition.dependency_id,
+                    False,
+                    "cancelled",
+                    None,
+                    "readiness probe was cancelled",
+                    _timestamp(),
+                )
+            if result.timed_out:
+                return DependencyProbe(
+                    definition.dependency_id,
+                    False,
+                    "failed",
+                    None,
+                    "readiness probe timed out",
+                    _timestamp(),
+                )
+            if result.exit_code != 0:
+                return DependencyProbe(
+                    definition.dependency_id,
+                    False,
+                    "missing",
+                    None,
+                    _bounded_text("".join(outputs)) or "dependency is not available",
+                    _timestamp(),
+                )
+
+        combined = _bounded_text("\n".join(item.strip() for item in outputs if item.strip()))
+        version, summary = _public_probe_result(definition, combined)
+        return DependencyProbe(
+            definition.dependency_id,
+            True,
+            "ready",
+            version,
+            summary,
+            _timestamp(),
+        )
+
+    def _start_task(self, task_id: str) -> None:
+        thread = threading.Thread(
+            target=self.run_task,
+            args=(task_id,),
+            name=f"kirara-dependency-{task_id[-8:]}",
+            daemon=True,
+        )
+        with self._lock:
+            self._threads[task_id] = thread
+        thread.start()
+
+    def _finish_task(
+        self,
+        task: DependencyInstallTask,
+        *,
+        status: str,
+        output: str,
+        error_code: str | None = None,
+        error_summary: str | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            task.status = status
+            task.finished_at = _timestamp()
+            task.error_code = error_code
+            task.error_summary = _bounded_text(_sanitize_output(error_summary or "")) or None
+            task.output_tail = _bounded_text(_sanitize_output(output))
+            self._persist_tasks()
+            if status != "succeeded":
+                state = self._registry[task.dependency_id]
+                state.update(
+                    {
+                        "status": "failed" if status == "failed" else status,
+                        "ready": False,
+                        "summary": task.error_summary,
+                        "checked_at": task.finished_at,
+                    }
+                )
+                self._persist_registry()
+            result = task.to_dict()
+        self._audit(
+            task.dependency_id,
+            f"install_{status}",
+            "succeeded" if status == "succeeded" else "failed",
+            task_id=task.task_id,
+            error_code=error_code,
+        )
+        return result
+
+    def _run_command(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: int,
+        cancellation_event: threading.Event,
+        output_sink: Callable[[str], None],
+    ) -> CommandResult:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key.upper() in _ALLOWED_ENVIRONMENT_KEYS
+        }
+        command = _resolve_command_argv(argv, environment)
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=self.root,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                shell=False,
+            )
+        except OSError as error:
+            return CommandResult(127, _sanitize_output(str(error)))
+
+        captured: list[str] = []
+        captured_size = 0
+
+        def read_output() -> None:
+            nonlocal captured_size
+            if process.stdout is None:
+                return
+            for line in iter(process.stdout.readline, ""):
+                sanitized = _sanitize_output(line)
+                if not sanitized:
+                    continue
+                output_sink(sanitized)
+                encoded_size = len(sanitized.encode("utf-8", errors="replace"))
+                if captured_size < MAX_COMMAND_OUTPUT_BYTES:
+                    captured.append(sanitized)
+                    captured_size += encoded_size
+
+        reader = threading.Thread(target=read_output, name="kirara-dependency-output", daemon=True)
+        reader.start()
+        deadline = time.monotonic() + max(1, timeout)
+        timed_out = False
+        cancelled = False
+        while process.poll() is None:
+            if cancellation_event.wait(0.1):
+                cancelled = True
+                self._terminate_process(process)
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                self._terminate_process(process)
+                break
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        reader.join(timeout=2)
+        output = _bounded_bytes("".join(captured), MAX_COMMAND_OUTPUT_BYTES)
+        return CommandResult(
+            exit_code=process.returncode,
+            output=output,
+            timed_out=timed_out,
+            cancelled=cancelled,
+        )
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[str]) -> None:
+        try:
+            process.terminate()
+            process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    def _load_registry(self) -> dict[str, dict[str, Any]]:
+        loaded: Mapping[str, Any] = {}
+        try:
+            payload = json.loads(self.registry_path.read_text(encoding="utf-8"))
+            if payload.get("version") == REGISTRY_FORMAT_VERSION and isinstance(payload.get("dependencies"), dict):
+                loaded = payload["dependencies"]
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+            loaded = {}
+        registry: dict[str, dict[str, Any]] = {}
+        for dependency_id in self._definitions:
+            value = loaded.get(dependency_id, {})
+            registry[dependency_id] = {
+                "dependency_id": dependency_id,
+                "status": str(value.get("status", "unknown")) if isinstance(value, Mapping) else "unknown",
+                "ready": value.get("ready") is True if isinstance(value, Mapping) else False,
+                "version": _optional_string(value.get("version")) if isinstance(value, Mapping) else None,
+                "summary": _sanitize_output(str(value.get("summary") or "")) if isinstance(value, Mapping) else None,
+                "checked_at": _optional_string(value.get("checked_at")) if isinstance(value, Mapping) else None,
+                "last_task_id": _optional_string(value.get("last_task_id")) if isinstance(value, Mapping) else None,
+            }
+        return registry
+
+    def _load_tasks(self) -> dict[str, DependencyInstallTask]:
+        try:
+            payload = json.loads(self.tasks_path.read_text(encoding="utf-8"))
+            if payload.get("version") != TASKS_FORMAT_VERSION or not isinstance(payload.get("tasks"), list):
+                return {}
+            tasks = [DependencyInstallTask.from_dict(item) for item in payload["tasks"] if isinstance(item, Mapping)]
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError, KeyError):
+            return {}
+        return {
+            task.task_id: task
+            for task in tasks
+            if task.dependency_id in self._definitions and task.task_id.startswith("dep-")
+        }
+
+    def _recover_interrupted_tasks(self) -> None:
+        changed = False
+        for task in self._tasks.values():
+            if task.status not in {"queued", "running"}:
+                continue
+            task.status = "failed"
+            task.finished_at = _timestamp()
+            task.error_code = "service_restarted"
+            task.error_summary = "dependency installation was interrupted by a service restart"
+            changed = True
+        if changed:
+            self._persist_tasks()
+
+    def _persist_registry(self) -> None:
+        self._atomic_json(
+            self.registry_path,
+            {"version": REGISTRY_FORMAT_VERSION, "dependencies": self._registry},
+        )
+
+    def _persist_tasks(self) -> None:
+        self._atomic_json(
+            self.tasks_path,
+            {
+                "version": TASKS_FORMAT_VERSION,
+                "tasks": [task.to_dict() for task in self._tasks.values()],
+            },
+        )
+
+    @staticmethod
+    def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
+        temporary = path.with_suffix(f"{path.suffix}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8", newline="\n") as output:
+                json.dump(payload, output, ensure_ascii=False, indent=2, sort_keys=True)
+                output.write("\n")
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _append_task_log(self, task_id: str, value: str) -> None:
+        path = self.logs_path / f"{task_id}.log"
+        sanitized = _sanitize_output(value)
+        if not sanitized:
+            return
+        try:
+            existing = path.stat().st_size if path.exists() else 0
+            remaining = MAX_COMMAND_OUTPUT_BYTES - existing
+            if remaining <= 0:
+                return
+            encoded = sanitized.encode("utf-8", errors="replace")[:remaining]
+            with path.open("ab") as output:
+                output.write(encoded)
+        except OSError:
+            pass
+
+    def _audit(
+        self,
+        dependency_id: str,
+        operation: str,
+        result: str,
+        *,
+        task_id: str | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        event = {
+            "dependency_id": dependency_id,
+            "operation": operation,
+            "result": result,
+            "task_id": task_id,
+            "error_code": error_code,
+            "timestamp": _timestamp(),
+        }
+        try:
+            with self.audit_path.open("a", encoding="utf-8", newline="\n") as output:
+                output.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+                output.flush()
+                os.fsync(output.fileno())
+        except OSError:
+            pass
+
+
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _resolve_command_argv(
+    argv: Sequence[str], environment: Mapping[str, str]
+) -> list[str]:
+    command = [str(argument) for argument in argv]
+    if not command:
+        return command
+    executable = shutil.which(command[0], path=environment.get("PATH"))
+    if executable is not None:
+        command[0] = executable
+    return command
+
+
+def _public_probe_result(
+    definition: DependencyDefinition, output: str
+) -> tuple[str | None, str]:
+    if definition.dependency_id != "agent-browser-browser":
+        version = output.splitlines()[0] if output else None
+        return version, output or "dependency is ready"
+
+    try:
+        payload = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        return None, "Agent Browser browser runtime is ready"
+
+    checks = payload.get("checks") if isinstance(payload, Mapping) else None
+    summary = payload.get("summary") if isinstance(payload, Mapping) else None
+    version = None
+    if isinstance(checks, list):
+        for check in checks:
+            if not isinstance(check, Mapping) or check.get("id") != "chrome.installed":
+                continue
+            match = re.search(r"\b\d+(?:\.\d+){1,3}\b", str(check.get("message") or ""))
+            if match:
+                version = match.group(0)
+            break
+
+    if isinstance(summary, Mapping):
+        passed = _safe_count(summary.get("pass"))
+        warned = _safe_count(summary.get("warn"))
+        failed = _safe_count(summary.get("fail"))
+        return version, (
+            "Agent Browser browser checks completed: "
+            f"{passed} passed, {warned} warnings, {failed} failed"
+        )
+    return version, "Agent Browser browser runtime is ready"
+
+
+def _safe_count(value: Any) -> int:
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _optional_string(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _bounded_text(value: str, limit: int = MAX_PUBLIC_OUTPUT_CHARS) -> str:
+    return value[-limit:]
+
+
+def _bounded_bytes(value: str, limit: int) -> str:
+    encoded = value.encode("utf-8", errors="replace")
+    if len(encoded) <= limit:
+        return value
+    return encoded[-limit:].decode("utf-8", errors="replace")
+
+
+def _sanitize_output(value: str) -> str:
+    sanitized = _INLINE_SECRET_PATTERN.sub(lambda match: f"{match.group(1)}=[redacted]", value)
+    sanitized = _BEARER_PATTERN.sub("Bearer [redacted]", sanitized)
+    sanitized = _WINDOWS_PATH_PATTERN.sub("<host-path>", sanitized)
+    sanitized = _POSIX_PATH_PATTERN.sub("<host-path>", sanitized)
+    return _bounded_text(sanitized, MAX_COMMAND_OUTPUT_BYTES)
+
+
+__all__ = [
+    "CommandResult",
+    "DependencyDefinition",
+    "DependencyInstallConfirmationRequired",
+    "DependencyInstallTask",
+    "DependencyInstallUnsupported",
+    "DependencyNotFoundError",
+    "DependencyProbe",
+    "DependencyTaskStateError",
+    "SystemDependencyError",
+    "SystemDependencyService",
+]

@@ -7,6 +7,7 @@ from collections import deque
 from copy import deepcopy
 from datetime import datetime, timezone
 from functools import partial
+from pathlib import Path
 import time
 from typing import Callable, Dict, Iterable, NamedTuple, Optional, Tuple
 
@@ -14,12 +15,15 @@ from mcp import McpError, types
 from mcp.shared.session import RequestResponder
 
 from kirara_ai.config.global_config import GlobalConfig, MCPServerConfig
-from kirara_ai.agent_runtime.core import effective_mcp_allowlist
+from kirara_ai.config import DATA_PATH
+from kirara_ai.agent_runtime.core import resolve_mcp_tool_allowlist
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.logger import get_logger
 from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
 from .models import MCPConnectionState
 from .server import MCPServer
+from .audit_store import MCPAuditStore
+from .confirmation_store import MCPConfirmationStore
 
 logger = get_logger("MCP")
 
@@ -36,10 +40,15 @@ class MCPServerManager:
         self,
         container: DependencyContainer,
         audit_sink: Optional[Callable[[dict], None]] = None,
+        confirmation_store: MCPConfirmationStore | None = None,
+        audit_store: MCPAuditStore | None = None,
     ):
         """初始化MCP服务器管理器"""
         self.container = container
         self.config = container.resolve(GlobalConfig)
+        self.confirmation_store = confirmation_store or MCPConfirmationStore(
+            Path(DATA_PATH) / "mcp" / "confirmations.db"
+        )
         self.servers: Dict[str, MCPServer] = {}
         self.tools_cache: Dict[str, ToolCacheEntry] = {}
         self.prompts_cache: Dict[str, list[types.Prompt]] = {}
@@ -50,6 +59,14 @@ class MCPServerManager:
         self.runtime_status: Dict[str, dict[str, object]] = {}
         self.audit_records: deque[dict[str, object]] = deque(maxlen=1000)
         self._audit_sink = audit_sink
+        try:
+            self.audit_store = audit_store or MCPAuditStore(
+                Path(DATA_PATH) / "mcp" / "audit.db",
+                retention_limit=self.audit_records.maxlen or 1000,
+            )
+        except Exception:
+            self.audit_store = None
+            logger.warning("Persistent MCP audit storage is unavailable; using memory only")
 
     @staticmethod
     def _runtime_timestamp() -> str:
@@ -109,13 +126,17 @@ class MCPServerManager:
         started_at: float,
         outcome: str,
         error: Optional[BaseException] = None,
+        correlation_id: Optional[str] = None,
     ) -> None:
         record = {
             "component": "mcp",
+            "timestamp": self._runtime_timestamp(),
             "server": server,
+            "resource_id": f"mcp.{server}",
             "operation": operation,
             "duration_ms": round((time.monotonic() - started_at) * 1000, 3),
             "outcome": outcome,
+            "correlation_id": correlation_id,
             "error": (
                 {"type": type(error).__name__, "message": "operation failed"}
                 if error is not None
@@ -123,6 +144,12 @@ class MCPServerManager:
             ),
         }
         self.audit_records.append(record)
+        if self.audit_store is not None:
+            try:
+                self.audit_store.append(record)
+            except Exception:
+                self.audit_store = None
+                logger.warning("Persistent MCP audit write failed; using memory only")
         if self.container.has(ExtensionLifecycleHost):
             self.container.resolve(ExtensionLifecycleHost).emit(
                 "mcp_operation",
@@ -138,6 +165,63 @@ class MCPServerManager:
                 self._audit_sink(record)
             except Exception:
                 logger.warning("MCP audit sink rejected an event")
+
+    def list_audit(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 50,
+        server_id: str | None = None,
+        operation: str | None = None,
+        outcome: str | None = None,
+    ) -> dict[str, object]:
+        """Return persisted records, falling back to this process when needed."""
+        if offset < 0:
+            raise ValueError("audit offset cannot be negative")
+        if limit < 1 or limit > 200:
+            raise ValueError("audit limit is outside the allowed range")
+
+        normalized_server = server_id.strip() if server_id else None
+        normalized_operation = operation.strip() if operation else None
+        normalized_outcome = outcome.strip() if outcome else None
+
+        if self.audit_store is not None:
+            try:
+                return self.audit_store.list(
+                    offset=offset,
+                    limit=limit,
+                    server_id=normalized_server,
+                    operation=normalized_operation,
+                    outcome=normalized_outcome,
+                )
+            except Exception:
+                self.audit_store = None
+                logger.warning("Persistent MCP audit query failed; using memory only")
+
+        records = list(self.audit_records)
+        filtered = [
+            deepcopy(record)
+            for record in records
+            if (normalized_server is None or record.get("server") == normalized_server)
+            and (
+                normalized_operation is None
+                or record.get("operation") == normalized_operation
+            )
+            and (
+                normalized_outcome is None or record.get("outcome") == normalized_outcome
+            )
+        ]
+        filtered.reverse()
+        items = filtered[offset : offset + limit]
+        return {
+            "items": items,
+            "total": len(filtered),
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(items) < len(filtered),
+            "persistent": False,
+            "retention_limit": self.audit_records.maxlen or len(records),
+        }
             
     def load_servers(self):
         """从配置加载所有MCP服务器"""
@@ -262,15 +346,18 @@ class MCPServerManager:
             
     async def connect_server(self, server_id: str) -> bool:
         """连接MCP服务器"""
+        started_at = time.monotonic()
         server = self.servers.get(server_id)
         if not server:
             self._clear_server_caches(server_id)
             self._set_runtime_status(server_id, "failed", error="MCP server was not found")
+            self._audit_operation(server_id, "connect", started_at, "not_found")
             logger.error(f"Cannot connect to non-existent MCP server: {server_id}")
             return False
 
         if server.state == MCPConnectionState.CONNECTED:
             self._set_runtime_status(server_id, "running")
+            self._audit_operation(server_id, "connect", started_at, "already_connected")
             logger.warning(f"MCP server {server_id} is already connected")
             return True
 
@@ -287,6 +374,7 @@ class MCPServerManager:
             if not success:
                 self._clear_server_caches(server_id)
                 self._set_runtime_status(server_id, "failed", error="connection attempt failed")
+                self._audit_operation(server_id, "connect", started_at, "failure")
                 logger.error(f"Failed to connect to MCP server {server_id}")
                 return False
             
@@ -299,16 +387,19 @@ class MCPServerManager:
             if not all(cache_results):
                 self._clear_server_caches(server_id)
                 self._set_runtime_status(server_id, "failed", error="capability loading failed")
+                self._audit_operation(server_id, "connect", started_at, "capability_load_failed")
                 logger.error(f"Failed to load MCP capabilities for server {server_id}")
                 return False
             
             self._set_runtime_status(server_id, "running")
+            self._audit_operation(server_id, "connect", started_at, "success")
             logger.info(f"Successfully connected to MCP server {server_id}")
             return True
             
         except Exception as e:
             self._clear_server_caches(server_id)
             self._set_runtime_status(server_id, "failed", error=e)
+            self._audit_operation(server_id, "connect", started_at, "error", e)
             logger.opt(exception=e).error(f"Error occurred when connecting to MCP server {server_id}")
             return False
     
@@ -332,17 +423,20 @@ class MCPServerManager:
             
     async def stop_server(self, server_id: str) -> bool:
         """断开MCP服务器连接"""
+        started_at = time.monotonic()
         server = self.servers.get(server_id)
         
         if not server:
             self._clear_server_caches(server_id)
             self._set_runtime_status(server_id, "stopped")
+            self._audit_operation(server_id, "disconnect", started_at, "not_found")
             logger.error(f"Cannot disconnect from non-existent MCP server: {server_id}")
             return False
         
         if server.state != MCPConnectionState.CONNECTED:
             self._clear_server_caches(server_id)
             self._set_runtime_status(server_id, "stopped")
+            self._audit_operation(server_id, "disconnect", started_at, "already_disconnected")
             logger.warning(f"MCP server {server_id} is not connected")
             return True
         
@@ -354,15 +448,18 @@ class MCPServerManager:
             
             if not success:
                 self._set_runtime_status(server_id, "failed", error="disconnect attempt failed")
+                self._audit_operation(server_id, "disconnect", started_at, "failure")
                 logger.error(f"Failed to disconnect from MCP server {server_id}")
                 return False
-            
+
             self._set_runtime_status(server_id, "stopped")
+            self._audit_operation(server_id, "disconnect", started_at, "success")
             logger.info(f"Successfully disconnected from MCP server {server_id}")
             return True
 
         except Exception as e:
             self._set_runtime_status(server_id, "failed", error=e)
+            self._audit_operation(server_id, "disconnect", started_at, "error", e)
             logger.opt(exception=e).error(f"Error occurred when disconnecting from MCP server {server_id}")
             return False
         finally:
@@ -478,6 +575,7 @@ class MCPServerManager:
         session_allowlist: Optional[set[str] | frozenset[str]] = None,
         workflow_allowlist: Optional[set[str] | frozenset[str]] = None,
         confirmed: bool = False,
+        correlation_id: Optional[str] = None,
     ) -> Optional[types.CallToolResult]:
         """
         调用指定工具
@@ -495,7 +593,13 @@ class MCPServerManager:
         result = self.get_tool_server(tool_name)
         if not result:
             logger.error(f"Tool {tool_name} not found or server not available")
-            self._audit_operation(server_id, "call_tool", started_at, "not_found")
+            self._audit_operation(
+                server_id,
+                "call_tool",
+                started_at,
+                "not_found",
+                correlation_id=correlation_id,
+            )
             return None
 
         if agent_mcp_server_ids is not None:
@@ -506,46 +610,91 @@ class MCPServerManager:
             }
             if server_id not in bound_servers:
                 logger.warning("Rejected MCP tool from an unbound server")
-                self._audit_operation(server_id, "call_tool", started_at, "server_not_bound")
+                self._audit_operation(
+                    server_id,
+                    "call_tool",
+                    started_at,
+                    "server_not_bound",
+                    correlation_id=correlation_id,
+                )
                 return None
 
         if agent_allowlist is not None:
             try:
-                allowed_tools = effective_mcp_allowlist(
+                allowed_tools = resolve_mcp_tool_allowlist(
                     agent_allowlist=agent_allowlist,
+                    tool_entries=self.tools_cache,
+                    agent_mcp_server_ids=agent_mcp_server_ids,
                     session_allowlist=session_allowlist,
                     workflow_allowlist=workflow_allowlist,
-                    connected_tools=self.tools_cache.keys(),
                 )
             except ValueError as error:
                 logger.warning("Rejected MCP tool policy expansion")
-                self._audit_operation(server_id, "call_tool", started_at, "denied", error)
+                self._audit_operation(
+                    server_id,
+                    "call_tool",
+                    started_at,
+                    "denied",
+                    error,
+                    correlation_id=correlation_id,
+                )
                 return None
             if tool_name not in allowed_tools:
                 logger.warning("Rejected MCP tool outside runtime allowlist")
-                self._audit_operation(server_id, "call_tool", started_at, "denied")
+                self._audit_operation(
+                    server_id,
+                    "call_tool",
+                    started_at,
+                    "denied",
+                    correlation_id=correlation_id,
+                )
                 return None
 
         if self._tool_requires_confirmation(entry.tool_info) and not confirmed:
             logger.warning("Rejected MCP tool call pending user confirmation")
-            self._audit_operation(server_id, "call_tool", started_at, "confirmation_required")
+            self._audit_operation(
+                server_id,
+                "call_tool",
+                started_at,
+                "confirmation_required",
+                correlation_id=correlation_id,
+            )
             return None
         
         server, original_name = result
         
         if server.state != MCPConnectionState.CONNECTED:
             logger.error(f"Server for tool {tool_name} is not connected")
-            self._audit_operation(server_id, "call_tool", started_at, "disconnected")
+            self._audit_operation(
+                server_id,
+                "call_tool",
+                started_at,
+                "disconnected",
+                correlation_id=correlation_id,
+            )
             return None
         
         try:
             # 使用原始工具名称调用
             call_tool_result = await server.call_tool(original_name, tool_args)
-            self._audit_operation(server_id, "call_tool", started_at, "success")
+            self._audit_operation(
+                server_id,
+                "call_tool",
+                started_at,
+                "success",
+                correlation_id=correlation_id,
+            )
             return call_tool_result
         except Exception as e:
             logger.error(f"Error occurred when calling tool {tool_name}")
-            self._audit_operation(server_id, "call_tool", started_at, "error", e)
+            self._audit_operation(
+                server_id,
+                "call_tool",
+                started_at,
+                "error",
+                e,
+                correlation_id=correlation_id,
+            )
             return None
 
     @staticmethod

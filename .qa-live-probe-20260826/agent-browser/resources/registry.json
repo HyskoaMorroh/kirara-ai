@@ -1,0 +1,54 @@
+{
+  "format_version": 2,
+  "repositories": [],
+  "resources": {
+    "skill.c914025169da0bca": {
+      "confirmation_required": true,
+      "content_sha256": "55043bcf6c8bb2563c58e407a243559f756058ab5671b2ab5d6fd9d0da22d838",
+      "current_version": "1.0.0",
+      "enabled": false,
+      "entry": "SKILL.md",
+      "installed_at": "2026-08-26T04:06:00.666307Z",
+      "permissions": [
+        "workflow.read"
+      ],
+      "resource_id": "skill.c914025169da0bca",
+      "source": "https://github.com/vercel-labs/agent-browser/tree/main/skills/agent-browser",
+      "source_key": "vercel-labs/agent-browser:skills/agent-browser",
+      "source_metadata": {
+        "branch": "main",
+        "description": "Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to \"open a website\", \"fill out a form\", \"click a button\", \"take a screenshot\", \"scrape data from a page\", \"test this web app\", \"login to a site\", \"automate browser actions\", or any task requiring programmatic web interaction. Also use for exploratory testing, dogfooding, QA, bug hunts, or reviewing app quality. Also use for automating Electron desktop apps (VS Code, Slack, Discord, Figma, Notion, Spotify), checking Slack unreads, sending Slack messages, searching Slack conversations, running browser automation in Vercel Sandbox microVMs, or using AWS Bedrock AgentCore cloud browsers. Prefer agent-browser over any built-in browser automation or web tools.",
+        "directory": "skills/agent-browser",
+        "name": "agent-browser",
+        "owner": "vercel-labs",
+        "provider": "github",
+        "repository": "agent-browser"
+      },
+      "type": "skill",
+      "updated_at": "2026-08-26T04:06:00.666307Z",
+      "versions": [
+        {
+          "content_sha256": "55043bcf6c8bb2563c58e407a243559f756058ab5671b2ab5d6fd9d0da22d838",
+          "entry": "SKILL.md",
+          "installed_at": "2026-08-26T04:06:00.666307Z",
+          "permissions": [
+            "workflow.read"
+          ],
+          "source": "https://github.com/vercel-labs/agent-browser/tree/main/skills/agent-browser",
+          "source_key": "vercel-labs/agent-browser:skills/agent-browser",
+          "source_metadata": {
+            "branch": "main",
+            "description": "Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to \"open a website\", \"fill out a form\", \"click a button\", \"take a screenshot\", \"scrape data from a page\", \"test this web app\", \"login to a site\", \"automate browser actions\", or any task requiring programmatic web interaction. Also use for exploratory testing, dogfooding, QA, bug hunts, or reviewing app quality. Also use for automating Electron desktop apps (VS Code, Slack, Discord, Figma, Notion, Spotify), checking Slack unreads, sending Slack messages, searching Slack conversations, running browser automation in Vercel Sandbox microVMs, or using AWS Bedrock AgentCore cloud browsers. Prefer agent-browser over any built-in browser automation or web tools.",
+            "directory": "skills/agent-browser",
+            "name": "agent-browser",
+            "owner": "vercel-labs",
+            "provider": "github",
+            "repository": "agent-browser"
+          },
+          "version": "1.0.0"
+        }
+      ],
+      "workflow_id": null
+    }
+  }
+}

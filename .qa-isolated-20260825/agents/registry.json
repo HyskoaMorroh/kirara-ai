@@ -50,7 +50,20 @@
           "version_policy": "current"
         }
       ],
-      "memory_bindings": [],
+      "memory_bindings": [
+        {
+          "content_sha256": "99517d71a1645fef9c7f8182a4abf45ceec05ea23b3b7abfe4490512d6c64ebc",
+          "enabled": true,
+          "permissions": [
+            "workflow.read"
+          ],
+          "resource_id": "memory.research-context",
+          "resource_type": "memory",
+          "source": "catalog://kirara/memory/research-context",
+          "version": "1.0.0",
+          "version_policy": "current"
+        }
+      ],
       "model_priority": [
         "qa-primary-model",
         "qa-fallback-model"
@@ -82,6 +95,18 @@
           "resource_id": "skill.c914025169da0bca",
           "resource_type": "skill",
           "source": "https://github.com/vercel-labs/agent-browser/tree/main/skills/agent-browser",
+          "version": "1.0.0",
+          "version_policy": "current"
+        },
+        {
+          "content_sha256": "752720cdeedabca354d7cd136df94de8c8b5b285c9717e759cf316f30d8b2aa4",
+          "enabled": true,
+          "permissions": [
+            "workflow.read"
+          ],
+          "resource_id": "skill.58e8bfda5b55b781",
+          "resource_type": "skill",
+          "source": "https://github.com/skills-101/superpowers/tree/main/tools/utilities/agent-browser",
           "version": "1.0.0",
           "version_policy": "current"
         }

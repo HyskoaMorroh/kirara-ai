@@ -32,9 +32,9 @@ vi.mock('naive-ui', () => {
     NCheckboxGroup: passthrough('NCheckboxGroup'),
     NForm: passthrough('NForm'),
     NFormItem: passthrough('NFormItem'),
-    NInput: { name: 'NInput', inheritAttrs: false, props: ['value'], emits: ['update:value'], template: '<input v-bind="$attrs" :value="value" @input="$emit(\'update:value\', $event.target.value)" />' },
+    NInput: { name: 'NInput', inheritAttrs: false, props: ['value', 'inputProps'], emits: ['update:value'], template: '<div class="n-input" v-bind="$attrs"><input v-bind="inputProps" :value="value" @input="$emit(\'update:value\', $event.target.value)" /></div>' },
     NInputNumber: { name: 'NInputNumber', props: ['value'], emits: ['update:value'], template: '<input type="number" v-bind="$attrs" :value="value" @input="$emit(\'update:value\', Number($event.target.value))" />' },
-    NSelect: { name: 'NSelect', inheritAttrs: false, props: ['value', 'options'], emits: ['update:value'], template: '<select v-bind="$attrs" :value="value" @change="$emit(\'update:value\', $event.target.value)"><option v-for="option in options" :key="option.value" :value="option.value">{{ option.label }}</option></select>' },
+    NSelect: { name: 'NSelect', inheritAttrs: false, props: ['value', 'options', 'inputProps'], emits: ['update:value'], template: '<div class="n-select" v-bind="$attrs"><select v-bind="inputProps" :value="value" @change="$emit(\'update:value\', $event.target.value)"><option v-for="option in options" :key="option.value" :value="option.value">{{ option.label }}</option></select></div>' },
     NSwitch: { name: 'NSwitch', props: ['value'], emits: ['update:value'], template: '<input type="checkbox" v-bind="$attrs" :checked="value" @change="$emit(\'update:value\', $event.target.checked)" />' },
     NTag: { template: '<span><slot /></span>' }
   }
@@ -64,12 +64,33 @@ const agent = {
   }
 }
 
+const managedResource = (
+  resource_id: string,
+  type: 'prompt' | 'skill' | 'memory' | 'mcp' | 'hook',
+  enabled = true,
+  confirmation_required = false
+) => ({
+  resource_id,
+  type,
+  current_version: '1.0.0',
+  source: 'builtin',
+  entry: 'entry.md',
+  permissions: [],
+  content_sha256: 'hash',
+  enabled,
+  confirmation_required,
+  workflow_id: null,
+  installed_at: '2026-08-25T00:00:00Z',
+  updated_at: '2026-08-25T00:00:00Z',
+  versions: []
+})
+
 describe('AgentView', () => {
   beforeEach(() => {
     listAgents.mockReset().mockResolvedValue([agent])
     listResources.mockReset().mockResolvedValue([
-      { resource_id: 'prompt.office-research', type: 'prompt', current_version: '1.0.0' },
-      { resource_id: 'mcp.context7', type: 'mcp', current_version: '1.0.0' }
+      managedResource('prompt.office-research', 'prompt'),
+      managedResource('mcp.context7', 'mcp')
     ])
     createAgentConfiguration.mockReset().mockResolvedValue(agent)
     updateAgentConfiguration.mockReset().mockResolvedValue(agent)
@@ -92,7 +113,7 @@ describe('AgentView', () => {
     const wrapper = mount(AgentView)
     await flushPromises()
 
-    await wrapper.get('[data-test="agent-display-name"]').setValue('Updated Office Research')
+    await wrapper.get('[data-test="agent-display-name"] input').setValue('Updated Office Research')
     await wrapper.get('[data-test="save-agent"]').trigger('click')
     await flushPromises()
 
@@ -110,13 +131,98 @@ describe('AgentView', () => {
     )
   })
 
+  it('restores Memory bindings from the API and keeps them in the update payload', async () => {
+    const memoryBinding = {
+      resource_id: 'memory.research-context',
+      resource_type: 'memory',
+      version: '1.0.0',
+      version_policy: 'current',
+      enabled: true,
+      content_sha256: 'memory-hash',
+      permissions: [],
+      source: 'builtin'
+    }
+    listAgents.mockResolvedValue([{ ...agent, memory_bindings: [memoryBinding] }])
+    listResources.mockResolvedValue([
+      managedResource('prompt.office-research', 'prompt'),
+      managedResource('memory.research-context', 'memory'),
+      managedResource('mcp.context7', 'mcp')
+    ])
+
+    const wrapper = mount(AgentView)
+    await flushPromises()
+
+    expect((wrapper.get('[aria-label="Memory资源"]').element as HTMLSelectElement).value).toBe('memory.research-context')
+
+    await wrapper.get('[data-test="save-agent"]').trigger('click')
+    await flushPromises()
+
+    expect(updateAgentConfiguration).toHaveBeenCalledWith(
+      'office-research',
+      expect.objectContaining({
+        memory_bindings: [
+          expect.objectContaining({
+            resource_id: 'memory.research-context',
+            resource_type: 'memory',
+            version_policy: 'current',
+            enabled: true
+          })
+        ]
+      })
+    )
+  })
+
+  it('does not offer globally disabled or confirmation-pending resources for new bindings', async () => {
+    listResources.mockResolvedValue([
+      managedResource('prompt.office-research', 'prompt'),
+      managedResource('memory.disabled', 'memory', false),
+      managedResource('memory.pending-confirmation', 'memory', false, true),
+      managedResource('mcp.context7', 'mcp')
+    ])
+
+    const wrapper = mount(AgentView)
+    await flushPromises()
+
+    const memorySection = wrapper.get('[data-test="resource-binding-memory"]')
+    const addButton = memorySection.get('button')
+    expect((addButton.element as HTMLButtonElement).disabled).toBe(true)
+    expect(memorySection.text()).toContain('没有可绑定的已启用资源')
+
+    await addButton.trigger('click')
+    expect(memorySection.find('[aria-label="Memory资源"]').exists()).toBe(false)
+  })
+
+  it('gives every top-level switch an accessible name', async () => {
+    const wrapper = mount(AgentView)
+    await flushPromises()
+
+    expect(wrapper.get('[aria-label="允许 Agent 接收新请求"]').attributes('type')).toBe('checkbox')
+    expect(wrapper.get('[aria-label="设为默认 Agent"]').attributes('type')).toBe('checkbox')
+    expect(wrapper.get('[aria-label="允许调用工具"]').attributes('type')).toBe('checkbox')
+    expect(wrapper.find('[aria-label="允许 Agent 接收新请求"][aria-labelledby]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="设为默认 Agent"][aria-labelledby]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="允许调用工具"][aria-labelledby]').exists()).toBe(false)
+  })
+
+  it('forwards input and select labels to their semantic controls', async () => {
+    const wrapper = mount(AgentView)
+    await flushPromises()
+
+    const modelInput = wrapper.get('input[aria-label="1号模型"]')
+    const promptSelect = wrapper.get('select[aria-label="Prompt资源"]')
+    expect(modelInput.element.tagName).toBe('INPUT')
+    expect(promptSelect.element.tagName).toBe('SELECT')
+    expect(wrapper.find('.n-input[aria-label]').exists()).toBe(false)
+    expect(wrapper.find('.n-select[aria-label]').exists()).toBe(false)
+  })
+
   it('starts a new configuration with a stable empty editor', async () => {
     const wrapper = mount(AgentView)
     await flushPromises()
 
     await wrapper.get('[data-test="new-agent"]').trigger('click')
 
-    expect((wrapper.get('[data-test="agent-id"]').element as HTMLInputElement).value).toBe('')
+    expect((wrapper.get('[data-test="agent-id"] input').element as HTMLInputElement).value).toBe('')
     expect(wrapper.text()).toContain('新建 Agent')
   })
 
@@ -125,7 +231,7 @@ describe('AgentView', () => {
     await flushPromises()
 
     await wrapper.get('[data-test="new-agent"]').trigger('click')
-    await wrapper.get('[data-test="agent-id"]').setValue('new-research-agent')
+    await wrapper.get('[data-test="agent-id"] input').setValue('new-research-agent')
     await wrapper.get('[aria-label="1号模型"]').setValue('primary-model')
     await wrapper.get('[data-test="save-agent"]').trigger('click')
     await flushPromises()
@@ -134,5 +240,54 @@ describe('AgentView', () => {
       expect.objectContaining({ agent_id: 'new-research-agent' })
     )
     expect(updateAgentConfiguration).not.toHaveBeenCalled()
+  })
+
+  it('keeps a successfully loaded Agent editable when the resource catalog fails', async () => {
+    listResources.mockRejectedValue(new Error('resource catalog unavailable'))
+
+    const wrapper = mount(AgentView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Office Research')
+    expect(wrapper.text()).toContain('资源目录加载失败')
+    expect(wrapper.find('[data-test="agent-display-name"] input').exists()).toBe(true)
+
+    await wrapper.get('[data-test="agent-display-name"] input').setValue('Still Editable')
+    await wrapper.get('[data-test="save-agent"]').trigger('click')
+    await flushPromises()
+
+    expect(updateAgentConfiguration).toHaveBeenCalledWith(
+      'office-research',
+      expect.objectContaining({
+        display_name: 'Still Editable',
+        prompt_bindings: [expect.objectContaining({ resource_id: 'prompt.office-research' })]
+      })
+    )
+  })
+
+  it('shows an Agent loading error instead of an empty list or new configuration', async () => {
+    listAgents.mockRejectedValue(new Error('agent registry unavailable'))
+
+    const wrapper = mount(AgentView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Agent 配置加载失败')
+    expect(wrapper.text()).not.toContain('还没有 Agent')
+    expect(wrapper.text()).not.toContain('新建 Agent')
+    expect(wrapper.find('form').exists()).toBe(false)
+  })
+
+  it('does not overwrite unsaved Agent edits when a resource refresh fails', async () => {
+    const wrapper = mount(AgentView)
+    await flushPromises()
+    await wrapper.get('[data-test="agent-display-name"] input').setValue('Unsaved Draft')
+
+    listResources.mockRejectedValueOnce(new Error('refresh unavailable'))
+    await wrapper.get('[data-test="refresh-resources"]').trigger('click')
+    await flushPromises()
+
+    expect((wrapper.get('[data-test="agent-display-name"] input').element as HTMLInputElement).value).toBe('Unsaved Draft')
+    expect(wrapper.text()).toContain('资源目录加载失败')
+    expect(wrapper.find('[aria-label="Prompt资源"]').exists()).toBe(true)
   })
 })

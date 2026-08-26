@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 import bcrypt
 import jwt
@@ -14,20 +14,34 @@ def verify_password(password: str, hashed: bytes) -> bool:
     return bcrypt.checkpw(password.encode(), hashed)
 
 
-def create_jwt_token(secret_key: str, expires_delta: Optional[timedelta] = None) -> str:
+def create_jwt_token(
+    secret_key: str,
+    expires_delta: Optional[timedelta] = None,
+    *,
+    role: str = "admin",
+    scopes: Optional[list[str]] = None,
+) -> str:
     if expires_delta:
         expire = datetime.now() + expires_delta
     else:
         expire = datetime.now() + timedelta(minutes=30)
 
-    to_encode = {"exp": expire}
+    to_encode: dict[str, Any] = {
+        "exp": expire,
+        "role": role,
+        "scopes": list(scopes or []),
+    }
     encoded_jwt = jwt.encode(to_encode, secret_key, algorithm="HS256")
     return encoded_jwt
 
 
-def verify_jwt_token(token: str, secret_key: str) -> bool:
+def decode_jwt_token(token: str, secret_key: str) -> Mapping[str, Any] | None:
     try:
-        jwt.decode(token, secret_key, algorithms=["HS256"])
-        return True
-    except:
-        return False
+        payload = jwt.decode(token, secret_key, algorithms=["HS256"])
+        return payload if isinstance(payload, Mapping) else None
+    except Exception:
+        return None
+
+
+def verify_jwt_token(token: str, secret_key: str) -> bool:
+    return decode_jwt_token(token, secret_key) is not None

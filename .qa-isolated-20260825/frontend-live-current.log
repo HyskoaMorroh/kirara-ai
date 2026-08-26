@@ -1,0 +1,8 @@
+yarn run v1.22.22
+$ vite --debug --config vite.qa-isolated.config.ts --host 127.0.0.1 --port 15174
+
+  VITE v4.5.14  ready in 453 ms
+
+  ➜  Local:   http://127.0.0.1:15174/
+  ➜  press h to show help
+07:58:31 [vite] hmr update /src/components/layout/StatusBar.vue, /src/components/UpdateChecker.vue, /src/views/login/LoginView.vue, /src/components/LLMStatistics.vue, /src/views/resources/ResourceView.vue, /src/views/llm/AgentView.vue

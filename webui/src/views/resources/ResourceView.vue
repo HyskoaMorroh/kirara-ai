@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   NAlert,
   NButton,
@@ -40,9 +40,11 @@ import {
   ShieldCheckmarkOutline,
   TrashOutline
 } from '@vicons/ionicons5'
+import { useRoute } from 'vue-router'
 import {
   addRepository,
   bindResourceWorkflow,
+  cancelDependencyTask,
   checkResourceUpdates,
   deleteResourceBackup,
   disableResource,
@@ -50,11 +52,16 @@ import {
   getCatalogItem,
   importResource,
   installCatalogItem,
+  installSystemDependency,
+  listDependencyTasks,
   listResourceAudit,
   listResourceBackups,
   listRepositories,
   listResources,
+  listSystemDependencies,
+  probeSystemDependency,
   restoreResourceBackup,
+  retryDependencyTask,
   searchResourceCatalog,
   setRepositoryEnabled,
   updateRemoteResource
@@ -63,19 +70,22 @@ import { listAgents } from '@/api/agent'
 import type {
   AuditRecord,
   CatalogItem,
+  DependencyInstallTask,
   ManagedResource,
   ResourceBackup,
   ResourceRepository,
   ResourceType,
-  ResourceUpdateCheck
+  ResourceUpdateCheck,
+  SystemDependency
 } from '@/api/resource'
 import type { AgentSummary } from '@/api/agent'
 
 type ResourceFilter = ResourceType | 'all'
-type PanelName = 'install' | 'discover' | 'backups' | 'relations' | null
+type PanelName = 'install' | 'discover' | 'backups' | 'relations' | 'dependencies' | null
 
 const message = useMessage()
 const dialog = useDialog()
+const route = useRoute()
 const resources = ref<ManagedResource[]>([])
 const resourceType = ref<ResourceFilter>('all')
 const loading = ref(true)
@@ -87,6 +97,7 @@ const audits = ref<AuditRecord[]>([])
 const auditTotal = ref(0)
 const auditPage = ref(1)
 const auditLoading = ref(false)
+const auditFilters = ref({ correlationId: '', component: '', outcome: '' })
 const repositories = ref<ResourceRepository[]>([])
 const repositoryLoading = ref(false)
 const repositoryForm = ref({ owner: '', name: '', branch: 'main' })
@@ -107,6 +118,13 @@ const backups = ref<ResourceBackup[]>([])
 const backupLoading = ref(false)
 const agents = ref<AgentSummary[]>([])
 const relationLoading = ref(false)
+const systemDependencies = ref<SystemDependency[]>([])
+const dependencyTasks = ref<DependencyInstallTask[]>([])
+const dependencyLoading = ref(false)
+const dependencyTaskLoading = ref(false)
+const busyDependencyId = ref('')
+const busyDependencyTaskId = ref('')
+const compactDependencyLayout = ref(typeof window !== 'undefined' && window.innerWidth <= 768)
 const workflowId = ref('')
 const busyResourceId = ref('')
 const checkingResourceId = ref('')
@@ -118,6 +136,7 @@ const selectedUpdate = ref<ManagedResource | null>(null)
 const selectedUpdateCheck = computed(() =>
   selectedUpdate.value ? updateChecks.value[selectedUpdate.value.resource_id] : undefined
 )
+let dependencyPollTimer: ReturnType<typeof setTimeout> | null = null
 
 const typeOptions = [
   { label: '全部资源', value: 'all' },
@@ -213,6 +232,7 @@ const changeType = async (value: ResourceFilter) => {
 const reload = async () => {
   await loadResources()
   if (panel.value === 'backups') await loadBackups()
+  if (panel.value === 'dependencies') await loadDependencyData()
 }
 
 const ask = (options: { title: string; content: string; positiveText?: string; onPositiveClick: () => Promise<void> }) =>
@@ -425,7 +445,7 @@ const installCatalog = (item: CatalogItem) => {
     onPositiveClick: async () => {
       remoteLoading.value = true
       try {
-        await run(() => installCatalogItem(item.catalog_id, item.branch || 'main'), '安装资源失败')
+        await run(() => installCatalogItem(item.catalog_id, item.branch), '安装资源失败')
         message.success('资源已安装，启用前需要确认')
         await Promise.all([loadResources(), searchRemote()])
         if (showCatalogDetailModal.value && selectedCatalogItem.value?.catalog_id === item.catalog_id) {
@@ -487,15 +507,182 @@ const loadRelations = async () => {
   }
 }
 
-const loadAudit = async (resourceId?: string) => {
+const dependencyStatusLabel = (dependency: SystemDependency) => {
+  if (dependency.ready) return '已就绪'
+  if (dependency.status === 'unknown') return '未检查'
+  if (dependency.status === 'cancelled') return '已取消'
+  if (dependency.status === 'failed') return '检查失败'
+  return '未就绪'
+}
+
+const dependencyStatusType = (dependency: SystemDependency) => {
+  if (dependency.ready) return 'success' as const
+  if (dependency.status === 'failed') return 'error' as const
+  if (dependency.status === 'cancelled') return 'warning' as const
+  return 'default' as const
+}
+
+const dependencyTaskStatusLabel = (status: string) =>
+  ({ queued: '排队中', running: '安装中', succeeded: '已完成', failed: '失败', cancelled: '已取消' })[status] || status
+
+const dependencyTaskStatusType = (status: string) => {
+  if (status === 'succeeded') return 'success' as const
+  if (status === 'failed') return 'error' as const
+  if (status === 'queued' || status === 'running') return 'warning' as const
+  return 'default' as const
+}
+
+const dependencyName = (dependencyId: string) =>
+  systemDependencies.value.find((item) => item.dependency_id === dependencyId)?.name || dependencyId
+
+const activeDependencyTask = (dependencyId: string) =>
+  dependencyTasks.value.find(
+    (task) => task.dependency_id === dependencyId && ['queued', 'running'].includes(task.status)
+  )
+
+const clearDependencyPolling = () => {
+  if (dependencyPollTimer !== null) {
+    clearTimeout(dependencyPollTimer)
+    dependencyPollTimer = null
+  }
+}
+
+const scheduleDependencyPolling = () => {
+  clearDependencyPolling()
+  if (
+    panel.value !== 'dependencies' ||
+    !dependencyTasks.value.some((task) => ['queued', 'running'].includes(task.status))
+  ) return
+  dependencyPollTimer = setTimeout(() => {
+    void loadDependencyData(false)
+  }, 2000)
+}
+
+const loadSystemDependencies = async (reportError = true) => {
+  dependencyLoading.value = true
+  try {
+    systemDependencies.value = await listSystemDependencies()
+  } catch (error) {
+    if (reportError) {
+      const detail = error instanceof Error ? error.message : '未知错误'
+      message.error(`读取系统依赖失败：${detail}`)
+    }
+  } finally {
+    dependencyLoading.value = false
+  }
+}
+
+const loadDependencyTaskList = async (reportError = true) => {
+  dependencyTaskLoading.value = true
+  try {
+    dependencyTasks.value = await listDependencyTasks()
+  } catch (error) {
+    if (reportError) {
+      const detail = error instanceof Error ? error.message : '未知错误'
+      message.error(`读取依赖任务失败：${detail}`)
+    }
+  } finally {
+    dependencyTaskLoading.value = false
+    scheduleDependencyPolling()
+  }
+}
+
+const loadDependencyData = async (reportError = true) => {
+  await Promise.all([
+    loadSystemDependencies(reportError),
+    loadDependencyTaskList(reportError)
+  ])
+}
+
+const probeDependency = async (dependency: SystemDependency) => {
+  busyDependencyId.value = dependency.dependency_id
+  try {
+    const result = await run(
+      () => probeSystemDependency(dependency.dependency_id),
+      '检查系统依赖失败'
+    )
+    systemDependencies.value = systemDependencies.value.map((item) =>
+      item.dependency_id === result.dependency_id ? result : item
+    )
+    message.success(`${dependency.name} 检查完成`)
+  } finally {
+    busyDependencyId.value = ''
+  }
+}
+
+const installDependency = (dependency: SystemDependency) => {
+  ask({
+    title: '确认安装系统依赖',
+    content: `服务器将使用已登记的受控安装流程处理 ${dependency.name}。该操作可能修改 VPS 的工具环境。`,
+    positiveText: '安装',
+    onPositiveClick: async () => {
+      busyDependencyId.value = dependency.dependency_id
+      try {
+        await run(
+          () => installSystemDependency(dependency.dependency_id, true),
+          '创建依赖安装任务失败'
+        )
+        message.success('依赖安装任务已创建')
+        await loadDependencyData()
+      } finally {
+        busyDependencyId.value = ''
+      }
+    }
+  })
+}
+
+const retryDependency = (task: DependencyInstallTask) => {
+  ask({
+    title: '确认重试依赖任务',
+    content: `服务器将为 ${dependencyName(task.dependency_id)} 创建新的受控安装任务。`,
+    positiveText: '重试',
+    onPositiveClick: async () => {
+      busyDependencyTaskId.value = task.task_id
+      try {
+        await run(() => retryDependencyTask(task.task_id, true), '重试依赖任务失败')
+        message.success('依赖重试任务已创建')
+        await loadDependencyData()
+      } finally {
+        busyDependencyTaskId.value = ''
+      }
+    }
+  })
+}
+
+const cancelDependency = async (task: DependencyInstallTask) => {
+  busyDependencyTaskId.value = task.task_id
+  try {
+    await run(() => cancelDependencyTask(task.task_id), '取消依赖任务失败')
+    message.success('已请求取消依赖任务')
+    await loadDependencyData()
+  } finally {
+    busyDependencyTaskId.value = ''
+  }
+}
+
+const loadAudit = async () => {
   auditLoading.value = true
   try {
-    const page = await run(() => listResourceAudit(resourceId, (auditPage.value - 1) * 10, 10), '读取审计记录失败')
+    const page = await run(() => listResourceAudit({
+      correlationId: auditFilters.value.correlationId.trim() || undefined,
+      component: auditFilters.value.component || undefined,
+      outcome: auditFilters.value.outcome || undefined
+    }, (auditPage.value - 1) * 10, 10), '读取审计记录失败')
     audits.value = page.items
     auditTotal.value = page.total
   } finally {
     auditLoading.value = false
   }
+}
+
+const applyAuditFilters = async () => {
+  auditPage.value = 1
+  await loadAudit()
+}
+
+const handleAuditPageChange = async (page: number) => {
+  auditPage.value = page
+  await loadAudit()
 }
 
 const bindWorkflow = (resource: ManagedResource) => {
@@ -582,23 +769,155 @@ const backupColumns: DataTableColumns<ResourceBackup> = [
   }
 ]
 
+const dependencyColumns: DataTableColumns<SystemDependency> = [
+  {
+    title: '依赖',
+    key: 'name',
+    width: 240,
+    render: (row) => h('div', { class: 'dependency-name' }, [
+      h('strong', row.name),
+      h('small', row.description)
+    ])
+  },
+  {
+    title: '用于',
+    key: 'required_by',
+    width: 210,
+    render: (row) => h('div', { class: 'dependency-tags' },
+      row.required_by.map((item) => h(NTag, { size: 'small', bordered: false }, { default: () => item }))
+    )
+  },
+  {
+    title: '就绪状态',
+    key: 'status',
+    width: 180,
+    render: (row) => h('div', { class: 'dependency-status' }, [
+      h(NTag, { type: dependencyStatusType(row), bordered: false }, { default: () => dependencyStatusLabel(row) }),
+      h('small', row.version || `检查时间：${formatDate(row.checked_at || undefined)}`)
+    ])
+  },
+  {
+    title: '操作',
+    key: 'actions',
+    width: 210,
+    render: (row) => h(NSpace, { size: 6, wrap: true }, {
+      default: () => [
+        h(NButton, {
+          size: 'small',
+          secondary: true,
+          loading: busyDependencyId.value === row.dependency_id,
+          'aria-label': `检查 ${row.name}`,
+          onClick: () => probeDependency(row)
+        }, { default: () => '检查' }),
+        row.install_supported
+          ? h(NButton, {
+              size: 'small',
+              type: 'primary',
+              disabled: Boolean(activeDependencyTask(row.dependency_id)),
+              loading: busyDependencyId.value === row.dependency_id,
+              'aria-label': `安装 ${row.name}`,
+              onClick: () => installDependency(row)
+            }, { default: () => row.ready ? '重新检查安装' : '安装' })
+          : h('span', { class: 'operator-guidance' }, row.operator_guidance || '需要 VPS 运维处理')
+      ]
+    })
+  }
+]
+
+const dependencyTaskColumns: DataTableColumns<DependencyInstallTask> = [
+  {
+    title: '依赖',
+    key: 'dependency_id',
+    width: 210,
+    render: (row) => h('div', { class: 'dependency-name' }, [
+      h('strong', dependencyName(row.dependency_id)),
+      h('small', row.retry_of ? '重试任务' : '安装任务')
+    ])
+  },
+  {
+    title: '任务状态',
+    key: 'status',
+    width: 120,
+    render: (row) => h(NTag, { type: dependencyTaskStatusType(row.status), bordered: false }, {
+      default: () => dependencyTaskStatusLabel(row.status)
+    })
+  },
+  {
+    title: '结果',
+    key: 'error_summary',
+    width: 260,
+    render: (row) => h('div', { class: 'dependency-result' }, [
+      h('span', row.error_summary || (row.status === 'succeeded' ? '依赖已通过安装后检查' : '等待任务状态更新')),
+      h('small', formatDate(row.finished_at || row.started_at || row.created_at))
+    ])
+  },
+  {
+    title: '操作',
+    key: 'actions',
+    width: 120,
+    render: (row) => h(NSpace, { size: 4 }, {
+      default: () => [
+        ['failed', 'cancelled'].includes(row.status)
+          ? h(NButton, {
+              size: 'small',
+              loading: busyDependencyTaskId.value === row.task_id,
+              'aria-label': '重试依赖任务',
+              onClick: () => retryDependency(row)
+            }, { default: () => '重试' })
+          : null,
+        ['queued', 'running'].includes(row.status)
+          ? h(NButton, {
+              size: 'small',
+              type: 'warning',
+              secondary: true,
+              loading: busyDependencyTaskId.value === row.task_id,
+              'aria-label': '取消依赖任务',
+              onClick: () => cancelDependency(row)
+            }, { default: () => '取消' })
+          : null
+      ]
+    })
+  }
+]
+
 const auditColumns: DataTableColumns<AuditRecord> = [
   { title: '时间', key: 'timestamp', render: (row) => formatDate(row.timestamp) },
-  { title: '资源', key: 'resource_id' },
+  { title: '组件', key: 'component', render: (row) => row.component || row.type || '资源生命周期' },
+  { title: '资源', key: 'resource_id', render: (row) => row.resource_id || row.server || '未记录' },
   { title: '操作', key: 'operation' },
-  { title: '结果', key: 'result' },
-  { title: '版本', key: 'current_version' }
+  { title: '结果', key: 'outcome', render: (row) => row.outcome || row.result || row.status || '未记录' },
+  { title: '关联 ID', key: 'correlation_id', render: (row) => row.correlation_id || '未记录' }
 ]
 
 const openPanel = async (name: Exclude<PanelName, null>) => {
+  clearDependencyPolling()
   panel.value = name
   if (name === 'discover') await Promise.all([loadRepositories(), searchRemote()])
   if (name === 'backups') await loadBackups()
   if (name === 'relations') await loadRelations()
+  if (name === 'dependencies') await loadDependencyData()
+}
+
+const closePanel = () => {
+  panel.value = null
+  clearDependencyPolling()
+}
+
+const updateDependencyLayout = () => {
+  compactDependencyLayout.value = window.innerWidth <= 768
 }
 
 onMounted(() => {
+  window.addEventListener('resize', updateDependencyLayout)
   void loadResources()
+  if (route.query.panel === 'dependencies') {
+    void openPanel('dependencies')
+  }
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', updateDependencyLayout)
+  clearDependencyPolling()
 })
 </script>
 
@@ -613,6 +932,7 @@ onMounted(() => {
       <n-space class="header-actions" :wrap="true">
         <n-button secondary @click="reload"><template #icon><n-icon aria-hidden="true"><refresh-outline /></n-icon></template>刷新</n-button>
         <n-button secondary @click="openPanel('backups')"><template #icon><n-icon aria-hidden="true"><archive-outline /></n-icon></template>备份与恢复</n-button>
+        <n-button secondary aria-label="系统依赖" @click="openPanel('dependencies')"><template #icon><n-icon aria-hidden="true"><build-outline /></n-icon></template>系统依赖</n-button>
         <n-button type="primary" aria-label="发现并安装资源" @click="openPanel('discover')"><template #icon><n-icon aria-hidden="true"><search-outline /></n-icon></template>发现并安装</n-button>
       </n-space>
     </header>
@@ -655,8 +975,24 @@ onMounted(() => {
 
     <n-card v-if="audits.length || auditLoading" class="workspace-card audit-card">
       <h2 class="card-section-title">最近变更</h2>
-      <n-data-table :loading="auditLoading" :columns="auditColumns" :data="audits" :pagination="false" :bordered="false" :scroll-x="680" />
-      <n-pagination v-if="auditTotal > 10" v-model:page="auditPage" :page-count="Math.ceil(auditTotal / 10)" @update:page="loadAudit" />
+      <div class="audit-toolbar">
+        <n-input v-model:value="auditFilters.correlationId" clearable placeholder="关联 ID" aria-label="按关联 ID 筛选审计" @keyup.enter="applyAuditFilters" />
+        <n-select v-model:value="auditFilters.component" clearable placeholder="全部组件" aria-label="按组件筛选审计" :options="[
+          { label: '资源生命周期', value: 'resource_lifecycle' },
+          { label: 'Agent', value: 'agent_runtime' },
+          { label: 'Hook', value: 'agent_hook' },
+          { label: 'MCP', value: 'mcp' }
+        ]" />
+        <n-select v-model:value="auditFilters.outcome" clearable placeholder="全部结果" aria-label="按结果筛选审计" :options="[
+          { label: '成功', value: 'success' },
+          { label: '失败', value: 'failure' },
+          { label: '错误', value: 'error' },
+          { label: '拒绝', value: 'denied' }
+        ]" />
+        <n-button secondary :loading="auditLoading" @click="applyAuditFilters"><template #icon><n-icon aria-hidden="true"><search-outline /></n-icon></template>筛选</n-button>
+      </div>
+      <n-data-table :loading="auditLoading" :columns="auditColumns" :data="audits" :pagination="false" :bordered="false" :scroll-x="820" />
+      <n-pagination v-if="auditTotal > 10" :page="auditPage" :page-count="Math.ceil(auditTotal / 10)" @update:page="handleAuditPageChange" />
     </n-card>
 
     <n-modal v-model:show="showDetailModal" preset="card" title="资源详情" aria-label="资源详情" class="resource-modal">
@@ -779,13 +1115,72 @@ onMounted(() => {
       </template>
     </n-modal>
 
-    <n-modal :show="panel === 'backups'" preset="card" title="备份与恢复" aria-label="备份与恢复" class="resource-modal" @update:show="(value) => !value && (panel = null)">
+    <n-modal :show="panel === 'dependencies'" preset="card" title="VPS 系统依赖" aria-label="VPS 系统依赖" class="resource-modal dependency-modal" @update:show="(value) => !value && closePanel()">
+      <n-alert type="info" :show-icon="true">这里管理 Agent 运行所需的服务器依赖。依赖就绪状态、资源安装状态和 MCP 连接状态分别记录，安装任务会在服务器后台执行。</n-alert>
+      <div class="dependency-section-heading">
+        <div>
+          <h2 class="card-section-title">运行环境</h2>
+          <p class="section-caption">检查已登记的 CLI、运行时和浏览器环境，以及它们被哪些资源使用。</p>
+        </div>
+        <n-button secondary :loading="dependencyLoading || dependencyTaskLoading" aria-label="刷新系统依赖" @click="loadDependencyData()">
+          <template #icon><n-icon aria-hidden="true"><refresh-outline /></n-icon></template>刷新
+        </n-button>
+      </div>
+      <div v-if="dependencyLoading" class="loading-state" aria-busy="true"><n-skeleton text :repeat="4" /></div>
+      <n-empty v-else-if="!systemDependencies.length" description="暂无系统依赖登记" />
+      <div v-else-if="compactDependencyLayout" class="dependency-mobile-list">
+        <article v-for="dependency in systemDependencies" :key="dependency.dependency_id" class="dependency-mobile-item">
+          <div class="dependency-mobile-heading">
+            <strong>{{ dependency.name }}</strong>
+            <n-tag :type="dependencyStatusType(dependency)" size="small" :bordered="false">{{ dependencyStatusLabel(dependency) }}</n-tag>
+          </div>
+          <p>{{ dependency.description }}</p>
+          <div class="dependency-tags">
+            <n-tag v-for="item in dependency.required_by" :key="item" size="small" :bordered="false">{{ item }}</n-tag>
+          </div>
+          <small>{{ dependency.version || `检查时间：${formatDate(dependency.checked_at || undefined)}` }}</small>
+          <n-space :wrap="true">
+            <n-button size="small" secondary :loading="busyDependencyId === dependency.dependency_id" :aria-label="`检查 ${dependency.name}`" @click="probeDependency(dependency)">检查</n-button>
+            <n-button v-if="dependency.install_supported" size="small" type="primary" :disabled="Boolean(activeDependencyTask(dependency.dependency_id))" :loading="busyDependencyId === dependency.dependency_id" :aria-label="`安装 ${dependency.name}`" @click="installDependency(dependency)">{{ dependency.ready ? '重新检查安装' : '安装' }}</n-button>
+          </n-space>
+          <span v-if="!dependency.install_supported" class="operator-guidance">{{ dependency.operator_guidance || '需要 VPS 运维处理' }}</span>
+        </article>
+      </div>
+      <n-data-table v-else class="modal-table" :loading="dependencyLoading" :columns="dependencyColumns" :data="systemDependencies" :pagination="false" :bordered="false" :scroll-x="760" />
+
+      <n-divider />
+      <div class="dependency-section-heading">
+        <div>
+          <h2 class="card-section-title">安装任务</h2>
+          <p class="section-caption">任务状态会自动刷新；输出仅保留经过处理的结果摘要。</p>
+        </div>
+      </div>
+      <div v-if="dependencyTaskLoading" class="loading-state" aria-busy="true"><n-skeleton text :repeat="3" /></div>
+      <n-empty v-else-if="!dependencyTasks.length" description="暂无依赖安装任务" />
+      <div v-else-if="compactDependencyLayout" class="dependency-mobile-list">
+        <article v-for="task in dependencyTasks" :key="task.task_id" class="dependency-mobile-item">
+          <div class="dependency-mobile-heading">
+            <strong>{{ dependencyName(task.dependency_id) }}</strong>
+            <n-tag :type="dependencyTaskStatusType(task.status)" size="small" :bordered="false">{{ dependencyTaskStatusLabel(task.status) }}</n-tag>
+          </div>
+          <p>{{ task.error_summary || (task.status === 'succeeded' ? '依赖已通过安装后检查' : '等待任务状态更新') }}</p>
+          <small>{{ task.retry_of ? '重试任务' : '安装任务' }} · {{ formatDate(task.finished_at || task.started_at || task.created_at) }}</small>
+          <n-space :wrap="true">
+            <n-button v-if="['failed', 'cancelled'].includes(task.status)" size="small" :loading="busyDependencyTaskId === task.task_id" aria-label="重试依赖任务" @click="retryDependency(task)">重试</n-button>
+            <n-button v-if="['queued', 'running'].includes(task.status)" size="small" type="warning" secondary :loading="busyDependencyTaskId === task.task_id" aria-label="取消依赖任务" @click="cancelDependency(task)">取消</n-button>
+          </n-space>
+        </article>
+      </div>
+      <n-data-table v-else class="modal-table" :loading="dependencyTaskLoading" :columns="dependencyTaskColumns" :data="dependencyTasks" :pagination="false" :bordered="false" :scroll-x="680" />
+    </n-modal>
+
+    <n-modal :show="panel === 'backups'" preset="card" title="备份与恢复" aria-label="备份与恢复" class="resource-modal" @update:show="(value) => !value && closePanel()">
       <n-alert type="warning" :show-icon="true">备份只保留资源版本元数据和受控文件。恢复或删除备份前必须确认，操作会写入服务器审计记录。</n-alert>
       <n-data-table class="modal-table" :loading="backupLoading" :columns="backupColumns" :data="backups" :pagination="false" :bordered="false" :scroll-x="720" />
       <n-empty v-if="!backupLoading && !backups.length" description="暂无资源备份" />
     </n-modal>
 
-    <n-modal :show="panel === 'relations'" preset="card" title="Agent 与资源关系" aria-label="Agent 与资源关系" class="resource-modal" @update:show="(value) => !value && (panel = null)">
+    <n-modal :show="panel === 'relations'" preset="card" title="Agent 与资源关系" aria-label="Agent 与资源关系" class="resource-modal" @update:show="(value) => !value && closePanel()">
       <div v-if="relationLoading" class="loading-state"><n-skeleton text :repeat="4" /></div>
       <n-empty v-else-if="!agents.length" description="暂无 Agent 关系" />
       <div v-else class="agent-list">
@@ -848,8 +1243,23 @@ h1 { margin: 8px 0 6px; font-size: 30px; line-height: 1.2; letter-spacing: 0; }
 .audit-card .n-pagination { margin-top: 16px; justify-content: flex-end; }
 .resource-modal { width: min(720px, calc(100vw - 32px)); }
 .discover-modal { width: min(900px, calc(100vw - 32px)); }
+.dependency-modal { width: min(980px, calc(100vw - 32px)); }
 .modal-content { margin-top: 18px; }
 .modal-table { margin-top: 18px; }
+.dependency-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-top: 20px; }
+.dependency-section-heading .card-section-title { margin-bottom: 4px; }
+.section-caption { margin: 0; color: var(--text-color-secondary); font-size: 13px; line-height: 1.5; }
+.dependency-name, .dependency-status, .dependency-result { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dependency-name small, .dependency-status small, .dependency-result small { color: var(--text-color-secondary); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.dependency-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.dependency-mobile-list { display: grid; gap: 0; margin-top: 16px; }
+.dependency-mobile-item { display: grid; gap: 10px; padding: 16px 0; border-bottom: 1px solid var(--border-color); }
+.dependency-mobile-item:last-child { border-bottom: 0; }
+.dependency-mobile-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.dependency-mobile-heading strong { min-width: 0; overflow-wrap: anywhere; }
+.dependency-mobile-item p { margin: 0; color: var(--text-color-secondary); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+.dependency-mobile-item > small { color: var(--text-color-secondary); font-size: 12px; line-height: 1.45; }
+.operator-guidance { display: inline-block; max-width: 220px; color: var(--text-color-secondary); font-size: 12px; line-height: 1.45; }
 .upload-title { margin-top: 8px; font-weight: 600; }
 .upload-hint { margin-top: 4px; color: var(--text-color-secondary); font-size: 13px; }
 .remote-results { display: grid; gap: 8px; margin-top: 16px; }
@@ -879,6 +1289,7 @@ h1 { margin: 8px 0 6px; font-size: 30px; line-height: 1.2; letter-spacing: 0; }
   .lower-grid { grid-template-columns: 1fr; }
   .workspace-card :deep(.n-card-header) { align-items: flex-start; }
   .workspace-card :deep(.n-card-header__extra) { max-width: 100%; }
+  .dependency-section-heading { align-items: stretch; flex-direction: column; }
 }
 
 @media (max-width: 480px) {

@@ -1,0 +1,78 @@
+{
+  "account_bindings": [
+    {
+      "account_scope": "main",
+      "adapter_instance": "telegram-main",
+      "agent_id": "browser-research-agent",
+      "channel_type": "telegram"
+    }
+  ],
+  "agents": [
+    {
+      "agent_id": "browser-research-agent",
+      "allow_tools": true,
+      "capabilities": [
+        "browser",
+        "research"
+      ],
+      "display_name": "Browser Research Agent",
+      "enabled": true,
+      "hook_bindings": [],
+      "max_tool_iterations": 8,
+      "mcp_allowlist": [],
+      "mcp_bindings": [],
+      "memory_bindings": [],
+      "model_priority": [
+        "qa-model-primary",
+        "qa-model-backup"
+      ],
+      "prompt_bindings": [],
+      "provider_allowlist": [],
+      "skill_bindings": [
+        {
+          "content_sha256": "55043bcf6c8bb2563c58e407a243559f756058ab5671b2ab5d6fd9d0da22d838",
+          "enabled": true,
+          "permissions": [
+            "workflow.read"
+          ],
+          "resource_id": "skill.c914025169da0bca",
+          "resource_type": "skill",
+          "source": "https://github.com/vercel-labs/agent-browser/tree/main/skills/agent-browser",
+          "version": "1.0.0",
+          "version_policy": "fixed"
+        }
+      ],
+      "workflow_id": null
+    }
+  ],
+  "channel_bindings": [
+    {
+      "agent_id": "browser-research-agent",
+      "channel_type": "onebot"
+    },
+    {
+      "agent_id": "browser-research-agent",
+      "channel_type": "qqbot"
+    },
+    {
+      "agent_id": "browser-research-agent",
+      "channel_type": "telegram"
+    },
+    {
+      "agent_id": "browser-research-agent",
+      "channel_type": "webui"
+    },
+    {
+      "agent_id": "browser-research-agent",
+      "channel_type": "wecom"
+    }
+  ],
+  "default_agent_id": "browser-research-agent",
+  "format_version": 1,
+  "session_bindings": [
+    {
+      "agent_id": "browser-research-agent",
+      "session_key": "telegram/telegram-main/main/c2c:researcher"
+    }
+  ]
+}

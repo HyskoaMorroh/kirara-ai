@@ -1,6 +1,8 @@
 import asyncio
 import os
 import sys
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,7 +24,13 @@ from kirara_ai.workflow.core.workflow.registry import WorkflowRegistry
 
 
 class FakeWorkflowDispatcher(WorkflowDispatcher):
-    async def dispatch(self, source: IMAdapter, message: IMMessage):
+    async def dispatch(
+        self,
+        source: IMAdapter,
+        message: IMMessage,
+        *,
+        require_agent: bool = False,
+    ):
         return None
 
 
@@ -67,6 +75,31 @@ async def test_chat_endpoint(adapter):
     # Test with missing fields (should use defaults)
     response = test_client.post("/v1/chat", json={"message": "Test message"})
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_legacy_chat_routes_require_the_shared_agent_runtime(adapter):
+    dispatcher = SimpleNamespace(dispatch=AsyncMock())
+    adapter.dispatcher = dispatcher
+    test_client = TestClient(adapter.app)
+
+    v1_response = test_client.post(
+        "/v1/chat",
+        json={"session_id": "agent-session", "message": "route through agent"},
+    )
+    assert v1_response.status_code == 200
+    dispatcher.dispatch.assert_awaited_once()
+    assert dispatcher.dispatch.await_args.kwargs == {"require_agent": True}
+
+    dispatcher.dispatch.reset_mock()
+    v2_response = test_client.post(
+        "/v2/chat",
+        json={"session_id": "agent-session", "message": "route through agent"},
+    )
+    assert v2_response.status_code == 200
+    await asyncio.sleep(0)
+    dispatcher.dispatch.assert_awaited_once()
+    assert dispatcher.dispatch.await_args.kwargs == {"require_agent": True}
 
 
 @pytest.mark.asyncio

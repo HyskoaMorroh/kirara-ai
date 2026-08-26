@@ -19,6 +19,10 @@ def write_project_data(data_path: Path, marker: str, config: str | None = None) 
     (data_path / "venv").mkdir()
     (data_path / "logs").mkdir()
     (data_path / "backups").mkdir()
+    (data_path / "agents").mkdir()
+    (data_path / "resources" / "installed").mkdir(parents=True)
+    (data_path / "resources" / ".staging").mkdir(parents=True)
+    (data_path / "sessions").mkdir()
 
     # 固定 newline="\n"，避免 Windows 把 \n 翻译成 \r\n 导致夹具字节数与 Linux 不一致
     (data_path / "config.yaml").write_text(
@@ -40,6 +44,23 @@ def write_project_data(data_path: Path, marker: str, config: str | None = None) 
     (data_path / "plugins" / "custom_plugin" / "plugin.py").write_text(
         "PLUGIN = True\n", encoding="utf-8", newline="\n"
     )
+    (data_path / "agents" / "registry.json").write_text(
+        json.dumps({"default_agent_id": "research", "agents": []}),
+        encoding="utf-8",
+        newline="\n",
+    )
+    (data_path / "resources" / "registry.json").write_text(
+        json.dumps({"resources": []}), encoding="utf-8", newline="\n"
+    )
+    (data_path / "resources" / "installed" / "prompt.txt").write_text(
+        marker, encoding="utf-8", newline="\n"
+    )
+    (data_path / "resources" / ".staging" / "partial.txt").write_text(
+        "ignore", encoding="utf-8", newline="\n"
+    )
+    (data_path / "sessions" / "session.json").write_text(
+        json.dumps({"marker": marker}), encoding="utf-8", newline="\n"
+    )
     (data_path / "web" / "password.hash").write_text(marker, encoding="utf-8", newline="\n")
     (data_path / "fonts" / "custom.ttf").write_text(marker, encoding="utf-8", newline="\n")
     (data_path / "auto_detect_state.json").write_text("{}", encoding="utf-8", newline="\n")
@@ -60,6 +81,7 @@ def test_create_backup_contains_allowed_data_and_manifest(tmp_path: Path):
     assert archive_path.parent == data_path / "backups"
     assert manifest.components == {
         "auto_detect_state.json",
+        "agents",
         "config.yaml",
         "db",
         "dispatch_rules",
@@ -67,6 +89,8 @@ def test_create_backup_contains_allowed_data_and_manifest(tmp_path: Path):
         "media",
         "memory",
         "plugins",
+        "resources",
+        "sessions",
         "web",
         "workflows",
     }
@@ -79,6 +103,7 @@ def test_create_backup_contains_allowed_data_and_manifest(tmp_path: Path):
     assert not any(name.startswith("venv/") for name in names)
     assert not any(name.startswith("logs/") for name in names)
     assert not any(name.startswith("backups/") for name in names)
+    assert not any(name.startswith("resources/.staging/") for name in names)
     assert not any(name.endswith(".pyc") for name in names)
 
 

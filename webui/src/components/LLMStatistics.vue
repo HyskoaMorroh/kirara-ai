@@ -12,7 +12,10 @@ import {
   NTabPane,
   NDivider,
   NIcon,
-  NTooltip
+  NTooltip,
+  NAlert,
+  NButton,
+  NSpin
 } from 'naive-ui'
 import { http } from '@/utils/http'
 import { use } from 'echarts/core'
@@ -56,27 +59,26 @@ const chartCard = computed(() => themeStore.seed.card)
 const chartZoomBg = computed(() => themeStore.seed.divider)
 
 // LLM 统计数据
-const llmStats = ref<LLMStatistics>({
-  overview: {
-    total_tokens: 0,
-    total_requests: 0,
-    pending_requests: 0,
-    success_requests: 0,
-    failed_requests: 0
-  },
-  daily_stats: [],
-  hourly_stats: [],
-  models: [],
-  backends: []
-})
+const llmStats = ref<LLMStatistics | null>(null)
+const statisticsStatus = ref<'loading' | 'ready' | 'error'>('loading')
+const statisticsError = ref('')
 
 // 获取 LLM 统计数据
+let statisticsRequestId = 0
 const fetchLLMStats = async () => {
+  const requestId = ++statisticsRequestId
+  statisticsStatus.value = 'loading'
+  statisticsError.value = ''
   try {
     const data = await http.get<LLMStatistics>('/tracing/llm/statistics')
+    if (requestId !== statisticsRequestId) return
     llmStats.value = data
-  } catch (error) {
-    console.error('获取 LLM 统计数据失败:', error)
+    statisticsStatus.value = 'ready'
+  } catch {
+    if (requestId !== statisticsRequestId) return
+    llmStats.value = null
+    statisticsStatus.value = 'error'
+    statisticsError.value = '统计数据加载失败，请稍后重试。'
   }
 }
 
@@ -142,7 +144,7 @@ const dailyTokensOption = computed(() => ({
   },
   xAxis: {
     type: 'category',
-    data: llmStats.value.daily_stats.map((item: { date: string }) => item.date),
+    data: llmStats.value?.daily_stats.map((item: { date: string }) => item.date) ?? [],
     axisLabel: {
       rotate: 45,
       formatter: (value: string) => value.slice(5), // 只显示月-日
@@ -179,7 +181,7 @@ const dailyTokensOption = computed(() => ({
   series: [
     {
       name: 'Token 使用量',
-      data: llmStats.value.daily_stats.map((item: { tokens: number }) => item.tokens),
+      data: llmStats.value?.daily_stats.map((item: { tokens: number }) => item.tokens) ?? [],
       type: 'line',
       smooth: true,
       symbolSize: 6,
@@ -263,17 +265,17 @@ const requestStatusOption = computed(() => ({
       },
       data: [
         {
-          value: llmStats.value.overview.success_requests,
+          value: llmStats.value?.overview.success_requests ?? 0,
           name: '成功',
           itemStyle: { color: themeColors.value[1] }
         },
         {
-          value: llmStats.value.overview.failed_requests,
+          value: llmStats.value?.overview.failed_requests ?? 0,
           name: '失败',
           itemStyle: { color: themeColors.value[5] }
         },
         {
-          value: llmStats.value.overview.pending_requests,
+          value: llmStats.value?.overview.pending_requests ?? 0,
           name: '处理中',
           itemStyle: { color: themeColors.value[4] }
         }
@@ -320,7 +322,7 @@ const modelUsageOption = computed(() => ({
   },
   xAxis: {
     type: 'category',
-    data: llmStats.value.models.map((item: { model_id: string }) => item.model_id),
+    data: llmStats.value?.models.map((item: { model_id: string }) => item.model_id) ?? [],
     axisLabel: {
       rotate: 45,
       interval: 0,
@@ -359,7 +361,7 @@ const modelUsageOption = computed(() => ({
     {
       name: '请求次数',
       type: 'bar',
-      data: llmStats.value.models.map((item: { count: number }) => item.count),
+      data: llmStats.value?.models.map((item: { count: number }) => item.count) ?? [],
       itemStyle: {
         color: {
           type: 'linear',
@@ -386,9 +388,9 @@ const modelUsageOption = computed(() => ({
       name: '平均响应时间',
       type: 'line',
       yAxisIndex: 1,
-      data: llmStats.value.models.map((item: { avg_duration: number }) =>
+      data: llmStats.value?.models.map((item: { avg_duration: number }) =>
         Math.round(item.avg_duration)
-      ),
+      ) ?? [],
       itemStyle: {
         color: themeColors.value[2]
       },
@@ -442,7 +444,7 @@ const hourlyRequestsOption = computed(() => ({
   xAxis: {
     type: 'category',
     boundaryGap: false,
-    data: llmStats.value.hourly_stats.map((item: { hour: string }) => item.hour.split(' ')[1]),
+    data: llmStats.value?.hourly_stats.map((item: { hour: string }) => item.hour.split(' ')[1]) ?? [],
     axisLabel: {
       rotate: 45,
       color: chartTextSecondary.value
@@ -481,7 +483,7 @@ const hourlyRequestsOption = computed(() => ({
       type: 'line',
       smooth: true,
       symbolSize: 6,
-      data: llmStats.value.hourly_stats.map((item: { requests: number }) => item.requests),
+      data: llmStats.value?.hourly_stats.map((item: { requests: number }) => item.requests) ?? [],
       itemStyle: {
         color: themeColors.value[0]
       },
@@ -511,7 +513,7 @@ const hourlyRequestsOption = computed(() => ({
       smooth: true,
       symbolSize: 6,
       yAxisIndex: 1,
-      data: llmStats.value.hourly_stats.map((item: { tokens: number }) => item.tokens),
+      data: llmStats.value?.hourly_stats.map((item: { tokens: number }) => item.tokens) ?? [],
       itemStyle: {
         color: themeColors.value[1]
       },
@@ -570,7 +572,20 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <n-space vertical :size="12">
+  <n-spin v-if="statisticsStatus === 'loading'" data-test="statistics-loading" description="正在加载统计数据" />
+  <n-alert
+    v-else-if="statisticsStatus === 'error'"
+    type="error"
+    :show-icon="true"
+    data-test="statistics-error"
+    role="alert"
+  >
+    {{ statisticsError }}
+    <template #action>
+      <n-button size="small" data-test="retry-statistics" @click="fetchLLMStats">重试</n-button>
+    </template>
+  </n-alert>
+  <n-space v-else-if="llmStats" vertical :size="12">
     <!-- 概览统计卡片 -->
     <n-card title="LLM 使用分析" :bordered="false" class="overview-card">
       <template #header-extra>

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from datetime import timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 
 class AuthService(ABC):
@@ -24,6 +24,10 @@ class AuthService(ABC):
     @abstractmethod
     def verify_token(self, token: str) -> bool:
         pass
+
+    def get_token_claims(self, token: str) -> Mapping[str, Any] | None:
+        """Return claims while keeping legacy AuthService implementations valid."""
+        return {"role": "admin", "scopes": ["*"]} if self.verify_token(token) else None
 
 
 class FileBasedAuthService(AuthService):
@@ -62,11 +66,18 @@ class FileBasedAuthService(AuthService):
 
         return verify_jwt_token(token, self.secret_key)
 
+    def get_token_claims(self, token: str) -> Mapping[str, Any] | None:
+        from .utils import decode_jwt_token
+
+        return decode_jwt_token(token, self.secret_key)
+
 
 class MockAuthService(AuthService):
-    def __init__(self):
+    def __init__(self, *, role: str = "admin", scopes: Optional[list[str]] = None):
         self._password = None
         self._is_first_time = True
+        self.role = role
+        self.scopes = list(scopes or [])
 
     def is_first_time(self) -> bool:
         return self._is_first_time
@@ -83,3 +94,8 @@ class MockAuthService(AuthService):
 
     def verify_token(self, token: str) -> bool:
         return token == "mock_token"
+
+    def get_token_claims(self, token: str) -> Mapping[str, Any] | None:
+        if not self.verify_token(token):
+            return None
+        return {"role": self.role, "scopes": list(self.scopes)}

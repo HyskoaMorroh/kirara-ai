@@ -279,6 +279,72 @@
               </n-card>
             </div>
           </n-tab-pane>
+
+          <!-- 运行审计标签页 -->
+          <n-tab-pane name="audit" tab="运行审计">
+            <n-alert :type="auditPersistent ? 'success' : 'warning'" :show-icon="true" class="section-alert">
+              <template v-if="auditPersistent">
+                最近 {{ auditRetentionLimit }} 条记录已持久化到服务器，服务重启后仍可查询。
+              </template>
+              <template v-else>
+                持久审计存储当前不可用，仅保留本次后端进程中的最近 {{ auditRetentionLimit }} 条记录，重启后清空。
+              </template>
+              命令、URL、参数、环境变量和请求头不会在此展示。
+            </n-alert>
+
+            <div class="audit-toolbar">
+              <n-space wrap>
+                <n-select
+                  v-model:value="auditOperation"
+                  :options="auditOperationOptions"
+                  clearable
+                  placeholder="全部操作"
+                  class="audit-filter"
+                  data-test="audit-operation"
+                  @update:value="resetAuditPage"
+                />
+                <n-select
+                  v-model:value="auditOutcome"
+                  :options="auditOutcomeOptions"
+                  clearable
+                  placeholder="全部结果"
+                  class="audit-filter"
+                  data-test="audit-outcome"
+                  @update:value="resetAuditPage"
+                />
+                <n-button size="small" @click="loadAudit" :loading="auditLoading">
+                  <template #icon>
+                    <n-icon><refresh-outline /></n-icon>
+                  </template>
+                  刷新审计
+                </n-button>
+              </n-space>
+            </div>
+
+            <n-data-table
+              :columns="auditColumns"
+              :data="auditRecords"
+              :loading="auditLoading"
+              :pagination="false"
+              :bordered="false"
+              class="audit-table"
+            />
+            <div v-if="!auditLoading && auditRecords.length === 0" class="audit-empty">
+              <n-empty description="当前筛选条件下没有运行记录" />
+            </div>
+            <div class="audit-pagination">
+              <span class="audit-count">共 {{ auditTotal }} 条记录</span>
+              <n-pagination
+                v-model:page="auditPage"
+                :page-count="auditPageCount"
+                :page-size="auditPageSize"
+                :page-sizes="[20, 50, 100]"
+                show-size-picker
+                @update:page="handleAuditPageChange"
+                @update:page-size="handleAuditPageSizeChange"
+              />
+            </div>
+          </n-tab-pane>
         </n-tabs>
       </n-card>
     </n-card>
@@ -296,6 +362,22 @@
           {{ selectedTool.description || '没有描述' }}
         </div>
 
+        <n-form-item label="执行 Agent">
+          <n-select
+            v-model:value="selectedAgentId"
+            :options="agentOptions"
+            placeholder="请选择已绑定此 MCP 服务器的 Agent"
+            data-test="tool-agent"
+          />
+        </n-form-item>
+
+        <n-alert v-if="pendingConfirmationId" type="warning" :show-icon="false">
+          该工具需要明确确认。确认令牌仅对当前 Agent、参数和工具版本有效，且只能使用一次。
+          <n-button size="small" type="warning" data-test="confirm-tool-call" @click="executeToolCall(true)">
+            确认执行
+          </n-button>
+        </n-alert>
+
         <n-form
           :model="toolForm"
           ref="toolFormRef"
@@ -308,7 +390,51 @@
             :key="param.name"
             :label="param.name + (param.required ? ' *' : '')"
           >
-            <n-input v-model:value="toolForm[param.name]" :placeholder="param.description || ''" />
+            <n-switch
+              v-if="param.type === 'boolean'"
+              v-model:value="toolForm[param.name]"
+              :data-test="`tool-param-${param.name}`"
+              :aria-label="param.name"
+            />
+            <n-input-number
+              v-else-if="param.type === 'integer' || param.type === 'number'"
+              v-model:value="toolForm[param.name]"
+              :step="param.type === 'integer' ? 1 : undefined"
+              :input-props="{
+                'data-test': `tool-param-${param.name}`,
+                'aria-label': param.name
+              }"
+            />
+            <n-select
+              v-else-if="param.options"
+              v-model:value="toolForm[param.name]"
+              :options="param.options"
+              :input-props="{
+                'data-test': `tool-param-${param.name}`,
+                'aria-label': param.name
+              }"
+              clearable
+            />
+            <n-input
+              v-else-if="param.type === 'object' || param.type === 'array'"
+              v-model:value="toolForm[param.name]"
+              type="textarea"
+              :rows="4"
+              :placeholder="param.description || (param.type === 'array' ? '[]' : '{}')"
+              :input-props="{
+                'data-test': `tool-param-${param.name}`,
+                'aria-label': param.name
+              }"
+            />
+            <n-input
+              v-else
+              v-model:value="toolForm[param.name]"
+              :placeholder="param.description || ''"
+              :input-props="{
+                'data-test': `tool-param-${param.name}`,
+                'aria-label': param.name
+              }"
+            />
           </n-form-item>
         </n-form>
 
@@ -320,7 +446,7 @@
       <template #footer>
         <n-space justify="end">
           <n-button @click="showToolModal = false">关闭</n-button>
-          <n-button type="primary" :loading="callingTool" @click="executeToolCall"> 执行 </n-button>
+          <n-button type="primary" :loading="callingTool" @click="executeToolCall(false)"> 执行 </n-button>
         </n-space>
       </template>
     </n-modal>
@@ -367,18 +493,21 @@
           label-width="100px"
           class="prompt-form"
         >
-          <n-form-item label="提示文本">
+          <n-form-item
+            v-for="argument in selectedPrompt.arguments"
+            :key="argument.name"
+            :label="argument.name + (argument.required ? ' *' : '')"
+          >
             <n-input
-              v-model:value="promptForm.text"
-              type="textarea"
-              :rows="6"
-              placeholder="输入提示文本..."
+              v-model:value="promptForm[argument.name]"
+              :placeholder="argument.description || ''"
+              :input-props="{
+                'data-test': `prompt-argument-${argument.name}`,
+                'aria-label': argument.name
+              }"
             />
           </n-form-item>
-          <n-form-item label="温度">
-            <n-slider v-model:value="promptForm.temperature" :min="0" :max="1" :step="0.05" />
-            <div class="slider-value">{{ promptForm.temperature }}</div>
-          </n-form-item>
+          <n-empty v-if="selectedPrompt.arguments.length === 0" description="该提示无需参数" />
         </n-form>
 
         <div class="prompt-response" v-if="promptResponse">
@@ -407,6 +536,9 @@ import {
   NButton,
   NCard,
   NInput,
+  NInputNumber,
+  NSelect,
+  NSwitch,
   NSpace,
   NModal,
   NForm,
@@ -428,7 +560,8 @@ import {
   NDescriptions,
   NDescriptionsItem,
   NCode,
-  NSlider
+  NDataTable,
+  NPagination
 } from 'naive-ui'
 import {
   ArrowBackOutline,
@@ -445,7 +578,9 @@ import {
   ChatbubbleOutline,
   DownloadOutline
 } from '@vicons/ionicons5'
-import { http } from '@/utils/http'
+import { http, HttpRequestError } from '@/utils/http'
+import { listAgents } from '@/api/agent'
+import type { AgentSummary } from '@/api/agent'
 import { useMCPViewModel } from './mcp.vm'
 import type { MCPServer, MCPTool } from './mcp.vm'
 
@@ -487,6 +622,25 @@ const selectedTool = ref<MCPTool | null>(null)
 const toolForm = reactive<Record<string, any>>({})
 const toolResponse = ref<any>(null)
 const callingTool = ref(false)
+const agents = ref<AgentSummary[]>([])
+const selectedAgentId = ref('')
+const pendingConfirmationId = ref('')
+
+interface MCPJSONSchemaProperty {
+  type?: string | string[]
+  description?: string
+  enum?: unknown[]
+  default?: unknown
+}
+
+interface MCPToolParameter {
+  name: string
+  description: string
+  required: boolean
+  type: string
+  schema: MCPJSONSchemaProperty
+  options?: Array<{ label: string; value: unknown }>
+}
 
 // 资源相关
 interface MCPResource {
@@ -502,16 +656,112 @@ const resourceContent = ref<any>(null)
 // 提示相关
 interface MCPPrompt {
   id: string
+  name: string
   description?: string
+  arguments: MCPPromptArgument[]
 }
+interface MCPPromptArgument {
+  name: string
+  description?: string
+  required?: boolean
+}
+
+interface MCPAuditRecord {
+  component: string
+  timestamp?: string | null
+  server: string
+  operation: string
+  duration_ms: number
+  outcome: string
+  correlation_id?: string | null
+  error?: { type?: string; message?: string } | null
+}
+
+interface MCPAuditPage {
+  items: MCPAuditRecord[]
+  total: number
+  offset: number
+  limit: number
+  has_more: boolean
+  persistent: boolean
+  retention_limit: number
+}
+
+const auditRecords = ref<MCPAuditRecord[]>([])
+const auditTotal = ref(0)
+const auditPage = ref(1)
+const auditPageSize = ref(20)
+const auditRetentionLimit = ref(1000)
+const auditPersistent = ref(false)
+const auditLoading = ref(false)
+const auditOperation = ref<string | null>(null)
+const auditOutcome = ref<string | null>(null)
+
+const auditOperationOptions = [
+  { label: '连接', value: 'connect' },
+  { label: '断开', value: 'disconnect' },
+  { label: '调用工具', value: 'call_tool' },
+  { label: '读取提示', value: 'get_prompt' },
+  { label: '读取资源', value: 'get_resource' }
+]
+
+const auditOutcomeOptions = [
+  { label: '成功', value: 'success' },
+  { label: '失败', value: 'failure' },
+  { label: '错误', value: 'error' },
+  { label: '已连接', value: 'already_connected' },
+  { label: '已断开', value: 'already_disconnected' },
+  { label: '未找到', value: 'not_found' },
+  { label: '能力加载失败', value: 'capability_load_failed' }
+]
+
+const auditOperationLabels: Record<string, string> = {
+  connect: '连接',
+  disconnect: '断开',
+  call_tool: '调用工具',
+  get_prompt: '读取提示',
+  get_resource: '读取资源'
+}
+
+const auditOutcomeLabels: Record<string, string> = {
+  success: '成功',
+  failure: '失败',
+  error: '错误',
+  already_connected: '已连接',
+  already_disconnected: '已断开',
+  not_found: '未找到',
+  capability_load_failed: '能力加载失败',
+  server_not_bound: '服务器未绑定',
+  denied: '权限拒绝',
+  confirmation_required: '需要确认',
+  disconnected: '未连接'
+}
+
+const formatAuditTime = (timestamp?: string | null) => {
+  if (!timestamp) return '未记录'
+  const date = new Date(timestamp)
+  return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString()
+}
+
+const formatAuditOperation = (operation: string) => auditOperationLabels[operation] || operation
+
+const formatAuditOutcome = (outcome: string) => auditOutcomeLabels[outcome] || outcome
+
+const auditColumns = [
+  { title: '时间', key: 'timestamp', render: (row: MCPAuditRecord) => formatAuditTime(row.timestamp) },
+  { title: '操作', key: 'operation', render: (row: MCPAuditRecord) => formatAuditOperation(row.operation) },
+  { title: '结果', key: 'outcome', render: (row: MCPAuditRecord) => formatAuditOutcome(row.outcome) },
+  { title: '耗时', key: 'duration_ms', render: (row: MCPAuditRecord) => `${row.duration_ms} ms` },
+  { title: '关联 ID', key: 'correlation_id', render: (row: MCPAuditRecord) => row.correlation_id || '未记录' },
+  { title: '错误', key: 'error', render: (row: MCPAuditRecord) => row.error ? `${row.error.type || '未知错误'}：${row.error.message || '操作失败'}` : '无' }
+]
+
+const auditPageCount = computed(() => Math.max(1, Math.ceil(auditTotal.value / auditPageSize.value)))
 const prompts = ref<MCPPrompt[]>([])
 const loadingPrompts = ref(false)
 const showPromptModal = ref(false)
 const selectedPrompt = ref<MCPPrompt | null>(null)
-const promptForm = reactive({
-  text: '',
-  temperature: 0.7
-})
+const promptForm = reactive<Record<string, string>>({})
 const promptResponse = ref<string>('')
 const samplingPrompt = ref(false)
 
@@ -529,6 +779,13 @@ const hasEnvOrHeaders = computed(() => {
   return Object.keys(envOrHeaders.value).length > 0
 })
 
+const agentOptions = computed(() => agents.value
+  .filter((agent) => agent.enabled)
+  .map((agent) => ({
+    label: agent.display_name ? `${agent.display_name} (${agent.agent_id})` : agent.agent_id,
+    value: agent.agent_id
+  })))
+
 const formatCommand = computed(() => {
   if (!serverInfo.value) return ''
   return [
@@ -540,19 +797,27 @@ const formatCommand = computed(() => {
 })
 
 // 工具参数计算属性
-const getToolParams = (tool: MCPTool) => {
+const schemaType = (property: MCPJSONSchemaProperty) => {
+  if (!Array.isArray(property.type)) return property.type || 'string'
+  return property.type.find((type) => type !== 'null') || 'string'
+}
+
+const getToolParams = (tool: MCPTool): MCPToolParameter[] => {
   if (!tool.input_schema || typeof tool.input_schema !== 'object') return []
 
   // 假设 input_schema 是 JSON Schema 格式，从中提取属性作为参数
   const schema = tool.input_schema
-  const params = []
+  const params: MCPToolParameter[] = []
 
   if (schema.properties) {
-    for (const [name, prop] of Object.entries<any>(schema.properties)) {
+    for (const [name, prop] of Object.entries<MCPJSONSchemaProperty>(schema.properties)) {
       params.push({
         name,
         description: prop.description || '',
-        required: schema.required?.includes(name) || false
+        required: schema.required?.includes(name) || false,
+        type: schemaType(prop),
+        schema: prop,
+        options: prop.enum?.map((value) => ({ label: String(value), value }))
       })
     }
   }
@@ -562,12 +827,26 @@ const getToolParams = (tool: MCPTool) => {
 
 // 初始化加载
 onMounted(async () => {
+  await loadAgents()
   await loadServerDetails()
+  await loadAudit()
   // 添加初始连接状态到日志
   if (serverInfo.value) {
     addConnectionLog(serverInfo.value.connection_state)
   }
 })
+
+const loadAgents = async () => {
+  try {
+    agents.value = await listAgents()
+    if (!selectedAgentId.value) {
+      selectedAgentId.value = agents.value.find((agent) => agent.enabled)?.agent_id || ''
+    }
+  } catch (error) {
+    console.error('加载 Agent 列表失败:', error)
+    agents.value = []
+  }
+}
 
 // 加载服务器详情
 const loadServerDetails = async () => {
@@ -590,6 +869,50 @@ const loadServerDetails = async () => {
 // 刷新服务器详情
 const refreshDetails = async () => {
   await loadServerDetails()
+  await loadAudit()
+}
+
+const loadAudit = async () => {
+  auditLoading.value = true
+  try {
+    const params = new URLSearchParams({
+      server_id: serverId.value,
+      offset: String((auditPage.value - 1) * auditPageSize.value),
+      limit: String(auditPageSize.value)
+    })
+    if (auditOperation.value) params.set('operation', auditOperation.value)
+    if (auditOutcome.value) params.set('outcome', auditOutcome.value)
+
+    const response = await http.get<MCPAuditPage>(`/mcp/audit?${params.toString()}`)
+    auditRecords.value = response.items || []
+    auditTotal.value = response.total || 0
+    auditRetentionLimit.value = response.retention_limit || 1000
+    auditPersistent.value = response.persistent === true
+  } catch (error) {
+    console.error('加载MCP运行审计失败:', error)
+    message.error('加载MCP运行审计失败')
+    auditRecords.value = []
+    auditTotal.value = 0
+    auditPersistent.value = false
+  } finally {
+    auditLoading.value = false
+  }
+}
+
+const resetAuditPage = async () => {
+  auditPage.value = 1
+  await loadAudit()
+}
+
+const handleAuditPageChange = async (page: number) => {
+  auditPage.value = page
+  await loadAudit()
+}
+
+const handleAuditPageSizeChange = async (pageSize: number) => {
+  auditPageSize.value = pageSize
+  auditPage.value = 1
+  await loadAudit()
 }
 
 // 返回服务器列表
@@ -613,10 +936,12 @@ const startServer = async () => {
     await loadTools()
     await loadResources()
     await loadPrompts()
+    await loadAudit()
   } catch (error: any) {
     console.error('连接服务器失败:', error)
     message.error('连接服务器失败: ' + (error.message || '未知错误'))
     addConnectionLog('error', '连接服务器失败: ' + (error.message || '未知错误'))
+    await loadAudit()
   } finally {
     isConnecting.value = false
   }
@@ -633,10 +958,12 @@ const stopServer = async () => {
     serverInfo.value = await getServerById(serverId.value)
     message.success('服务器已断开连接')
     addConnectionLog('disconnected', '服务器已断开连接')
+    await loadAudit()
   } catch (error: any) {
     console.error('断开服务器失败:', error)
     message.error('断开服务器失败: ' + (error.message || '未知错误'))
     addConnectionLog('error', '断开服务器失败: ' + (error.message || '未知错误'))
+    await loadAudit()
   } finally {
     isDisconnecting.value = false
   }
@@ -705,31 +1032,105 @@ const callTool = (tool: MCPTool) => {
   Object.keys(toolForm).forEach((key) => delete toolForm[key])
   // 初始化表单字段
   const params = getToolParams(tool)
-  if (params.length > 0) {
-    params.forEach((param) => {
-      toolForm[param.name] = ''
-    })
-  }
+  params.forEach((param) => {
+    const defaultValue = param.schema.default
+    if (param.type === 'object' || param.type === 'array') {
+      toolForm[param.name] = defaultValue === undefined
+        ? ''
+        : JSON.stringify(defaultValue, null, 2)
+    } else if (defaultValue !== undefined) {
+      toolForm[param.name] = defaultValue
+    } else if (param.type === 'boolean') {
+      toolForm[param.name] = false
+    } else {
+      toolForm[param.name] = null
+    }
+  })
   toolResponse.value = null
+  pendingConfirmationId.value = ''
   showToolModal.value = true
 }
 
 // 执行工具调用
-const executeToolCall = async () => {
+const executeToolCall = async (usePendingConfirmation = false) => {
   if (!selectedTool.value) return
+
+  if (!selectedAgentId.value) {
+    message.error('请先选择执行 Agent')
+    return
+  }
+
+  const params: Record<string, unknown> = {}
+  for (const param of getToolParams(selectedTool.value)) {
+    const value = toolForm[param.name]
+    const isEmpty = value === null || value === undefined || value === ''
+    if (isEmpty) {
+      if (param.required) {
+        message.error(`参数 ${param.name} 为必填项`)
+        return
+      }
+      continue
+    }
+    if (param.type === 'object' || param.type === 'array') {
+      try {
+        const parsed = JSON.parse(String(value))
+        const validType = param.type === 'array'
+          ? Array.isArray(parsed)
+          : parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+        if (!validType) throw new TypeError('JSON type mismatch')
+        params[param.name] = parsed
+      } catch {
+        message.error(`参数 ${param.name} 必须是有效的 ${param.type === 'array' ? 'JSON 数组' : 'JSON 对象'}`)
+        return
+      }
+    } else if (param.type === 'integer') {
+      if (!Number.isInteger(value)) {
+        message.error(`参数 ${param.name} 必须是整数`)
+        return
+      }
+      params[param.name] = value
+    } else if (param.type === 'number') {
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        message.error(`参数 ${param.name} 必须是数字`)
+        return
+      }
+      params[param.name] = value
+    } else {
+      params[param.name] = value
+    }
+  }
 
   callingTool.value = true
   try {
     const response = await http.post<any>(`/mcp/servers/${serverId.value}/tools/call`, {
       toolName: selectedTool.value.name,
-      params: toolForm
+      params,
+      agent_id: selectedAgentId.value,
+      ...(usePendingConfirmation && pendingConfirmationId.value
+        ? { confirmation_id: pendingConfirmationId.value }
+        : {})
     })
     toolResponse.value = response
+    pendingConfirmationId.value = ''
     message.success('工具执行成功')
+    await loadAudit()
   } catch (error: any) {
     console.error('工具执行失败:', error)
+    if (
+      error instanceof HttpRequestError &&
+      error.status === 409 &&
+      error.data &&
+      typeof error.data === 'object' &&
+      typeof (error.data as Record<string, unknown>).confirmation_id === 'string'
+    ) {
+      pendingConfirmationId.value = (error.data as Record<string, string>).confirmation_id
+      message.error('该工具需要明确确认，请检查参数后确认执行')
+      await loadAudit()
+      return
+    }
     message.error('工具执行失败: ' + (error.message || '未知错误'))
     toolResponse.value = { error: error.message || '未知错误' }
+    await loadAudit()
   } finally {
     callingTool.value = false
   }
@@ -744,18 +1145,22 @@ const viewResource = async (resource: MCPResource) => {
   try {
     const response = await http.get<any>(`/mcp/servers/${serverId.value}/resources/${resource.id}`)
     resourceContent.value = response
+    await loadAudit()
   } catch (error) {
     console.error('加载资源内容失败:', error)
     message.error('加载资源内容失败')
     resourceContent.value = { error: '加载资源失败' }
+    await loadAudit()
   }
 }
 
 // 采样提示
 const samplePrompt = (prompt: MCPPrompt) => {
   selectedPrompt.value = prompt
-  promptForm.text = ''
-  promptForm.temperature = 0.7
+  Object.keys(promptForm).forEach((key) => delete promptForm[key])
+  prompt.arguments.forEach((argument) => {
+    promptForm[argument.name] = ''
+  })
   promptResponse.value = ''
   showPromptModal.value = true
 }
@@ -764,21 +1169,36 @@ const samplePrompt = (prompt: MCPPrompt) => {
 const executeSampling = async () => {
   if (!selectedPrompt.value) return
 
+  const missing = selectedPrompt.value.arguments.find(
+    (argument) => argument.required && !promptForm[argument.name]?.trim()
+  )
+  if (missing) {
+    message.error(`提示词参数 ${missing.name} 为必填项`)
+    return
+  }
+
+  const argumentsPayload = Object.fromEntries(
+    selectedPrompt.value.arguments
+      .map((argument) => [argument.name, promptForm[argument.name]?.trim() || ''])
+      .filter(([, value]) => value !== '')
+  )
+
   samplingPrompt.value = true
   try {
     const response = await http.post<{ text: string }>(
       `/mcp/servers/${serverId.value}/prompts/sample`,
       {
         promptId: selectedPrompt.value.id,
-        text: promptForm.text,
-        temperature: promptForm.temperature
+        arguments: argumentsPayload
       }
     )
     promptResponse.value = response.text || JSON.stringify(response)
+    await loadAudit()
   } catch (error: any) {
     console.error('提示采样失败:', error)
     message.error('提示采样失败: ' + (error.message || '未知错误'))
     promptResponse.value = '错误: ' + (error.message || '未知错误')
+    await loadAudit()
   } finally {
     samplingPrompt.value = false
   }
@@ -950,6 +1370,37 @@ const formatTime = (timestamp: number) => {
   margin-bottom: 16px;
 }
 
+.audit-toolbar {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.audit-filter {
+  min-width: 150px;
+}
+
+.audit-table {
+  min-height: 120px;
+}
+
+.audit-empty {
+  padding: 24px 0;
+}
+
+.audit-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.audit-count {
+  color: var(--text-color-secondary, rgba(0, 0, 0, 0.65));
+  font-size: var(--font-size-sm, 13px);
+}
+
 .loading-container {
   display: flex;
   flex-direction: column;
@@ -1063,6 +1514,13 @@ const formatTime = (timestamp: number) => {
   padding: 20px 0;
   display: flex;
   justify-content: center;
+}
+
+@media (max-width: 640px) {
+  .audit-pagination {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 
 @keyframes fade-in {

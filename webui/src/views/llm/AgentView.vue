@@ -50,8 +50,12 @@ const agentOptions = ref<AgentSummary[]>([])
 const resources = ref<ManagedResource[]>([])
 const form = ref<AgentConfigurationRequest>(emptyForm())
 const selectedAgentId = ref('')
-const loading = ref(true)
+const agentsLoaded = ref(false)
+const agentsLoading = ref(true)
+const resourcesLoading = ref(true)
 const saving = ref(false)
+const agentLoadError = ref('')
+const resourceLoadError = ref('')
 const errorMessage = ref('')
 const savedMessage = ref('')
 const providerText = ref('')
@@ -155,32 +159,50 @@ function chooseInitialAgent(items: AgentSummary[]) {
   return items.find((agent) => agent.relations.is_default)?.agent_id || items[0]?.agent_id || ''
 }
 
-async function load() {
-  loading.value = true
-  errorMessage.value = ''
+async function loadAgents() {
+  agentsLoading.value = true
+  agentLoadError.value = ''
   try {
-    const [agents, installedResources] = await Promise.all([listAgents(), listResources()])
+    const agents = await listAgents()
     agentOptions.value = agents
-    resources.value = installedResources
+    agentsLoaded.value = true
     const initial = agents.find((agent) => agent.agent_id === selectedAgentId.value) ||
       agents.find((agent) => agent.agent_id === chooseInitialAgent(agents))
     if (initial) selectAgent(initial)
     else startNewAgent()
-  } catch (error) {
-    agentOptions.value = []
-    resources.value = []
-    startNewAgent()
-    errorMessage.value = error instanceof Error ? error.message : 'Agent 配置加载失败'
+  } catch {
+    agentLoadError.value = 'Agent 配置加载失败，请检查服务状态后重试。'
   } finally {
-    loading.value = false
+    agentsLoading.value = false
   }
 }
 
-function resourceOptions(type: AgentResourceType) {
+async function loadResourceCatalog() {
+  resourcesLoading.value = true
+  resourceLoadError.value = ''
+  try {
+    const installedResources = await listResources()
+    resources.value = installedResources
+  } catch {
+    resourceLoadError.value = '资源目录加载失败，当前 Agent 配置和已有绑定已保留。'
+  } finally {
+    resourcesLoading.value = false
+  }
+}
+
+async function load() {
+  await Promise.all([loadAgents(), loadResourceCatalog()])
+}
+
+function isBindableResource(resource: ManagedResource) {
+  return resource.enabled && !resource.confirmation_required
+}
+
+function resourceOptions(type: AgentResourceType, currentResourceId = '') {
   return resources.value
-    .filter((resource) => resource.type === type)
+    .filter((resource) => resource.type === type && (isBindableResource(resource) || resource.resource_id === currentResourceId))
     .map((resource) => ({
-      label: `${resource.resource_id} · ${resource.current_version}`,
+      label: `${resource.resource_id} · ${resource.current_version}${isBindableResource(resource) ? '' : ' · 未启用'}`,
       value: resource.resource_id
     }))
 }
@@ -203,8 +225,10 @@ function parseList(value: string) {
 }
 
 function addBinding(section: ResourceSection) {
+  const options = resourceOptions(section.type)
+  if (!options.length) return
   const binding: AgentResourceBindingInput = {
-    resource_id: resourceOptions(section.type)[0]?.value || '',
+    resource_id: options[0].value,
     resource_type: section.type,
     version_policy: 'current',
     enabled: true
@@ -326,11 +350,12 @@ onMounted(() => {
           <span class="eyebrow">统一运行入口</span>
           <h1 id="agent-page-title">Agent 管理</h1>
         </div>
-        <n-button size="small" secondary data-test="new-agent" @click="startNewAgent">新建</n-button>
+        <n-button size="small" secondary data-test="new-agent" :disabled="!agentsLoaded" @click="startNewAgent">新建</n-button>
       </div>
-      <n-button class="refresh-button" secondary :loading="loading" @click="load">刷新列表</n-button>
-      <div v-if="loading" class="loading-state" aria-busy="true">正在加载 Agent 配置...</div>
-      <div v-else-if="!agentOptions.length" class="empty-list" role="status">
+      <n-button class="refresh-button" secondary :loading="agentsLoading" @click="loadAgents">刷新列表</n-button>
+      <div v-if="agentsLoading && !agentsLoaded" class="loading-state" aria-busy="true">正在加载 Agent 配置...</div>
+      <n-alert v-else-if="agentLoadError && !agentsLoaded" type="error" :show-icon="true" role="alert">{{ agentLoadError }}</n-alert>
+      <div v-else-if="agentsLoaded && !agentOptions.length" class="empty-list" role="status">
         <strong>还没有 Agent</strong>
         <span>创建一个 Agent，把模型链、资源和渠道关系放在同一份策略里。</span>
       </div>
@@ -351,6 +376,9 @@ onMounted(() => {
     </aside>
 
     <section class="editor-panel" aria-label="Agent 配置编辑器">
+      <div v-if="agentsLoading && !agentsLoaded" class="editor-loading" aria-busy="true">正在读取 Agent 关系...</div>
+      <n-alert v-else-if="agentLoadError && !agentsLoaded" type="error" :show-icon="true" role="alert">{{ agentLoadError }}</n-alert>
+      <template v-else-if="agentsLoaded">
       <header class="editor-header">
         <div>
           <span class="eyebrow">{{ isCreating ? '新建配置' : '编辑配置' }}</span>
@@ -365,17 +393,18 @@ onMounted(() => {
 
       <n-alert v-if="errorMessage" type="error" :show-icon="true" role="alert">{{ errorMessage }}</n-alert>
       <n-alert v-if="savedMessage" type="success" :show-icon="true" role="status">{{ savedMessage }}</n-alert>
+      <n-alert v-if="agentLoadError" type="error" :show-icon="true" role="alert">{{ agentLoadError }}</n-alert>
+      <n-alert v-if="resourceLoadError" type="warning" :show-icon="true" role="alert">{{ resourceLoadError }}</n-alert>
 
-      <div v-if="loading" class="editor-loading" aria-busy="true">正在读取可用资源和 Agent 关系...</div>
-      <form v-else class="editor-form" @submit.prevent="save">
+      <form class="editor-form" @submit.prevent="save">
         <section class="editor-section" aria-labelledby="identity-heading">
           <div class="section-heading"><div><h3 id="identity-heading">身份与运行状态</h3><p>Agent ID 保存后作为稳定路由身份，不可通过编辑器修改。</p></div></div>
           <div class="form-grid two-columns">
             <label class="field"><span>Agent ID</span><n-input v-model:value="form.agent_id" data-test="agent-id" :disabled="!isCreating" placeholder="例如 office-research" /></label>
             <label class="field"><span>显示名称</span><n-input v-model:value="form.display_name" data-test="agent-display-name" placeholder="例如 Office Research" /></label>
             <label class="field"><span>工作流 ID</span><n-input v-model:value="form.workflow_id" placeholder="可选，例如 chat:normal" /></label>
-            <label class="switch-field"><span>允许 Agent 接收新请求</span><n-switch v-model:value="form.enabled" /></label>
-            <label class="switch-field"><span>设为默认 Agent</span><n-switch v-model:value="form.relations.is_default" /></label>
+            <div class="switch-field"><span>允许 Agent 接收新请求</span><n-switch v-model:value="form.enabled" aria-label="允许 Agent 接收新请求" /></div>
+            <div class="switch-field"><span>设为默认 Agent</span><n-switch v-model:value="form.relations.is_default" aria-label="设为默认 Agent" /></div>
           </div>
         </section>
 
@@ -384,7 +413,7 @@ onMounted(() => {
           <div class="ordered-list">
             <div v-for="(model, index) in form.model_priority" :key="index" class="ordered-row">
               <span class="order-number">{{ index + 1 }}</span>
-              <n-input v-model:value="form.model_priority[index]" :placeholder="index === 0 ? '主模型 ID' : '备用模型 ID'" :aria-label="`${index + 1}号模型`" />
+              <n-input v-model:value="form.model_priority[index]" :placeholder="index === 0 ? '主模型 ID' : '备用模型 ID'" :input-props="{ 'aria-label': `${index + 1}号模型` }" />
               <n-button quaternary size="small" :disabled="form.model_priority.length === 1" :aria-label="`移除第 ${index + 1} 个模型`" @click="removeModel(index)">移除</n-button>
             </div>
           </div>
@@ -397,22 +426,22 @@ onMounted(() => {
         <section class="editor-section" aria-labelledby="tool-heading">
           <div class="section-heading"><div><h3 id="tool-heading">工具策略</h3><p>MCP 服务器绑定负责边界，白名单只允许更窄的工具集合。</p></div></div>
           <div class="form-grid two-columns">
-            <label class="switch-field"><span>允许调用工具</span><n-switch v-model:value="form.allow_tools" /></label>
+            <div class="switch-field"><span>允许调用工具</span><n-switch v-model:value="form.allow_tools" aria-label="允许调用工具" /></div>
             <label class="field"><span>最大工具轮数</span><n-input-number v-model:value="form.max_tool_iterations" :min="0" data-test="max-tool-iterations" /></label>
             <label class="field full-width"><span>MCP 工具白名单</span><n-input v-model:value="mcpAllowlistText" placeholder="例如 context7.query-docs, context7.resolve-library-id" /></label>
           </div>
         </section>
 
         <section class="editor-section" aria-labelledby="resource-heading">
-          <div class="section-heading"><div><h3 id="resource-heading">Prompt / Skill / Memory / MCP / Hook</h3><p>绑定只引用服务器已安装资源；每一项都可独立停用，并选择版本策略。</p></div></div>
+          <div class="section-heading"><div><h3 id="resource-heading">Prompt / Skill / Memory / MCP / Hook</h3><p>绑定只引用服务器已安装资源；每一项都可独立停用，并选择版本策略。</p></div><n-button size="small" secondary data-test="refresh-resources" :loading="resourcesLoading" @click="loadResourceCatalog">刷新资源</n-button></div>
           <div class="resource-grid">
             <article v-for="section in resourceSections" :key="section.key" class="resource-section" :data-test="`resource-binding-${section.type}`">
-              <header class="resource-section-header"><div><h4>{{ section.label }}</h4><p>{{ section.description }}</p></div><n-button size="small" secondary @click="addBinding(section)">添加</n-button></header>
-              <div v-if="!form[section.key].length" class="binding-empty">未绑定</div>
+              <header class="resource-section-header"><div><h4>{{ section.label }}</h4><p>{{ section.description }}</p></div><n-button size="small" secondary :disabled="!resourceOptions(section.type).length" :title="resourceOptions(section.type).length ? '添加已启用资源' : '请先在资源管理中启用并确认资源'" @click="addBinding(section)">添加</n-button></header>
+              <div v-if="!form[section.key].length" class="binding-empty">{{ resourceOptions(section.type).length ? '未绑定' : '没有可绑定的已启用资源，请先在资源管理中启用并确认。' }}</div>
               <div v-for="(binding, index) in form[section.key]" :key="index" class="binding-row">
-                <n-select v-model:value="binding.resource_id" :options="resourceOptions(section.type)" :aria-label="`${section.label}资源`" placeholder="选择已安装资源" />
-                <n-select v-model:value="binding.version_policy" :options="policyOptions" :aria-label="`${section.label}版本策略`" />
-                <n-input v-if="binding.version_policy === 'fixed'" v-model:value="binding.version" placeholder="版本" :aria-label="`${section.label}固定版本`" />
+                <n-select v-model:value="binding.resource_id" :options="resourceOptions(section.type, binding.resource_id)" :input-props="{ 'aria-label': `${section.label}资源` }" placeholder="选择已安装资源" />
+                <n-select v-model:value="binding.version_policy" :options="policyOptions" :input-props="{ 'aria-label': `${section.label}版本策略` }" />
+                <n-input v-if="binding.version_policy === 'fixed'" v-model:value="binding.version" placeholder="版本" :input-props="{ 'aria-label': `${section.label}固定版本` }" />
                 <span v-else class="current-version" :title="resourceLabel(binding.resource_id)">当前版本</span>
                 <n-switch v-model:value="binding.enabled" :aria-label="`启用${section.label}绑定`" />
                 <n-button quaternary size="small" :aria-label="`移除${section.label}绑定`" @click="removeBinding(section.key, index)">移除</n-button>
@@ -434,9 +463,9 @@ onMounted(() => {
             <div class="subsection-heading"><h4>账号关系</h4><n-button size="small" secondary @click="addAccount">添加账号</n-button></div>
             <div v-if="!form.relations.accounts.length" class="binding-empty">未绑定特定账号</div>
             <div v-for="(account, index) in form.relations.accounts" :key="index" class="relation-row">
-              <n-select v-model:value="account.channel_type" :options="channelOptions" aria-label="账号渠道" />
-              <n-input v-model:value="account.adapter_instance" placeholder="适配器实例" aria-label="适配器实例" />
-              <n-input v-model:value="account.account_scope" placeholder="账号范围" aria-label="账号范围" />
+              <n-select v-model:value="account.channel_type" :options="channelOptions" :input-props="{ 'aria-label': '账号渠道' }" />
+              <n-input v-model:value="account.adapter_instance" placeholder="适配器实例" :input-props="{ 'aria-label': '适配器实例' }" />
+              <n-input v-model:value="account.account_scope" placeholder="账号范围" :input-props="{ 'aria-label': '账号范围' }" />
               <n-button quaternary size="small" aria-label="移除账号关系" @click="removeAccount(index)">移除</n-button>
             </div>
           </div>
@@ -445,12 +474,13 @@ onMounted(() => {
             <div class="subsection-heading"><h4>会话关系</h4><n-button size="small" secondary @click="addSession">添加会话</n-button></div>
             <div v-if="!form.relations.sessions.length" class="binding-empty">未绑定特定会话</div>
             <div v-for="(session, index) in form.relations.sessions" :key="index" class="relation-row session-row">
-              <n-input v-model:value="form.relations.sessions[index]" placeholder="例如 telegram/telegram/main/c2c:user/user" aria-label="会话关系" />
+              <n-input v-model:value="form.relations.sessions[index]" placeholder="例如 telegram/telegram/main/c2c:user/user" :input-props="{ 'aria-label': '会话关系' }" />
               <n-button quaternary size="small" aria-label="移除会话关系" @click="removeSession(index)">移除</n-button>
             </div>
           </div>
         </section>
       </form>
+      </template>
     </section>
   </main>
 </template>

@@ -30,6 +30,7 @@ from kirara_ai.plugin_manager.plugin_loader import PluginLoader
 from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
 from kirara_ai.plugin_manager.resource_sources import ResourceSourceService
 from kirara_ai.plugin_manager.resource_catalog import ResourceCatalogService
+from kirara_ai.plugin_manager.system_dependencies import SystemDependencyService
 from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
 from kirara_ai.plugin_manager.models import LifecycleName
 from kirara_ai.scheduler import TaskScheduler
@@ -182,7 +183,11 @@ def _agent_audit_hook(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _agent_runtime_audit_sink(record: Mapping[str, Any]) -> None:
+def _agent_runtime_audit_sink(
+    record: Mapping[str, Any],
+    *,
+    resource_service: ResourceLifecycleService | None = None,
+) -> None:
     """Write only a small, recursively redacted Agent runtime audit summary."""
 
     sensitive_parts = (
@@ -222,6 +227,12 @@ def _agent_runtime_audit_sink(record: Mapping[str, Any]) -> None:
 
     summary = redact(record)
     logger.info("Agent runtime audit: {}", summary)
+    if resource_service is not None:
+        try:
+            resource_service.append_runtime_audit(summary)
+        except Exception:
+            # Audit persistence is deliberately isolated from Agent execution.
+            logger.debug("Unable to persist Agent runtime audit")
 
 
 def init_agent_runtime(container: DependencyContainer):
@@ -260,7 +271,9 @@ def init_agent_runtime(container: DependencyContainer):
         resource_loader=resource_service.read_entry,
         resource_service=resource_service,
         handlers=hook_handlers,
-        audit_sink=_agent_runtime_audit_sink,
+        audit_sink=lambda record: _agent_runtime_audit_sink(
+            record, resource_service=resource_service
+        ),
     )
     memory_manager = (
         container.resolve(MemoryManager)
@@ -277,7 +290,9 @@ def init_agent_runtime(container: DependencyContainer):
         memory_manager=memory_manager,
         hook_runtime=hook_runtime,
         context_char_threshold=runtime_config.context_char_threshold,
-        audit_sink=_agent_runtime_audit_sink,
+        audit_sink=lambda record: _agent_runtime_audit_sink(
+            record, resource_service=resource_service
+        ),
     )
     container.register(AgentRegistry, agent_registry)
     container.register(SessionStore, session_store)
@@ -361,7 +376,13 @@ def init_application() -> DependencyContainer:
     container.register(ResourceLifecycleService, resource_service)
     source_service = ResourceSourceService(resource_service)
     container.register(ResourceSourceService, source_service)
-    catalog_service = ResourceCatalogService(resource_service, source_service)
+    dependency_service = SystemDependencyService(DATA_PATH)
+    container.register(SystemDependencyService, dependency_service)
+    catalog_service = ResourceCatalogService(
+        resource_service,
+        source_service,
+        dependency_service,
+    )
     container.register(ResourceCatalogService, catalog_service)
     catalog_service.ensure_builtins()
 
@@ -385,7 +406,10 @@ def init_application() -> DependencyContainer:
 
     container.register(WebServer, WebServer(container))
 
-    mcp_manager = MCPServerManager(container)
+    mcp_manager = MCPServerManager(
+        container,
+        audit_sink=resource_service.append_runtime_audit,
+    )
     container.register(MCPServerManager, mcp_manager)
 
     # 初始化记忆系统

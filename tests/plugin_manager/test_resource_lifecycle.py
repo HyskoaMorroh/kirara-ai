@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import stat
+import threading
 import zipfile
 from pathlib import Path
 
@@ -280,6 +281,80 @@ def test_audit_excludes_body_payload_and_credentials(tmp_path: Path):
     assert "cookie-value" not in audit_text
     assert "content_sha256" in audit_text
     assert "operation" in audit_text
+
+
+def test_runtime_audit_normalizes_legacy_hook_component_and_result_field(tmp_path: Path):
+    service = _service(tmp_path)
+    service.audit_path.write_text(
+        json.dumps(
+            {
+                "component": "agent_hook_runtime",
+                "operation": "run_event",
+                "event": "PreToolUse",
+                "result": "success",
+                "correlation_id": "legacy-correlation",
+                "timestamp": "2026-08-27T00:00:00+00:00",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    page = service.list_audit(
+        component="agent_hook",
+        outcome="success",
+        correlation_id="legacy-correlation",
+    )
+
+    assert page["total"] == 1
+    assert page["items"][0]["component"] == "agent_hook"
+    assert page["items"][0]["outcome"] == "success"
+
+
+def test_runtime_audit_concurrent_writes_remain_valid_json_lines(tmp_path: Path):
+    service = _service(tmp_path)
+    thread_count = 8
+    records_per_thread = 20
+
+    def write_records(worker: int) -> None:
+        for index in range(records_per_thread):
+            service.append_runtime_audit(
+                {
+                    "component": "agent_runtime",
+                    "operation": "turn",
+                    "status": "completed",
+                    "correlation_id": f"worker-{worker}-{index}",
+                }
+            )
+
+    threads = [
+        threading.Thread(target=write_records, args=(worker,))
+        for worker in range(thread_count)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    lines = service.audit_path.read_text(encoding="utf-8").splitlines()
+    records = [json.loads(line) for line in lines]
+    assert len(records) == thread_count * records_per_thread
+    assert len({record["correlation_id"] for record in records}) == len(records)
+
+
+def test_runtime_audit_write_failure_does_not_escape(tmp_path: Path):
+    service = _service(tmp_path)
+    unwritable_target = tmp_path / "audit-as-directory"
+    unwritable_target.mkdir()
+    service.audit_path = unwritable_target
+
+    service.append_runtime_audit(
+        {
+            "component": "agent_runtime",
+            "operation": "turn",
+            "status": "completed",
+        }
+    )
 
 
 class _WorkflowRegistry:

@@ -1,0 +1,27 @@
+{
+  "cookies": [
+    {
+      "name": "NID",
+      "value": "534=kX_F075j7WfOuyj-vK6cFRpv6WOx60Q_MNmUB1RaQA-W3nXjgFKNGJUWySp1egdCAp5yNXDtsO3UOp9357htm3BnN7JBMtr9U5llMtEg9QsnKs2BbxnKnoCx_1taFvgLJVBoQ9J70l9zwtB520ZzEoiqy7dqBZuPEZAUxrlOTmWZf3tEkYzQLnS-fn7rIP7AIgTjxlLmAVhR5aVRzeM",
+      "domain": ".google.com",
+      "path": "/",
+      "expires": 1803575788.326921,
+      "size": 218,
+      "httpOnly": true,
+      "secure": false,
+      "session": false
+    }
+  ],
+  "origins": [
+    {
+      "origin": "http://127.0.0.1:15178",
+      "localStorage": [
+        {
+          "name": "token",
+          "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3ODc4ODAwNzMsInJvbGUiOiJhZG1pbiIsInNjb3BlcyI6W119.rw33jBa7Tcd3mUIVSp_7iMOrx8JOxzd8Q4Yj_NZU4yM"
+        }
+      ],
+      "sessionStorage": []
+    }
+  ]
+}

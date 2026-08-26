@@ -5,9 +5,14 @@ import { defineComponent, h } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ResourceView from '../src/views/resources/ResourceView.vue'
-import type { ManagedResource, ResourceType } from '../src/api/resource'
+import type {
+  DependencyInstallTask,
+  ManagedResource,
+  ResourceType,
+  SystemDependency
+} from '../src/api/resource'
 
-const { api, dialogWarning, message } = vi.hoisted(() => ({
+const { api, dialogWarning, message, routeQuery } = vi.hoisted(() => ({
   api: {
     listResources: vi.fn(),
     listResourceAudit: vi.fn(),
@@ -22,14 +27,21 @@ const { api, dialogWarning, message } = vi.hoisted(() => ({
     updateRemoteResource: vi.fn(),
     searchResourceCatalog: vi.fn(),
     getCatalogItem: vi.fn(),
-    installCatalogItem: vi.fn()
+    installCatalogItem: vi.fn(),
+    listSystemDependencies: vi.fn(),
+    probeSystemDependency: vi.fn(),
+    installSystemDependency: vi.fn(),
+    listDependencyTasks: vi.fn(),
+    retryDependencyTask: vi.fn(),
+    cancelDependencyTask: vi.fn()
   },
   dialogWarning: vi.fn(),
   message: {
     success: vi.fn(),
     warning: vi.fn(),
     error: vi.fn()
-  }
+  },
+  routeQuery: {} as Record<string, string>
 }))
 
 vi.mock('../src/api/resource', () => ({
@@ -39,6 +51,10 @@ vi.mock('../src/api/resource', () => ({
 
 vi.mock('../src/api/agent', () => ({
   listAgents: vi.fn().mockResolvedValue([])
+}))
+
+vi.mock('vue-router', () => ({
+  useRoute: () => ({ query: routeQuery })
 }))
 
 vi.mock('naive-ui', () => {
@@ -118,7 +134,16 @@ vi.mock('naive-ui', () => {
           props.data.map((row) =>
             h(
               'div',
-              { class: 'resource-row', 'data-resource-id': (row as ManagedResource).resource_id },
+              {
+                class: 'resource-row',
+                'data-row-id': String(
+                  (row as Record<string, unknown>).resource_id ||
+                  (row as Record<string, unknown>).dependency_id ||
+                  (row as Record<string, unknown>).task_id ||
+                  ''
+                ),
+                'data-resource-id': (row as ManagedResource).resource_id
+              },
               props.columns.map((column) => {
                 const typedColumn = column as {
                   key?: string
@@ -217,10 +242,59 @@ const resource = (resourceId: string, type: ResourceType, enabled: boolean, conf
 const skill = resource('demo.skill', 'skill', true)
 const prompt = resource('demo.prompt', 'prompt', false, true)
 
+const systemDependency: SystemDependency = {
+  dependency_id: 'agent-browser-cli',
+  name: 'Agent Browser CLI',
+  description: 'Agent Browser 命令行程序。',
+  kind: 'cli',
+  required_by: ['agent-browser Skill'],
+  prerequisites: ['node-runtime'],
+  install_supported: true,
+  operator_guidance: null,
+  status: 'missing',
+  ready: false,
+  version: null,
+  summary: 'dependency is not available',
+  checked_at: '2026-08-26T00:00:00Z',
+  last_task_id: null
+}
+
+const failedDependencyTask: DependencyInstallTask = {
+  task_id: 'dep-failed',
+  dependency_id: 'agent-browser-cli',
+  operation: 'install',
+  status: 'failed',
+  created_at: '2026-08-26T00:00:00Z',
+  started_at: '2026-08-26T00:00:01Z',
+  finished_at: '2026-08-26T00:00:02Z',
+  retry_of: null,
+  cancel_requested: false,
+  error_code: 'install_failed',
+  error_summary: '安装未完成',
+  output_tail: ''
+}
+
+const runningDependencyTask: DependencyInstallTask = {
+  ...failedDependencyTask,
+  task_id: 'dep-running',
+  status: 'running',
+  started_at: '2026-08-26T00:00:01Z',
+  finished_at: null,
+  error_code: null,
+  error_summary: null
+}
+
+const succeededDependencyTask: DependencyInstallTask = {
+  ...runningDependencyTask,
+  status: 'succeeded',
+  finished_at: '2026-08-26T00:00:03Z'
+}
+
 const mountView = () => mount(ResourceView)
 
 describe('ResourceView lifecycle controls', () => {
   beforeEach(() => {
+    Object.keys(routeQuery).forEach((key) => delete routeQuery[key])
     Object.values(api).forEach((mock) => mock.mockReset())
     dialogWarning.mockReset()
     Object.values(message).forEach((mock) => mock.mockReset())
@@ -269,9 +343,34 @@ describe('ResourceView lifecycle controls', () => {
       enabled: false
     })
     api.installCatalogItem.mockResolvedValue(prompt)
+    api.listSystemDependencies.mockResolvedValue([systemDependency])
+    api.probeSystemDependency.mockResolvedValue({ ...systemDependency, status: 'ready', ready: true })
+    api.installSystemDependency.mockResolvedValue({
+      ...failedDependencyTask,
+      task_id: 'dep-queued',
+      status: 'queued',
+      started_at: null,
+      finished_at: null,
+      error_code: null,
+      error_summary: null
+    })
+    api.listDependencyTasks.mockResolvedValue([failedDependencyTask])
+    api.retryDependencyTask.mockResolvedValue({
+      ...failedDependencyTask,
+      task_id: 'dep-retry',
+      status: 'queued',
+      retry_of: 'dep-failed',
+      error_code: null,
+      error_summary: null
+    })
+    api.cancelDependencyTask.mockResolvedValue({
+      ...failedDependencyTask,
+      status: 'cancelled'
+    })
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.clearAllMocks()
   })
 
@@ -464,5 +563,131 @@ describe('ResourceView lifecycle controls', () => {
     expect(api.getCatalogItem).toHaveBeenCalledTimes(2)
     expect(wrapper.text()).toContain('已安装，未启用')
     expect(wrapper.find('button[aria-label="安装详情目录资源"]').exists()).toBe(false)
+  })
+
+  it('opens a VPS dependency view and keeps dependency readiness separate from resource state', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('button[aria-label="系统依赖"]').trigger('click')
+    await flushPromises()
+
+    expect(api.listSystemDependencies).toHaveBeenCalledOnce()
+    expect(api.listDependencyTasks).toHaveBeenCalledOnce()
+    expect(wrapper.text()).toContain('VPS 系统依赖')
+    expect(wrapper.text()).toContain('Agent Browser CLI')
+    expect(wrapper.text()).toContain('未就绪')
+    expect(wrapper.text()).toContain('agent-browser Skill')
+    expect(wrapper.text()).not.toContain('npm install')
+  })
+
+  it('opens the dependency view from a deep-link query', async () => {
+    routeQuery.panel = 'dependencies'
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(api.listSystemDependencies).toHaveBeenCalledOnce()
+    expect(api.listDependencyTasks).toHaveBeenCalledOnce()
+    expect(wrapper.text()).toContain('VPS 系统依赖')
+  })
+
+  it('probes dependencies directly but requires confirmation before installation', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('button[aria-label="系统依赖"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('button[aria-label="检查 Agent Browser CLI"]').trigger('click')
+    await flushPromises()
+    expect(api.probeSystemDependency).toHaveBeenCalledWith('agent-browser-cli')
+
+    await wrapper.get('button[aria-label="安装 Agent Browser CLI"]').trigger('click')
+    expect(dialogWarning).toHaveBeenCalledOnce()
+    expect(api.installSystemDependency).not.toHaveBeenCalled()
+
+    const dialog = dialogWarning.mock.calls[0][0] as { onPositiveClick: () => Promise<void> }
+    await dialog.onPositiveClick()
+    expect(api.installSystemDependency).toHaveBeenCalledWith('agent-browser-cli', true)
+  })
+
+  it('requires confirmation before retrying a failed dependency task', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('button[aria-label="系统依赖"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('button[aria-label="重试依赖任务"]').trigger('click')
+    expect(dialogWarning).toHaveBeenCalledOnce()
+    expect(api.retryDependencyTask).not.toHaveBeenCalled()
+
+    const dialog = dialogWarning.mock.calls[0][0] as { onPositiveClick: () => Promise<void> }
+    await dialog.onPositiveClick()
+    expect(api.retryDependencyTask).toHaveBeenCalledWith('dep-failed', true)
+  })
+
+  it('shows cancel for a running dependency task and cancels it without an install confirmation', async () => {
+    api.listDependencyTasks.mockResolvedValue([runningDependencyTask])
+    api.cancelDependencyTask.mockResolvedValue({
+      ...runningDependencyTask,
+      status: 'cancelled',
+      cancel_requested: true,
+      finished_at: '2026-08-26T00:00:03Z',
+      error_code: 'cancelled',
+      error_summary: '依赖安装已取消'
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('button[aria-label="系统依赖"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('安装中')
+    await wrapper.get('button[aria-label="取消依赖任务"]').trigger('click')
+    await flushPromises()
+
+    expect(dialogWarning).not.toHaveBeenCalled()
+    expect(api.cancelDependencyTask).toHaveBeenCalledWith('dep-running')
+    wrapper.unmount()
+  })
+
+  it('polls running dependency tasks and stops after the task reaches a terminal state', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    api.listDependencyTasks
+      .mockResolvedValueOnce([runningDependencyTask])
+      .mockResolvedValue([succeededDependencyTask])
+
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('button[aria-label="系统依赖"]').trigger('click')
+    await flushPromises()
+    expect(api.listDependencyTasks).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    expect(api.listDependencyTasks).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('已完成')
+
+    await vi.advanceTimersByTimeAsync(4000)
+    await flushPromises()
+    expect(api.listDependencyTasks).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('clears dependency polling when the component unmounts', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    api.listDependencyTasks.mockResolvedValue([runningDependencyTask])
+
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('button[aria-label="系统依赖"]').trigger('click')
+    await flushPromises()
+    expect(api.listDependencyTasks).toHaveBeenCalledTimes(1)
+
+    wrapper.unmount()
+    await vi.advanceTimersByTimeAsync(4000)
+    await flushPromises()
+
+    expect(api.listDependencyTasks).toHaveBeenCalledTimes(1)
   })
 })

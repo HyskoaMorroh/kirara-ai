@@ -36,7 +36,11 @@ class TestLLMTracer(TracingTestBase):
         """测试完成追踪请求"""
         request = self.create_test_request()
         response = self.create_test_response()
-        trace_id = self.tracer.start_request_tracking("test-backend", request)
+        trace_id = self.tracer.start_request_tracking(
+            "test-backend",
+            request,
+            correlation_id="turn-complete",
+        )
 
         self.tracer.complete_request_tracking(trace_id, request, response)
 
@@ -45,6 +49,7 @@ class TestLLMTracer(TracingTestBase):
         self.assertIsNotNone(trace)
         self.assertEqual(trace.status, "success")
         self.assertEqual(trace.total_tokens, 30)
+        self.assertEqual(trace.correlation_id, "turn-complete")
         # 验证活跃追踪是否移除
         self.assertNotIn(trace_id, self.tracer._active_traces)
 
@@ -78,7 +83,11 @@ class TestLLMTracer(TracingTestBase):
         """测试失败追踪请求"""
         request = self.create_test_request()
         error = Exception("Test error")
-        trace_id = self.tracer.start_request_tracking("test-backend", request)
+        trace_id = self.tracer.start_request_tracking(
+            "test-backend",
+            request,
+            correlation_id="turn-fail",
+        )
 
         self.tracer.fail_request_tracking(trace_id, request, str(error))
 
@@ -87,6 +96,7 @@ class TestLLMTracer(TracingTestBase):
         self.assertIsNotNone(trace)
         self.assertEqual(trace.status, "failed")
         self.assertEqual(trace.error, str(error))
+        self.assertEqual(trace.correlation_id, "turn-fail")
         # 验证活跃追踪是否移除
         self.assertNotIn(trace_id, self.tracer._active_traces)
 
@@ -168,3 +178,45 @@ class TestLLMTracer(TracingTestBase):
         backend_stat = stats["backends"][0]
         self.assertEqual(backend_stat["backend_name"], "test-backend")
         self.assertEqual(backend_stat["count"], 3)
+
+    def test_get_traces_supports_case_insensitive_search_on_declared_fields(self):
+        request = self.create_test_request(model="Research-Model")
+        matching_id = self.tracer.start_request_tracking("Primary-Provider", request)
+        other_id = self.tracer.start_request_tracking(
+            "secondary-provider", self.create_test_request(model="chat-model")
+        )
+
+        records, total = self.tracer.get_traces(
+            query="research",
+            search_fields=("trace_id", "model_id", "backend_name", "status"),
+        )
+
+        self.assertEqual(total, 1)
+        self.assertEqual([record.trace_id for record in records], [matching_id])
+        self.assertNotEqual(records[0].trace_id, other_id)
+
+    def test_get_traces_filters_and_searches_by_correlation_id(self):
+        request = self.create_test_request()
+        matching_id = self.tracer.start_request_tracking(
+            "primary-provider",
+            request,
+            correlation_id="turn-Exact-123",
+        )
+        self.tracer.start_request_tracking(
+            "primary-provider",
+            request,
+            correlation_id="turn-other-456",
+        )
+
+        filtered, filtered_total = self.tracer.get_traces(
+            filters={"correlation_id": "turn-Exact-123"},
+        )
+        searched, searched_total = self.tracer.get_traces(
+            query="exact-123",
+            search_fields=("trace_id", "correlation_id"),
+        )
+
+        self.assertEqual(filtered_total, 1)
+        self.assertEqual([record.trace_id for record in filtered], [matching_id])
+        self.assertEqual(searched_total, 1)
+        self.assertEqual([record.trace_id for record in searched], [matching_id])

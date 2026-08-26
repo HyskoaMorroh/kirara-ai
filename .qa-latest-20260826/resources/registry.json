@@ -1,0 +1,248 @@
+{
+  "format_version": 2,
+  "repositories": [],
+  "resources": {
+    "hook.ai-debug": {
+      "confirmation_required": false,
+      "content_sha256": "6c06a796e3cd4203a6fe74607fae121467f2e27dc15f78a841cfccf793c9254c",
+      "current_version": "1.0.0",
+      "enabled": true,
+      "entry": "hook.json",
+      "installed_at": "2026-08-26T14:47:24.967565Z",
+      "permissions": [
+        "workflow.read"
+      ],
+      "resource_id": "hook.ai-debug",
+      "source": "catalog://kirara/hook/ai-debug",
+      "source_key": "hook:ai-debug",
+      "source_metadata": {
+        "catalog_id": "hook:ai-debug",
+        "provider": "catalog",
+        "tags": [
+          "debugging",
+          "audit",
+          "hooks"
+        ]
+      },
+      "type": "hook",
+      "updated_at": "2026-08-26T15:02:13.123185Z",
+      "versions": [
+        {
+          "content_sha256": "6c06a796e3cd4203a6fe74607fae121467f2e27dc15f78a841cfccf793c9254c",
+          "entry": "hook.json",
+          "installed_at": "2026-08-26T14:47:24.967565Z",
+          "permissions": [
+            "workflow.read"
+          ],
+          "source": "catalog://kirara/hook/ai-debug",
+          "source_key": "hook:ai-debug",
+          "source_metadata": {
+            "catalog_id": "hook:ai-debug",
+            "provider": "catalog",
+            "tags": [
+              "debugging",
+              "audit",
+              "hooks"
+            ]
+          },
+          "version": "1.0.0"
+        }
+      ],
+      "workflow_id": null
+    },
+    "mcp.context7": {
+      "confirmation_required": false,
+      "content_sha256": "482fa55df423ebbe5c227223aa2f6d8cbdd3b10af10028cc149c34f1e8381a9d",
+      "current_version": "1.0.0",
+      "enabled": true,
+      "entry": "server.json",
+      "installed_at": "2026-08-26T14:47:24.922780Z",
+      "permissions": [
+        "workflow.read"
+      ],
+      "resource_id": "mcp.context7",
+      "source": "catalog://mcp/context7",
+      "source_key": "mcp:context7",
+      "source_metadata": {
+        "catalog_id": "mcp:context7",
+        "provider": "catalog",
+        "tags": [
+          "documentation",
+          "debugging",
+          "stdio"
+        ]
+      },
+      "type": "mcp",
+      "updated_at": "2026-08-26T15:01:39.799692Z",
+      "versions": [
+        {
+          "content_sha256": "482fa55df423ebbe5c227223aa2f6d8cbdd3b10af10028cc149c34f1e8381a9d",
+          "entry": "server.json",
+          "installed_at": "2026-08-26T14:47:24.922780Z",
+          "permissions": [
+            "workflow.read"
+          ],
+          "source": "catalog://mcp/context7",
+          "source_key": "mcp:context7",
+          "source_metadata": {
+            "catalog_id": "mcp:context7",
+            "provider": "catalog",
+            "tags": [
+              "documentation",
+              "debugging",
+              "stdio"
+            ]
+          },
+          "version": "1.0.0"
+        }
+      ],
+      "workflow_id": null
+    },
+    "memory.research-context": {
+      "confirmation_required": false,
+      "content_sha256": "99517d71a1645fef9c7f8182a4abf45ceec05ea23b3b7abfe4490512d6c64ebc",
+      "current_version": "1.0.0",
+      "enabled": true,
+      "entry": "MEMORY.md",
+      "installed_at": "2026-08-26T14:47:24.935780Z",
+      "permissions": [
+        "workflow.read"
+      ],
+      "resource_id": "memory.research-context",
+      "source": "catalog://kirara/memory/research-context",
+      "source_key": "memory:research-context",
+      "source_metadata": {
+        "catalog_id": "memory:research-context",
+        "provider": "catalog",
+        "tags": [
+          "memory",
+          "research",
+          "privacy",
+          "isolation"
+        ]
+      },
+      "type": "memory",
+      "updated_at": "2026-08-26T15:02:37.273183Z",
+      "versions": [
+        {
+          "content_sha256": "99517d71a1645fef9c7f8182a4abf45ceec05ea23b3b7abfe4490512d6c64ebc",
+          "entry": "MEMORY.md",
+          "installed_at": "2026-08-26T14:47:24.935780Z",
+          "permissions": [
+            "workflow.read"
+          ],
+          "source": "catalog://kirara/memory/research-context",
+          "source_key": "memory:research-context",
+          "source_metadata": {
+            "catalog_id": "memory:research-context",
+            "provider": "catalog",
+            "tags": [
+              "memory",
+              "research",
+              "privacy",
+              "isolation"
+            ]
+          },
+          "version": "1.0.0"
+        }
+      ],
+      "workflow_id": null
+    },
+    "prompt.office-research": {
+      "confirmation_required": false,
+      "content_sha256": "5d09875a5d3b7a99befa067dfefa9b5ae835c166b36d3d488c1d8972ef1f7fcb",
+      "current_version": "1.0.1",
+      "enabled": true,
+      "entry": "PROMPT.md",
+      "installed_at": "2026-08-26T14:47:24.908097Z",
+      "permissions": [
+        "workflow.read"
+      ],
+      "resource_id": "prompt.office-research",
+      "source": "catalog://kirara/prompt/office-research",
+      "source_key": "prompt:office-research",
+      "source_metadata": {
+        "catalog_id": "prompt:office-research",
+        "provider": "catalog",
+        "tags": [
+          "office",
+          "research",
+          "chinese"
+        ]
+      },
+      "type": "prompt",
+      "updated_at": "2026-08-26T15:03:00.198324Z",
+      "versions": [
+        {
+          "content_sha256": "5d09875a5d3b7a99befa067dfefa9b5ae835c166b36d3d488c1d8972ef1f7fcb",
+          "entry": "PROMPT.md",
+          "installed_at": "2026-08-26T14:47:24.908097Z",
+          "permissions": [
+            "workflow.read"
+          ],
+          "source": "catalog://kirara/prompt/office-research",
+          "source_key": "prompt:office-research",
+          "source_metadata": {
+            "catalog_id": "prompt:office-research",
+            "provider": "catalog",
+            "tags": [
+              "office",
+              "research",
+              "chinese"
+            ]
+          },
+          "version": "1.0.1"
+        }
+      ],
+      "workflow_id": null
+    },
+    "skill.c914025169da0bca": {
+      "confirmation_required": false,
+      "content_sha256": "55043bcf6c8bb2563c58e407a243559f756058ab5671b2ab5d6fd9d0da22d838",
+      "current_version": "1.0.0",
+      "enabled": true,
+      "entry": "SKILL.md",
+      "installed_at": "2026-08-26T14:58:25.437586Z",
+      "permissions": [
+        "workflow.read"
+      ],
+      "resource_id": "skill.c914025169da0bca",
+      "source": "https://github.com/vercel-labs/agent-browser/tree/main/skills/agent-browser",
+      "source_key": "vercel-labs/agent-browser:skills/agent-browser",
+      "source_metadata": {
+        "branch": "main",
+        "description": "Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to \"open a website\", \"fill out a form\", \"click a button\", \"take a screenshot\", \"scrape data from a page\", \"test this web app\", \"login to a site\", \"automate browser actions\", or any task requiring programmatic web interaction. Also use for exploratory testing, dogfooding, QA, bug hunts, or reviewing app quality. Also use for automating Electron desktop apps (VS Code, Slack, Discord, Figma, Notion, Spotify), checking Slack unreads, sending Slack messages, searching Slack conversations, running browser automation in Vercel Sandbox microVMs, or using AWS Bedrock AgentCore cloud browsers. Prefer agent-browser over any built-in browser automation or web tools.",
+        "directory": "skills/agent-browser",
+        "name": "agent-browser",
+        "owner": "vercel-labs",
+        "provider": "github",
+        "repository": "agent-browser"
+      },
+      "type": "skill",
+      "updated_at": "2026-08-26T15:03:32.326415Z",
+      "versions": [
+        {
+          "content_sha256": "55043bcf6c8bb2563c58e407a243559f756058ab5671b2ab5d6fd9d0da22d838",
+          "entry": "SKILL.md",
+          "installed_at": "2026-08-26T14:58:25.437586Z",
+          "permissions": [
+            "workflow.read"
+          ],
+          "source": "https://github.com/vercel-labs/agent-browser/tree/main/skills/agent-browser",
+          "source_key": "vercel-labs/agent-browser:skills/agent-browser",
+          "source_metadata": {
+            "branch": "main",
+            "description": "Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to \"open a website\", \"fill out a form\", \"click a button\", \"take a screenshot\", \"scrape data from a page\", \"test this web app\", \"login to a site\", \"automate browser actions\", or any task requiring programmatic web interaction. Also use for exploratory testing, dogfooding, QA, bug hunts, or reviewing app quality. Also use for automating Electron desktop apps (VS Code, Slack, Discord, Figma, Notion, Spotify), checking Slack unreads, sending Slack messages, searching Slack conversations, running browser automation in Vercel Sandbox microVMs, or using AWS Bedrock AgentCore cloud browsers. Prefer agent-browser over any built-in browser automation or web tools.",
+            "directory": "skills/agent-browser",
+            "name": "agent-browser",
+            "owner": "vercel-labs",
+            "provider": "github",
+            "repository": "agent-browser"
+          },
+          "version": "1.0.0"
+        }
+      ],
+      "workflow_id": null
+    }
+  }
+}

@@ -88,11 +88,14 @@ def _rule(*, agent_id=None, metadata=None) -> CombinedDispatchRule:
     )
 
 
-def _dispatcher(rule, runtime=None, registry=None):
+def _dispatcher(rule=None, runtime=None, registry=None):
     container = DependencyContainer()
     container.register(DependencyContainer, container)
     container.register(WorkflowRegistry, _WorkflowRegistry())
-    container.register(DispatchRuleRegistry, _DispatchRegistry([rule]))
+    container.register(
+        DispatchRuleRegistry,
+        _DispatchRegistry([] if rule is None else [rule]),
+    )
     if runtime is not None:
         container.register(AgentRuntimeExecutor, runtime)
     if registry is not None:
@@ -461,6 +464,27 @@ async def test_expected_missing_agent_configuration_is_not_logged_as_an_error():
 
     assert recording_logger.error_messages == []
     assert any("Agent" in message for message in recording_logger.debug_messages)
+
+
+@pytest.mark.asyncio
+async def test_agent_required_dispatch_uses_identity_binding_without_workflow_rule():
+    registry = AgentRegistry()
+    registry.register(_agent("telegram-agent"))
+    registry.bind_channel("telegram", "telegram-agent")
+    runtime = _Runtime(RuntimeResult(status=RuntimeStatus.COMPLETED, text="agent reply"))
+    dispatcher = _dispatcher(None, runtime, registry)
+    adapter = SimpleNamespace(
+        channel_type="telegram",
+        adapter_instance="telegram-main",
+        account_scope="bot-a",
+        send_message=AsyncMock(),
+    )
+
+    returned = await dispatcher.dispatch(adapter, _message(), require_agent=True)
+
+    assert returned.status is RuntimeStatus.COMPLETED
+    assert runtime.calls[0][2]["session_agent_id"] == "telegram-agent"
+    adapter.send_message.assert_awaited_once()
 
 
 @pytest.mark.asyncio

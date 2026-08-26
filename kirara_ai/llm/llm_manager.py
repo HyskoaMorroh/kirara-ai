@@ -264,13 +264,16 @@ class LLMManager:
         deadline_seconds: Optional[float] = None,
         cancellation_event: Optional[threading.Event] = None,
         provider_allowlist: Optional[Iterable[str]] = None,
+        correlation_id: Optional[str] = None,
     ) -> ChatExecutionResult:
         candidates = self.get_provider_candidates(
             request.model or "",
             provider_allowlist=provider_allowlist,
         )
         tracer = self._get_llm_tracer()
-        trace_id = self._start_logical_trace(tracer, request, candidates)
+        trace_id = self._start_logical_trace(
+            tracer, request, candidates, correlation_id=correlation_id
+        )
         requested_at = datetime.now(timezone.utc)
         initial_provider = self._candidate_provider(candidates)
         try:
@@ -291,6 +294,7 @@ class LLMManager:
                 error,
                 error.attempts,
                 backend_name=self._final_provider(error.attempts, initial_provider),
+                correlation_id=correlation_id,
             )
             raise
         except Exception as error:
@@ -302,6 +306,7 @@ class LLMManager:
                 error,
                 attempts,
                 backend_name=self._final_provider(attempts, initial_provider),
+                correlation_id=correlation_id,
             )
             raise
         response = mark_provider_usage(result.response)
@@ -320,6 +325,7 @@ class LLMManager:
                 provider=final_provider,
                 requested_at=requested_at,
             ),
+            correlation_id=correlation_id,
         )
         return result
 
@@ -512,6 +518,7 @@ class LLMManager:
         deadline_seconds: Optional[float] = None,
         cancellation_event: Optional[threading.Event] = None,
         provider_allowlist: Optional[Iterable[str]] = None,
+        correlation_id: Optional[str] = None,
     ) -> StreamExecutionResult:
         """Execute a stream without joining output from different providers."""
         model_id = request.model or ""
@@ -521,7 +528,9 @@ class LLMManager:
             provider_allowlist=provider_allowlist,
         )
         tracer = self._get_llm_tracer()
-        trace_id = self._start_logical_trace(tracer, request, candidates)
+        trace_id = self._start_logical_trace(
+            tracer, request, candidates, correlation_id=correlation_id
+        )
         requested_at = datetime.now(timezone.utc)
         initial_provider = self._candidate_provider(candidates)
         try:
@@ -558,6 +567,7 @@ class LLMManager:
                 error,
                 getattr(error, "attempts", attempts),
                 backend_name=initial_provider,
+                correlation_id=correlation_id,
             )
             raise
         iterator = self._trace_stream_iterator(
@@ -568,6 +578,7 @@ class LLMManager:
             attempts=attempts,
             initial_provider=initial_provider,
             requested_at=requested_at,
+            correlation_id=correlation_id,
         )
         return StreamExecutionResult(
             iterator,
@@ -580,6 +591,7 @@ class LLMManager:
                 "LLM stream closed before iteration",
                 attempts,
                 backend_name=initial_provider,
+                correlation_id=correlation_id,
             ),
         )
 
@@ -593,6 +605,7 @@ class LLMManager:
         attempts: List[ProviderAttempt],
         initial_provider: str,
         requested_at: datetime,
+        correlation_id: Optional[str] = None,
     ) -> Iterator[Any]:
         responses: List[LLMChatResponse] = []
         try:
@@ -609,6 +622,7 @@ class LLMManager:
                 "LLM stream closed before completion",
                 attempts,
                 backend_name=self._final_provider(attempts, initial_provider),
+                correlation_id=correlation_id,
             )
             raise
         except Exception as error:
@@ -620,6 +634,7 @@ class LLMManager:
                 error,
                 error_attempts,
                 backend_name=self._final_provider(error_attempts, initial_provider),
+                correlation_id=correlation_id,
             )
             raise
         else:
@@ -637,6 +652,7 @@ class LLMManager:
                     provider=final_provider,
                     requested_at=requested_at,
                 ),
+                correlation_id=correlation_id,
             )
 
     def _execute_stream_iterator(
@@ -980,13 +996,27 @@ class LLMManager:
             return None
 
     @staticmethod
-    def _start_logical_trace(tracer, request, candidates) -> str:
+    def _start_logical_trace(
+        tracer,
+        request,
+        candidates,
+        *,
+        correlation_id: Optional[str] = None,
+    ) -> str:
         fallback = uuid.uuid4().hex
         if tracer is None:
             return fallback
         provider = getattr(candidates[0], "backend_name", "unknown") if candidates else "unknown"
         try:
-            return tracer.start_request_tracking(provider, request)
+            start = tracer.start_request_tracking
+            return start(
+                provider,
+                request,
+                **LLMManager._supported_trace_kwargs(
+                    start,
+                    correlation_id=correlation_id,
+                ),
+            )
         except Exception:
             return fallback
 
@@ -1000,6 +1030,7 @@ class LLMManager:
         *,
         backend_name: str,
         cost_snapshot: Optional[CostSnapshot] = None,
+        correlation_id: Optional[str] = None,
     ) -> None:
         if tracer is None:
             return
@@ -1014,6 +1045,7 @@ class LLMManager:
                     attempts=attempts,
                     backend_name=backend_name,
                     cost_snapshot=cost_snapshot,
+                    correlation_id=correlation_id,
                 ),
             )
         except Exception:
@@ -1028,6 +1060,7 @@ class LLMManager:
         attempts,
         *,
         backend_name: str,
+        correlation_id: Optional[str] = None,
     ) -> None:
         if tracer is None:
             return
@@ -1041,6 +1074,7 @@ class LLMManager:
                     fail,
                     attempts=attempts,
                     backend_name=backend_name,
+                    correlation_id=correlation_id,
                 ),
             )
         except Exception:

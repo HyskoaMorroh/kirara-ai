@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List
 from unittest.mock import MagicMock
 
@@ -119,6 +119,32 @@ class TestMemoryManager:
         # 验证结果
         assert len(results) == 1
         assert results[0] == test_entry
+
+    def test_query_sorts_legacy_naive_and_timezone_aware_entries(
+        self, memory_manager, mock_scope
+    ):
+        sender = ChatSender(
+            user_id="user1",
+            chat_type=ChatType.C2C,
+            display_name="Test User",
+        )
+        memory_manager.persistence.storage["test_scope"] = [
+            MemoryEntry(
+                sender=sender,
+                content="legacy",
+                timestamp=datetime(2026, 8, 26, 10, 0),
+            ),
+            MemoryEntry(
+                sender=sender,
+                content="runtime",
+                timestamp=datetime(2026, 8, 26, 3, 0, tzinfo=timezone.utc),
+            ),
+        ]
+
+        results = memory_manager.query(mock_scope, sender)
+
+        assert {entry.content for entry in results} == {"legacy", "runtime"}
+        assert all(entry.timestamp.tzinfo is None for entry in results)
 
     def test_max_entries_limit(self, memory_manager, mock_scope, container):
         """测试最大条目数限制"""

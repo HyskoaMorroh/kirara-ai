@@ -34,13 +34,17 @@ class AsyncMemoryPersistence:
         self.worker.start()
 
     def _worker(self):
-        while self.running:
+        while self.running or not self.queue.empty():
             try:
                 scope_key, entries = self.queue.get(timeout=1)
-                self.persistence.save(scope_key, entries)
-                self.queue.task_done()
-                logger.info(f"Saved {scope_key} with {len(entries)} entries")
+                try:
+                    self.persistence.save(scope_key, entries)
+                    logger.info(f"Saved {scope_key} with {len(entries)} entries")
+                finally:
+                    self.queue.task_done()
             except Empty:
+                if not self.running:
+                    break
                 continue
             except Exception as e:
                 logger.error(f"Error saving memory: {e}")
@@ -55,4 +59,8 @@ class AsyncMemoryPersistence:
     def stop(self):
         self.running = False
         self.worker.join()
+        # The worker exits only after every item present at shutdown has been
+        # acknowledged. Keep this assertion local so future implementations
+        # cannot silently drop queued writes.
+        self.queue.join()
         self.persistence.flush()

@@ -96,7 +96,9 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
     def start_request_tracking(
         self,
         backend_name: str,
-        request: LLMChatRequest
+        request: LLMChatRequest,
+        *,
+        correlation_id: Optional[str] = None,
     ) -> str:
         """开始跟踪LLM请求"""
         trace_id = generate_trace_id()
@@ -104,12 +106,14 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
             trace_id=trace_id,
             model_id=request.model or 'unknown',
             backend_name=backend_name,
-            request=request.model_copy(deep=True)
+            request=request.model_copy(deep=True),
+            correlation_id=correlation_id,
         )
         # 存储活跃追踪信息
         self._active_traces[trace_id] = {
             'backend_name': backend_name,
-            'start_time': event.start_time
+            'start_time': event.start_time,
+            'correlation_id': correlation_id,
         }
         # 发布事件
         self.event_bus.post(event)
@@ -125,6 +129,7 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
         cost_snapshot: Optional[CostSnapshot] = None,
         ttft_ms: Optional[int] = None,
         backend_name: Optional[str] = None,
+        correlation_id: Optional[str] = None,
     ):
         """完成LLM请求跟踪"""
         if trace_id in self._active_traces:
@@ -143,6 +148,11 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
                 attempts=attempts,
                 cost_snapshot=cost_snapshot,
                 ttft_ms=ttft_ms,
+                correlation_id=(
+                    correlation_id
+                    if correlation_id is not None
+                    else trace_data.get('correlation_id')
+                ),
             )
             # 移除活跃追踪
             del self._active_traces[trace_id]
@@ -158,6 +168,7 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
         attempts: Optional[Iterable[ProviderAttempt]] = None,
         ttft_ms: Optional[int] = None,
         backend_name: Optional[str] = None,
+        correlation_id: Optional[str] = None,
     ):
         """记录LLM请求失败"""
         if trace_id in self._active_traces:
@@ -175,6 +186,11 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
                 start_time=start_time,
                 attempts=attempts,
                 ttft_ms=ttft_ms,
+                correlation_id=(
+                    correlation_id
+                    if correlation_id is not None
+                    else trace_data.get('correlation_id')
+                ),
             )
             # 移除活跃追踪
             del self._active_traces[trace_id]

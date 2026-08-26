@@ -66,6 +66,7 @@ class MCPResourceInfo(BaseModel):
 
 class MCPPromptSampleRequest(BaseModel):
     promptId: str
+    arguments: Dict[str, str] = Field(default_factory=dict)
     text: str = Field(default="")
     temperature: Optional[float] = None
 
@@ -87,6 +88,27 @@ class MCPStatistics(BaseModel):
     disconnected_servers: int
     error_servers: int
     total_tools: int
+
+
+class MCPAuditRecord(BaseModel):
+    component: str = "mcp"
+    timestamp: Optional[str] = None
+    server: str
+    operation: str
+    duration_ms: float
+    outcome: str
+    correlation_id: Optional[str] = None
+    error: Optional[Dict[str, str]] = None
+
+
+class MCPAuditPage(BaseModel):
+    items: List[MCPAuditRecord]
+    total: int
+    offset: int
+    limit: int
+    has_more: bool
+    persistent: bool = False
+    retention_limit: int
 
 
 class _CanonicalServerPayload(BaseModel):
@@ -169,7 +191,5 @@ class MCPServerUpdateRequest(BaseModel):
 class MCPToolCallRequest(BaseModel):
     toolName: str
     params: Dict[str, Any] = Field(default_factory=dict)
-    confirmed: bool = False
-    agent_allowlist: Optional[List[str]] = None
-    session_allowlist: Optional[List[str]] = None
-    workflow_allowlist: Optional[List[str]] = None
+    agent_id: Optional[str] = None
+    confirmation_id: Optional[str] = None

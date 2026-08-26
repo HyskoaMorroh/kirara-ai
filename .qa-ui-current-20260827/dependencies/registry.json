@@ -1,0 +1,59 @@
+{
+  "dependencies": {
+    "agent-browser-browser": {
+      "checked_at": null,
+      "dependency_id": "agent-browser-browser",
+      "last_task_id": null,
+      "ready": false,
+      "status": "unknown",
+      "summary": "",
+      "version": null
+    },
+    "agent-browser-cli": {
+      "checked_at": null,
+      "dependency_id": "agent-browser-cli",
+      "last_task_id": null,
+      "ready": false,
+      "status": "unknown",
+      "summary": "",
+      "version": null
+    },
+    "context7-runtime": {
+      "checked_at": null,
+      "dependency_id": "context7-runtime",
+      "last_task_id": null,
+      "ready": false,
+      "status": "unknown",
+      "summary": "",
+      "version": null
+    },
+    "graphify-cli": {
+      "checked_at": null,
+      "dependency_id": "graphify-cli",
+      "last_task_id": null,
+      "ready": false,
+      "status": "unknown",
+      "summary": "",
+      "version": null
+    },
+    "node-runtime": {
+      "checked_at": null,
+      "dependency_id": "node-runtime",
+      "last_task_id": null,
+      "ready": false,
+      "status": "unknown",
+      "summary": "",
+      "version": null
+    },
+    "python-tooling": {
+      "checked_at": null,
+      "dependency_id": "python-tooling",
+      "last_task_id": null,
+      "ready": false,
+      "status": "unknown",
+      "summary": "",
+      "version": null
+    }
+  },
+  "version": 1
+}

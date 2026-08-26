@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 import threading
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -58,8 +59,20 @@ class SessionStore:
     def _session_digest(session_key: str) -> str:
         return hashlib.sha256(session_key.encode("utf-8")).hexdigest()
 
-    def _history_path(self, session_key: str) -> Path:
-        return self.root / f"{self._session_digest(session_key)}.json"
+    def _history_path(
+        self,
+        session_key: str,
+        agent_id: str | None = None,
+    ) -> Path:
+        if agent_id is None:
+            digest_source = session_key
+        else:
+            digest_source = json.dumps(
+                [session_key, str(agent_id)],
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+        return self.root / f"{self._session_digest(digest_source)}.json"
 
     def save_history(
         self,
@@ -75,7 +88,10 @@ class SessionStore:
         if agent_id is not None:
             payload["agent_id"] = str(agent_id)
         with self._transaction():
-            self._atomic_write(self._history_path(session_key), payload)
+            self._atomic_write(
+                self._history_path(session_key, agent_id=agent_id),
+                payload,
+            )
 
     def load_history(
         self,
@@ -84,7 +100,15 @@ class SessionStore:
         agent_id: str | None = None,
     ) -> list[LLMChatMessage]:
         with self._transaction():
-            payload = self._read_json(self._history_path(session_key), default=None)
+            payload = self._read_json(
+                self._history_path(session_key, agent_id=agent_id),
+                default=None,
+            )
+            if payload is None and agent_id is not None:
+                payload = self._read_json(
+                    self._history_path(session_key),
+                    default=None,
+                )
         if payload is None:
             return []
         if (
@@ -96,8 +120,10 @@ class SessionStore:
         stored_agent_id = payload.get("agent_id")
         if (
             agent_id is not None
-            and stored_agent_id is not None
-            and str(stored_agent_id) != str(agent_id)
+            and (
+                stored_agent_id is None
+                or str(stored_agent_id) != str(agent_id)
+            )
         ):
             return []
         try:
@@ -141,6 +167,11 @@ class SessionStore:
             record = records.get(confirmation_id)
             if record is None:
                 return "not_found", None
+            if not record.get("correlation_id"):
+                record = dict(record)
+                record["correlation_id"] = uuid.uuid4().hex
+                records[confirmation_id] = record
+                self._write_confirmations(records)
             expected_digest = self._session_digest(session_key)
             if not hmac.compare_digest(record["session_digest"], expected_digest):
                 return "session_mismatch", dict(record)
@@ -313,6 +344,13 @@ class SessionStore:
         ):
             raise ValueError("pending confirmation record is invalid")
         if status not in _CONFIRMATION_STATES:
+            raise ValueError("pending confirmation record is invalid")
+        correlation_id = record.get("correlation_id")
+        if correlation_id is not None and (
+            not isinstance(correlation_id, str)
+            or not correlation_id
+            or len(correlation_id) > 64
+        ):
             raise ValueError("pending confirmation record is invalid")
         for field in ("created_at", "updated_at", "expires_at"):
             value = record.get(field)

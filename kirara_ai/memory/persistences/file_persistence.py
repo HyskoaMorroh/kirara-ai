@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 from datetime import datetime
 from typing import List
 
@@ -37,15 +38,32 @@ class FileMemoryPersistence(MemoryPersistence):
             for entry in entries
         ]
 
-        # 写入文件
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(
-                serialized_entries,
-                f,
-                ensure_ascii=False,
-                indent=2,
-                cls=MemoryJSONEncoder,
-            )
+        # Write to a sibling temporary file and replace the target so a
+        # process stop cannot leave a truncated memory document behind.
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{os.path.basename(file_path)}-",
+            suffix=".tmp",
+            dir=self.data_dir,
+        )
+        temporary_path = temporary_name
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(
+                    serialized_entries,
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                    cls=MemoryJSONEncoder,
+                )
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary_path, file_path)
+        finally:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
 
     def load(self, scope_key: str) -> List[MemoryEntry]:
         file_path = self._get_file_path(scope_key)
@@ -72,5 +90,5 @@ class FileMemoryPersistence(MemoryPersistence):
         ]
 
     def flush(self) -> None:
-        # 文件系统实现不需要特别的flush操作
+        # Each save is fsynced before replace; no additional buffer remains.
         pass

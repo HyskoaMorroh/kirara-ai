@@ -13,19 +13,23 @@ import json
 import zipfile
 from typing import Any, Mapping
 
+from packaging.version import Version
+
 from .resource_lifecycle import ResourceLifecycleService, ResourceStateError
 from .resource_sources import ResourceSourceService
+from .system_dependencies import SystemDependencyService
 
 
-OFFICE_RESEARCH_PROMPT = """你是一名面向上班族的学术研究与办公助手。
+OFFICE_RESEARCH_PROMPT = """我是上班族，偏学术研究。我经常要处理【邮件、会议、表格、文档等】。我偶尔兼职程序员。
+帮我干活时：
 
-- 用大白话讲清结果，内容精湛、准确、精美。
-- 发现问题、风险或关键遗漏时直接提醒，不要只顺着用户。
-- 遇到受限表达时，改用意思相同且符合规范的表达继续处理，不要中断任务。
-- 除了真正代码，不用代码块堆正文。
-- 写邮件和报告时去掉空话、套话、过多破折号和生硬的 AI 腔。
-- 不在结果中暴露身份号码、电话号码、住址、付款信息或密钥。
-- 涉及发送、退订、建会、删除、发布或付款时，先停下来请求用户确认。
+- 用大白话讲清结果，内容要精湛精美；
+- 该提醒就直接提醒，不要只顺着我；
+- 若出现敏感词或sensitive words，请你按相同含义更换成符合要求的内容再重新执行，不要中断；
+- 除了真正代码，不用代码块堆正文；
+- 写邮件和报告时去掉空话、套话、过多破折号和生硬AI腔；
+- 不在结果里暴露身份号码、电话、住址、付款信息或密钥；
+- 涉及发送、退订、建会、删除、发布、付款时先停下来让我确认。
 """
 
 RESEARCH_MEMORY_POLICY = """这是研究型 Agent 的记忆使用边界。
@@ -43,7 +47,7 @@ _BUILTINS: tuple[dict[str, Any], ...] = (
         "type": "prompt",
         "name": "Office and Research Assistant",
         "description": "办公、邮件、会议、表格和学术研究场景的中文行为提示词。",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "permissions": ["workflow.read"],
         "entry": "PROMPT.md",
         "source": "catalog://kirara/prompt/office-research",
@@ -103,21 +107,77 @@ _BUILTINS: tuple[dict[str, Any], ...] = (
         "type": "hook",
         "name": "AI Debug Audit Hooks",
         "description": "记录 Agent 生命周期和工具策略事件的受控 Hook 声明。",
-        "version": "1.0.0",
-        "permissions": ["workflow.read"],
+        "version": "1.1.0",
+        "permissions": ["workflow.read", "process.execute"],
         "entry": "hook.json",
         "source": "catalog://kirara/hook/ai-debug",
         "tags": ["debugging", "audit", "hooks"],
         "content": {
             "events": {
-                "SessionStart": {"handler": "audit.agent_start"},
-                "UserPromptSubmit": {"handler": "audit.user_prompt"},
-                "PreToolUse": {"handler": "audit.pre_tool"},
-                "PermissionRequest": {"handler": "audit.permission_request"},
-                "PostToolUse": {"handler": "audit.post_tool"},
-                "PreCompact": {"handler": "audit.pre_compact"},
-                "PostCompact": {"handler": "audit.post_compact"},
-                "Stop": {"handler": "audit.stop"},
+                "SessionStart": {
+                    "type": "command",
+                    "command": ["{python}", "-m", "kirara_ai.agent_runtime.audit_hook_command", "SessionStart"],
+                    "timeout_ms": 5000,
+                    "max_output_bytes": 4096,
+                    "required_permissions": ["process.execute"],
+                    "required_capabilities": ["process.execute"],
+                },
+                "UserPromptSubmit": {
+                    "type": "command",
+                    "command": ["{python}", "-m", "kirara_ai.agent_runtime.audit_hook_command", "UserPromptSubmit"],
+                    "timeout_ms": 5000,
+                    "max_output_bytes": 4096,
+                    "required_permissions": ["process.execute"],
+                    "required_capabilities": ["process.execute"],
+                },
+                "PreToolUse": {
+                    "type": "command",
+                    "command": ["{python}", "-m", "kirara_ai.agent_runtime.audit_hook_command", "PreToolUse"],
+                    "timeout_ms": 5000,
+                    "max_output_bytes": 4096,
+                    "required_permissions": ["process.execute"],
+                    "required_capabilities": ["process.execute"],
+                },
+                "PermissionRequest": {
+                    "type": "command",
+                    "command": ["{python}", "-m", "kirara_ai.agent_runtime.audit_hook_command", "PermissionRequest"],
+                    "timeout_ms": 5000,
+                    "max_output_bytes": 4096,
+                    "required_permissions": ["process.execute"],
+                    "required_capabilities": ["process.execute"],
+                },
+                "PostToolUse": {
+                    "type": "command",
+                    "command": ["{python}", "-m", "kirara_ai.agent_runtime.audit_hook_command", "PostToolUse"],
+                    "timeout_ms": 5000,
+                    "max_output_bytes": 4096,
+                    "required_permissions": ["process.execute"],
+                    "required_capabilities": ["process.execute"],
+                },
+                "PreCompact": {
+                    "type": "command",
+                    "command": ["{python}", "-m", "kirara_ai.agent_runtime.audit_hook_command", "PreCompact"],
+                    "timeout_ms": 5000,
+                    "max_output_bytes": 4096,
+                    "required_permissions": ["process.execute"],
+                    "required_capabilities": ["process.execute"],
+                },
+                "PostCompact": {
+                    "type": "command",
+                    "command": ["{python}", "-m", "kirara_ai.agent_runtime.audit_hook_command", "PostCompact"],
+                    "timeout_ms": 5000,
+                    "max_output_bytes": 4096,
+                    "required_permissions": ["process.execute"],
+                    "required_capabilities": ["process.execute"],
+                },
+                "Stop": {
+                    "type": "command",
+                    "command": ["{python}", "-m", "kirara_ai.agent_runtime.audit_hook_command", "Stop"],
+                    "timeout_ms": 5000,
+                    "max_output_bytes": 4096,
+                    "required_permissions": ["process.execute"],
+                    "required_capabilities": ["process.execute"],
+                },
             }
         },
     },
@@ -135,9 +195,11 @@ class ResourceCatalogService:
         self,
         lifecycle: ResourceLifecycleService,
         sources: ResourceSourceService | None = None,
+        dependencies: SystemDependencyService | None = None,
     ) -> None:
         self.lifecycle = lifecycle
         self.sources = sources or ResourceSourceService(lifecycle)
+        self.dependencies = dependencies
 
     def search(
         self,
@@ -224,16 +286,19 @@ class ResourceCatalogService:
             item = self._public_builtin(item)
         return self._with_install_state(item)
 
-    def install(self, catalog_id: str, *, branch: str = "main") -> dict[str, Any]:
+    def install(self, catalog_id: str, *, branch: str | None = None) -> dict[str, Any]:
         item = self._find(catalog_id)
         existing = self._installed_for_catalog(item)
         if existing is not None:
+            if item["type"] != "skill" and Version(str(item["version"])) > Version(
+                str(existing["current_version"])
+            ):
+                return self._install_builtin(item, update=True)
             return existing
         if item["type"] == "skill":
             source_key = str(item["source_key"])
             owner_repo, directory = source_key.split(":", 1)
             owner, name = owner_repo.split("/", 1)
-            _, _, branch = self.sources.validate_repository(owner, name, branch)
             return self.sources.install_skill(
                 owner=owner,
                 name=name,
@@ -244,13 +309,40 @@ class ResourceCatalogService:
         return self._install_builtin(item)
 
     def ensure_builtins(self) -> None:
-        """Install built-ins once, disabled until an operator enables them."""
+        """Install or safely advance built-ins to the bundled version."""
 
         for item in _BUILTINS:
-            if self._installed_for_catalog(item) is None:
-                self._install_builtin(item)
+            self.install(str(item["catalog_id"]))
 
-    def _install_builtin(self, item: Mapping[str, Any]) -> dict[str, Any]:
+    def project_dependencies(self, item: Mapping[str, Any]) -> dict[str, Any]:
+        """Project persisted VPS readiness without probing or mutating resources."""
+
+        result = dict(item)
+        dependency_ids = self._dependency_ids(item)
+        system_dependencies = (
+            [self.dependencies.get_dependency(dependency_id) for dependency_id in dependency_ids]
+            if self.dependencies is not None
+            else []
+        )
+        result.update(
+            {
+                "dependency_ids": dependency_ids,
+                "system_dependencies": system_dependencies,
+                "dependencies_ready": not dependency_ids
+                or (
+                    len(system_dependencies) == len(dependency_ids)
+                    and all(dependency.get("ready") is True for dependency in system_dependencies)
+                ),
+                "dependency_status": self._dependency_status(
+                    dependency_ids, system_dependencies
+                ),
+            }
+        )
+        return result
+
+    def _install_builtin(
+        self, item: Mapping[str, Any], *, update: bool = False
+    ) -> dict[str, Any]:
         content = item["content"]
         if isinstance(content, str):
             data = content.encode("utf-8")
@@ -285,6 +377,10 @@ class ResourceCatalogService:
         temporary = self.lifecycle.imports_path / f"catalog-{hashlib.sha256(archive.getvalue()).hexdigest()}.zip"
         temporary.write_bytes(archive.getvalue())
         try:
+            if update:
+                return self.lifecycle.update_archive(
+                    temporary, expected_resource_id=resource_id
+                )
             return self.lifecycle.install_archive(temporary)
         finally:
             temporary.unlink(missing_ok=True)
@@ -311,23 +407,48 @@ class ResourceCatalogService:
                 "source_key": self.sources.source_key(owner, repository, directory),
                 "owner": owner,
                 "repository": repository,
-                "branch": "main",
+                "branch": None,
                 "directory": directory,
                 "source_url": self.sources._skill_source_url(
-                    owner, repository, "main", directory
+                    owner, repository, None, directory
                 ),
             }
         raise ResourceCatalogError("catalog item is not available")
 
     def _installed_for_catalog(self, item: Mapping[str, Any]) -> dict[str, Any] | None:
         source_key = item.get("catalog_id") or item.get("source_key")
+        candidates: list[dict[str, Any]] = []
         for resource in self.lifecycle.list_resources():
             if resource.get("source_key") == source_key:
                 return resource
             metadata = resource.get("source_metadata") or {}
             if metadata.get("catalog_id") == source_key:
                 return resource
-        return None
+            if item.get("type") != "skill" or resource.get("type") != "skill":
+                continue
+            if metadata.get("provider") != "github":
+                continue
+            if any(
+                not isinstance(item.get(key), str)
+                or metadata.get(key) != item.get(key)
+                for key in ("owner", "repository")
+            ):
+                continue
+            requested_branch = item.get("branch")
+            if requested_branch and metadata.get("branch") != requested_branch:
+                continue
+            requested_directory = str(item.get("directory") or "").strip("/")
+            installed_directory = str(metadata.get("directory") or "").strip("/")
+            if not requested_directory or not installed_directory:
+                continue
+            if requested_directory == installed_directory:
+                return resource
+            if (
+                requested_directory.rsplit("/", 1)[-1].casefold()
+                == installed_directory.rsplit("/", 1)[-1].casefold()
+            ):
+                candidates.append(resource)
+        return candidates[0] if len(candidates) == 1 else None
 
     def _with_install_state(self, item: Mapping[str, Any]) -> dict[str, Any]:
         result = dict(item)
@@ -335,7 +456,54 @@ class ResourceCatalogService:
         result["installed"] = installed is not None
         result["installed_resource_id"] = installed.get("resource_id") if installed else None
         result["enabled"] = bool(installed and installed.get("enabled"))
-        return result
+        return self.project_dependencies(result)
+
+    @staticmethod
+    def _dependency_ids(item: Mapping[str, Any]) -> list[str]:
+        metadata = item.get("source_metadata")
+        metadata = metadata if isinstance(metadata, Mapping) else {}
+        catalog_id = str(item.get("catalog_id") or metadata.get("catalog_id") or "").casefold()
+        resource_id = str(item.get("resource_id") or "").casefold()
+        source_key = str(item.get("source_key") or metadata.get("source_key") or "").casefold()
+
+        if catalog_id == "mcp:context7" or source_key == "mcp:context7" or resource_id == "mcp.context7":
+            return ["context7-runtime"]
+        if str(item.get("type") or "").casefold() != "skill":
+            return []
+
+        names = {
+            str(item.get("name") or "").strip().casefold(),
+            str(metadata.get("name") or "").strip().casefold(),
+            str(item.get("directory") or "").strip("/").rsplit("/", 1)[-1].casefold(),
+            str(metadata.get("directory") or "").strip("/").rsplit("/", 1)[-1].casefold(),
+        }
+        source_parts = {
+            source_key.rsplit(":", 1)[-1].strip("/").rsplit("/", 1)[-1],
+            str(item.get("directory") or "").strip("/").rsplit("/", 1)[-1].casefold(),
+            str(metadata.get("directory") or "").strip("/").rsplit("/", 1)[-1].casefold(),
+        }
+        identifiers = names | source_parts
+        if "agent-browser" in identifiers:
+            return ["agent-browser-cli", "agent-browser-browser"]
+        if "graphify" in identifiers:
+            return ["graphify-cli"]
+        return []
+
+    @staticmethod
+    def _dependency_status(
+        dependency_ids: list[str], system_dependencies: list[Mapping[str, Any]]
+    ) -> str:
+        if not dependency_ids:
+            return "not_required"
+        if len(system_dependencies) != len(dependency_ids):
+            return "unknown"
+        statuses = [str(item.get("status") or "unknown") for item in system_dependencies]
+        if all(item.get("ready") is True for item in system_dependencies):
+            return "ready"
+        for status in ("failed", "missing", "cancelled", "unknown"):
+            if status in statuses:
+                return status
+        return statuses[0] if len(set(statuses)) == 1 else "unknown"
 
     @staticmethod
     def _public_builtin(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -352,7 +520,7 @@ class ResourceCatalogService:
             "source_key": source_key,
             "owner": item.get("owner"),
             "repository": item.get("repository"),
-            "branch": item.get("branch", "main"),
+            "branch": item.get("branch"),
             "directory": item.get("directory"),
             "source_url": item.get("source_url"),
             "installs": item.get("installs", 0),

@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Optional, Sequence
+from urllib.parse import quote
 
 from kirara_ai.im.message import IMMessage
 from kirara_ai.im.sender import ChatType
@@ -157,13 +158,24 @@ class ChannelContext:
     @property
     def session_key(self) -> str:
         return "/".join(
-            (
-                self.channel_type,
-                self.adapter_instance,
-                self.account_scope,
-                self.conversation_scope,
-                self.sender_scope,
-            )
+            quote(component, safe="._:@-")
+            for component in self._session_components
+        )
+
+    @property
+    def legacy_session_key(self) -> str:
+        """Return the pre-encoding key used by existing persisted bindings."""
+
+        return "/".join(self._session_components)
+
+    @property
+    def _session_components(self) -> tuple[str, str, str, str, str]:
+        return (
+            self.channel_type,
+            self.adapter_instance,
+            self.account_scope,
+            self.conversation_scope,
+            self.sender_scope,
         )
 
     @staticmethod
@@ -333,6 +345,108 @@ def effective_mcp_allowlist(
         effective.intersection_update(candidate)
     if connected_tools is not None:
         effective.intersection_update(_as_frozenset(connected_tools))
+    return frozenset(effective)
+
+
+def resolve_mcp_tool_allowlist(
+    *,
+    agent_allowlist: Iterable[str],
+    tool_entries: Mapping[str, Any],
+    agent_mcp_server_ids: Optional[Iterable[str]] = None,
+    session_allowlist: Optional[Iterable[str]] = None,
+    workflow_allowlist: Optional[Iterable[str]] = None,
+) -> frozenset[str]:
+    """Resolve stable MCP policy names to the current tool-cache names.
+
+    Persisted policies use ``server_id.original_name`` so reconnect order and
+    cache collision aliases cannot change their meaning. Legacy original names
+    remain valid only when they identify exactly one tool in the Agent's bound
+    server set. Session and workflow policies are resolved through the same
+    identities before enforcing that they only narrow Agent permissions.
+    """
+
+    bound_servers = (
+        _as_frozenset(agent_mcp_server_ids)
+        if agent_mcp_server_ids is not None
+        else None
+    )
+    identities: dict[str, tuple[str, str, str]] = {}
+    for cache_name, entry in tool_entries.items():
+        server_id = str(getattr(entry, "server_id", "")).strip()
+        if not server_id or (
+            bound_servers is not None and server_id not in bound_servers
+        ):
+            continue
+        info = getattr(entry, "tool_info", entry)
+        original_name = str(
+            getattr(entry, "original_name", "")
+            or getattr(info, "name", "")
+            or cache_name
+        ).strip()
+        if not original_name:
+            continue
+        display_name = str(cache_name).strip()
+        identities[display_name] = (
+            server_id,
+            original_name,
+            f"{server_id}.{original_name}",
+        )
+
+    canonical_index: dict[str, set[str]] = {}
+    original_index: dict[str, set[str]] = {}
+    for cache_name, (_server_id, original_name, canonical_name) in identities.items():
+        canonical_index.setdefault(canonical_name, set()).add(cache_name)
+        original_index.setdefault(original_name, set()).add(cache_name)
+
+    def resolve(values: Iterable[str]) -> frozenset[str]:
+        resolved: set[str] = set()
+        for token in _as_frozenset(values):
+            # Stable server-qualified identities win over compatibility aliases.
+            # A cache/display name is the next-most-specific spelling; an
+            # unqualified original name is accepted only when it is unique.
+            canonical_matches = canonical_index.get(token, set())
+            if len(canonical_matches) == 1:
+                matches = canonical_matches
+            else:
+                original_matches = original_index.get(token, set())
+                cache_matches = {token} if token in identities else set()
+                compatibility_matches = original_matches | cache_matches
+                matches = (
+                    compatibility_matches
+                    if len(compatibility_matches) == 1
+                    else set()
+                )
+            if len(matches) == 1:
+                resolved.update(matches)
+        return frozenset(resolved)
+
+    raw_agent = _as_frozenset(agent_allowlist)
+    agent = resolve(raw_agent)
+    effective = set(agent)
+    for label, values in (
+        ("session", session_allowlist),
+        ("workflow", workflow_allowlist),
+    ):
+        if values is None:
+            continue
+        raw_candidate = _as_frozenset(values)
+        candidate = resolve(raw_candidate)
+        unresolved_expansions = raw_candidate - raw_agent
+        if not candidate.issubset(agent):
+            unresolved_expansions.update(candidate - agent)
+        else:
+            unresolved_expansions = {
+                token
+                for token in unresolved_expansions
+                if not resolve((token,)).issubset(agent)
+                or not resolve((token,))
+            }
+        if unresolved_expansions:
+            raise ValueError(
+                f"{label} MCP allowlist cannot expand Agent permissions: "
+                f"{sorted(unresolved_expansions)}"
+            )
+        effective.intersection_update(candidate)
     return frozenset(effective)
 
 
@@ -656,9 +770,12 @@ class AgentRegistry:
 
     def unbind_session(self, session_key: str | ChannelContext) -> None:
         with self._lock:
-            key = session_key.session_key if isinstance(session_key, ChannelContext) else str(session_key)
             next_state = self._capture_state()
-            next_state["session_bindings"].pop(key, None)
+            if isinstance(session_key, ChannelContext):
+                next_state["session_bindings"].pop(session_key.session_key, None)
+                next_state["session_bindings"].pop(session_key.legacy_session_key, None)
+            else:
+                next_state["session_bindings"].pop(str(session_key), None)
             self._commit(next_state)
 
     def update_resource_bindings(
@@ -720,9 +837,14 @@ class AgentRegistry:
         context: ChannelContext,
         session_agent_id: Optional[str] = None,
     ) -> AgentDefinition:
+        persisted_session_agent = self._session_bindings.get(context.session_key)
+        if persisted_session_agent is None:
+            persisted_session_agent = self._session_bindings.get(
+                context.legacy_session_key
+            )
         candidates = [
             session_agent_id,
-            self._session_bindings.get(context.session_key),
+            persisted_session_agent,
             self._account_bindings.get(
                 (context.channel_type, context.adapter_instance, context.account_scope)
             ),

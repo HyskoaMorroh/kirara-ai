@@ -2,7 +2,7 @@ import abc
 import asyncio
 import uuid
 from asyncio import Queue
-from typing import Any, Dict, Generic, List, Optional, Tuple, Type, TypeVar
+from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, Type, TypeVar
 
 from sqlalchemy import Column, DateTime, String, asc
 
@@ -99,6 +99,8 @@ class TracerBase(Generic[R], abc.ABC):
     def get_traces(
         self,
         filters: Optional[Dict[str, Any]] = None,
+        query: Optional[str] = None,
+        search_fields: Sequence[str] = (),
         page: int = 1,
         page_size: int = 20,
         order_by: str = "request_time",
@@ -108,6 +110,8 @@ class TracerBase(Generic[R], abc.ABC):
         
         Args:
             filters: 过滤条件字典
+            query: 要在明确声明字段中查找的文本
+            search_fields: 允许模糊查找的字段名
             page: 页码（从1开始）
             page_size: 每页记录数
             order_by: 排序字段
@@ -117,31 +121,49 @@ class TracerBase(Generic[R], abc.ABC):
             Tuple[List[R], int]: 记录列表和总记录数
         """
         with self.db_manager.get_session() as session:
-            from sqlalchemy import desc, func, select
+            from sqlalchemy import desc, func, or_, select
 
             # 构建基础查询
-            query = select(self.record_class)
+            stmt = select(self.record_class)
             count_query = select(func.count()).select_from(self.record_class)
             
             # 应用过滤条件
             if filters:
                 for field, value in filters.items():
                     if value is not None and hasattr(self.record_class, field):
-                        query = query.filter(getattr(self.record_class, field) == value)
+                        stmt = stmt.filter(getattr(self.record_class, field) == value)
                         count_query = count_query.filter(getattr(self.record_class, field) == value)
+
+            search_term = (query or "").strip()
+            columns = [
+                getattr(self.record_class, field)
+                for field in search_fields
+                if hasattr(self.record_class, field)
+            ]
+            if search_term and columns:
+                escaped = (
+                    search_term.replace("\\", "\\\\")
+                    .replace("%", "\\%")
+                    .replace("_", "\\_")
+                )
+                search_filter = or_(
+                    *(column.ilike(f"%{escaped}%", escape="\\") for column in columns)
+                )
+                stmt = stmt.filter(search_filter)
+                count_query = count_query.filter(search_filter)
             
             # 应用排序
             if hasattr(self.record_class, order_by):
                 order_func = desc if order_desc else asc
-                query = query.order_by(order_func(getattr(self.record_class, order_by)))
+                stmt = stmt.order_by(order_func(getattr(self.record_class, order_by)))
             
             # 应用分页
             if page > 0 and page_size > 0:
-                query = query.offset((page - 1) * page_size).limit(page_size)
+                stmt = stmt.offset((page - 1) * page_size).limit(page_size)
             
             # 执行查询
             total = session.execute(count_query).scalar() or 0
-            records = list(session.execute(query).scalars().all())
+            records = list(session.execute(stmt).scalars().all())
             
             return records, total
 

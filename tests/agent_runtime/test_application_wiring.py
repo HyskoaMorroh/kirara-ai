@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -136,8 +137,9 @@ def test_executor_uses_resource_service_when_no_legacy_loader_is_supplied(tmp_pa
     catalog = ResourceCatalogService(lifecycle)
     catalog.ensure_builtins()
     lifecycle.enable("prompt.office-research", confirmed=True)
+    current_version = lifecycle.get_resource("prompt.office-research")["current_version"]
     binding = lifecycle.resolve_binding(
-        "prompt.office-research", "prompt", version="1.0.0", enabled=True
+        "prompt.office-research", "prompt", version=current_version, enabled=True
     )
 
     agent = AgentRegistry()
@@ -165,7 +167,7 @@ def test_executor_uses_resource_service_when_no_legacy_loader_is_supplied(tmp_pa
         None,
     )
 
-    assert "办公" in messages[0].content[0].text
+    assert "我是上班族" in messages[0].content[0].text
 
 
 def test_agent_runtime_audit_sink_does_not_log_prompt_or_credentials(monkeypatch):
@@ -185,6 +187,51 @@ def test_agent_runtime_audit_sink_does_not_log_prompt_or_credentials(monkeypatch
     assert "private prompt text" not in serialized
     assert "credential-value" not in serialized
     assert "[redacted]" in serialized
+
+
+def test_production_agent_audit_sink_persists_redacted_hook_events_for_unified_query(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setattr(entry, "DATA_PATH", str(tmp_path / "vps-data"))
+    lifecycle = ResourceLifecycleService(tmp_path / "vps-data")
+    container = DependencyContainer()
+    container.register(ResourceLifecycleService, lifecycle)
+    container.register(LLMManager, MagicMock(spec=LLMManager))
+    container.register(MCPServerManager, MagicMock(spec=MCPServerManager))
+
+    runtime = entry.init_agent_runtime(container)
+    runtime.audit_sink(
+        {
+            "component": "agent_hook",
+            "operation": "run_event",
+            "event": "PreToolUse",
+            "resource_id": "hook.ai-debug",
+            "resource_version": "1.1.0",
+            "resource_sha256": "a" * 64,
+            "outcome": "success",
+            "correlation_id": "audit-correlation-123",
+            "prompt": "private prompt must not be persisted",
+            "api_token": "credential-value",
+            "session": {"channel_type": "webui"},
+        }
+    )
+
+    reloaded = ResourceLifecycleService(tmp_path / "vps-data")
+    page = reloaded.list_audit(
+        correlation_id="audit-correlation-123",
+        component="agent_hook",
+        event="PreToolUse",
+    )
+
+    assert page["total"] == 1
+    record = page["items"][0]
+    assert record["resource_id"] == "hook.ai-debug"
+    assert record["resource_version"] == "1.1.0"
+    assert record["resource_sha256"] == "a" * 64
+    assert record["correlation_id"] == "audit-correlation-123"
+    serialized = json.dumps(page, ensure_ascii=True)
+    assert "private prompt must not be persisted" not in serialized
+    assert "credential-value" not in serialized
 
 
 @pytest.mark.parametrize("data_path", ["/app/data", "C:/kirara-data"])

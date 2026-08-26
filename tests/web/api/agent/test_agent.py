@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.events.event_bus import EventBus
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.mcp_module.manager import MCPServerManager
-from kirara_ai.plugin_manager.resource_catalog import ResourceCatalogService
+from kirara_ai.plugin_manager.resource_catalog import ResourceCatalogService, _BUILTINS
 from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
 from kirara_ai.plugin_manager.resource_sources import ResourceSourceService
 from kirara_ai.web.app import create_web_api_app
@@ -38,6 +39,11 @@ def agent_api(tmp_path: Path):
     )
     source_service = ResourceSourceService(lifecycle)
     catalog = ResourceCatalogService(lifecycle, source_service)
+    legacy_prompt = deepcopy(
+        next(item for item in _BUILTINS if item["catalog_id"] == "prompt:office-research")
+    )
+    legacy_prompt["version"] = "1.0.0"
+    catalog._install_builtin(legacy_prompt)
     catalog.ensure_builtins()
     for resource_id in (
         "prompt.office-research",
@@ -95,13 +101,15 @@ async def test_create_agent_defaults_bindings_to_current_and_uses_server_metadat
     payload = await response.get_json()
     assert payload["model_priority"] == ["primary-model", "backup-model"]
     prompt = payload["prompt_bindings"][0]
-    assert prompt["version"] == "1.0.0"
+    assert prompt["version"] == lifecycle.get_resource(
+        "prompt.office-research"
+    )["current_version"] == "1.0.1"
     assert prompt["version_policy"] == "current"
     assert prompt["source"] == "catalog://kirara/prompt/office-research"
     assert prompt["permissions"] == ["workflow.read"]
     assert prompt["content_sha256"] == lifecycle.get_resource(
         "prompt.office-research"
-    )["versions"][0]["content_sha256"]
+    )["versions"][-1]["content_sha256"]
     assert prompt["content_sha256"] != "f" * 64
     assert payload["mcp_bindings"][0]["resource_id"] == "mcp.context7"
     assert payload["hook_bindings"][0]["resource_id"] == "hook.ai-debug"
@@ -229,7 +237,7 @@ async def test_create_complete_agent_configuration_commits_definition_and_relati
     }
     assert payload["prompt_bindings"][0]["content_sha256"] == lifecycle.get_resource(
         "prompt.office-research"
-    )["versions"][0]["content_sha256"]
+    )["versions"][-1]["content_sha256"]
     assert registry.default_agent_id == "office-agent"
     assert registry.get("office-agent").model_priority == (
         "primary-model",

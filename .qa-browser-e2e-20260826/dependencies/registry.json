@@ -1,0 +1,59 @@
+{
+  "dependencies": {
+    "agent-browser-browser": {
+      "checked_at": "2026-08-26T12:26:10.500337Z",
+      "dependency_id": "agent-browser-browser",
+      "last_task_id": null,
+      "ready": true,
+      "status": "ready",
+      "summary": "Agent Browser browser checks completed: 6 passed, 0 warnings, 0 failed",
+      "version": "152.0.7977.54"
+    },
+    "agent-browser-cli": {
+      "checked_at": "2026-08-26T12:26:09.953294Z",
+      "dependency_id": "agent-browser-cli",
+      "last_task_id": null,
+      "ready": true,
+      "status": "ready",
+      "summary": "agent-browser 0.34.0",
+      "version": "agent-browser 0.34.0"
+    },
+    "context7-runtime": {
+      "checked_at": "2026-08-26T12:26:11.385531Z",
+      "dependency_id": "context7-runtime",
+      "last_task_id": null,
+      "ready": true,
+      "status": "ready",
+      "summary": "11.11.0",
+      "version": "11.11.0"
+    },
+    "graphify-cli": {
+      "checked_at": "2026-08-26T12:26:12.057901Z",
+      "dependency_id": "graphify-cli",
+      "last_task_id": null,
+      "ready": true,
+      "status": "ready",
+      "summary": "graphify 0.9.43",
+      "version": "graphify 0.9.43"
+    },
+    "node-runtime": {
+      "checked_at": "2026-08-26T12:26:08.925788Z",
+      "dependency_id": "node-runtime",
+      "last_task_id": null,
+      "ready": true,
+      "status": "ready",
+      "summary": "v24.19.0\n11.11.0\n11.11.0",
+      "version": "v24.19.0"
+    },
+    "python-tooling": {
+      "checked_at": "2026-08-26T12:26:09.487596Z",
+      "dependency_id": "python-tooling",
+      "last_task_id": null,
+      "ready": true,
+      "status": "ready",
+      "summary": "uv 0.12.1 (329541a50 2026-07-31 x86_64-pc-windows-msvc)",
+      "version": "uv 0.12.1 (329541a50 2026-07-31 x86_64-pc-windows-msvc)"
+    }
+  },
+  "version": 1
+}

@@ -167,7 +167,7 @@ class HttpLegacyAdapter(IMAdapter):
 
             message.sender.raw_metadata["callback_func"] = handle_response
 
-            await self.dispatcher.dispatch(self, message)
+            await self.dispatcher.dispatch(self, message, require_agent=True)
             return result.to_dict()
 
         @app.post("/v2/chat")
@@ -196,7 +196,9 @@ class HttpLegacyAdapter(IMAdapter):
                 bot_request.response_event.set()
 
             message.sender.raw_metadata["callback_func"] = handle_response
-            asyncio.create_task(self.dispatcher.dispatch(self, message))
+            asyncio.create_task(
+                self.dispatcher.dispatch(self, message, require_agent=True)
+            )
             return request_time
 
         @app.get("/v2/chat/response")

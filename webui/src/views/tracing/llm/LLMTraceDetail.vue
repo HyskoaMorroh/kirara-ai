@@ -39,6 +39,9 @@
                 <n-descriptions-item label="追踪ID">
                   <n-text code class="trace-id">{{ traceDetail?.trace_id }}</n-text>
                 </n-descriptions-item>
+                <n-descriptions-item label="回合 ID">
+                  <n-text code class="trace-id">{{ traceDetail?.correlation_id || '---' }}</n-text>
+                </n-descriptions-item>
                 <n-descriptions-item label="请求时间">
                   {{ formatDate(traceDetail?.request_time) }}
                 </n-descriptions-item>

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
+from kirara_ai.plugin_manager.resource_catalog import ResourceCatalogService
 from kirara_ai.plugin_manager.resource_sources import (
     ResourceSourceError,
     ResourceSourceService,
@@ -54,6 +55,20 @@ def _root_skill_archive() -> bytes:
             "---\nname: Root skill\ndescription: root repository skill\n---\nbody",
         )
         archive.writestr("demo-repo-main/scripts/run.js", "console.log('root skill')")
+    return payload.getvalue()
+
+
+def _archive_with_skill_entry(
+    *, root: str = "demo-repo-v8", entry_path: str = "skills/demo/skill.md"
+) -> bytes:
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            f"{root}/{entry_path}",
+            "---\nname: Demo skill\ndescription: lower-case entry\n---\nbody",
+        )
+        directory = str(Path(entry_path).parent).replace("\\", "/")
+        archive.writestr(f"{root}/{directory}/README.md", "docs")
     return payload.getvalue()
 
 
@@ -175,6 +190,107 @@ def test_repository_discovery_is_anchored_on_skill_md_and_uses_stable_source_key
     assert skills[0]["directory"] == "skills/research"
     assert skills[0]["name"] == "Research helper"
     assert skills[0]["description"] == "Finds reliable evidence"
+
+
+def test_missing_branch_is_resolved_from_github_repository_metadata(
+    tmp_path: Path, monkeypatch
+):
+    lifecycle = _service(tmp_path)
+    service = ResourceSourceService(lifecycle)
+    requested_urls: list[str] = []
+
+    def fake_request_json(url: str):
+        requested_urls.append(url)
+        return {"default_branch": "v8"}
+
+    monkeypatch.setattr(service, "_request_json", fake_request_json)
+    monkeypatch.setattr(
+        service,
+        "_download_bytes",
+        lambda url: (
+            requested_urls.append(url) or _archive_with_skill_entry(
+                root="graphify-v8", entry_path="graphify/skill.md"
+            )
+        ),
+    )
+
+    installed = service.install_skill(
+        owner="graphify-labs", name="graphify", branch=None, directory="graphify"
+    )
+
+    assert requested_urls[0] == "https://api.github.com/repos/graphify-labs/graphify"
+    assert "/zip/refs/heads/v8" in requested_urls[1]
+    assert installed["source_key"] == "graphify-labs/graphify:graphify"
+    assert installed["source_metadata"]["branch"] == "v8"
+    assert installed["source_metadata"]["directory"] == "graphify"
+
+
+def test_lowercase_skill_entry_is_normalized_to_standard_skill_md(
+    tmp_path: Path, monkeypatch
+):
+    lifecycle = _service(tmp_path)
+    service = ResourceSourceService(lifecycle)
+    monkeypatch.setattr(
+        service,
+        "_download_bytes",
+        lambda _url: _archive_with_skill_entry(entry_path="skills/demo/skill.md"),
+    )
+
+    installed = service.install_skill(
+        owner="owner", name="demo-repo", branch="v8", directory="skills/demo"
+    )
+    version_path = lifecycle.installed_path / installed["resource_id"] / "1.0.0"
+
+    assert (version_path / "SKILL.md").is_file()
+    assert [path.name for path in version_path.iterdir() if path.name.casefold() == "skill.md"] == [
+        "SKILL.md"
+    ]
+    assert lifecycle.read_entry(installed["resource_id"]).startswith("---\nname: Demo skill")
+
+
+def test_graphify_leaf_directory_resolves_to_the_real_repository_path(
+    tmp_path: Path, monkeypatch
+):
+    lifecycle = _service(tmp_path)
+    service = ResourceSourceService(lifecycle)
+    monkeypatch.setattr(service, "_request_json", lambda _url: {"default_branch": "v8"})
+    monkeypatch.setattr(
+        service,
+        "_download_bytes",
+        lambda _url: _archive_with_skill_entry(
+            root="graphify-v8", entry_path="graphify/skill.md"
+        ),
+    )
+
+    installed = service.install_skill(
+        owner="graphify-labs", name="graphify", branch=None, directory="graphify"
+    )
+
+    assert installed["source"] == (
+        "https://github.com/graphify-labs/graphify/tree/v8/graphify"
+    )
+    assert installed["source_metadata"]["directory"] == "graphify"
+    assert installed["source_metadata"]["branch"] == "v8"
+
+
+def test_failed_remote_install_cleans_import_and_staging_paths(
+    tmp_path: Path, monkeypatch
+):
+    lifecycle = _service(tmp_path)
+    service = ResourceSourceService(lifecycle)
+    monkeypatch.setattr(service, "_download_bytes", lambda _url: _github_archive())
+
+    def fail_registry_write(_registry):
+        raise OSError("simulated registry write failure")
+
+    monkeypatch.setattr(lifecycle, "_write_registry", fail_registry_write)
+    with pytest.raises(OSError):
+        service.install_skill(
+            owner="owner", name="demo-repo", branch="main", directory="skills/research"
+        )
+
+    assert not list(lifecycle.imports_path.glob("remote-*.zip"))
+    assert not list(lifecycle.staging_path.iterdir())
 
 
 def test_skills_sh_results_are_normalized_and_remote_install_generates_server_manifest(
@@ -327,6 +443,64 @@ def test_update_reuses_resolved_nested_directory_metadata(tmp_path: Path, monkey
 
     assert updated[0]["source_key"] == "owner/demo-repo:skills/agent-browser"
     assert updated[0]["source_metadata"]["directory"] == "skills/agent-browser"
+
+
+def test_catalog_matches_skills_sh_leaf_alias_to_resolved_installed_directory(
+    tmp_path: Path, monkeypatch
+):
+    lifecycle = _service(tmp_path)
+    source = ResourceSourceService(lifecycle)
+    catalog = ResourceCatalogService(lifecycle, source)
+    monkeypatch.setattr(
+        source,
+        "_download_bytes",
+        lambda _url: _archive_with_skill_directories("skills/agent-browser"),
+    )
+
+    installed = source.install_skill(
+        owner="vercel-labs",
+        name="agent-browser",
+        branch="main",
+        directory="agent-browser",
+    )
+
+    item = {
+        "catalog_id": "skill:vercel-labs/agent-browser:agent-browser",
+        "type": "skill",
+        "source_key": "vercel-labs/agent-browser:agent-browser",
+        "owner": "vercel-labs",
+        "repository": "agent-browser",
+        "branch": "main",
+        "directory": "agent-browser",
+    }
+
+    assert catalog._installed_for_catalog(item) == installed
+    assert catalog._with_install_state(item)["installed"] is True
+    assert catalog._with_install_state(item)["installed_resource_id"] == installed["resource_id"]
+
+
+def test_catalog_skill_install_returns_existing_resource_for_leaf_alias(
+    tmp_path: Path, monkeypatch
+):
+    lifecycle = _service(tmp_path)
+    source = ResourceSourceService(lifecycle)
+    catalog = ResourceCatalogService(lifecycle, source)
+    monkeypatch.setattr(
+        source,
+        "_download_bytes",
+        lambda _url: _archive_with_skill_directories("skills/agent-browser"),
+    )
+
+    first = source.install_skill(
+        owner="vercel-labs",
+        name="agent-browser",
+        branch="main",
+        directory="agent-browser",
+    )
+    second = catalog.install("skill:vercel-labs/agent-browser:agent-browser")
+
+    assert second["resource_id"] == first["resource_id"]
+    assert len(lifecycle.list_resources("skill")) == 1
 
 
 def test_repository_sources_are_persisted_as_server_state(tmp_path: Path):

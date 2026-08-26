@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from copy import deepcopy
 from pathlib import Path
@@ -16,6 +17,14 @@ from kirara_ai.plugin_manager.resource_lifecycle import (
 )
 from kirara_ai.plugin_manager.resource_sources import ResourceSourceError, ResourceSourceService
 from kirara_ai.plugin_manager.resource_catalog import ResourceCatalogError, ResourceCatalogService
+from kirara_ai.plugin_manager.system_dependencies import (
+    DependencyInstallConfirmationRequired,
+    DependencyInstallUnsupported,
+    DependencyNotFoundError,
+    DependencyTaskStateError,
+    SystemDependencyError,
+    SystemDependencyService,
+)
 from kirara_ai.mcp_module.manager import MCPServerManager
 from kirara_ai.web.auth.middleware import require_auth
 
@@ -35,6 +44,10 @@ def _sources() -> ResourceSourceService:
 
 def _catalog() -> ResourceCatalogService:
     return g.container.resolve(ResourceCatalogService)
+
+
+def _dependencies() -> SystemDependencyService:
+    return g.container.resolve(SystemDependencyService)
 
 
 def _error(message: str, status_code: int):
@@ -67,11 +80,12 @@ def _runtime_status(resource: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resource_response(resource: Any) -> Any:
-    """Add runtime fields only to lifecycle resource objects."""
+    """Add transient runtime and VPS readiness fields to lifecycle objects."""
 
     if not isinstance(resource, dict) or not {"resource_id", "type"}.issubset(resource):
         return resource
     projected = deepcopy(resource)
+    projected = _catalog().project_dependencies(projected)
     projected.update(_runtime_status(projected))
     return projected
 
@@ -84,6 +98,19 @@ def _resource_list_response(resources: Any) -> Any:
 
 def _lifecycle_error(error: Exception):
     if isinstance(error, (ResourceValidationError, ResourceSourceError, ResourceCatalogError)):
+        return _error(str(error), 400)
+    if isinstance(error, DependencyNotFoundError):
+        return _error(str(error), 404)
+    if isinstance(
+        error,
+        (
+            DependencyInstallConfirmationRequired,
+            DependencyInstallUnsupported,
+            DependencyTaskStateError,
+        ),
+    ):
+        return _error(str(error), 409)
+    if isinstance(error, SystemDependencyError):
         return _error(str(error), 400)
     if isinstance(error, ResourceStateError):
         status_code = 404 if str(error) == "resource is not installed" else 409
@@ -98,6 +125,14 @@ async def _json_object() -> dict[str, Any]:
         return {}
     if not isinstance(payload, dict):
         raise ResourceValidationError("request body must be a JSON object")
+    return payload
+
+
+async def _strict_json_object(allowed_fields: set[str]) -> dict[str, Any]:
+    payload = await _json_object()
+    unexpected = set(payload) - allowed_fields
+    if unexpected:
+        raise ResourceValidationError("request body contains unsupported fields")
     return payload
 
 
@@ -184,8 +219,101 @@ async def _state_change(
         return _lifecycle_error(error)
 
 
+@resource_bp.route("/dependencies", methods=["GET"])
+@require_auth("resources.read")
+async def list_system_dependencies():
+    try:
+        return jsonify(_dependencies().list_dependencies())
+    except Exception as error:
+        return _lifecycle_error(error)
+
+
+@resource_bp.route("/dependencies/<dependency_id>", methods=["GET"])
+@require_auth("resources.read")
+async def get_system_dependency(dependency_id: str):
+    try:
+        return jsonify(_dependencies().get_dependency(dependency_id))
+    except Exception as error:
+        return _lifecycle_error(error)
+
+
+@resource_bp.route("/dependencies/<dependency_id>/probe", methods=["POST"])
+@require_auth("resources.manage")
+async def probe_system_dependency(dependency_id: str):
+    try:
+        await _strict_json_object(set())
+        result = await asyncio.to_thread(_dependencies().probe, dependency_id)
+        return jsonify(result)
+    except Exception as error:
+        return _lifecycle_error(error)
+
+
+@resource_bp.route("/dependencies/<dependency_id>/install", methods=["POST"])
+@require_auth("resources.manage")
+async def install_system_dependency(dependency_id: str):
+    try:
+        payload = await _strict_json_object({"confirmed"})
+        if payload.get("confirmed") is not True:
+            raise DependencyInstallConfirmationRequired(
+                "dependency installation requires confirmation"
+            )
+        return jsonify(
+            _dependencies().install(dependency_id, confirmed=True)
+        ), 202
+    except Exception as error:
+        return _lifecycle_error(error)
+
+
+@resource_bp.route("/dependency-tasks", methods=["GET"])
+@require_auth("resources.read")
+async def list_dependency_tasks():
+    try:
+        return jsonify(
+            _dependencies().list_tasks(
+                dependency_id=request.args.get("dependency_id")
+            )
+        )
+    except Exception as error:
+        return _lifecycle_error(error)
+
+
+@resource_bp.route("/dependency-tasks/<task_id>", methods=["GET"])
+@require_auth("resources.read")
+async def get_dependency_task(task_id: str):
+    try:
+        return jsonify(_dependencies().get_task(task_id))
+    except Exception as error:
+        return _lifecycle_error(error)
+
+
+@resource_bp.route("/dependency-tasks/<task_id>/retry", methods=["POST"])
+@require_auth("resources.manage")
+async def retry_dependency_task(task_id: str):
+    try:
+        payload = await _strict_json_object({"confirmed"})
+        if payload.get("confirmed") is not True:
+            raise DependencyInstallConfirmationRequired(
+                "dependency installation requires confirmation"
+            )
+        return jsonify(
+            _dependencies().retry_task(task_id, confirmed=True)
+        ), 202
+    except Exception as error:
+        return _lifecycle_error(error)
+
+
+@resource_bp.route("/dependency-tasks/<task_id>/cancel", methods=["POST"])
+@require_auth("resources.manage")
+async def cancel_dependency_task(task_id: str):
+    try:
+        await _strict_json_object(set())
+        return jsonify(_dependencies().cancel_task(task_id))
+    except Exception as error:
+        return _lifecycle_error(error)
+
+
 @resource_bp.route("/repositories", methods=["GET"])
-@require_auth
+@require_auth("resources.read")
 async def list_repositories():
     try:
         return jsonify(_sources().list_repositories())
@@ -194,7 +322,7 @@ async def list_repositories():
 
 
 @resource_bp.route("/repositories", methods=["POST"])
-@require_auth
+@require_auth("resources.manage")
 async def add_repository():
     try:
         payload = await _json_object()
@@ -208,7 +336,7 @@ async def add_repository():
 
 
 @resource_bp.route("/repositories/<owner>/<name>/<branch>/enabled", methods=["POST"])
-@require_auth
+@require_auth("resources.manage")
 async def set_repository_enabled(owner: str, name: str, branch: str):
     try:
         payload = await _json_object()
@@ -220,25 +348,28 @@ async def set_repository_enabled(owner: str, name: str, branch: str):
 
 
 @resource_bp.route("/repositories/<owner>/<name>/<branch>/discover", methods=["GET"])
-@require_auth
+@require_auth("resources.read")
 async def discover_repository(owner: str, name: str, branch: str):
     try:
-        return jsonify(_sources().discover_repository(owner, name, branch))
+        discovered = await asyncio.to_thread(
+            _sources().discover_repository, owner, name, branch
+        )
+        return jsonify(discovered)
     except Exception as error:
         return _lifecycle_error(error)
 
 
 @resource_bp.route("/skills-sh/search", methods=["GET"])
-@require_auth
+@require_auth("resources.read")
 async def search_skills_sh():
     try:
-        return jsonify(
-            _sources().search_skills(
+        results = await asyncio.to_thread(
+            _sources().search_skills,
                 request.args.get("q", ""),
                 limit=int(request.args.get("limit", 20)),
                 offset=int(request.args.get("offset", 0)),
-            )
         )
+        return jsonify(results)
     except (TypeError, ValueError):
         return _error("search pagination values must be integers", 400)
     except Exception as error:
@@ -246,17 +377,17 @@ async def search_skills_sh():
 
 
 @resource_bp.route("/catalog/search", methods=["GET"])
-@require_auth
+@require_auth("resources.read")
 async def search_catalog():
     try:
-        return jsonify(
-            _catalog().search(
+        results = await asyncio.to_thread(
+            _catalog().search,
                 request.args.get("type"),
                 request.args.get("q", ""),
                 limit=int(request.args.get("limit", 20)),
                 offset=int(request.args.get("offset", 0)),
-            )
         )
+        return jsonify(results)
     except (TypeError, ValueError):
         return _error("catalog pagination values must be integers", 400)
     except Exception as error:
@@ -264,7 +395,7 @@ async def search_catalog():
 
 
 @resource_bp.route("/catalog/<path:catalog_id>", methods=["GET"])
-@require_auth
+@require_auth("resources.read")
 async def get_catalog_item(catalog_id: str):
     try:
         return jsonify(_catalog().get(catalog_id))
@@ -273,43 +404,48 @@ async def get_catalog_item(catalog_id: str):
 
 
 @resource_bp.route("/catalog/install", methods=["POST"])
-@require_auth
+@require_auth("resources.manage")
 async def install_catalog_item():
     try:
         payload = await _json_object()
         catalog_id = payload.get("catalog_id")
         if not isinstance(catalog_id, str) or not catalog_id.strip():
             raise ResourceCatalogError("catalog_id is required")
-        return jsonify(
-            _resource_response(
-                _catalog().install(catalog_id.strip(), branch=payload.get("branch", "main"))
-            )
-        ), 201
+        installed = await asyncio.to_thread(
+            _catalog().install,
+            catalog_id.strip(),
+            branch=payload.get("branch"),
+        )
+        return jsonify(_resource_response(installed)), 201
     except Exception as error:
         return _lifecycle_error(error)
 
 
 @resource_bp.route("/remote-install", methods=["POST"])
-@require_auth
+@require_auth("resources.manage")
 async def install_remote_skill():
     try:
         payload = await _json_object()
-        return jsonify(_resource_response(_sources().install_skill(**payload))), 201
+        installed = await asyncio.to_thread(_sources().install_skill, **payload)
+        return jsonify(_resource_response(installed)), 201
     except Exception as error:
         return _lifecycle_error(error)
 
 
 @resource_bp.route("/updates", methods=["GET"])
-@require_auth
+@require_auth("resources.read")
 async def check_resource_updates():
     try:
-        return jsonify(_sources().check_updates(request.args.get("resource_id")))
+        results = await asyncio.to_thread(
+            _sources().check_updates, request.args.get("resource_id")
+        )
+        return jsonify(results)
     except Exception as error:
         return _lifecycle_error(error)
 
 
 @resource_bp.route("/backups", methods=["GET"])
-@require_auth
+@require_auth("resources.read")
 async def list_backups():
     try:
         return jsonify(_service().list_backups(request.args.get("resource_id")))
@@ -318,7 +454,7 @@ async def list_backups():
 
 
 @resource_bp.route("/backups/<backup_id>/restore", methods=["POST"])
-@require_auth
+@require_auth("resources.manage")
 async def restore_backup(backup_id: str):
     return await _state_change(
         lambda payload: _service().restore_backup(
@@ -328,7 +464,7 @@ async def restore_backup(backup_id: str):
 
 
 @resource_bp.route("/backups/<backup_id>", methods=["DELETE"])
-@require_auth
+@require_auth("resources.manage")
 async def delete_backup(backup_id: str):
     return await _state_change(
         lambda payload: _service().delete_backup(
@@ -339,17 +475,35 @@ async def delete_backup(backup_id: str):
 
 # Static routes are declared before the resource ID route to keep /audit explicit.
 @resource_bp.route("/audit", methods=["GET"])
-@require_auth
+@require_auth("resources.read")
 async def list_audit():
     try:
         offset = int(request.args.get("offset", 0))
         limit = int(request.args.get("limit", 50))
         resource_id = request.args.get("resource_id")
+        correlation_id = request.args.get("correlation_id")
+        component = request.args.get("component")
+        event = request.args.get("event")
+        operation = request.args.get("operation")
+        outcome = request.args.get("outcome") or request.args.get("result")
+        status = request.args.get("status")
+        agent_id = request.args.get("agent_id")
+        model_id = request.args.get("model_id")
+        server = request.args.get("server")
         return jsonify(
             _service().list_audit(
                 offset=offset,
                 limit=limit,
                 resource_id=resource_id,
+                correlation_id=correlation_id,
+                component=component,
+                event=event,
+                operation=operation,
+                outcome=outcome,
+                status=status,
+                agent_id=agent_id,
+                model_id=model_id,
+                server=server,
             )
         )
     except (TypeError, ValueError):
@@ -359,7 +513,7 @@ async def list_audit():
 
 
 @resource_bp.route("/storage", methods=["GET"])
-@require_auth
+@require_auth("resources.read")
 async def get_storage_status():
     try:
         return jsonify(_service().get_storage_status())
@@ -368,7 +522,7 @@ async def get_storage_status():
 
 
 @resource_bp.route("", methods=["GET"])
-@require_auth
+@require_auth("resources.read")
 async def list_resources():
     try:
         return jsonify(
@@ -379,7 +533,7 @@ async def list_resources():
 
 
 @resource_bp.route("", methods=["POST"])
-@require_auth
+@require_auth("resources.manage")
 async def install_resource():
     return await _with_uploaded_archive(
         _service().install_archive,
@@ -388,13 +542,13 @@ async def install_resource():
 
 
 @resource_bp.route("/imports", methods=["POST"])
-@require_auth
+@require_auth("resources.manage")
 async def import_resource():
     return await _with_import_archive()
 
 
 @resource_bp.route("/<resource_id>", methods=["GET"])
-@require_auth
+@require_auth("resources.read")
 async def get_resource(resource_id: str):
     try:
         return jsonify(_resource_response(_service().get_resource(resource_id)))
@@ -403,7 +557,7 @@ async def get_resource(resource_id: str):
 
 
 @resource_bp.route("/<resource_id>/versions", methods=["POST"])
-@require_auth
+@require_auth("resources.manage")
 async def update_resource(resource_id: str):
     return await _with_uploaded_archive(
         lambda archive_path: _service().update_archive(
@@ -415,41 +569,46 @@ async def update_resource(resource_id: str):
 
 
 @resource_bp.route("/<resource_id>/update", methods=["POST"])
-@require_auth
+@require_auth("resources.manage")
 async def update_remote_resource(resource_id: str):
     try:
-        return jsonify(_resource_response(_sources().update_skill(resource_id)))
+        updated = await asyncio.to_thread(_sources().update_skill, resource_id)
+        return jsonify(_resource_response(updated))
     except Exception as error:
         return _lifecycle_error(error)
 
 
 @resource_bp.route("/<resource_id>/enable", methods=["POST"])
-@require_auth
+@require_auth("resources.manage")
 async def enable_resource(resource_id: str):
     try:
         payload = await _json_object()
         resource = _service().enable(resource_id, confirmed=payload.get("confirmed") is True)
         if resource.get("type") == "mcp" and g.container.has(MCPServerManager):
-            await g.container.resolve(MCPServerManager).refresh_managed_servers()
+            await g.container.resolve(MCPServerManager).refresh_managed_servers(
+                connect=False
+            )
         return jsonify(_resource_response(resource))
     except Exception as error:
         return _lifecycle_error(error)
 
 
 @resource_bp.route("/<resource_id>/disable", methods=["POST"])
-@require_auth
+@require_auth("resources.manage")
 async def disable_resource(resource_id: str):
     try:
         resource = _service().disable(resource_id)
         if resource.get("type") == "mcp" and g.container.has(MCPServerManager):
-            await g.container.resolve(MCPServerManager).refresh_managed_servers()
+            await g.container.resolve(MCPServerManager).refresh_managed_servers(
+                connect=False
+            )
         return jsonify(_resource_response(resource))
     except Exception as error:
         return _lifecycle_error(error)
 
 
 @resource_bp.route("/<resource_id>/workflow", methods=["POST"])
-@require_auth
+@require_auth("resources.manage")
 async def bind_workflow(resource_id: str):
     return await _state_change(
         lambda payload: _service().bind_workflow(
@@ -460,7 +619,7 @@ async def bind_workflow(resource_id: str):
 
 
 @resource_bp.route("/<resource_id>/restore", methods=["POST"])
-@require_auth
+@require_auth("resources.manage")
 async def restore_resource(resource_id: str):
     return await _state_change(
         lambda payload: _service().restore_version(

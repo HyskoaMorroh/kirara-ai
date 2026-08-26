@@ -95,6 +95,19 @@ class MCPTransportConfig(BaseModel):
     cwd: Optional[str] = Field(default=None, description="stdio 工作目录")
     url: Optional[str] = Field(default=None, description="http/sse URL")
     headers: Dict[str, str] = Field(default_factory=dict, description="http/sse 请求 Headers")
+    roots: List[str] = Field(
+        default_factory=list,
+        description=(
+            "显式允许 MCP 服务访问的本地文件根目录或文件路径；"
+            "未配置时不声明 roots 能力"
+        ),
+    )
+    startup_timeout_ms: int = Field(
+        default=120_000,
+        ge=1_000,
+        le=600_000,
+        description="启动 MCP 进程并完成 initialize 的最大等待时间（毫秒）",
+    )
 
     model_config = ConfigDict(extra="allow")
 

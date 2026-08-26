@@ -98,6 +98,56 @@
       ],
       "workflow_id": null
     },
+    "memory.research-context": {
+      "confirmation_required": false,
+      "content_sha256": "99517d71a1645fef9c7f8182a4abf45ceec05ea23b3b7abfe4490512d6c64ebc",
+      "current_version": "1.0.0",
+      "enabled": true,
+      "entry": "MEMORY.md",
+      "installed_at": "2026-08-25T11:01:29.371369Z",
+      "permissions": [
+        "workflow.read"
+      ],
+      "resource_id": "memory.research-context",
+      "source": "catalog://kirara/memory/research-context",
+      "source_key": "memory:research-context",
+      "source_metadata": {
+        "catalog_id": "memory:research-context",
+        "provider": "catalog",
+        "tags": [
+          "memory",
+          "research",
+          "privacy",
+          "isolation"
+        ]
+      },
+      "type": "memory",
+      "updated_at": "2026-08-25T11:55:34.929816Z",
+      "versions": [
+        {
+          "content_sha256": "99517d71a1645fef9c7f8182a4abf45ceec05ea23b3b7abfe4490512d6c64ebc",
+          "entry": "MEMORY.md",
+          "installed_at": "2026-08-25T11:01:29.371369Z",
+          "permissions": [
+            "workflow.read"
+          ],
+          "source": "catalog://kirara/memory/research-context",
+          "source_key": "memory:research-context",
+          "source_metadata": {
+            "catalog_id": "memory:research-context",
+            "provider": "catalog",
+            "tags": [
+              "memory",
+              "research",
+              "privacy",
+              "isolation"
+            ]
+          },
+          "version": "1.0.0"
+        }
+      ],
+      "workflow_id": null
+    },
     "prompt.office-research": {
       "confirmation_required": false,
       "content_sha256": "27fc4c657ca734c8ae613fa097d7c896257eb5262e00448dd04741f693d7f524",
@@ -146,6 +196,54 @@
       ],
       "workflow_id": null
     },
+    "skill.58e8bfda5b55b781": {
+      "confirmation_required": false,
+      "content_sha256": "752720cdeedabca354d7cd136df94de8c8b5b285c9717e759cf316f30d8b2aa4",
+      "current_version": "1.0.0",
+      "enabled": true,
+      "entry": "SKILL.md",
+      "installed_at": "2026-08-25T19:54:20.396843Z",
+      "permissions": [
+        "workflow.read"
+      ],
+      "resource_id": "skill.58e8bfda5b55b781",
+      "source": "https://github.com/skills-101/superpowers/tree/main/tools/utilities/agent-browser",
+      "source_key": "skills-101/superpowers:tools/utilities/agent-browser",
+      "source_metadata": {
+        "branch": "main",
+        "description": "Browser automation for AI agents via inference.sh. Navigate web pages, interact with elements using @e refs, take screenshots, record video. Capabilities: web scraping, form filling, clicking, typing, drag-drop, file upload, JavaScript execution. Use for: web automation, data extraction, testing, agent browsing, research. Triggers: browser, web automation, scrape, navigate, click, fill form, screenshot, browse web, playwright, headless browser, web agent, surf internet, record video",
+        "directory": "tools/utilities/agent-browser",
+        "name": "agent-browser",
+        "owner": "skills-101",
+        "provider": "github",
+        "repository": "superpowers"
+      },
+      "type": "skill",
+      "updated_at": "2026-08-25T19:58:50.318838Z",
+      "versions": [
+        {
+          "content_sha256": "752720cdeedabca354d7cd136df94de8c8b5b285c9717e759cf316f30d8b2aa4",
+          "entry": "SKILL.md",
+          "installed_at": "2026-08-25T19:54:20.396843Z",
+          "permissions": [
+            "workflow.read"
+          ],
+          "source": "https://github.com/skills-101/superpowers/tree/main/tools/utilities/agent-browser",
+          "source_key": "skills-101/superpowers:tools/utilities/agent-browser",
+          "source_metadata": {
+            "branch": "main",
+            "description": "Browser automation for AI agents via inference.sh. Navigate web pages, interact with elements using @e refs, take screenshots, record video. Capabilities: web scraping, form filling, clicking, typing, drag-drop, file upload, JavaScript execution. Use for: web automation, data extraction, testing, agent browsing, research. Triggers: browser, web automation, scrape, navigate, click, fill form, screenshot, browse web, playwright, headless browser, web agent, surf internet, record video",
+            "directory": "tools/utilities/agent-browser",
+            "name": "agent-browser",
+            "owner": "skills-101",
+            "provider": "github",
+            "repository": "superpowers"
+          },
+          "version": "1.0.0"
+        }
+      ],
+      "workflow_id": null
+    },
     "skill.c914025169da0bca": {
       "confirmation_required": false,
       "content_sha256": "55043bcf6c8bb2563c58e407a243559f756058ab5671b2ab5d6fd9d0da22d838",
@@ -169,7 +267,7 @@
         "repository": "agent-browser"
       },
       "type": "skill",
-      "updated_at": "2026-08-25T10:14:10.929003Z",
+      "updated_at": "2026-08-25T16:02:19.385614Z",
       "versions": [
         {
           "content_sha256": "55043bcf6c8bb2563c58e407a243559f756058ab5671b2ab5d6fd9d0da22d838",
