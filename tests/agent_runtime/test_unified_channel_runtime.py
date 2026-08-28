@@ -30,6 +30,7 @@ from kirara_ai.web.api.llm.webui_adapter import WebUIAdapter
 from kirara_ai.workflow.core.dispatch.dispatcher import WorkflowDispatcher
 from kirara_ai.workflow.core.dispatch.registry import DispatchRuleRegistry
 from kirara_ai.workflow.core.workflow.registry import WorkflowRegistry
+from kirara_ai.web.auth.principal import RuntimePrincipal, runtime_principal_context
 
 
 HASH_PROMPT = "a" * 64
@@ -37,6 +38,13 @@ HASH_SKILL = "b" * 64
 HASH_MEMORY = "c" * 64
 HASH_MCP = "d" * 64
 HASH_HOOK = "e" * 64
+CREATOR = RuntimePrincipal(subject="unified-runtime-test-creator", is_creator=True)
+
+
+@pytest.fixture
+def creator_principal():
+    with runtime_principal_context(CREATOR):
+        yield
 
 
 class _FailoverToolLLM:
@@ -362,6 +370,7 @@ async def _run_wecom(dispatcher, user_id: str, text: str):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_webui_onebot_qq_telegram_wecom_share_one_agent_runtime(tmp_path: Path):
     (
         dispatcher,

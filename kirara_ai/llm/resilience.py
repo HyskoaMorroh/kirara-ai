@@ -10,7 +10,7 @@ import uuid
 from collections import deque
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import Any, Callable, Deque, Iterable, Iterator, Optional
+from typing import Any, Callable, Deque, Iterable, Iterator, Mapping, Optional
 
 
 class CircuitState(str, Enum):
@@ -213,6 +213,68 @@ class CircuitBreaker:
                     else None
                 ),
             }
+
+    def durable_state(self) -> Optional[dict[str, Any]]:
+        """Return the part of this breaker's state worth surviving a restart.
+
+        只有「已打开」或「已在半开探测中」才值得持久化：CLOSED 是默认状态，
+        存下来没有意义。这里不导出结果环形缓冲区——错误**率**描述的是最近的真实流量，
+        把重启前的窗口搬回来会让一个现在健康的上游被过期样本重新熔断。
+        重启后由连续失败阈值接手，这是更保守的选择。
+        """
+        with self._lock:
+            state = self._refresh_state(self._now(None))
+            if state == CircuitState.CLOSED:
+                return None
+            return {
+                "state": state.value,
+                "consecutive_failures": self._consecutive_failures,
+                "recovery_successes": self._recovery_successes,
+                # 距今多久之前打开的，恢复时按经过时间继续计时。
+                "opened_ago_seconds": (
+                    max(0.0, self._clock() - self._opened_at)
+                    if self._opened_at is not None
+                    else None
+                ),
+            }
+
+    def restore_durable_state(
+        self,
+        state: Mapping[str, Any],
+        *,
+        elapsed_seconds: float = 0.0,
+    ) -> bool:
+        """Re-apply a persisted state. Returns False when nothing was applied.
+
+        ``elapsed_seconds`` 是「保存到现在」的时长，与保存时记录的
+        ``opened_ago_seconds`` 相加，得到熔断已经打开了多久。这样恢复等待时间
+        在重启期间继续流逝，而不是从头再等一遍。
+        """
+        raw_state = str(state.get("state") or "")
+        if raw_state not in {CircuitState.OPEN.value, CircuitState.HALF_OPEN.value}:
+            return False
+        opened_ago = state.get("opened_ago_seconds")
+        total_open = 0.0
+        if isinstance(opened_ago, (int, float)):
+            total_open = max(0.0, float(opened_ago))
+        total_open += max(0.0, float(elapsed_seconds))
+
+        with self._lock:
+            failures = state.get("consecutive_failures")
+            self._consecutive_failures = (
+                int(failures) if isinstance(failures, int) and failures >= 0 else 0
+            )
+            recoveries = state.get("recovery_successes")
+            self._recovery_successes = (
+                int(recoveries) if isinstance(recoveries, int) and recoveries >= 0 else 0
+            )
+            self._outcomes.clear()
+            self._half_open_probe_in_flight = False
+            self._state = CircuitState.OPEN
+            self._opened_at = self._clock() - total_open
+            # 若恢复等待时间在停机期间已经走完，立刻进入半开而不是继续拒绝。
+            self._refresh_state(self._clock())
+            return True
 
 
 @dataclass

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import tempfile
 import threading
 from dataclasses import dataclass, field, replace
@@ -22,6 +23,7 @@ from urllib.parse import quote
 
 from kirara_ai.im.message import IMMessage
 from kirara_ai.im.sender import ChatType
+from kirara_ai.web.auth.principal import get_runtime_principal
 
 
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9._:@/-]+$")
@@ -57,6 +59,19 @@ def _as_tuple(values: Optional[Iterable[str]]) -> tuple[str, ...]:
     if values is None:
         return ()
     return tuple(str(value).strip() for value in values if str(value).strip())
+
+
+def principal_can_control_agent(owner_subject: Optional[str]) -> bool:
+    """Return whether the current creator owns the explicitly bound Agent."""
+
+    if not isinstance(owner_subject, str) or not owner_subject:
+        return False
+    principal = get_runtime_principal()
+    return bool(
+        principal is not None
+        and principal.is_creator
+        and secrets.compare_digest(principal.subject, owner_subject)
+    )
 
 
 class _ImmutableTuple(tuple):
@@ -488,6 +503,7 @@ class AgentDefinition:
     """An enabled model/resource/tool policy selected for a channel session."""
 
     agent_id: str
+    owner_subject: Optional[str] = None
     display_name: Optional[str] = None
     enabled: bool = True
     workflow_id: Optional[str] = None
@@ -505,11 +521,19 @@ class AgentDefinition:
 
     def __post_init__(self) -> None:
         agent_id = _clean_identifier(self.agent_id, "agent")
+        owner_subject = self.owner_subject
+        if owner_subject is not None:
+            if not isinstance(owner_subject, str):
+                raise TypeError("Agent owner subject must be text")
+            owner_subject = owner_subject.strip()
+            if not owner_subject or len(owner_subject) > 256:
+                raise ValueError("Agent owner subject is invalid")
         if not self.model_priority:
             raise ValueError("Agent must define at least one model candidate")
         if self.max_tool_iterations < 0:
             raise ValueError("max_tool_iterations must be non-negative")
         object.__setattr__(self, "agent_id", agent_id)
+        object.__setattr__(self, "owner_subject", owner_subject)
         object.__setattr__(self, "model_priority", _as_tuple(self.model_priority))
         object.__setattr__(self, "provider_allowlist", _as_frozenset(self.provider_allowlist))
         object.__setattr__(self, "capabilities", _as_frozenset(self.capabilities))
@@ -603,6 +627,7 @@ class AgentRegistry:
         with self._lock:
             if agent.agent_id in self._agents:
                 raise ValueError(f"Agent already registered: {agent.agent_id}")
+            agent = self._bind_creation_owner(agent)
             next_state = self._capture_state()
             next_state["agents"][agent.agent_id] = agent
             if next_state["default_agent_id"] is None and agent.agent_id == "default":
@@ -613,6 +638,7 @@ class AgentRegistry:
         with self._lock:
             if agent.agent_id not in self._agents:
                 raise KeyError(agent.agent_id)
+            agent = self._preserve_owner(self._agents[agent.agent_id], agent)
             next_state = self._capture_state()
             next_state["agents"][agent.agent_id] = agent
             self._commit(next_state)
@@ -658,6 +684,11 @@ class AgentRegistry:
                 raise ValueError(f"Agent already registered: {agent.agent_id}")
             if not create and not exists:
                 raise KeyError(agent.agent_id)
+            agent = (
+                self._bind_creation_owner(agent)
+                if create
+                else self._preserve_owner(self._agents[agent.agent_id], agent)
+            )
 
             normalized_channels = tuple(
                 self._normalize_channel_type(channel) for channel in channels
@@ -881,6 +912,41 @@ class AgentRegistry:
             "default_agent_id": self._default_agent_id,
         }
 
+    @staticmethod
+    def _bind_creation_owner(agent: AgentDefinition) -> AgentDefinition:
+        principal = get_runtime_principal()
+        if agent.owner_subject is None:
+            if principal is not None and principal.is_creator:
+                return replace(agent, owner_subject=principal.subject)
+            return agent
+        if (
+            principal is None
+            or not principal.is_creator
+            or not secrets.compare_digest(principal.subject, agent.owner_subject)
+        ):
+            raise PermissionError(
+                "Agent owner can only be assigned by the matching creator"
+            )
+        return agent
+
+    @staticmethod
+    def _preserve_owner(
+        current: AgentDefinition,
+        replacement: AgentDefinition,
+    ) -> AgentDefinition:
+        if current.owner_subject is None:
+            if replacement.owner_subject is not None:
+                raise ValueError("Agent owner cannot be assigned after creation")
+            return replacement
+        if replacement.owner_subject is None:
+            return replace(replacement, owner_subject=current.owner_subject)
+        if not secrets.compare_digest(
+            current.owner_subject,
+            replacement.owner_subject,
+        ):
+            raise ValueError("Agent owner cannot be transferred")
+        return replacement
+
     def _commit(self, state: dict[str, Any]) -> None:
         self._validate_state(state)
         if self._registry_path is not None:
@@ -925,6 +991,7 @@ class AgentRegistry:
     def _agent_to_dict(cls, agent: AgentDefinition) -> dict[str, Any]:
         return {
             "agent_id": agent.agent_id,
+            "owner_subject": agent.owner_subject,
             "display_name": agent.display_name,
             "enabled": agent.enabled,
             "workflow_id": agent.workflow_id,
@@ -986,6 +1053,7 @@ class AgentRegistry:
         if not isinstance(payload, dict):
             raise ValueError("Agent definition is invalid")
         values = dict(payload)
+        values.setdefault("owner_subject", None)
         for field_name, resource_type in (
             ("prompt_bindings", "prompt"),
             ("skill_bindings", "skill"),

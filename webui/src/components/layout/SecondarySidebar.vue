@@ -35,6 +35,11 @@ const menuOptions = computed<MenuOption[]>(() => {
           label: () => 'Agent 对话',
           key: 'llm-chat',
           path: '/llm/chat'
+        },
+        {
+          label: () => '成本定价',
+          key: 'llm-pricing',
+          path: '/llm/pricing'
         }
       ]
     case 'workflow':

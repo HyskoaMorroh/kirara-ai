@@ -21,6 +21,19 @@ dist
 .pytest_cache
 .mypy_cache
 
+# 本地审计、浏览器自动化与一次性分析产物
+.qa-*
+.playwright-mcp
+.playwright-cli
+.superpowers
+.codex-red-host-authorization.txt
+PATHFINDER-2026-08-21
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.pid
+
 # 本机构建/测试缓存（vue-tsc、node、pytest 的临时目录），不参与镜像构建
 .build-tmp
 .npm-cache
@@ -52,7 +65,16 @@ data/venv
 data/config.yaml
 data/config.yaml.bak
 data/web/password.hash
+# 创建者身份等同于凭据，不得进入镜像
+data/web/creator.subject
+data/creator.subject
 data/auto_detect_state.json
+data/mcp
+data/resources
+data/sessions
+data/plugins
+data/dispatch_rules/.transactions
+data/workflows/.transactions
 data/memory/*.json
 data/media/metadata
 data/media/files

@@ -56,6 +56,7 @@ export type WorkflowGraphIssue = {
     | 'unknown_target_port'
     | 'missing_source_block'
     | 'missing_target_block'
+    | 'code_node_without_ports'
   message: string
   severity: 'error' | 'warning'
 }
@@ -222,6 +223,25 @@ const asPort = (port: any, direction: 'input' | 'output'): BlockInput | BlockOut
     : common
 }
 
+/**
+ * The block type whose ports are declared per instance rather than on the class.
+ *
+ * `CodeBlock` builds its ports in `__init__` from the `inputs`/`outputs` config
+ * lists, so `/block/types` reports zero ports for it and the canvas has to read
+ * the instance config instead.
+ */
+export const CODE_BLOCK_TYPE_NAME = 'internal:code'
+
+/**
+ * The runtime data type of every custom-script port.
+ *
+ * `CodeBlock.__init__` types each port `Any`, and the backend type system treats
+ * `Any` as compatible with everything. The config panel still lets the user pick
+ * a label-level type (default `str`) for readability and handle color, but that
+ * choice must never be used to refuse a connection the runtime would accept.
+ */
+export const CODE_BLOCK_PORT_RUNTIME_TYPE = 'Any'
+
 const getConfiguredPorts = (block: ConfiguredBlock, direction: 'input' | 'output') => {
   const key = direction === 'input' ? 'inputs' : 'outputs'
   return Array.isArray(block.config?.[key])
@@ -264,12 +284,12 @@ export const getCanvasBlockPorts = (
   wires: PortWire[] = []
 ) => {
   const inputs = (
-    blockType.type_name === 'internal:code'
+    blockType.type_name === CODE_BLOCK_TYPE_NAME
       ? getConfiguredPorts(block, 'input')
       : blockType.inputs
   ).slice() as BlockInput[]
   const outputs = (
-    blockType.type_name === 'internal:code'
+    blockType.type_name === CODE_BLOCK_TYPE_NAME
       ? getConfiguredPorts(block, 'output')
       : blockType.outputs
   ).slice() as BlockOutput[]
@@ -310,8 +330,18 @@ export const createWorkflowConnectionPortIndex = (
 
   for (const block of blocks) {
     const ports = getCanvasBlockPorts(block, getCanvasBlockType(block, blockTypes))
-    outputs.set(block.name, new Map(ports.outputs.map((port) => [port.name, port.type])))
-    inputs.set(block.name, new Map(ports.inputs.map((port) => [port.name, port.type])))
+    // A custom-script port is `Any` at runtime; the type stored on the port is a
+    // display hint, so validating against it would reject valid connections.
+    const portType = (declared: string) =>
+      block.type_name === CODE_BLOCK_TYPE_NAME ? CODE_BLOCK_PORT_RUNTIME_TYPE : declared
+    outputs.set(
+      block.name,
+      new Map(ports.outputs.map((port) => [port.name, portType(port.type)]))
+    )
+    inputs.set(
+      block.name,
+      new Map(ports.inputs.map((port) => [port.name, portType(port.type)]))
+    )
   }
 
   return { outputs, inputs }
@@ -353,7 +383,16 @@ export const validateWorkflowConnection = (
   if (!targetType) return { valid: false, reason: 'unknown_target_port' }
 
   if (compatibility && compatibility[sourceType]?.[targetType] !== true) {
-    return { valid: false, reason: 'incompatible_types' }
+    // `Any` is universally compatible in the backend type system
+    // (`TypeSystem.is_compatible` returns True as soon as either side is `Any`).
+    // Honor that here so a table that predates a dynamically typed port — a
+    // custom-script port is always `Any` — cannot refuse a valid connection.
+    if (
+      sourceType !== CODE_BLOCK_PORT_RUNTIME_TYPE &&
+      targetType !== CODE_BLOCK_PORT_RUNTIME_TYPE
+    ) {
+      return { valid: false, reason: 'incompatible_types' }
+    }
   }
   return { valid: true }
 }
@@ -375,6 +414,22 @@ export const getWorkflowGraphIssues = (
         message: `节点类型「${block.type_name}」当前不可用，已显示为占位节点`,
         severity: 'error'
       })
+    }
+
+    // A freshly added custom-script node inherits the empty class-level port
+    // list, so it renders without a single handle and cannot be wired. That is
+    // a deliberate dynamic-port boundary on the backend, but leaving it silent
+    // makes it look like the node is broken or the wires were dropped.
+    if (block.type_name === CODE_BLOCK_TYPE_NAME) {
+      const ports = getCanvasBlockPorts(block, getCanvasBlockType(block, blockTypes))
+      if (ports.inputs.length === 0 && ports.outputs.length === 0) {
+        issues.push({
+          nodeId: block.name,
+          code: 'code_node_without_ports',
+          message: '自定义脚本节点尚未定义端口，因此无法连线；请在节点配置面板添加输入或输出端口',
+          severity: 'warning'
+        })
+      }
     }
   }
 

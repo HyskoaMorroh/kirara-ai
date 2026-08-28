@@ -56,7 +56,13 @@ import { getTypeColor } from '@/utils/node-colors'
 import { deepClone } from '@/utils/deep-clone'
 import { useThemeStore } from '@/stores/theme'
 // 导入 vue-flow 相关组件
-import { VueFlow, useVueFlow, Panel, connectionExists } from '@vue-flow/core'
+import {
+  VueFlow,
+  useVueFlow,
+  Panel,
+  connectionExists,
+  getRectOfNodes
+} from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls, ControlButton } from '@vue-flow/controls'
 import { MiniMap } from '@vue-flow/minimap'
@@ -72,6 +78,8 @@ import type { Connection, Edge, EdgeChange, EdgeUpdateEvent, Node, NodeChange } 
 import { MarkerType } from '@vue-flow/core'
 import {
   useLayout,
+  estimateBlockTypeSize,
+  estimateNodeSize,
   findFreeNodePosition,
   findOverlappingNodes,
   layoutMissingNodes,
@@ -98,6 +106,11 @@ import {
   createWorkflowCanvasInitializationGuard,
   getWorkflowCanvasInitializationKey
 } from './workflow-canvas-initialization'
+import {
+  getCanvasOverlayInsets,
+  getInsetFitViewTransform,
+  WORKFLOW_CANVAS_MIN_ZOOM
+} from './workflow-canvas-viewport'
 // ==================== 属性和事件定义 ====================
 const props = defineProps<{
   blocks: BlockInstance[]
@@ -217,18 +230,23 @@ const {
   addEdges,
   setNodes,
   setEdges,
-  fitView,
   addNodes,
   project,
   getSelectedNodes,
   removeSelectedNodes,
   addSelectedNodes,
   setCenter,
-  getViewport
+  getViewport,
+  setViewport
 } = useVueFlow()
 
 const { layout } = useLayout()
 const layoutDirection = ref<'LR' | 'TB'>('LR')
+const canvasRoot = ref<HTMLElement | null>(null)
+const CANVAS_MIN_ZOOM = WORKFLOW_CANVAS_MIN_ZOOM
+const CANVAS_MAX_ZOOM = 4
+const CANVAS_FIT_PADDING = 0.2
+let fitAfterNodesInitialize = false
 const selectedNode = computed(() =>
   getSelectedNodes.value.length > 0 ? getSelectedNodes.value[0] : null
 )
@@ -631,9 +649,83 @@ const restoreGraph = () => {
   } finally {
     restoringGraph = false
   }
-  nextTick(() => {
-    fitView()
+  requestCanvasFit()
+}
+
+/** Fit measured nodes inside the canvas area not covered by edge panels. */
+const fitCanvasToVisibleArea = async () => {
+  const root = canvasRoot.value
+  const canvas = root?.querySelector<HTMLElement>('.vue-flow')
+  if (!canvas || nodes.value.length === 0) return false
+  if (nodes.value.some((node) => !node.dimensions?.width || !node.dimensions?.height)) return false
+
+  const canvasRect = canvas.getBoundingClientRect()
+  const overlayRects = [
+    ...root.querySelectorAll<HTMLElement>(
+      '.node-list-panel-wrapper, .node-config-panel-wrapper'
+    )
+  ]
+    .filter((element) => element.getClientRects().length > 0)
+    .map((element) => element.getBoundingClientRect())
+  const insets = getCanvasOverlayInsets(canvasRect, overlayRects)
+  const transform = getInsetFitViewTransform(getRectOfNodes(nodes.value), canvasRect, insets, {
+    minZoom: CANVAS_MIN_ZOOM,
+    maxZoom: CANVAS_MAX_ZOOM,
+    padding: CANVAS_FIT_PADDING
   })
+
+  return setViewport(transform)
+}
+
+const requestCanvasFit = () => {
+  fitAfterNodesInitialize = true
+  // 显式请求适配意味着重新接管视口，解除用户手动调整后的固定。
+  viewportPinnedByUser.value = false
+  nextTick(() => {
+    void fitCanvasToVisibleArea().then((fitted) => {
+      if (fitted) fitAfterNodesInitialize = false
+    })
+  })
+}
+
+const handleNodesInitialized = () => {
+  if (!fitAfterNodesInitialize) return
+  void fitCanvasToVisibleArea().then((fitted) => {
+    if (fitted) fitAfterNodesInitialize = false
+  })
+}
+
+/**
+ * 画布可用面积变化后重新适配。
+ *
+ * 内边距感知的 fit 此前只在 restoreGraph、一键整理和显式点击「适应视图」时执行。
+ * 窗口缩放、侧边栏折叠、打开或关闭节点配置面板都会改变可用面积，但视口不会跟着
+ * 变，于是内容会被压到面板底下。这里用 ResizeObserver 观察画布根元素，并对
+ * window resize 做兜底（某些浏览器在窗口缩放时不一定触发元素级回调）。
+ *
+ * 只在「用户没有手动平移/缩放过」时自动重新适配：一旦用户自己调过视口，
+ * 自动 fit 会覆盖他的视角，那比错位更让人恼火。
+ */
+let canvasResizeObserver: ResizeObserver | null = null
+let viewportResizeTimer: number | null = null
+/** 用户是否手动调整过视口；手动调整后不再自动 fit。 */
+const viewportPinnedByUser = ref(false)
+
+const handleViewportResize = () => {
+  if (viewportPinnedByUser.value) return
+  if (viewportResizeTimer !== null) {
+    window.clearTimeout(viewportResizeTimer)
+  }
+  // 拖动窗口边框会连续触发，节流到停手后再算一次。
+  viewportResizeTimer = window.setTimeout(() => {
+    viewportResizeTimer = null
+    void fitCanvasToVisibleArea()
+  }, 200)
+}
+
+/** 用户主动平移或缩放后固定视口，避免自动适配抢走视角。 */
+const handleViewportMoveEnd = () => {
+  viewportPinnedByUser.value = true
 }
 
 /**
@@ -649,15 +741,15 @@ const handleTidyLayout = () => {
   }
   tidying.value = true
   try {
-    recordHistoryBeforeCanvasMutation()
-    // 这里的节点全部已经渲染过，DOM 实测尺寸永远比估算值准；
-    // measured 模式强制优先采用实测值，避免按估算留错空隙。
-    setNodes(layout(nodes.value, edges.value, layoutDirection.value, { measured: true }))
-    updateBlocks()
-    nextTick(() => {
-      fitView()
-      message.success('已重新排布节点')
+    // 整理会一次性移动全部节点：作为一个批次写历史，一次 Ctrl+Z 即可完整退回。
+    runCanvasBatch(() => {
+      // 这里的节点全部已经渲染过，DOM 实测尺寸永远比估算值准；
+      // measured 模式强制优先采用实测值，避免按估算留错空隙。
+      setNodes(layout(nodes.value, edges.value, layoutDirection.value, { measured: true }))
+      updateBlocks()
     })
+    requestCanvasFit()
+    message.success('已重新排布节点')
   } finally {
     tidying.value = false
   }
@@ -665,17 +757,30 @@ const handleTidyLayout = () => {
 
 /** 缩放至适应全部节点 */
 const handleFitView = () => {
-  fitView({ padding: 0.2 })
+  requestCanvasFit()
 }
 
-/** 尺寸尚未测量时的兜底值，取常见节点的偏大一侧 */
-const FALLBACK_NODE_WIDTH = 240
-const FALLBACK_NODE_HEIGHT = 140
+/**
+ * 尺寸尚未测量时的兜底值。
+ *
+ * 原先这里写死 240×140，而 useLayout 对同一个节点用的是按端口数、配置项数和
+ * 标签宽度推算出的估算值（普通节点至少 220px 宽、常见高度远超 140px）。
+ * 两套回退尺寸导致「空位搜索」「重叠告警」「跳转居中」在首次测量前各算一套，
+ * 于是新节点可能压在旧节点上、告警时有时无。现在统一走 useLayout 的估算函数，
+ * DOM 实测尺寸仍然优先。
+ */
+const nodeBoxSize = (node: Node) => {
+  const measured = node.dimensions
+  if (measured?.width && measured?.height) {
+    return { width: measured.width, height: measured.height }
+  }
+  return estimateNodeSize(node)
+}
 
 /**
  * 收集画布上所有节点的包围盒，供落点计算判断重叠。
  *
- * 已渲染节点用 DOM 实测尺寸；刚插入还没测量的用一个保守的兜底值，
+ * 已渲染节点用 DOM 实测尺寸；刚插入还没测量的用与自动布局一致的估算尺寸，
  * 宁可稍大也不能偏小，否则新节点会压在旧节点上。
  */
 const getOccupiedBoxes = (excludeIds: Set<string> = new Set()) =>
@@ -685,9 +790,27 @@ const getOccupiedBoxes = (excludeIds: Set<string> = new Set()) =>
       id: node.id,
       x: node.position.x,
       y: node.position.y,
-      width: node.dimensions?.width || FALLBACK_NODE_WIDTH,
-      height: node.dimensions?.height || FALLBACK_NODE_HEIGHT
+      ...nodeBoxSize(node)
     }))
+
+/**
+ * 把一组画布改动收成一个可撤销步骤。
+ *
+ * 此前复合编辑（复制多个节点、一键整理、粘贴）依赖 `recordHistoryBeforeCanvasMutation`
+ * 与 500ms 防抖窗口去合并：只要这组改动跨过窗口，就会被拆成多个撤销步骤，
+ * 用户得连按好几次 Ctrl+Z 才能退回操作前。`performBatchAction` 一直存在但没有调用方；
+ * 这里把它接上——由 store 在最外层批次捕获操作前快照，无论耗时多久都只产生一个检查点。
+ */
+const runCanvasBatch = <T,>(action: () => T): T => {
+  if (!graphHistoryReady || restoringGraph) return action()
+  // 批次自己负责写历史，避免与逐次记录重复压栈。
+  graphHistoryPending = true
+  try {
+    return intent.performBatchAction(action)
+  } finally {
+    graphHistoryPending = false
+  }
+}
 
 /**
  * 复制当前选中的节点。
@@ -702,43 +825,41 @@ const handleDuplicateSelection = () => {
     return
   }
 
-  recordHistoryBeforeCanvasMutation()
   const created: Node[] = []
-  const existingIds = new Set(nodes.value.map((node) => node.id))
-  // 原先固定 +40/+40，副本必然压在原节点上（节点至少 220px 宽）。
-  // 改为从「原节点右下角外侧」起算，再交给 findFreeNodePosition 找空位。
-  const occupied = getOccupiedBoxes()
+  runCanvasBatch(() => {
+    const existingIds = new Set(nodes.value.map((node) => node.id))
+    // 原先固定 +40/+40，副本必然压在原节点上（节点至少 220px 宽）。
+    // 改为从「原节点右下角外侧」起算，再交给 findFreeNodePosition 找空位。
+    const occupied = getOccupiedBoxes()
 
-  for (const node of selected) {
-    const newId = createUniqueNodeName(node.data?.blockType?.type_name || node.id, existingIds)
-    existingIds.add(newId)
+    for (const node of selected) {
+      const newId = createUniqueNodeName(node.data?.blockType?.type_name || node.id, existingIds)
+      existingIds.add(newId)
 
-    const size = {
-      width: node.dimensions?.width || FALLBACK_NODE_WIDTH,
-      height: node.dimensions?.height || FALLBACK_NODE_HEIGHT
+      const size = nodeBoxSize(node)
+      const position = findFreeNodePosition(
+        { x: node.position.x + size.width + 40, y: node.position.y },
+        size,
+        occupied
+      )
+      occupied.push({ id: newId, ...position, ...size })
+
+      created.push({
+        ...node,
+        id: newId,
+        selected: false,
+        position,
+        // 深拷贝配置，避免副本与原节点共享同一个 config 对象
+        data: {
+          ...node.data,
+          config: deepClone(node.data?.config || {})
+        }
+      })
     }
-    const position = findFreeNodePosition(
-      { x: node.position.x + size.width + 40, y: node.position.y },
-      size,
-      occupied
-    )
-    occupied.push({ id: newId, ...position, ...size })
 
-    created.push({
-      ...node,
-      id: newId,
-      selected: false,
-      position,
-      // 深拷贝配置，避免副本与原节点共享同一个 config 对象
-      data: {
-        ...node.data,
-        config: deepClone(node.data?.config || {})
-      }
-    })
-  }
-
-  addNodes(created)
-  updateBlocks()
+    addNodes(created)
+    updateBlocks()
+  })
   message.success(`已复制 ${created.length} 个节点`)
 }
 
@@ -1149,11 +1270,11 @@ const focusNode = (nodeId: string) => {
   if (!node) return
   removeSelectedNodes(getSelectedNodes.value)
   addSelectedNodes([node])
-  setCenter(
-    node.position.x + (node.dimensions?.width || FALLBACK_NODE_WIDTH) / 2,
-    node.position.y + (node.dimensions?.height || FALLBACK_NODE_HEIGHT) / 2,
-    { zoom: getViewport().zoom, duration: 300 }
-  )
+  const size = nodeBoxSize(node)
+  setCenter(node.position.x + size.width / 2, node.position.y + size.height / 2, {
+    zoom: getViewport().zoom,
+    duration: 300
+  })
 }
 
 /** 问题清单弹窗：列出全部问题，点任意一条即可跳到对应节点 */
@@ -1535,15 +1656,31 @@ onMounted(() => {
 
   // 添加离开页面时的确认提示
   window.addEventListener('beforeunload', beforeunloadHandler)
+
+  // 画布可用面积变化后重新适配（窗口缩放、侧栏折叠、面板开合）
+  if (typeof ResizeObserver !== 'undefined' && canvasRoot.value) {
+    canvasResizeObserver = new ResizeObserver(handleViewportResize)
+    canvasResizeObserver.observe(canvasRoot.value)
+  }
+  window.addEventListener('resize', handleViewportResize)
 })
 
 // 组件卸载
 onBeforeUnmount(() => {
   graphInitializationGuard.reset()
+  // 原先这里直接 cancel 两个 debounce，卸载前 500ms 内的拖动与连线会被丢弃，
+  // 且父组件的 hasUnsavedChanges 也来不及置位，于是「拖一下就切页」既没提示
+  // 也没保存。改为先把待写入的状态刷进 store 并向上通知，再取消定时器。
+  flushGraphData()
   updateBlocks.cancel()
   updateWires.cancel()
   window.removeEventListener('beforeunload', beforeunloadHandler)
   document.removeEventListener('keydown', handleKeydown)
+  if (canvasResizeObserver) {
+    canvasResizeObserver.disconnect()
+    canvasResizeObserver = null
+  }
+  window.removeEventListener('resize', handleViewportResize)
   if (compatibilityRetryTimer) {
     clearTimeout(compatibilityRetryTimer)
     compatibilityRetryTimer = null
@@ -1580,7 +1717,8 @@ const onDrop = (event: DragEvent) => {
 
     // 原先直接落在光标处：既不对齐网格，也允许正好压在已有节点上。
     // 这里先对齐到与画布网格一致的 20px，再找一个不与既有节点重叠的空位。
-    const droppedSize = { width: FALLBACK_NODE_WIDTH, height: FALLBACK_NODE_HEIGHT }
+    // 尺寸走与自动布局同一套估算，而不是另一个写死的兜底值。
+    const droppedSize = estimateBlockTypeSize(blockType)
     const snapped = { x: snapToGrid(x), y: snapToGrid(y) }
     const position = findFreeNodePosition(snapped, droppedSize, getOccupiedBoxes())
     if (position.x !== snapped.x || position.y !== snapped.y) {
@@ -1611,18 +1749,19 @@ const onDrop = (event: DragEvent) => {
 </script>
 
 <template>
-  <div class="workflow-canvas">
+  <div ref="canvasRoot" class="workflow-canvas">
     <VueFlow
       :nodes="nodes"
       :edges="edges"
-      fit-view-on-init
+      @nodes-initialized="handleNodesInitialized"
       @nodes-change="handleNodesChange"
       @edges-change="handleEdgesChange"
       @edge-update="handleEdgeUpdate"
       @connect="handleConnect"
+      @move-end="handleViewportMoveEnd"
       :default-zoom="1"
-      :min-zoom="0.2"
-      :max-zoom="4"
+      :min-zoom="CANVAS_MIN_ZOOM"
+      :max-zoom="CANVAS_MAX_ZOOM"
       :snap-to-grid="true"
       class="vue-flow-canvas"
       @drop="onDrop"
@@ -1965,7 +2104,7 @@ const onDrop = (event: DragEvent) => {
           :type-compatibility="typeCompatibility"
         />
       </Panel>
-      <Panel position="top-left" class="node-list-panel-wrapper" style="margin: 0; height: 100%">
+      <Panel position="top-left" class="node-list-panel-wrapper" style="margin: 0">
         <NodeListPanel :block-types="props.blockTypes"></NodeListPanel>
       </Panel>
       <!-- 画布内节点搜索：由左下角控件里的放大镜切换显示 -->
@@ -2324,6 +2463,21 @@ const onDrop = (event: DragEvent) => {
 }
 
 @media (max-width: 640px) {
+  .vue-flow__panel.node-list-panel-wrapper {
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: 260px;
+    margin: 0;
+  }
+
+  .node-list-panel-wrapper .node-list-panel {
+    width: 100%;
+    height: 260px;
+  }
+
   .toolbar {
     padding: 0.375rem;
     justify-content: flex-start;

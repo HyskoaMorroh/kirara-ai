@@ -70,6 +70,14 @@ class OneBotConfig(BaseModel):
         title="投递重试基础间隔",
         description="明确瞬态失败的指数退避基础秒数。",
     )
+    isolate_code_messages: bool = Field(
+        default=True,
+        title="代码单独成条",
+        description=(
+            "QQ 没有可用的复制按钮；开启后代码块会单独发一条消息，"
+            "整条内容即代码本体，长按全选即可复制。关闭则与正文混排。"
+        ),
+    )
     inbound_media_timeout_seconds: float = Field(
         default=15.0,
         gt=0,

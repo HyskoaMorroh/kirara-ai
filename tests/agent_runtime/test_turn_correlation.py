@@ -22,11 +22,19 @@ from kirara_ai.llm.format.response import LLMChatResponse, Message
 from kirara_ai.llm.format.tool import Function, ToolCall
 from kirara_ai.llm.resilience import ChatExecutionResult, FailoverExecutionError
 from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
+from kirara_ai.web.auth.principal import RuntimePrincipal, runtime_principal_context
 
 
 HASH_PROMPT = "a" * 64
 HASH_MCP = "b" * 64
 HASH_HOOK = "c" * 64
+CREATOR = RuntimePrincipal(subject="correlation-test-creator", is_creator=True)
+
+
+@pytest.fixture
+def creator_principal():
+    with runtime_principal_context(CREATOR):
+        yield
 
 
 class CorrelatedLLM:
@@ -205,6 +213,7 @@ def _executor(agent, llm, mcp, audit, *, store=None):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_one_agent_turn_uses_one_correlation_id_across_failover_hooks_mcp_and_audit():
     audit = []
     llm = CorrelatedLLM(
@@ -263,6 +272,7 @@ async def test_one_agent_turn_uses_one_correlation_id_across_failover_hooks_mcp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_one_agent_turn_persists_agent_hook_and_mcp_under_one_correlation_id(tmp_path):
     lifecycle = ResourceLifecycleService(tmp_path / "data")
     audit = PersistingAudit(lifecycle.append_runtime_audit)
@@ -310,6 +320,7 @@ async def test_one_agent_turn_persists_agent_hook_and_mcp_under_one_correlation_
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_confirmation_resume_keeps_the_original_correlation_id_after_executor_restart(
     tmp_path,
 ):

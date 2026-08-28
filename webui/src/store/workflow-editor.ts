@@ -20,6 +20,15 @@ export interface WorkflowEditorIntent {
   updateDescription: (description: string) => void
   updateWorkflowId: (workflowId: string) => void
   updateConfig: (config: WorkflowConfig) => void
+  performActionWithoutHistory: <T>(action: () => T) => T
+  /**
+   * 把一组改动收成一个可撤销步骤。
+   *
+   * 逐次记录 + 防抖窗口只能合并「窗口内」的连续改动；复制多个节点、一键整理
+   * 这类跨窗口的复合操作会被拆成多个撤销步骤。批次由最外层捕获操作前快照，
+   * 无论耗时多久都只产生一个检查点。
+   */
+  performBatchAction: <T>(action: () => T) => T
   saveToHistory: () => void
   undo: () => void
   redo: () => void
@@ -411,6 +420,10 @@ class WorkflowEditorModel {
     updateConfig: (config) => {
       this.state.value.config = config
     },
+
+    performActionWithoutHistory: <T>(action: () => T) => this.performActionWithoutHistory(action),
+
+    performBatchAction: <T>(action: () => T) => this.performBatchAction(action),
 
     saveToHistory: () => {
       // 只有在 skipSavingHistory 为 false 时才保存历史记录

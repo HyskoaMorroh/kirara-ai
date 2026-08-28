@@ -13,12 +13,14 @@ from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.database import DatabaseManager
 from kirara_ai.events.application import ApplicationStarted, ApplicationStopping
 from kirara_ai.events.event_bus import EventBus
+from kirara_ai.im.delivery_timing_store import DeliveryTimingStore
 from kirara_ai.im.im_registry import IMRegistry
 from kirara_ai.im.manager import IMManager
 from kirara_ai.internal import shutdown_event
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.llm.llm_registry import LLMBackendRegistry
+from kirara_ai.llm.pricing import PriceCatalog
 from kirara_ai.logger import get_logger
 from kirara_ai.mcp_module.manager import MCPServerManager
 from kirara_ai.media import MediaManager
@@ -290,6 +292,7 @@ def init_agent_runtime(container: DependencyContainer):
         memory_manager=memory_manager,
         hook_runtime=hook_runtime,
         context_char_threshold=runtime_config.context_char_threshold,
+        reply_stream_mode=runtime_config.reply_stream_mode,
         audit_sink=lambda record: _agent_runtime_audit_sink(
             record, resource_service=resource_service
         ),
@@ -312,7 +315,27 @@ def init_storage(container: DependencyContainer) -> tuple[DatabaseManager, Media
     container.register(MediaManager, media_manager)
     container.register(MediaCarrierRegistry, MediaCarrierRegistry(container))
     container.register(MediaCarrierService, MediaCarrierService(container, media_manager))
+
+    # 回复耗时落库：日志只能回答「刚才那条为什么慢」，按时间范围回查历史需要行。
+    # 只记录时长与计数，不记录任何消息正文。
+    timing_store = DeliveryTimingStore(db)
+    try:
+        removed = timing_store.cleanup()
+        if removed:
+            logger.info(f"已清理 {removed} 条超出保留期的投递耗时记录")
+    except Exception as error:  # noqa: BLE001 - 清理失败不应阻止启动
+        logger.warning(f"投递耗时记录清理失败：{error}")
+    container.register(DeliveryTimingStore, timing_store)
     return db, media_manager
+
+
+def init_pricing_system(container: DependencyContainer) -> PriceCatalog:
+    """Initialize the durable provider pricing catalog below the data root."""
+
+    catalog_path = Path(DATA_PATH).resolve() / "pricing" / "catalog.json"
+    catalog = PriceCatalog.load_or_create(catalog_path)
+    container.register(PriceCatalog, catalog)
+    return catalog
 
 
 def init_application() -> DependencyContainer:
@@ -364,6 +387,7 @@ def init_application() -> DependencyContainer:
     container.register(BlockRegistry, BlockRegistry())
 
     init_storage(container)
+    init_pricing_system(container)
 
     # 注册工作流注册表
     workflow_registry = WorkflowRegistry(container)

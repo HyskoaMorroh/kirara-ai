@@ -5,7 +5,8 @@ import re
 
 from wechatpy.messages import BaseMessage
 
-from kirara_ai.im.text_render import display_width, is_table_row, is_table_separator, parse_table_row, render_box_table
+from kirara_ai.im.text_render import (display_width, is_table_row, is_table_separator,
+                                      parse_table_row, render_box_table, split_structured_text)
 from kirara_ai.logger import get_logger
 
 if TYPE_CHECKING:
@@ -118,6 +119,10 @@ def _split_table_block(lines: list[str], max_length: int) -> list[str]:
     """
     拆分超长表格：每段都补齐上边框、表头、分隔线与下边框，
     保证每条消息里的表格都是结构完整的，不会出现半张表。
+
+    分段主路径已统一到 ``kirara_ai.im.text_render.split_structured_text``；
+    本函数保留为公开行为的兼容入口（外部插件可能直接调用），
+    并作为「表格必须整段带框」这一约定的可执行说明。
     """
     top = lines[0] if lines and lines[0].startswith("┌") else ""
     bottom = lines[-1] if lines and lines[-1].startswith("└") else ""
@@ -157,6 +162,9 @@ def _split_code_block(lines: list[str], max_length: int) -> list[str]:
     """
     拆分超长代码块：每段都补齐 ［代码］/［/代码］ 标记，
     并保持每行原始缩进，避免代码在分段处断裂。
+
+    与 :func:`_split_table_block` 同理，分段主路径已统一到共享实现，
+    这里保留为兼容入口与围栏约定的可执行说明。
     """
     head = lines[0] if lines and lines[0].startswith("［代码") else "［代码］"
     tail = "［/代码］"
@@ -181,96 +189,21 @@ def _split_code_block(lines: list[str], max_length: int) -> list[str]:
 
 
 def split_long_message(text: str, max_length: int = 1800) -> list[str]:
+    """Split WeCom plain text by UTF-8 bytes with complete structures.
+
+    企业微信曾经有一套自己的分段实现（按段落切分、表格与代码块各自补边框，
+    并给分段加 ``[i/N]`` 前缀）。它与 ``kirara_ai/im/text_render.py`` 的
+    ``split_structured_text`` 职责完全重叠，且页码格式与其余渠道的
+    「第 N 页 / 共 M 页」不一致——同一个机器人在不同 APP 上给出两种页码写法。
+    现在统一走共享实现，页码格式随之统一；WeCom 独有的部分只剩
+    ``code_style="wecom"``（``［代码］`` 围栏）这一个渲染差异。
     """
-    将超长消息按段落智能分割，避免超过企业微信2048字节上限
-    max_length 设为 1800 字节留出安全边界（中文字符占3字节）
-
-    表格与代码块视为整体，必要时按行拆分并为每段补齐边框/围栏，
-    保证分段后每条消息里的表格和代码依然是完整、对齐的。
-    """
-    # 如果不超长，直接返回
-    if len(text.encode('utf-8')) <= max_length:
-        return [text]
-
-    chunks: list[str] = []
-    current_chunk: list[str] = []
-    current_size = 0
-
-    # 按段落分割（保留双换行分隔的结构）
-    paragraphs = text.split('\n\n')
-
-    for para in paragraphs:
-        para_size = len(para.encode('utf-8'))
-
-        # 单个段落超长，需要按行拆分
-        if para_size > max_length:
-            # 记录待合并的前置内容（如表格上方的标题），稍后尽量并入第一段，
-            # 避免产生只有一行标题的碎片消息
-            pending = '\n\n'.join(current_chunk) if current_chunk else ''
-            current_chunk = []
-            current_size = 0
-
-            lines = para.split('\n')
-            sub_chunks: list[str] = []
-
-            # 表格块：按数据行拆分，每段补齐边框与表头
-            if lines and lines[0].startswith("┌"):
-                sub_chunks = _split_table_block(lines, max_length)
-            # 代码块：按代码行拆分，每段补齐围栏标记
-            elif lines and lines[0].startswith("［代码"):
-                sub_chunks = _split_code_block(lines, max_length)
-            else:
-                line_chunk: list[str] = []
-                line_size = 0
-
-                for line in lines:
-                    line_bytes = len(line.encode('utf-8'))
-                    if line_size + line_bytes + 1 > max_length:  # +1 for '\n'
-                        if line_chunk:
-                            sub_chunks.append('\n'.join(line_chunk))
-                        line_chunk = [line]
-                        line_size = line_bytes
-                    else:
-                        line_chunk.append(line)
-                        line_size += line_bytes + 1
-
-                if line_chunk:
-                    sub_chunks.append('\n'.join(line_chunk))
-
-            # 前置内容能塞进第一段就合并，否则单独成段
-            if pending and sub_chunks:
-                merged = f"{pending}\n\n{sub_chunks[0]}"
-                if len(merged.encode('utf-8')) <= max_length:
-                    sub_chunks[0] = merged
-                else:
-                    chunks.append(pending)
-            elif pending:
-                chunks.append(pending)
-
-            chunks.extend(sub_chunks)
-            continue
-
-        # 段落可以追加到当前块
-        elif current_size + para_size + 2 <= max_length:  # +2 for '\n\n'
-            current_chunk.append(para)
-            current_size += para_size + 2
-
-        # 段落无法追加，保存当前块并开启新块
-        else:
-            if current_chunk:
-                chunks.append('\n\n'.join(current_chunk))
-            current_chunk = [para]
-            current_size = para_size
-
-    # 保存最后一个块
-    if current_chunk:
-        chunks.append('\n\n'.join(current_chunk))
-
-    # 为分段消息添加序号（总数>1时）
-    if len(chunks) > 1:
-        return [f"[{i+1}/{len(chunks)}]\n{chunk}" for i, chunk in enumerate(chunks)]
-
-    return chunks
+    return split_structured_text(
+        text,
+        max_bytes=max_length,
+        max_total_bytes=None,
+        code_style="wecom",
+    )
 
 class WechatApiDelegate(ABC):
     """微信API代理接口，用于处理不同类型的微信API调用"""

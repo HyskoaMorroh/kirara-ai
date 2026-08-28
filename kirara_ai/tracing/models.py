@@ -106,6 +106,7 @@ class LLMRequestTrace(TraceRecord):
     correlation_id = Column(String(64), nullable=True, index=True)
     model_id = Column(String(64), nullable=False, index=True)
     backend_name = Column(String(64), nullable=False, index=True)
+    provider = Column(String(64), nullable=True)
     
     # 时间相关
     request_time = Column(DateTime, nullable=False, index=True)
@@ -130,6 +131,7 @@ class LLMRequestTrace(TraceRecord):
     
     # 错误信息
     error = Column(Text, nullable=True)
+    error_category = Column(String(32), nullable=True)
     status = Column(String(20), nullable=False, default="pending")
     
     # 创建索引
@@ -137,6 +139,9 @@ class LLMRequestTrace(TraceRecord):
         Index('idx_request_model', 'model_id', 'request_time'),
         Index('idx_backend_time', 'backend_name', 'request_time'),
         Index('idx_status_time', 'status', 'request_time'),
+        Index('idx_provider_time', 'provider', 'request_time'),
+        Index('idx_error_category_time', 'error_category', 'request_time'),
+        Index('idx_usage_source_time', 'usage_source', 'request_time'),
     )
     
     def __repr__(self):
@@ -149,8 +154,11 @@ class LLMRequestTrace(TraceRecord):
             self.correlation_id = event.correlation_id
             self.model_id = event.model_id
             self.backend_name = event.backend_name
+            self.provider = event.backend_name
             self.request_time = datetime.fromtimestamp(event.start_time)
             self.status = "pending"
+            self.usage_source = "unknown"
+            self.error_category = None
             if event.request:
                 self.request = event.request.model_dump()
         
@@ -159,6 +167,17 @@ class LLMRequestTrace(TraceRecord):
             self.response_time = datetime.fromtimestamp(event.end_time)
             self.duration = event.duration
             self.status = "success"
+            successful_attempt = next(
+                (attempt for attempt in reversed(event.attempts) if attempt.success),
+                None,
+            )
+            if successful_attempt is not None:
+                self.provider = successful_attempt.provider
+            elif event.cost_snapshot is not None:
+                self.provider = event.cost_snapshot.provider
+            else:
+                self.provider = event.backend_name
+            self.error_category = None
 
             # 记录令牌使用情况
             if event.response and event.response.usage:
@@ -168,6 +187,8 @@ class LLMRequestTrace(TraceRecord):
                 self.cached_tokens = event.response.usage.cached_tokens
                 self.cache_write_tokens = event.response.usage.cache_write_tokens
                 self.usage_source = event.response.usage.source.value
+            else:
+                self.usage_source = "unknown"
 
             self.ttft_ms = event.ttft_ms
             if self.ttft_ms is None:
@@ -199,6 +220,16 @@ class LLMRequestTrace(TraceRecord):
             self.duration = event.duration
             self.error = event.error
             self.status = "failed"
+            self.usage_source = self.usage_source or "unknown"
+            last_attempt = event.attempts[-1] if event.attempts else None
+            self.provider = last_attempt.provider if last_attempt else event.backend_name
+            classified_attempt = next(
+                (attempt for attempt in reversed(event.attempts) if attempt.error_category),
+                None,
+            )
+            self.error_category = (
+                classified_attempt.error_category if classified_attempt else "unknown"
+            )
             self.ttft_ms = event.ttft_ms
             self.attempt_count = len(event.attempts)
             self.attempts_json = json.dumps(
@@ -221,6 +252,7 @@ class LLMRequestTrace(TraceRecord):
             "correlation_id": self.correlation_id,
             "model_id": self.model_id,
             "backend_name": self.backend_name,
+            "provider": self.provider,
             "request_time": self.request_time.isoformat() if self.request_time else None, # type: ignore
             "response_time": self.response_time.isoformat() if self.response_time else None, # type: ignore
             "duration": self.duration,
@@ -235,7 +267,8 @@ class LLMRequestTrace(TraceRecord):
             "attempts": self.attempts,
             "cost_snapshot": self.cost_snapshot,
             "status": self.status,
-            "error": _redact_trace_value(self.error)
+            "error": _redact_trace_value(self.error),
+            "error_category": self.error_category,
         }
     
     def to_detail_dict(self) -> Dict[str, Any]:

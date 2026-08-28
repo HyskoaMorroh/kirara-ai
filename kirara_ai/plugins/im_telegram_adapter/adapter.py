@@ -19,7 +19,7 @@ from kirara_ai.im.message import (FileElement, ImageMessage, IMMessage, MentionE
                                   VideoMessage, VoiceMessage)
 from kirara_ai.im.profile import UserProfile
 from kirara_ai.im.sender import ChatSender, ChatType
-from kirara_ai.im.text_render import convert_markdown_tables
+from kirara_ai.im.text_render import convert_markdown_tables, split_structured_text
 from kirara_ai.logger import get_logger
 from kirara_ai.workflow.core.dispatch import WorkflowDispatcher
 
@@ -50,7 +50,7 @@ TELEGRAM_MESSAGE_FILTER = (
 )
 
 
-def split_telegram_message(text: str, max_length: int = TELEGRAM_MESSAGE_LIMIT) -> List[str]:
+def _split_telegram_message_legacy(text: str, max_length: int = TELEGRAM_MESSAGE_LIMIT) -> List[str]:
     """
     将 MarkdownV2 文本按结构安全分段，避免超过 Telegram 4096 字符上限导致发送失败。
 
@@ -133,6 +133,15 @@ def split_telegram_message(text: str, max_length: int = TELEGRAM_MESSAGE_LIMIT) 
 
     flush_buffer()
     return [chunk for chunk in chunks if chunk.strip()]
+
+
+def split_telegram_message(text: str, max_length: int = TELEGRAM_MESSAGE_LIMIT) -> List[str]:
+    """Split MarkdownV2 by Unicode character count with complete structures."""
+    return split_structured_text(
+        text,
+        max_length=max_length,
+        max_total_bytes=None,
+    )
 
 
 class TelegramConfig(BaseModel):
@@ -519,7 +528,13 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
         delivery_id: Optional[str] = None,
     ) -> None:
         """Persist every Telegram page before making any message API call."""
+        message.record_delivery_stage("formatting_started", adapter="telegram")
         recipient_key, units = await self._render_send_units(message, recipient)
+        message.record_delivery_stage(
+            "formatting_completed",
+            adapter="telegram",
+            segment_count=len(units),
+        )
         if not units:
             return
         if delivery_id is None:
@@ -530,9 +545,24 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
         if len(delivery_id) > 64:
             raise ValueError("Telegram delivery_id cannot exceed 64 characters")
 
+        message.record_delivery_stage("send_started", adapter="telegram")
         if getattr(self, "database_manager", None) is None:
-            for unit in units:
-                await self._send_outbox_payload(unit.params)
+            try:
+                for unit in units:
+                    await self._send_outbox_payload(unit.params)
+            except Exception as exc:
+                message.record_delivery_stage(
+                    "send_failed",
+                    adapter="telegram",
+                    error_type=type(exc).__name__,
+                    retry_count=0,
+                )
+                raise
+            message.record_delivery_stage(
+                "send_succeeded",
+                adapter="telegram",
+                retry_count=0,
+            )
             return
 
         outbox = self._ensure_outbox()
@@ -550,10 +580,26 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
                 logical_delivery_id=delivery_id,
             )
 
-        for unit_id in unit_ids:
-            result = await outbox.deliver(unit_id)
-            if result.status != "accepted":
-                raise self._delivery_error(result)
+        results: list[TelegramDeliveryResult] = []
+        try:
+            for unit_id in unit_ids:
+                result = await outbox.deliver(unit_id)
+                results.append(result)
+                if result.status != "accepted":
+                    raise self._delivery_error(result)
+        except Exception as exc:
+            message.record_delivery_stage(
+                "send_failed",
+                adapter="telegram",
+                error_type=type(exc).__name__,
+                retry_count=sum(max(0, item.attempt_count - 1) for item in results),
+            )
+            raise
+        message.record_delivery_stage(
+            "send_succeeded",
+            adapter="telegram",
+            retry_count=sum(max(0, item.attempt_count - 1) for item in results),
+        )
 
     def _deserialize_update(self, payload: dict[str, Any]) -> Update:
         return Update.de_json(payload, self.application.bot)

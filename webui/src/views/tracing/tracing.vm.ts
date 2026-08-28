@@ -120,6 +120,13 @@ export function useTracingViewModel<S extends TraceStatistics>(
     modelId: null as string | null,
     backendName: null as string | null,
     status: null as string | null,
+    // 后端一直支持这三个维度（provider 与 usage_source 甚至建了索引），
+    // 但界面上没有入口，于是「哪个供应商在失败」「哪些用量是估算的」问不出来。
+    provider: null as string | null,
+    usageSource: null as string | null,
+    errorCategory: null as string | null,
+    startTime: null as string | null,
+    endTime: null as string | null,
     query: ''
   })
 
@@ -135,6 +142,31 @@ export function useTracingViewModel<S extends TraceStatistics>(
   // API路径构造
   const getApiPrefix = () => `/tracing/${traceType}`
 
+  /**
+   * 统计接口的查询参数。
+   *
+   * 与列表接口用同一份筛选条件，避免「列表看到 3 条失败、卡片显示 0 条失败」这类
+   * 自相矛盾的画面。时区取浏览器时区：后端按该时区分桶，不传就会按服务器时区分桶，
+   * 跨时区用户看到的「今天」是错的。
+   */
+  const statisticsQueryParams = () => {
+    const params: Record<string, string> = {}
+    const { correlationId, modelId, backendName, status, provider, usageSource, errorCategory } =
+      filterParams.value as Record<string, string | null>
+    if (correlationId) params.correlation_id = correlationId
+    if (modelId) params.model = modelId
+    if (backendName) params.backend = backendName
+    if (status) params.status = status
+    if (provider) params.provider = provider
+    if (usageSource) params.usage_source = usageSource
+    if (errorCategory) params.error_category = errorCategory
+    if (filterParams.value.startTime) params.start_time = filterParams.value.startTime as string
+    if (filterParams.value.endTime) params.end_time = filterParams.value.endTime as string
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    if (timezone) params.timezone = timezone
+    return params
+  }
+
   // 获取追踪记录列表
   const fetchTraces = async () => {
     try {
@@ -146,6 +178,11 @@ export function useTracingViewModel<S extends TraceStatistics>(
         model_id: filterParams.value.modelId,
         backend_name: filterParams.value.backendName,
         status: filterParams.value.status,
+        provider: filterParams.value.provider,
+        usage_source: filterParams.value.usageSource,
+        error_category: filterParams.value.errorCategory,
+        start_time: filterParams.value.startTime,
+        end_time: filterParams.value.endTime,
         query: filterParams.value.query || undefined
       })
 
@@ -167,7 +204,12 @@ export function useTracingViewModel<S extends TraceStatistics>(
     statisticsStatus.value = 'loading'
     statisticsError.value = null
     try {
-      const response = await http.get<S>(`${getApiPrefix()}/statistics`)
+      // 此前这里不带任何参数：后端支持按 provider、模型、状态、时间范围和时区筛选，
+      // 但界面上选好的筛选条件从未送达，于是「筛选」只影响列表、不影响统计卡片。
+      const query = new URLSearchParams(statisticsQueryParams()).toString()
+      const response = await http.get<S>(
+        `${getApiPrefix()}/statistics${query ? `?${query}` : ''}`
+      )
       if (requestId !== statisticsRequestId) return
       statistics.value = response
       statisticsStatus.value = 'ready'
@@ -339,15 +381,23 @@ export function useTracingViewModel<S extends TraceStatistics>(
       modelId: null,
       backendName: null,
       status: null,
+      provider: null,
+      usageSource: null,
+      errorCategory: null,
+      startTime: null,
+      endTime: null,
       query: ''
     }
     currentPage.value = 1
     fetchTraces()
+    // 统计卡片同样受筛选影响，重置后必须一起刷新，否则卡片仍显示上一次的筛选结果。
+    fetchStatistics()
   }
 
   const applyFilter = () => {
     currentPage.value = 1
     fetchTraces()
+    fetchStatistics()
   }
 
   // 分页操作

@@ -6,6 +6,161 @@
 
 > 不纳入比较：`.git/`、编辑器缓存、测试缓存、运行日志、`data/db/`、记忆/媒体/插件运行数据、虚拟环境和任何本地密钥或密码文件。这些内容会随机器和使用状态变化，不属于可复现的产品功能。
 
+## [未发布]
+
+本轮以「1.txt 逐条要求」为验收口径，先由只读子代理建立现场证据，再对每一处
+**有 file:line 证据、可构造失败用例**的缺陷补回归测试、改最小范围代码、跑聚焦测试。
+未能在本机验证的外部场景（真实 Docker 重启、真实 QQ 扫码、真实多 Provider 上游、
+真实客户端渲染）一律标记为未验证，不计入已完成。
+
+### Fixed
+
+- **WebUI 保存后端会重置全部容错参数**：`webui/src/api/llm.ts` 的 `LLMBackend`
+  从未声明 `priority`、`participate_in_failover`、重试、超时与熔断字段，
+  而后端 `LLMBackendUpdateRequest` 直接继承 `LLMBackendConfig` 会接收它们。
+  于是从界面改一个开关，提交的 payload 缺字段，pydantic 用默认值补齐——
+  一次无关编辑就把调好的整套容错预算恢复出厂。现补齐类型、补齐新建默认值，
+  并在模型管理页提供「重试与队列 / 超时配置 / 熔断器设置」三组可编辑项。
+- **流式请求读错超时键**：同步路径已按 `non_stream_timeout_seconds` 计算总截止时间，
+  流式路径仍直接读遗留键 `request_timeout_seconds`，只配了新键的后端在流式下
+  仍按 60 秒旧默认值执行。新增 `stream_total_timeout_seconds` 并让流式路径优先采用它。
+- **`get_llm` 绕过优先级队列**：该入口一直是 `random.choice`（源码带 `TODO`），
+  与 `get_provider_candidates` 建立的确定性排序互相矛盾，同一模型两次调用可能
+  落到不同 Provider，配置里的 `priority` 对它完全无效。现复用同一套排序，
+  队列为空时才回退到活跃后端列表，保证「只配一个不参与故障转移的后端」仍可用。
+- **投递重试退避无上限**：OneBot 与 QQBot 的 `retry_delay * 2**(n-1)` 没有封顶，
+  在配置自身允许的最大值下（`outbox_max_attempts=10`、`outbox_retry_delay_seconds=60`）
+  最后一次等待约 8.5 小时，与队列卡死无法区分；Telegram 则完全没有指数项。
+  现统一到 `kirara_ai/im/outbox_backoff.py`：指数增长、5 分钟上限、抖动只提前不推迟。
+- **超时预算缺跨字段校验**：单字段 `gt=0` 从不检查「首字节 + 静默」是否超过流式总超时、
+  重试退避总量是否超过非流式总超时，配了永远达不到的值也照样接受。
+  现对用户显式写入的总超时做校验；沿用遗留键的既有配置不会因此变得无法加载。
+- **WeCom 媒体临时目录绕过 `DATA_PATH`**：此前用 `os.getcwd()` 拼接，
+  容器工作目录与数据卷挂载点不同时，临时文件落在卷外，既进不了备份也会在重建时丢失。
+- **启动期目录创建没有可执行的错误信息**：裸 `os.makedirs` 在只读挂载、磁盘写满或
+  路径被同名文件占用时抛出原始异常，不指明路径也不给处置建议，而现成的诊断
+  只存在于 HTTP readiness 接口里——那时进程已经起不来。现给出「路径 + 原因 + 处置」，
+  并实际探测一次写入（目录已存在但整卷只读是容器里最常见的情况）。
+- **画布两套回退节点尺寸**：`useLayout` 按端口数、配置项与标签宽度估算，
+  `WorkflowCanvas` 另有写死的 240×140。空位搜索、重叠告警与跳转居中都用了较小的那套，
+  首次测量前的几何判断与布局结果互相矛盾。现统一走同一估算函数。
+- **从节点列表添加节点会压在既有节点上**：该路径直接用 `project()` 原始坐标，
+  跳过网格吸附与空位搜索；拖拽路径有防护，点击路径没有。
+- **卸载前 500ms 的画布编辑被丢弃**：`onBeforeUnmount` 直接 `cancel()` 两个防抖，
+  且父组件的未保存标记也来不及置位，于是「拖一下就切页」既无提示也未保存。
+  现先把待写入状态刷入 store 并向上通知，再取消定时器。
+- **自定义脚本节点无法连线且不给原因**：`internal:code` 的类级 `inputs/outputs` 为空
+  （端口在 `__init__` 里按配置构建），`/block/types` 因此返回零端口，
+  新建的脚本节点没有任何 handle，校验器也不报此情况。现补一条可操作的
+  `code_node_without_ports` 提示。
+- **前端拒绝运行时能接受的连线**：配置面板让用户为脚本端口选一个类型（默认 `str`）
+  并据此校验，而后端端口实际是 `Any`，类型系统视其与任何类型兼容。
+  现把脚本端口按 `Any` 处理，普通节点之间的类型校验保持不变。
+- **画布不随可用面积变化重新适配**：内边距感知的 fit 只在恢复图、一键整理与显式点击时执行，
+  窗口缩放、侧栏折叠与面板开合都会把内容压到面板底下。现用 `ResizeObserver` 观察，
+  并在用户手动平移或缩放后停止自动接管视角。
+- **`creator.subject` 存在两个位置**：`resolve_password_file_path` 把
+  `data/web/password.hash` 改写到 `<DATA_PATH>/web/`，派生的身份文件随之下移一级；
+  旧位置的文件不再被读取，一旦被「恢复」回去就会让全部已签发令牌静默失效。
+  现在没有生效文件时自动继承旧文件（保证升级不掉线），两者都存在且不同时以生效位置为准并记一次日志。
+- **远端 Skill 版本是合成的**：安装恒为 `1.0.0`、更新自动进位 patch，
+  上游 `SKILL.md` 声明的 `version` 从不生效，`ResourceLifecycleService` 的
+  降级保护对远端 Skill 形同虚设。现读取上游版本，仅在高于已装版本时采用，
+  否则仍做本地递增（覆盖「内容变了但版本没动」的仓库）。
+- **非 GitHub 来源查不到更新**：`check_updates` 对 `provider != "github"` 直接跳过，
+  catalog 与 skills.sh 安装的 Skill 完全不出现在结果里，界面因此显示「无更新」。
+  「没有这一行」和「没有更新」是两件事；现返回带 `update_channel_supported=false`
+  的行并说明该来源应如何获取新版本。
+- **Hook 无按工具过滤与按事件启停**：所有已绑定 Hook 在每个已声明事件上都会执行，
+  一个只为某个危险工具写的 `PreToolUse` Hook 会在每次无关工具调用上被拉起，
+  连同它的阻断能力一起；关停单个事件只能改文件重装。现支持 `matcher`
+  （正则或工具名列表，整名匹配）与 `enabled`，未声明 matcher 时行为与此前一致。
+- **readiness 会因未知适配器状态返回 500**：`counts[snapshot.status] += 1` 遇到
+  新增状态直接 KeyError，把整个就绪接口拖下线。现降级计入未连接。
+- **发布物审计把浏览器留痕当作版本载体**：`.playwright-cli/` 与 `.playwright-mcp/`
+  被扫描为版本载体导致 `version.py check` 失败；三处忽略规则（git / docker / 版本脚本）
+  现保持一致，规划留痕与授权说明草稿也不再进入镜像构建上下文。
+
+### Added
+
+- **QQ / OneBot 连接状态可区分**：`AdapterHealthSnapshot.status` 增加
+  `initializing`、`credential_rejected`、`upstream_refused`，并新增固定取值的
+  `last_disconnect_reason`（`access_token_missing`、`access_token_mismatch`、
+  `invalid_client_role`、`missing_self_id`、`heartbeat_timeout`、
+  `upstream_lifecycle_disconnect`、`adapter_stopped`）。原有四种状态语义不变，
+  只知道旧状态的消费方继续可用。readiness 分别统计新状态，凭据被拒时给出
+  「核对访问令牌」而不是「检查心跳」。适配器详情页显示状态与一行可读原因。
+- **QQ 代码可复制路径**：QQ 的 OneBot 消息模型没有交互按钮，画一个点不动的
+  「复制」按钮比不画更糟。改为让代码块单独成为一条消息（整条即代码本体，
+  长按全选即可复制），随后附一句复制指引；可用 `isolate_code_messages` 关闭，
+  关闭后与正文混排，观感与此前完全一致。
+- **端到端投递时间线**：阶段扩展为 `received_event`、`workflow_started`、
+  `llm_first_byte`、`llm_completed`、`formatting_started`、`formatting_completed`、
+  `send_started`、`send_succeeded` / `send_failed`，并纳入 `to_dict()` 序列化
+  （此前只存在于内存、被排除在序列化之外，事后无法回答「为什么慢」）。
+  `delivery_durations()` 给出各阶段耗时；**没测到的阶段不会输出 0**。
+- **成本与失败维度统计**：概览新增总成本、计价货币与未定价请求数，
+  按 Provider / 模型 / 失败类型聚合各自成本，另给出首字节与尝试次数摘要。
+  成本一律取请求当时的价格快照，不会因后来改价而改写历史账单。
+  CSV 导出补上 `cost_snapshot`。
+- **统计前端补齐维度与导出**：筛选条件与时区现在会真正送达统计接口
+  （此前统计卡片完全不受筛选影响，且按服务器时区分桶导致跨时区用户的「今天」是错的），
+  新增 provider / 失败类型 / 用量来源 / 时间范围筛选，表格补 provider、
+  失败类型、首字节、尝试次数、用量来源与成本列，并提供 CSV 导出入口。
+- **会话与待确认可管理**：新增 `GET /agents/sessions`、
+  `DELETE /agents/sessions/<id>`、`DELETE /agents/sessions/<id>/history`
+  与 `GET /agents/confirmations`，Agent 页面提供只读列表与清空/删除动作。
+  接口只返回条数与时间戳，**不返回任何对话正文或工具参数**；
+  会话 ID 只接受 64 位摘要，杜绝路径穿越。
+- **统一页码格式**：`PAGE_LABEL_PATTERN` 收敛页码字面量，WeCom 自有的
+  `[i/N]` 前缀与并行 markdown 分段实现移除，四个渠道统一为「第 N 页 / 共 M 页」。
+- **QQ / OneBot 运维文档**：新增 [`docs/QQ_ONEBOT_OPERATIONS.md`](docs/QQ_ONEBOT_OPERATIONS.md)，
+  覆盖连接方向、七种状态与原因码对照、Kirara 与 QQ 两侧的数据目录清单、
+  Compose 参考（VNC/PMHQ 只绑本机、Token 走 `.env`）、
+  `down && pull && up -d` 的预期状态序列与恢复时间、二维码有效期与快速登录、
+  回复慢的分段定位方法，以及 11 项 Compose 验收矩阵。
+
+### Security
+
+- MCP 工具确认判定从私有方法提升为公开 `tool_requires_confirmation`
+  （保留原私有名别名，行为不变），让「HTTP 路由签发确认令牌」与
+  「运行时拒绝未确认调用」使用同一个显式边界。
+- 会话与确认接口的返回值经过裁剪：对话正文、工具参数不跨越该边界。
+- 断开原因码为固定枚举，不含令牌、账号或上游原始报文。
+
+### Tests
+
+- 新增后端用例：容错配置与优先级（`tests/llm/test_resilience_config.py`）、
+  投递退避（`tests/im/test_outbox_backoff.py`）、投递时间线
+  （`tests/im/test_delivery_timeline.py`）、代码复制路径
+  （`tests/im/test_code_copy.py`、`tests/plugins/im_onebot_adapter/test_code_delivery.py`）、
+  连接状态（`tests/plugins/im_onebot_adapter/test_connection_states.py`）、
+  readiness 新状态（`tests/web/api/system/test_readiness_im_states.py`）、
+  数据目录契约（`tests/test_data_paths.py`）、页码统一
+  （`tests/plugins/im_wecom_adapter/test_page_markers.py`）、成本统计
+  （`tests/tracing/test_statistics_cost.py`）、创建者身份
+  （`tests/web/auth/test_creator_identity.py`）、Skill 版本与更新渠道
+  （`tests/plugin_manager/test_skill_versions.py`、`test_update_channels.py`）、
+  Hook matcher（`tests/agent_runtime/test_hook_matchers.py`、
+  `test_hook_dispatch_matching.py`）、会话管理
+  （`tests/agent_runtime/test_session_management.py`、`tests/web/api/agent/test_sessions.py`）、
+  链路时间线（`tests/workflow_executor/test_dispatch_timeline.py`）。
+- 新增 WebUI 用例：后端容错字段往返（`llm-backend-resilience`）、
+  脚本节点端口（`workflow-code-node-ports`）、节点尺寸估算（`workflow-node-size`）、
+  统计请求契约（`tracing-statistics-request`）、会话面板（`agent-view-sessions`）。
+- 修正一条断言方向错误的既有用例：`test_im_text_render.py` 原本断言
+  投递时间线**不**被序列化，而那正是缺陷本身；现断言其可序列化，
+  同时保留「事件不可篡改」「时间戳带时区」两项要求。
+
+### 未验证项（不计入完成）
+
+- 真实 `docker compose down && pull && up -d` 后的连接恢复与免扫码登录。
+- 真实 QQ 扫码、PMHQ 注入与 QQ 热更新时序。
+- 真实多 Provider 上游的故障转移与熔断触发。
+- 真实 QQ / Telegram / WeCom 客户端上的渲染观感。
+- OneBot 与 QQBot **入站**去重收据尚未实现（Telegram / WeCom 已有）：
+  上游重连后重投同一事件会重跑工作流，造成重复计费与重复回复。
+
 ## [3.3.0b11] - 2026-08-22
 
 ### Added

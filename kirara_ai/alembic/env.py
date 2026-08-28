@@ -17,6 +17,8 @@ if config.config_file_name is not None:
 # from myapp import mymodel
 # target_metadata = mymodel.Base.metadata
 from kirara_ai.database.manager import Base
+from kirara_ai.im.delivery_timing_store import DeliveryTiming  # noqa: F401
+from kirara_ai.im.inbound_receipts import InboundReceipt  # noqa: F401
 from kirara_ai.plugins.im_onebot_adapter.outbox import OneBotDelivery  # noqa: F401
 from kirara_ai.plugins.im_qqbot_adapter.outbox import QQBotDelivery  # noqa: F401
 from kirara_ai.plugins.im_wecom_adapter.outbox import (  # noqa: F401

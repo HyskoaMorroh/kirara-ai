@@ -12,6 +12,7 @@ import asyncio
 import inspect
 import hashlib
 import json
+import secrets
 import uuid
 from collections.abc import Mapping as ABCMapping
 from dataclasses import dataclass, field
@@ -29,7 +30,7 @@ from kirara_ai.llm.format.message import (
     LLMToolCallContent,
 )
 from kirara_ai.llm.format.request import LLMChatRequest, Tool, ToolParameters
-from kirara_ai.llm.format.response import LLMChatResponse
+from kirara_ai.llm.format.response import LLMChatResponse, Message
 from kirara_ai.llm.format.tool import LLMToolResultContent, ToolCall
 from kirara_ai.llm.resilience import (
     ChatExecutionResult,
@@ -46,9 +47,11 @@ from kirara_ai.agent_runtime.core import (
     AgentRegistry,
     ChannelContext,
     ResourceSnapshot,
+    principal_can_control_agent,
     resolve_mcp_tool_allowlist,
 )
 from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
+from kirara_ai.web.auth.principal import get_runtime_principal
 
 from .session_store import SessionStore
 from .hooks import AgentHookRuntime, HookOutcome
@@ -85,6 +88,7 @@ class _PendingConfirmation:
     pending_call: ToolCall
     tool_names: frozenset[str]
     mcp_server_ids: frozenset[str]
+    principal_subject_digest: str
     agent_policy_signature: tuple[Any, ...]
     tool_signature: tuple[Any, ...]
     session_allowlist: Optional[frozenset[str]]
@@ -112,6 +116,7 @@ class AgentRuntimeExecutor:
         hook_runtime: Optional[AgentHookRuntime] = None,
         context_char_threshold: Optional[int] = None,
         compactor: Optional[Callable[..., Any]] = None,
+        reply_stream_mode: str = "off",
     ) -> None:
         if context_char_threshold is not None:
             if isinstance(context_char_threshold, bool) or not isinstance(
@@ -120,6 +125,8 @@ class AgentRuntimeExecutor:
                 raise ValueError("context_char_threshold must be a non-negative integer")
         if compactor is not None and not callable(compactor):
             raise TypeError("compactor must be callable")
+        if reply_stream_mode not in {"off", "aggregate"}:
+            raise ValueError("reply_stream_mode must be either off or aggregate")
         self.agent_registry = agent_registry
         self.llm_manager = llm_manager
         self.mcp_manager = mcp_manager
@@ -139,6 +146,10 @@ class AgentRuntimeExecutor:
         )
         self.context_char_threshold = context_char_threshold or 0
         self.compactor = compactor
+        #: 回复生成模式。``aggregate`` 走流式请求再整段投递：IM 平台普遍不支持
+        #: 逐字编辑消息，所以这里不做逐字推送；真正的收益是让流式首字节超时、
+        #: 静默超时与「首字节之前的故障转移」这三条容错路径实际生效。
+        self.reply_stream_mode = reply_stream_mode
         self._pending: dict[str, _PendingConfirmation] = {}
 
     async def run(
@@ -162,11 +173,15 @@ class AgentRuntimeExecutor:
             session_allowlist = self._optional_set(session_mcp_allowlist)
             workflow_allowlist = self._optional_set(workflow_mcp_allowlist)
             tool_entries = self._read_tool_entries()
-            effective_tools = self._effective_tool_names(
-                agent,
-                tool_entries,
-                session_allowlist,
-                workflow_allowlist,
+            effective_tools = (
+                self._effective_tool_names(
+                    agent,
+                    tool_entries,
+                    session_allowlist,
+                    workflow_allowlist,
+                )
+                if principal_can_control_agent(agent.owner_subject)
+                else frozenset()
             )
             stored_history = history
             memory_history: list[LLMChatMessage] = []
@@ -333,6 +348,36 @@ class AgentRuntimeExecutor:
                 self.agent_registry.get(pending.agent.agent_id)
             )
             stop_agent = current_agent
+            principal = get_runtime_principal()
+            if (
+                principal is None
+                or not principal.is_creator
+                or not secrets.compare_digest(
+                    principal.subject_digest,
+                    pending.principal_subject_digest,
+                )
+                or not principal_can_control_agent(current_agent.owner_subject)
+            ):
+                result = RuntimeResult(
+                    status=RuntimeStatus.FAILED,
+                    context=pending.context,
+                    agent_id=pending.agent.agent_id,
+                    snapshot=pending.snapshot,
+                    confirmation_id=confirmation_id,
+                    correlation_id=pending.correlation_id,
+                    error={
+                        "type": "ConfirmationPrincipalMismatch",
+                        "message": "confirmation principal or Agent owner changed",
+                    },
+                )
+                if self.session_store is not None:
+                    self.session_store.complete_pending(
+                        confirmation_id,
+                        "failed",
+                        error_type="ConfirmationPrincipalMismatch",
+                    )
+                self._audit("confirm", result)
+                return result
             current_entries = self._read_tool_entries()
             current_name = (
                 pending.pending_call.function.name
@@ -675,6 +720,24 @@ class AgentRuntimeExecutor:
                             )
                         )
                         continue
+                    principal = get_runtime_principal()
+                    if (
+                        principal is None
+                        or not principal_can_control_agent(agent.owner_subject)
+                    ):
+                        current_messages.append(self._assistant_tool_message(call))
+                        current_messages.append(
+                            LLMChatMessage(
+                                role="tool",
+                                content=[
+                                    self._error_result(
+                                        call,
+                                        "permission denied for host tool execution",
+                                    )
+                                ],
+                            )
+                        )
+                        continue
                     self._pending[confirmation_id] = _PendingConfirmation(
                         confirmation_id=confirmation_id,
                         context=context,
@@ -684,6 +747,7 @@ class AgentRuntimeExecutor:
                         pending_call=call,
                         tool_names=tool_names,
                         mcp_server_ids=self._mcp_server_ids(agent),
+                        principal_subject_digest=principal.subject_digest,
                         agent_policy_signature=self._agent_policy_signature(agent),
                         tool_signature=self._tool_signature(self._read_tool_entries().get(name)),
                         session_allowlist=session_allowlist,
@@ -1112,6 +1176,14 @@ class AgentRuntimeExecutor:
                         for parameter in parameters
                     ):
                         options["correlation_id"] = correlation_id
+                # 流式模式下走 execute_stream，让首字节超时、静默超时与
+                # 「首字节之前的故障转移」真正生效；结果聚合成一条响应返回，
+                # 调用方看到的形状与非流式完全一致。
+                if self._stream_chat_available() and not candidate_request.tools:
+                    response, trace_id = await self._execute_model_streaming(
+                        candidate_request, model_id, options
+                    )
+                    return response, model_id, trace_id
                 result = execute_chat(candidate_request, **options)
                 if inspect.isawaitable(result):
                     result = await result
@@ -1128,6 +1200,57 @@ class AgentRuntimeExecutor:
         if last_error is not None:
             raise last_error
         raise LookupError("Agent has no available model")
+
+    def _stream_chat_available(self) -> bool:
+        """Whether this request may be served as a stream."""
+        return self.reply_stream_mode == "aggregate" and callable(
+            getattr(self.llm_manager, "execute_stream", None)
+        )
+
+    async def _execute_model_streaming(
+        self,
+        request: LLMChatRequest,
+        model_id: str,
+        options: dict[str, Any],
+    ) -> tuple[LLMChatResponse, str]:
+        """Consume a stream and return it as one aggregated response.
+
+        为什么不逐字推送：QQ、Telegram、WeCom 都不支持对已发出的消息逐字编辑，
+        逐字推送只会变成几十条碎片消息。这里取的是流式**请求**本身的收益——
+        首字节超时、静默超时，以及「首字节之前可以安全切换 Provider」。
+        工具调用不走这条路：工具轮次需要结构化的 tool_calls，聚合文本会丢掉它。
+        """
+        execution = self.llm_manager.execute_stream(request, **options)
+        chunks: list[str] = []
+        usage = None
+        finish_reason = ""
+        try:
+            for chunk in execution:
+                message = getattr(chunk, "message", None)
+                for part in getattr(message, "content", None) or ():
+                    text = getattr(part, "text", None)
+                    if isinstance(text, str) and text:
+                        chunks.append(text)
+                if getattr(chunk, "usage", None) is not None:
+                    usage = chunk.usage
+                reason = getattr(message, "finish_reason", None)
+                if reason:
+                    finish_reason = reason
+        finally:
+            close = getattr(execution, "close", None)
+            if callable(close):
+                close()
+
+        aggregated = LLMChatResponse(
+            model=model_id,
+            usage=usage,
+            message=Message(
+                role="assistant",
+                content=[LLMChatTextContent(text="".join(chunks))],
+                finish_reason=finish_reason,
+            ),
+        )
+        return aggregated, str(getattr(execution, "trace_id", "") or "")
 
     @staticmethod
     def _can_failover_to_next_model(error: BaseException) -> bool:
@@ -1314,6 +1437,7 @@ class AgentRuntimeExecutor:
                 args,
                 agent_allowlist=frozenset(agent.mcp_allowlist),
                 agent_mcp_server_ids=mcp_server_ids,
+                agent_owner_subject=agent.owner_subject,
                 session_allowlist=session_allowlist,
                 workflow_allowlist=workflow_allowlist,
                 confirmed=confirmed,
@@ -1434,6 +1558,7 @@ class AgentRuntimeExecutor:
 
         return AgentDefinition(
             agent_id=agent.agent_id,
+            owner_subject=agent.owner_subject,
             display_name=agent.display_name,
             enabled=agent.enabled,
             workflow_id=agent.workflow_id,
@@ -1519,8 +1644,14 @@ class AgentRuntimeExecutor:
             )
             for item in agent.resource_bindings
         )
+        owner_digest = (
+            hashlib.sha256(agent.owner_subject.encode("utf-8")).hexdigest()
+            if agent.owner_subject is not None
+            else None
+        )
         return (
             agent.enabled,
+            owner_digest,
             tuple(agent.model_priority),
             tuple(sorted(agent.provider_allowlist)),
             tuple(sorted(agent.capabilities)),
@@ -1895,6 +2026,7 @@ class AgentRuntimeExecutor:
                 "pending_call": pending.pending_call.model_dump(mode="json"),
                 "tool_names": sorted(pending.tool_names),
                 "mcp_server_ids": sorted(pending.mcp_server_ids),
+                "principal_subject_digest": pending.principal_subject_digest,
                 "agent_policy_signature": pending.agent_policy_signature,
                 "tool_signature": pending.tool_signature,
                 "session_allowlist": sorted(pending.session_allowlist or ()),
@@ -1934,6 +2066,15 @@ class AgentRuntimeExecutor:
                 LLMChatMessage.model_validate(item) for item in record["messages"]
             ]
             pending_call = ToolCall.model_validate(record["pending_call"])
+            principal_subject_digest = str(record["principal_subject_digest"])
+            if (
+                len(principal_subject_digest) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in principal_subject_digest
+                )
+            ):
+                raise ValueError("pending confirmation principal is invalid")
             return _PendingConfirmation(
                 confirmation_id=str(record["confirmation_id"]),
                 context=context,
@@ -1943,6 +2084,7 @@ class AgentRuntimeExecutor:
                 pending_call=pending_call,
                 tool_names=frozenset(record.get("tool_names", ())),
                 mcp_server_ids=frozenset(record.get("mcp_server_ids", ())),
+                principal_subject_digest=principal_subject_digest,
                 agent_policy_signature=self._tupleize(record.get("agent_policy_signature", ())),
                 tool_signature=tuple(record.get("tool_signature", ())),
                 session_allowlist=(

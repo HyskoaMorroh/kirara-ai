@@ -20,11 +20,12 @@ from kirara_ai.im.adapter import (
     IMActionTimeoutError,
     IMAdapter,
 )
-from kirara_ai.im.message import (ImageMessage, IMMessage, MentionElement, MessageElement, TextMessage, VideoElement,
-                                  VoiceMessage)
+from kirara_ai.im.message import (FileMessage, ImageMessage, IMMessage, MentionElement, MessageElement, TextMessage,
+                                  VideoElement, VoiceMessage)
 from kirara_ai.im.profile import UserProfile
+from kirara_ai.im.inbound_receipts import InboundReceiptService
 from kirara_ai.im.sender import ChatSender, ChatType
-from kirara_ai.im.text_render import convert_markdown_tables
+from kirara_ai.im.text_render import render_plain_text, split_structured_text
 from kirara_ai.logger import get_logger
 from kirara_ai.web.app import WebServer
 from kirara_ai.workflow.core.dispatch import WorkflowDispatcher
@@ -169,6 +170,7 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
         self._started = False
         self._http_open = False
         self._outbox: Optional[QQBotOutboxService] = None
+        self._inbound_receipts: Optional[InboundReceiptService] = None
         self._outbox_resume_task: Optional[asyncio.Task[Any]] = None
 
     def get_health_snapshot(self) -> AdapterHealthSnapshot:
@@ -337,16 +339,18 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
         def append_text(text: str) -> None:
             if not text:
                 return
-            params: dict[str, Any] = {
-                **base_params,
-                "msg_id": msg_id,
-                "content": replace_url_dots(text),
-            }
-            units.append(_QQBotSendUnit(str(base_params["_action"]), params))
+            rendered = replace_url_dots(render_plain_text(text))
+            for page in split_structured_text(rendered, max_bytes=3800):
+                params: dict[str, Any] = {
+                    **base_params,
+                    "msg_id": msg_id,
+                    "content": page,
+                }
+                units.append(_QQBotSendUnit(str(base_params["_action"]), params))
 
         for element in message.message_elements:
             if isinstance(element, TextMessage):
-                current_text += convert_markdown_tables(element.text)
+                current_text += element.text
                 append_text(current_text)
                 current_text = ""
                 continue
@@ -355,7 +359,7 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
                     f'<qqbot-at-user id="{element.target.user_id}" />'
                 )
                 continue
-            if isinstance(element, (ImageMessage, VoiceMessage, VideoElement)):
+            if isinstance(element, (ImageMessage, VoiceMessage, VideoElement, FileMessage)):
                 append_text(current_text)
                 current_text = ""
                 file_type = (
@@ -364,6 +368,8 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
                     else 3
                     if isinstance(element, VoiceMessage)
                     else 2
+                    if isinstance(element, VideoElement)
+                    else 4
                 )
                 params = {
                     **base_params,
@@ -439,7 +445,13 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
         delivery_id: Optional[str] = None,
     ) -> None:
         """Persist every ordered QQ send unit before making network calls."""
+        message.record_delivery_stage("formatting_started", adapter="qqbot")
         recipient_key, units = await self._render_send_units(message, recipient)
+        message.record_delivery_stage(
+            "formatting_completed",
+            adapter="qqbot",
+            segment_count=len(units),
+        )
         if not units:
             return
         if delivery_id is None:
@@ -465,10 +477,93 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
                 media_data=unit.media_data,
             )
 
-        for unit_id in unit_ids:
-            result = await outbox.deliver(unit_id)
-            if result.status != "accepted":
-                raise self._delivery_error(result)
+        message.record_delivery_stage("send_started", adapter="qqbot")
+        results: list[QQBotDeliveryResult] = []
+        try:
+            for unit_id in unit_ids:
+                result = await outbox.deliver(unit_id)
+                results.append(result)
+                if result.status != "accepted":
+                    raise self._delivery_error(result)
+        except Exception as exc:
+            message.record_delivery_stage(
+                "send_failed",
+                adapter="qqbot",
+                error_type=type(exc).__name__,
+                retry_count=sum(
+                    max(0, item.attempt_count - 1)
+                    + max(0, item.upload_attempt_count - 1)
+                    for item in results
+                ),
+            )
+            raise
+        message.record_delivery_stage(
+            "send_succeeded",
+            adapter="qqbot",
+            retry_count=sum(
+                max(0, item.attempt_count - 1)
+                + max(0, item.upload_attempt_count - 1)
+                for item in results
+            ),
+        )
+
+    def _ensure_inbound_receipts(self) -> Optional[InboundReceiptService]:
+        """Return the inbound dedup service, or ``None`` without a database."""
+        existing = getattr(self, "_inbound_receipts", None)
+        if existing is not None:
+            return existing
+        database = getattr(self, "database_manager", None)
+        if database is None:
+            return None
+        instance = getattr(self, "adapter_instance", None) or getattr(
+            self, "name", None
+        ) or "default"
+        service = InboundReceiptService(
+            database,
+            channel="qqbot",
+            adapter_instance=str(instance),
+        )
+        self._inbound_receipts = service
+        return service
+
+    @staticmethod
+    def _inbound_event_key(message: Any) -> Optional[str]:
+        """Identify one inbound QQ message.
+
+        QQ's webhook payload carries a per-message ``id``. Returning ``None``
+        means the event cannot be identified; the caller then processes it
+        without dedup, because losing a message is worse than a rare duplicate.
+        """
+        message_id = getattr(message, "id", None)
+        if message_id:
+            return str(message_id)[:128]
+        return None
+
+    async def _dispatch_inbound(
+        self,
+        message: Any,
+        im_message: IMMessage,
+        chat_key: str,
+    ) -> None:
+        """Dispatch one inbound QQ message exactly once.
+
+        QQ 的 webhook 在网关重连或我们回 5xx 时会重投同一条消息；没有收据的话
+        整条工作流会再跑一遍（重复计费 + 重复回复）。去重必须由本侧完成。
+        """
+        receipts = self._ensure_inbound_receipts()
+        event_key = self._inbound_event_key(message) if receipts is not None else None
+        if receipts is not None and event_key is not None:
+            if not receipts.claim(event_key, chat_key):
+                self.logger.debug("QQ 重复事件已忽略")
+                return
+        try:
+            await self.dispatcher.dispatch(self, im_message, require_agent=True)
+        except BaseException:
+            if receipts is not None and event_key is not None:
+                receipts.retry(event_key)
+            raise
+        if receipts is not None and event_key is not None:
+            receipts.complete(event_key)
 
     async def on_c2c_message_create(self, message: ymbotpy.message.C2CMessage):
         """
@@ -477,7 +572,11 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
         """
         self.logger.debug(f"收到 C2C 消息: {message}")
         im_message = await self.convert_to_message(message)
-        await self.dispatcher.dispatch(self, im_message, require_agent=True)
+        await self._dispatch_inbound(
+            message,
+            im_message,
+            f"c2c:{getattr(getattr(message, 'author', None), 'user_openid', '')}",
+        )
 
     async def on_group_at_message_create(self, message: ymbotpy.message.GroupMessage):
         """
@@ -489,7 +588,11 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
         # 这个逆天的 Webhook 居然不包含 mention 字段，这里要手动补上
         im_message.message_elements.append(
             MentionElement(target=ChatSender.get_bot_sender()))
-        await self.dispatcher.dispatch(self, im_message, require_agent=True)
+        await self._dispatch_inbound(
+            message,
+            im_message,
+            f"group:{getattr(message, 'group_openid', '')}",
+        )
 
     async def get_bot_profile(self) -> Optional[UserProfile]:
         """
@@ -513,6 +616,13 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
 
         if getattr(self, "database_manager", None) is not None:
             self._ensure_outbox().recover_on_startup()
+            receipts = self._ensure_inbound_receipts()
+            if receipts is not None:
+                # 上次中断时留在 processing 的事件重新开放认领：不丢事件，
+                # 上游若重投也只会被处理一次。
+                reopened = receipts.recover_on_startup()
+                if reopened:
+                    self.logger.info(f"QQ 重新开放 {reopened} 个未完成的入站事件")
 
         mount_path = self.config.webhook_url.removesuffix('/') or '/'
         routes = self.web_server.app.routes

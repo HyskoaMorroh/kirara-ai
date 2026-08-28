@@ -93,3 +93,59 @@ def test_health_snapshot_exposes_layered_status_without_account_ids(tmp_path: Pa
     assert payload["external_login_status"] == "upstream_reported_online"
     assert payload["outbox"]["queued"] == 1
     assert "account-id-is-not-exposed" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_onebot_records_local_delivery_stages(tmp_path: Path):
+    adapter, _database = make_persistent_adapter(tmp_path)
+    adapter.bot.call_action = AsyncMock(return_value={"message_id": 1})
+    message = IMMessage(
+        sender=ChatSender.get_bot_sender(),
+        message_elements=[TextMessage("hello")],
+    )
+
+    await adapter.send_message(
+        message,
+        ChatSender.from_c2c_chat("100", "用户"),
+        delivery_id="logical-timeline",
+    )
+
+    assert [event.stage for event in message.delivery_timeline] == [
+        "formatting_started",
+        "formatting_completed",
+        "send_started",
+        "send_succeeded",
+    ]
+    assert message.delivery_timeline[1].details["segment_count"] == 1
+    assert message.delivery_timeline[-1].details["retry_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_onebot_records_send_failure_stage(tmp_path: Path):
+    adapter, _database = make_persistent_adapter(tmp_path)
+
+    async def hangs(*_args, **_kwargs):
+        await asyncio.sleep(1)
+
+    adapter.bot.call_action = AsyncMock(side_effect=hangs)
+    message = IMMessage(
+        sender=ChatSender.get_bot_sender(),
+        message_elements=[TextMessage("hello")],
+    )
+
+    with pytest.raises(OneBotActionTimeoutError):
+        await adapter.send_message(
+            message,
+            ChatSender.from_c2c_chat("100", "用户"),
+            delivery_id="logical-timeline-failure",
+        )
+
+    assert [event.stage for event in message.delivery_timeline] == [
+        "formatting_started",
+        "formatting_completed",
+        "send_started",
+        "send_failed",
+    ]
+    failed = message.delivery_timeline[-1]
+    assert failed.details["error_type"] == "OneBotActionTimeoutError"
+    assert failed.details["retry_count"] == 0

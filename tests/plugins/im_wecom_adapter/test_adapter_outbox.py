@@ -11,6 +11,7 @@ from kirara_ai.im.message import IMMessage, ImageMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.plugins.im_wecom_adapter.adapter import WecomAdapter, WecomConfig
+from kirara_ai.plugins.im_wecom_adapter.delegates import split_long_message
 from kirara_ai.plugins.im_wecom_adapter.outbox import WecomDelivery
 
 
@@ -88,8 +89,12 @@ async def test_all_units_are_persisted_before_wecom_network_calls(tmp_path: Path
     adapter.api_delegate.send_text = send_text
     adapter.api_delegate.send_media = send_media
 
+    message = IMMessage(
+        ChatSender.get_bot_sender(),
+        [TextMessage("hello"), fake_image()],
+    )
     await adapter.send_message(
-        IMMessage(ChatSender.get_bot_sender(), [TextMessage("hello"), fake_image()]),
+        message,
         recipient(),
         delivery_id="logical-1",
     )
@@ -99,6 +104,13 @@ async def test_all_units_are_persisted_before_wecom_network_calls(tmp_path: Path
     assert observed_counts == [2, 2]
     assert [item.status for item in persisted] == ["accepted", "accepted"]
     assert network_calls == ["text", "media"]
+    assert [event.stage for event in message.delivery_timeline] == [
+        "formatting_started",
+        "formatting_completed",
+        "send_started",
+        "send_succeeded",
+    ]
+    assert message.delivery_timeline[-1].details["retry_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -141,6 +153,116 @@ async def test_wecom_timeout_is_ambiguous_and_is_not_resent(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_wecom_48001_without_callback_is_reported_to_caller(tmp_path: Path):
+    adapter, database = make_adapter(tmp_path)
+    adapter.api_delegate.send_text = AsyncMock(
+        side_effect=RuntimeError("Error code: 48001, api unauthorized")
+    )
+    message = IMMessage(ChatSender.get_bot_sender(), [TextMessage("hello")])
+
+    with pytest.raises(RuntimeError, match="48001"):
+        await adapter.send_message(
+            message,
+            recipient(),
+            delivery_id="logical-no-passive-callback",
+        )
+
+    assert rows(database)[0].status == "dead_letter"
+    assert [event.stage for event in message.delivery_timeline] == [
+        "formatting_started",
+        "formatting_completed",
+        "send_started",
+        "send_failed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wecom_48001_with_callback_records_passive_reply_success(tmp_path: Path):
+    adapter, _database = make_adapter(tmp_path)
+    adapter.api_delegate.send_text = AsyncMock(
+        side_effect=RuntimeError("Error code: 48001, api unauthorized")
+    )
+    reply_task = asyncio.get_running_loop().create_future()
+    adapter.reply_tasks["incoming-1"] = reply_task
+    callback_recipient = ChatSender.from_c2c_chat(
+        "member-1",
+        "WeCom member",
+        metadata={"reply": "incoming-1"},
+    )
+    message = IMMessage(ChatSender.get_bot_sender(), [TextMessage("hello")])
+
+    await adapter.send_message(
+        message,
+        callback_recipient,
+        delivery_id="logical-passive-fallback",
+    )
+
+    assert reply_task.result() == "hello"
+    assert [event.stage for event in message.delivery_timeline] == [
+        "formatting_started",
+        "formatting_completed",
+        "send_started",
+        "send_succeeded",
+    ]
+    assert message.delivery_timeline[-1].details["delivery_mode"] == "passive_reply"
+
+
+@pytest.mark.asyncio
+async def test_wecom_active_success_does_not_duplicate_callback_reply(tmp_path: Path):
+    adapter, _database = make_adapter(tmp_path)
+    assert adapter._ensure_outbox().claim_inbound("incoming-active", "member-1")
+    reply_task = asyncio.get_running_loop().create_future()
+    adapter.reply_tasks["incoming-active"] = reply_task
+    callback_recipient = ChatSender.from_c2c_chat(
+        "member-1",
+        "WeCom member",
+        metadata={"reply": "incoming-active"},
+    )
+    message = IMMessage(ChatSender.get_bot_sender(), [TextMessage("hello")])
+
+    await adapter.send_message(
+        message,
+        callback_recipient,
+        delivery_id="logical-active-success",
+    )
+
+    assert reply_task.result() is None
+    assert message.delivery_timeline[-1].stage == "send_succeeded"
+    assert message.delivery_timeline[-1].details["delivery_mode"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_wecom_ambiguous_active_send_does_not_fall_back_to_passive_reply(
+    tmp_path: Path,
+):
+    adapter, _database = make_adapter(tmp_path, timeout=0.01)
+    assert adapter._ensure_outbox().claim_inbound("incoming-timeout", "member-1")
+
+    async def hangs(*_args, **_kwargs):
+        await asyncio.sleep(1)
+
+    adapter.api_delegate.send_text = hangs
+    reply_task = asyncio.get_running_loop().create_future()
+    adapter.reply_tasks["incoming-timeout"] = reply_task
+    callback_recipient = ChatSender.from_c2c_chat(
+        "member-1",
+        "WeCom member",
+        metadata={"reply": "incoming-timeout"},
+    )
+    message = IMMessage(ChatSender.get_bot_sender(), [TextMessage("hello")])
+
+    with pytest.raises(asyncio.TimeoutError):
+        await adapter.send_message(
+            message,
+            callback_recipient,
+            delivery_id="logical-ambiguous-callback",
+        )
+
+    assert reply_task.done() is False
+    assert message.delivery_timeline[-1].stage == "send_failed"
+
+
+@pytest.mark.asyncio
 async def test_stop_cancels_and_waits_for_background_dispatch_tasks(tmp_path: Path):
     adapter, _database = make_adapter(tmp_path)
     adapter.config.host = None
@@ -154,3 +276,25 @@ async def test_stop_cancels_and_waits_for_background_dispatch_tasks(tmp_path: Pa
     assert task.done()
     assert adapter._background_tasks == set()
     assert adapter.is_running is False
+
+
+def test_split_long_message_bounds_utf8_long_single_line_with_page_labels():
+    pages = split_long_message("中文🙂" * 300, max_length=180)
+
+    assert len(pages) > 1
+    assert all(len(page.encode("utf-8")) <= 180 for page in pages)
+    assert pages[0].startswith(f"第 1 页 / 共 {len(pages)} 页\n")
+    assert pages[-1].startswith(
+        f"第 {len(pages)} 页 / 共 {len(pages)} 页\n"
+    )
+
+
+def test_split_long_message_bounds_long_code_line_and_keeps_markers():
+    pages = split_long_message(
+        "［代码 text］\n" + ("x" * 1000) + "\n［/代码］",
+        max_length=180,
+    )
+
+    assert len(pages) > 1
+    assert all(len(page.encode("utf-8")) <= 180 for page in pages)
+    assert all("［代码 text］" in page and "［/代码］" in page for page in pages)

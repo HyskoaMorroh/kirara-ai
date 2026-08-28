@@ -1,5 +1,9 @@
+from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, Optional
+from decimal import Decimal, InvalidOperation
+import json
+from typing import Any, Dict, Iterable, Mapping, Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import case, func
 
@@ -68,6 +72,7 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
             for trace in pending_traces:
                 trace.status = "failed" # type: ignore
                 trace.error = "Incomplete request" # type: ignore
+                trace.error_category = "unknown" # type: ignore
             session.commit()
             return len(pending_traces)
             
@@ -248,112 +253,249 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
                 "data": trace
             })
 
-    def get_statistics(self) -> Dict:
-        """获取统计信息"""
+    @staticmethod
+    def _apply_statistics_filters(query, filters: Mapping[str, Any]):
+        for field, value in filters.items():
+            if value is None:
+                continue
+            if field == "start_time":
+                query = query.filter(LLMRequestTrace.request_time >= value)  # type: ignore
+            elif field == "end_time":
+                query = query.filter(LLMRequestTrace.request_time < value)  # type: ignore
+            elif hasattr(LLMRequestTrace, field):
+                query = query.filter(getattr(LLMRequestTrace, field) == value)
+        return query
+
+    @staticmethod
+    def _group_statistics(query, column, key: str) -> list[Dict[str, Any]]:
+        """按维度聚合请求数、Token、平均耗时与成本。
+
+        成本存在 ``cost_snapshot_json`` 里——历史请求必须沿用当时的定价快照，
+        不能拿现价重算——所以无法用 SQL 的 ``SUM`` 完成，这里改为取出该维度所需的
+        原始列后在 Python 侧聚合。排序仍保持「按请求数降序、维度键升序」。
+        """
+        rows = query.with_entities(
+            column,
+            LLMRequestTrace.total_tokens,
+            LLMRequestTrace.duration,
+            LLMRequestTrace.cost_snapshot_json,
+        ).all()
+        grouped: dict[Any, dict[str, Any]] = {}
+        for value, tokens, duration, snapshot_json in rows:
+            bucket = grouped.setdefault(
+                value,
+                {
+                    key: value,
+                    "count": 0,
+                    "tokens": 0,
+                    "avg_duration": 0.0,
+                    "_duration_total": 0.0,
+                    "_duration_samples": 0,
+                    "cost": Decimal("0"),
+                    "unpriced_requests": 0,
+                },
+            )
+            bucket["count"] += 1
+            bucket["tokens"] += int(tokens or 0)
+            if duration is not None:
+                bucket["_duration_total"] += float(duration)
+                bucket["_duration_samples"] += 1
+            cost = LLMTracer._snapshot_cost(snapshot_json)
+            if cost is None:
+                bucket["unpriced_requests"] += 1
+            else:
+                bucket["cost"] += cost
+
+        results = []
+        for bucket in grouped.values():
+            samples = bucket.pop("_duration_samples")
+            total = bucket.pop("_duration_total")
+            bucket["avg_duration"] = total / samples if samples else 0.0
+            bucket["cost"] = str(bucket["cost"])
+            results.append(bucket)
+        results.sort(key=lambda row: (-row["count"], str(row[key] or "")))
+        return results
+
+    @staticmethod
+    def _snapshot_cost(snapshot_json: Optional[str]) -> Optional[Decimal]:
+        """从价格快照里取出总成本；没有快照就返回 ``None``。
+
+        ``None`` 与 ``0`` 必须区分：前者是「这条请求没有定价证据」，
+        后者是「定价过且确实免费」。把前者当 0 会让账单凭空变小。
+        """
+        if not snapshot_json:
+            return None
+        try:
+            payload = json.loads(snapshot_json)
+        except (TypeError, ValueError):
+            return None
+        raw = payload.get("total_cost") if isinstance(payload, dict) else None
+        if raw is None:
+            return None
+        try:
+            return Decimal(str(raw))
+        except (InvalidOperation, ValueError):
+            return None
+
+    @staticmethod
+    def _snapshot_currency(snapshot_json: Optional[str]) -> Optional[str]:
+        if not snapshot_json:
+            return None
+        try:
+            payload = json.loads(snapshot_json)
+        except (TypeError, ValueError):
+            return None
+        currency = payload.get("currency") if isinstance(payload, dict) else None
+        return str(currency) if currency else None
+
+    @staticmethod
+    def _time_buckets(rows, storage_timezone: ZoneInfo, output_timezone: ZoneInfo):
+        daily = defaultdict(lambda: {"requests": 0, "tokens": 0, "success": 0, "failed": 0})
+        hourly = defaultdict(lambda: {"requests": 0, "tokens": 0})
+        for request_time, total_tokens, status in rows:
+            localized = request_time.replace(tzinfo=storage_timezone).astimezone(output_timezone)
+            date_key = localized.strftime("%Y-%m-%d")
+            hour_key = localized.strftime("%Y-%m-%d %H:00:00")
+            daily[date_key]["requests"] += 1
+            daily[date_key]["tokens"] += total_tokens or 0
+            if status == "success":
+                daily[date_key]["success"] += 1
+            elif status == "failed":
+                daily[date_key]["failed"] += 1
+            hourly[hour_key]["requests"] += 1
+            hourly[hour_key]["tokens"] += total_tokens or 0
+        return daily, hourly
+
+    def get_statistics(
+        self,
+        filters: Optional[Mapping[str, Any]] = None,
+        timezone_name: Optional[str] = None,
+    ) -> Dict:
+        """获取可筛选、按请求时区分桶的统计信息。"""
+        filters = dict(filters or {})
+        storage_timezone = ZoneInfo(self.config.system.timezone)
+        output_timezone = ZoneInfo(timezone_name or self.config.system.timezone)
+        has_explicit_range = filters.get("start_time") is not None or filters.get("end_time") is not None
+        now = datetime.now(storage_timezone).replace(tzinfo=None)
+
         with self.db_manager.get_session() as session:
-            # 基础统计
-            total_count = session.query(func.count(LLMRequestTrace.id)).scalar() or 0
-            success_count = session.query(func.count(LLMRequestTrace.id)).filter_by(status="success").scalar() or 0
-            failed_count = session.query(func.count(LLMRequestTrace.id)).filter_by(status="failed").scalar() or 0
-            pending_count = session.query(func.count(LLMRequestTrace.id)).filter_by(status="pending").scalar() or 0
-            total_tokens = session.query(func.sum(LLMRequestTrace.total_tokens)).scalar() or 0
+            base_query = self._apply_statistics_filters(
+                session.query(LLMRequestTrace),
+                filters,
+            )
+            overview = base_query.with_entities(
+                func.count(LLMRequestTrace.id),
+                func.sum(case((LLMRequestTrace.status == "success", 1), else_=0)),  # type: ignore
+                func.sum(case((LLMRequestTrace.status == "failed", 1), else_=0)),  # type: ignore
+                func.sum(case((LLMRequestTrace.status == "pending", 1), else_=0)),  # type: ignore
+                func.sum(LLMRequestTrace.total_tokens),
+            ).one()
 
-            # 获取30天内的每日统计
-            thirty_days_ago = datetime.now() - timedelta(days=30)
-            daily_stats = session.query(
-                func.strftime('%Y-%m-%d', LLMRequestTrace.request_time).label('date'),
-                func.count(LLMRequestTrace.id).label('requests'),
-                func.sum(LLMRequestTrace.total_tokens).label('tokens'),
-                func.sum(case((LLMRequestTrace.status == 'success', 1), else_=0)).label('success'), # type: ignore
-                func.sum(case((LLMRequestTrace.status == 'failed', 1), else_=0)).label('failed') # type: ignore
-            ).filter(
-                LLMRequestTrace.request_time >= thirty_days_ago # type: ignore
-            ).group_by(
-                func.strftime('%Y-%m-%d', LLMRequestTrace.request_time)
-            ).order_by(
-                func.strftime('%Y-%m-%d', LLMRequestTrace.request_time)
+            # 成本必须按请求当时的价格快照累加，不能拿现价重算历史账单。
+            cost_rows = base_query.with_entities(
+                LLMRequestTrace.cost_snapshot_json
             ).all()
+            total_cost = Decimal("0")
+            unpriced_requests = 0
+            cost_currency: Optional[str] = None
+            for (snapshot_json,) in cost_rows:
+                cost = self._snapshot_cost(snapshot_json)
+                if cost is None:
+                    unpriced_requests += 1
+                    continue
+                total_cost += cost
+                if cost_currency is None:
+                    cost_currency = self._snapshot_currency(snapshot_json)
 
-            daily_data = [{
-                'date': str(row.date),
-                'requests': row.requests,
-                'tokens': row.tokens or 0,
-                'success': row.success,
-                'failed': row.failed
-            } for row in daily_stats]
+            latency = base_query.with_entities(
+                func.avg(LLMRequestTrace.ttft_ms),
+                func.max(LLMRequestTrace.ttft_ms),
+                func.avg(LLMRequestTrace.duration),
+                func.avg(LLMRequestTrace.attempt_count),
+            ).one()
 
-            # 按模型分组统计（最近30天）
-            model_stats = []
-            model_counts = session.query(
-                LLMRequestTrace.model_id, # type: ignore
-                func.count(LLMRequestTrace.id).label('count'),
-                func.sum(LLMRequestTrace.total_tokens).label('tokens'),
-                func.avg(LLMRequestTrace.duration).label('avg_duration')
-            ).filter( # type: ignore
-                LLMRequestTrace.request_time >= thirty_days_ago # type: ignore
-            ).group_by(
-                LLMRequestTrace.model_id
+            recent_query = base_query
+            hourly_query = base_query
+            if not has_explicit_range:
+                recent_query = recent_query.filter(
+                    LLMRequestTrace.request_time >= now - timedelta(days=30)  # type: ignore
+                )
+                hourly_query = hourly_query.filter(
+                    LLMRequestTrace.request_time >= now - timedelta(hours=24)  # type: ignore
+                )
+
+            daily_rows = recent_query.with_entities(
+                LLMRequestTrace.request_time,
+                LLMRequestTrace.total_tokens,
+                LLMRequestTrace.status,
             ).all()
-
-            for model_id, count, tokens, avg_duration in model_counts:
-                model_stats.append({
-                    'model_id': model_id,
-                    'count': count,
-                    'tokens': tokens or 0,
-                    'avg_duration': float(avg_duration) if avg_duration else 0
-                })
-
-            # 按后端分组统计（最近30天）
-            backend_stats = []
-            backend_counts = session.query(
-                LLMRequestTrace.backend_name, # type: ignore
-                func.count(LLMRequestTrace.id).label('count'),
-                func.sum(LLMRequestTrace.total_tokens).label('tokens'),
-                func.avg(LLMRequestTrace.duration).label('avg_duration')
-            ).filter( # type: ignore
-                LLMRequestTrace.request_time >= thirty_days_ago # type: ignore
-            ).group_by(
-                LLMRequestTrace.backend_name
-            ).all()
-
-            for backend_name, count, tokens, avg_duration in backend_counts:
-                backend_stats.append({
-                    'backend_name': backend_name,
-                    'count': count,
-                    'tokens': tokens or 0,
-                    'avg_duration': float(avg_duration) if avg_duration else 0
-                })
-
-            # 获取每小时统计（最近24小时）
-            one_day_ago = datetime.now() - timedelta(hours=24)
-            hourly_stats = session.query(
-                func.strftime('%Y-%m-%d %H:00:00', LLMRequestTrace.request_time).label('hour'),
-                func.count(LLMRequestTrace.id).label('requests'),
-                func.sum(LLMRequestTrace.total_tokens).label('tokens')
-            ).filter(
-                LLMRequestTrace.request_time >= one_day_ago # type: ignore
-            ).group_by(
-                func.strftime('%Y-%m-%d %H:00:00', LLMRequestTrace.request_time)
-            ).order_by(
-                func.strftime('%Y-%m-%d %H:00:00', LLMRequestTrace.request_time)
-            ).all()
-
-            hourly_data = [{
-                'hour': str(row.hour),
-                'requests': row.requests,
-                'tokens': row.tokens or 0
-            } for row in hourly_stats]
+            _, hourly_buckets = self._time_buckets(
+                hourly_query.with_entities(
+                    LLMRequestTrace.request_time,
+                    LLMRequestTrace.total_tokens,
+                    LLMRequestTrace.status,
+                ).all(),
+                storage_timezone,
+                output_timezone,
+            )
+            daily_buckets, _ = self._time_buckets(
+                daily_rows,
+                storage_timezone,
+                output_timezone,
+            )
 
             return {
-                'overview': {
-                    'total_requests': total_count,
-                    'success_requests': success_count,
-                    'failed_requests': failed_count,
-                    'pending_requests': pending_count,
-                    'total_tokens': total_tokens,
+                "timezone": output_timezone.key,
+                "overview": {
+                    "total_requests": overview[0] or 0,
+                    "success_requests": overview[1] or 0,
+                    "failed_requests": overview[2] or 0,
+                    "pending_requests": overview[3] or 0,
+                    "total_tokens": overview[4] or 0,
+                    "total_cost": str(total_cost),
+                    "cost_currency": cost_currency,
+                    "unpriced_requests": unpriced_requests,
                 },
-                'daily_stats': daily_data,
-                'hourly_stats': hourly_data,
-                'models': model_stats,
-                'backends': backend_stats
+                "latency": {
+                    # 非流式请求没有真实首字节，此处保持 None，不伪造 0。
+                    "avg_ttft_ms": float(latency[0]) if latency[0] is not None else None,
+                    "max_ttft_ms": int(latency[1]) if latency[1] is not None else None,
+                    "avg_duration": float(latency[2]) if latency[2] is not None else None,
+                    "avg_attempt_count": float(latency[3]) if latency[3] is not None else None,
+                },
+                "daily_stats": [
+                    {"date": key, **daily_buckets[key]}
+                    for key in sorted(daily_buckets)
+                ],
+                "hourly_stats": [
+                    {"hour": key, **hourly_buckets[key]}
+                    for key in sorted(hourly_buckets)
+                ],
+                "models": self._group_statistics(
+                    recent_query,
+                    LLMRequestTrace.model_id,
+                    "model_id",
+                ),
+                "backends": self._group_statistics(
+                    recent_query,
+                    LLMRequestTrace.backend_name,
+                    "backend_name",
+                ),
+                "providers": self._group_statistics(
+                    recent_query,
+                    LLMRequestTrace.provider,
+                    "provider",
+                ),
+                "usage_sources": self._group_statistics(
+                    recent_query,
+                    LLMRequestTrace.usage_source,
+                    "usage_source",
+                ),
+                # 失败分类已经建了索引，此前却没有任何聚合出口，
+                # 于是「在失败什么」只能逐条翻请求日志。
+                "error_categories": self._group_statistics(
+                    recent_query.filter(LLMRequestTrace.error_category.isnot(None)),  # type: ignore
+                    LLMRequestTrace.error_category,
+                    "error_category",
+                ),
             }

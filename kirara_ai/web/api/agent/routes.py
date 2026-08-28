@@ -26,6 +26,31 @@ def _resources() -> ResourceLifecycleService:
     return g.container.resolve(ResourceLifecycleService)
 
 
+def _session_store():
+    """Resolve the session store, or ``None`` when the runtime is not wired.
+
+    A deployment without the Agent runtime (or a unit test using a bare
+    container) must get a clear 503 rather than a 500 from an unresolved
+    dependency.
+    """
+    from kirara_ai.agent_runtime import SessionStore
+
+    container = g.container
+    if not container.has(SessionStore):
+        return None
+    return container.resolve(SessionStore)
+
+
+def _hook_runtime():
+    """Resolve the hook runtime from the Agent executor, or ``None``."""
+    from kirara_ai.agent_runtime import AgentRuntimeExecutor
+
+    container = g.container
+    if not container.has(AgentRuntimeExecutor):
+        return None
+    return getattr(container.resolve(AgentRuntimeExecutor), "hook_runtime", None)
+
+
 def _error(message: str, status_code: int):
     return jsonify({"error": message}), status_code
 
@@ -382,5 +407,156 @@ async def add_agent_resources(agent_id: str):
             mcp_allowlist=updated.mcp_allowlist,
         )
         return jsonify(_agent_payload(registry.get(agent_id), registry))
+    except Exception as error:
+        return _handle_error(error)
+
+
+@agent_bp.route("/sessions", methods=["GET"])
+@require_auth
+async def list_sessions():
+    """List persisted sessions with counts only, never conversation text.
+
+    会话此前只有「绑定」接口，没有列表：既看不到有哪些会话、历史多长、
+    是否卡在待确认，也无从清理。这里只返回元数据，正文不出这个边界。
+    """
+    store = _session_store()
+    if store is None:
+        return _error("session store is not configured", 503)
+    try:
+        limit = int(request.args.get("limit", 200))
+    except (TypeError, ValueError):
+        return _error("limit must be an integer", 400)
+    try:
+        return jsonify({"items": store.list_sessions(limit=limit)})
+    except ValueError as error:
+        return _error(str(error), 400)
+    except Exception as error:
+        return _handle_error(error)
+
+
+@agent_bp.route("/sessions/<session_id>", methods=["DELETE"])
+@require_auth
+async def delete_session(session_id: str):
+    """Delete one session's stored history."""
+    store = _session_store()
+    if store is None:
+        return _error("session store is not configured", 503)
+    try:
+        if not store.delete_session(session_id):
+            return _error("session not found", 404)
+        return jsonify({"deleted": True})
+    except Exception as error:
+        return _handle_error(error)
+
+
+@agent_bp.route("/sessions/<session_id>/history", methods=["DELETE"])
+@require_auth
+async def clear_session_history(session_id: str):
+    """Empty one session's history while keeping its binding intact."""
+    store = _session_store()
+    if store is None:
+        return _error("session store is not configured", 503)
+    try:
+        if not store.clear_history(session_id):
+            return _error("session not found", 404)
+        return jsonify({"cleared": True})
+    except Exception as error:
+        return _handle_error(error)
+
+
+@agent_bp.route("/hooks", methods=["GET"])
+@require_auth
+async def list_hook_declarations():
+    """Describe every installed hook's declared events without executing them.
+
+    Hook 此前只能「装上再看它会不会跑」：事件名写错、matcher 写成非法正则、
+    把 command 写进不该写的位置，都只能在真实请求里暴露——而那时它已经在
+    生产路径上了。这里是只读描述，不执行任何 handler、不启动任何进程。
+    """
+    runtime = _hook_runtime()
+    if runtime is None:
+        return _error("agent hook runtime is not configured", 503)
+    try:
+        service = _resources()
+        items = []
+        for resource in service.list_resources("hook"):
+            resource_id = resource.get("resource_id")
+            if not resource_id:
+                continue
+            binding = service.resolve_binding(
+                resource_id,
+                "hook",
+                version=resource.get("current_version"),
+                enabled=bool(resource.get("enabled")),
+                version_policy="fixed",
+            )
+            items.append(runtime.describe_binding(binding))
+        return jsonify({"items": items})
+    except Exception as error:
+        return _handle_error(error)
+
+
+@agent_bp.route("/hooks/<resource_id>/preview", methods=["POST"])
+@require_auth
+async def preview_hook_event(resource_id: str):
+    """Answer "would this hook run for this tool?" without running it.
+
+    这是 dry-run 的核心问题：用户能在把 Hook 放到生产路径之前验证
+    matcher 是否按预期收窄，而不是靠一次真实的工具调用去试。
+    """
+    runtime = _hook_runtime()
+    if runtime is None:
+        return _error("agent hook runtime is not configured", 503)
+    payload = await request.get_json(silent=True) or {}
+    event = payload.get("event")
+    if not isinstance(event, str) or not event.strip():
+        return _error("event is required", 400)
+    tool_name = payload.get("tool_name")
+    if tool_name is not None and not isinstance(tool_name, str):
+        return _error("tool_name must be a string", 400)
+    try:
+        service = _resources()
+        resource = service.get_resource(resource_id)
+        binding = service.resolve_binding(
+            resource_id,
+            "hook",
+            version=resource.get("current_version"),
+            enabled=bool(resource.get("enabled")),
+            version_policy="fixed",
+        )
+        return jsonify(
+            runtime.preview_event(binding, event.strip(), tool_name=tool_name)
+        )
+    except Exception as error:
+        return _handle_error(error)
+
+
+@agent_bp.route("/confirmations", methods=["GET"])
+@require_auth
+async def list_pending_confirmations():
+    """List confirmations still waiting on a human decision.
+
+    确认记录一直是持久化的，但没有任何查询出口：一个卡住的待确认操作
+    在界面上完全不可见，只能去翻 data/sessions/pending.json。
+    这里只返回状态与时间戳等元数据，不含工具参数。
+    """
+    store = _session_store()
+    if store is None:
+        return _error("session store is not configured", 503)
+    try:
+        items = [
+            {
+                "confirmation_id": record.get("confirmation_id"),
+                "agent_id": record.get("agent_id"),
+                "status": record.get("status"),
+                "created_at": record.get("created_at"),
+                "updated_at": record.get("updated_at"),
+                "expires_at": record.get("expires_at"),
+                "correlation_id": record.get("correlation_id"),
+                "tool_name": record.get("tool_name"),
+            }
+            for record in store.load_pending()
+        ]
+        return jsonify({"items": items})
     except Exception as error:
         return _handle_error(error)

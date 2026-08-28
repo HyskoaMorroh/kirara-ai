@@ -13,6 +13,7 @@ from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.plugins.im_telegram_adapter.adapter import (
     TelegramAdapter,
     TelegramConfig,
+    split_telegram_message,
 )
 from kirara_ai.plugins.im_telegram_adapter.outbox import (
     TelegramDelivery,
@@ -119,11 +120,12 @@ async def test_all_telegram_units_are_persisted_before_ordered_network_calls(
     adapter.application.bot.send_message = AsyncMock(side_effect=send_message)
     adapter.application.bot.send_photo = AsyncMock(side_effect=send_photo)
 
+    message = IMMessage(
+        ChatSender.get_bot_sender(),
+        [TextMessage("hello"), fake_image()],
+    )
     await adapter.send_message(
-        IMMessage(
-            ChatSender.get_bot_sender(),
-            [TextMessage("hello"), fake_image()],
-        ),
+        message,
         recipient(),
         delivery_id="logical-1",
     )
@@ -134,6 +136,13 @@ async def test_all_telegram_units_are_persisted_before_ordered_network_calls(
     assert [item.page_index for item in rows] == [0, 1]
     assert [item.page_count for item in rows] == [2, 2]
     assert [item.status for item in rows] == ["accepted", "accepted"]
+    assert [event.stage for event in message.delivery_timeline] == [
+        "formatting_started",
+        "formatting_completed",
+        "send_started",
+        "send_succeeded",
+    ]
+    assert message.delivery_timeline[-1].details["retry_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -253,3 +262,25 @@ async def test_start_recovers_persisted_inbound_and_outbound_work(tmp_path: Path
         receipt = session.execute(select(TelegramInboundReceipt)).scalar_one()
         assert receipt.status == "completed"
         assert receipt.payload_json is None
+
+
+def test_split_telegram_message_labels_pages_and_bounds_long_single_line():
+    pages = split_telegram_message("中文🙂" * 200, max_length=180)
+
+    assert len(pages) > 1
+    assert all(len(page) <= 180 for page in pages)
+    assert pages[0].startswith(f"第 1 页 / 共 {len(pages)} 页\n")
+    assert pages[-1].startswith(
+        f"第 {len(pages)} 页 / 共 {len(pages)} 页\n"
+    )
+
+
+def test_split_telegram_message_bounds_long_code_line_and_keeps_fences():
+    pages = split_telegram_message(
+        "```text\n" + ("x" * 1000) + "\n```",
+        max_length=180,
+    )
+
+    assert len(pages) > 1
+    assert all(len(page) <= 180 for page in pages)
+    assert all(page.count("```") == 2 for page in pages)

@@ -91,7 +91,11 @@ COPY --from=frontend-builder /webui/dist /app/web
 
 # 复制应用代码
 COPY ./docker/start.sh /app/docker/
-COPY ./data /tmp/data
+# 只带入首次启动所需的受版本控制默认值。运行期数据库、资源注册表、
+# 会话、插件和审计记录必须由挂载的 /app/data 提供，不能进入镜像。
+COPY ./data/dispatch_rules /tmp/data/dispatch_rules
+COPY ./data/workflows /tmp/data/workflows
+COPY ./data/fonts /tmp/data/fonts
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \

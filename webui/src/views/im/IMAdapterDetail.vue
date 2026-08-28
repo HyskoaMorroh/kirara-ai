@@ -44,6 +44,28 @@ const isEdit = ref<string | null>(null)
 
 type StatusTagType = 'default' | 'success' | 'warning' | 'error'
 
+/**
+ * 断开原因码到可读文案。
+ *
+ * 后端只回固定原因码（不含凭据与账号信息），所以文案在前端组装；
+ * 每条都直说「下一步该查什么」，因为这里就是用户排查 QQ 未连接时唯一能看到的信息。
+ */
+const DISCONNECT_REASON_TEXT: Record<string, string> = {
+  access_token_missing: '上游未携带访问令牌',
+  access_token_mismatch: '上游访问令牌与本适配器配置不一致',
+  invalid_client_role: '上游握手缺少或使用了不支持的客户端角色',
+  missing_self_id: '上游握手缺少账号标识',
+  heartbeat_timeout: '曾经连上但心跳超时',
+  upstream_lifecycle_disconnect: '上游主动上报断开',
+  adapter_stopped: '适配器已停止'
+}
+
+const disconnectReasonText = (adapter: IMAdapter): string | null => {
+  const reason = adapter.health?.last_disconnect_reason
+  if (!reason) return null
+  return DISCONNECT_REASON_TEXT[reason] || null
+}
+
 const adapterStatus = (
   adapter: IMAdapter
 ): { label: string; type: StatusTagType; className: string } => {
@@ -59,8 +81,14 @@ const adapterStatus = (
         className: 'connected'
       }
     }
+    case 'initializing':
+      return { label: '正在启动', type: 'default', className: 'initializing' }
     case 'waiting':
       return { label: '等待连接', type: 'warning', className: 'waiting' }
+    case 'credential_rejected':
+      return { label: '凭据被拒', type: 'error', className: 'credential-rejected' }
+    case 'upstream_refused':
+      return { label: '握手被拒', type: 'error', className: 'upstream-refused' }
     case 'disconnected':
       return { label: '已断开', type: 'error', className: 'disconnected' }
     case 'stale':
@@ -348,9 +376,17 @@ defineExpose({
                       <n-tag
                         :type="adapterStatus(adapter).type"
                         :class="['status-tag', adapterStatus(adapter).className]"
+                        :title="disconnectReasonText(adapter) || undefined"
                       >
                         {{ adapterStatus(adapter).label }}
                       </n-tag>
+                    </template>
+                    <template #description>
+                      <!-- 原因码在这里落地成一行可读文案：QQ 未连接时，
+                           这是用户不进服务器就能拿到的唯一线索。 -->
+                      <span v-if="disconnectReasonText(adapter)" class="disconnect-reason">
+                        {{ disconnectReasonText(adapter) }}
+                      </span>
                     </template>
                     <template #action>
                       <n-space class="action-buttons">
@@ -608,9 +644,25 @@ defineExpose({
 }
 
 .status-tag.disconnected,
+.status-tag.credential-rejected,
+.status-tag.upstream-refused,
 .status-tag.stale {
   background-color: var(--error-color);
   color: white;
+}
+
+/* 正在启动是中性态：既不是成功也不是失败，用与「未启用」一致的弱化配色。 */
+.status-tag.initializing {
+  background-color: var(--text-color-tertiary);
+  color: white;
+}
+
+.disconnect-reason {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--text-color-secondary);
+  font-size: 0.8rem;
+  line-height: var(--line-height-normal, 1.5);
 }
 
 .status-tag.disabled {

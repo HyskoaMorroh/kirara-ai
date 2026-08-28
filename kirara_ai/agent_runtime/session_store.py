@@ -84,6 +84,10 @@ class SessionStore:
         payload = {
             "format_version": _STORE_FORMAT_VERSION,
             "messages": [self._serialize_message(message) for message in messages],
+            # 会话文件名是 [session_key, agent_id] 的摘要，而待确认记录按
+            # session_key 的摘要归档，两者无法互推。这里额外记录后者，
+            # 列会话时才能把「待确认数量」对上号。仅新增字段，旧文件不受影响。
+            "session_digest": self._session_digest(session_key),
         }
         if agent_id is not None:
             payload["agent_id"] = str(agent_id)
@@ -242,6 +246,104 @@ class SessionStore:
                 return
             records.pop(confirmation_id)
             self._write_confirmations(records)
+
+    def list_sessions(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        """List persisted sessions with counts only, never conversation text.
+
+        会话此前只能通过 Agent 绑定间接感知：既看不到有哪些会话、历史多长、
+        是否卡在待确认，也无法在一次糟糕的对话后清掉单个会话的历史，
+        只能手工去删摘要命名的文件。
+
+        这里只返回条数与时间戳等元数据；对话正文一律不出这个边界，
+        避免「列会话」变成一个可以读取全部聊天内容的接口。
+        """
+        if limit < 1 or limit > 1000:
+            raise ValueError("session listing limit is outside the allowed range")
+
+        pending_counts: dict[str, int] = {}
+        for record in self.load_pending():
+            digest = str(record.get("session_digest") or "")
+            if digest:
+                pending_counts[digest] = pending_counts.get(digest, 0) + 1
+
+        sessions: list[dict[str, Any]] = []
+        with self._transaction():
+            for path in sorted(self.root.glob("*.json")):
+                if path.name == self.pending_path.name:
+                    continue
+                payload = self._read_json(path, default=None)
+                if not isinstance(payload, dict):
+                    continue
+                messages = payload.get("messages")
+                if not isinstance(messages, list):
+                    continue
+                session_id = path.stem
+                # 待确认记录按 session_key 摘要归档；会话文件名是
+                # [session_key, agent_id] 摘要，因此用文件内记录的
+                # session_digest 关联，缺失（旧文件）时按 0 处理。
+                session_digest = str(payload.get("session_digest") or "")
+                try:
+                    updated_at = datetime.fromtimestamp(
+                        path.stat().st_mtime, tz=timezone.utc
+                    ).isoformat()
+                except OSError:
+                    updated_at = None
+                sessions.append(
+                    {
+                        "session_id": session_id,
+                        "agent_id": payload.get("agent_id"),
+                        "message_count": len(messages),
+                        "updated_at": updated_at,
+                        "pending_confirmations": pending_counts.get(session_digest, 0),
+                    }
+                )
+        sessions.sort(key=lambda item: (item["updated_at"] or ""), reverse=True)
+        return sessions[:limit]
+
+    def _session_path(self, session_id: str) -> Path | None:
+        """Resolve a listed session id to its file, refusing anything else.
+
+        ``session_id`` 就是文件名里的 SHA-256 摘要。只接受 64 位十六进制，
+        因此 ``../pending``、``a/b`` 这类输入不会被拼进路径。
+        """
+        value = str(session_id or "")
+        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+            return None
+        path = self.root / f"{value}.json"
+        if not path.is_file():
+            return None
+        return path
+
+    def delete_session(self, session_id: str) -> bool:
+        """Delete one session's stored history. Returns False when not found."""
+        with self._transaction():
+            path = self._session_path(session_id)
+            if path is None:
+                return False
+            path.unlink(missing_ok=True)
+            return True
+
+    def clear_history(self, session_id: str) -> bool:
+        """Empty one session's history while keeping the session itself."""
+        with self._transaction():
+            path = self._session_path(session_id)
+            if path is None:
+                return False
+            payload = self._read_json(path, default=None)
+            agent_id = payload.get("agent_id") if isinstance(payload, dict) else None
+            session_digest = (
+                payload.get("session_digest") if isinstance(payload, dict) else None
+            )
+            replacement: dict[str, Any] = {
+                "format_version": _STORE_FORMAT_VERSION,
+                "messages": [],
+            }
+            if agent_id is not None:
+                replacement["agent_id"] = str(agent_id)
+            if session_digest is not None:
+                replacement["session_digest"] = str(session_digest)
+            self._atomic_write(path, replacement)
+            return True
 
     def _transition(
         self,

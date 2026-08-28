@@ -13,9 +13,17 @@ from kirara_ai.agent_runtime import (
     ResourceBinding,
     ResourceSnapshot,
 )
+from kirara_ai.web.auth.principal import RuntimePrincipal, runtime_principal_context
 
 
 HASH = "a" * 64
+CREATOR = RuntimePrincipal(subject="command-hook-test-creator", is_creator=True)
+
+
+@pytest.fixture
+def creator_principal():
+    with runtime_principal_context(CREATOR):
+        yield
 
 
 def _context() -> ChannelContext:
@@ -31,6 +39,7 @@ def _context() -> ChannelContext:
 def _agent(*, capabilities: set[str] | None = None) -> AgentDefinition:
     return AgentDefinition(
         agent_id="command-hook-agent",
+        owner_subject=CREATOR.subject,
         model_priority=("model",),
         capabilities=frozenset(capabilities or set()),
         hook_bindings=(
@@ -60,6 +69,7 @@ def _command_hook(command: list[str], **extra: object) -> str:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_command_hook_receives_redacted_json_and_returns_structured_context(tmp_path: Path):
     output_file = tmp_path / "hook-input.json"
     script = (
@@ -92,6 +102,7 @@ async def test_command_hook_receives_redacted_json_and_returns_structured_contex
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_command_hook_is_denied_without_process_capability(tmp_path: Path):
     marker = tmp_path / "ran"
     script = f"import pathlib; pathlib.Path({str(marker)!r}).write_text('ran')"
@@ -116,6 +127,7 @@ async def test_command_hook_is_denied_without_process_capability(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_command_hook_timeout_is_recorded_and_process_is_stopped():
     runtime = AgentHookRuntime(
         resource_loader={
@@ -141,6 +153,7 @@ async def test_command_hook_timeout_is_recorded_and_process_is_stopped():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_pretool_command_hook_can_deny_with_codex_permission_decision():
     command = [
         sys.executable,
@@ -173,4 +186,3 @@ async def test_pretool_command_hook_can_deny_with_codex_permission_decision():
     assert outcome.blocked is True
     assert outcome.permission_decision == "deny"
     assert outcome.permission_decision_reason == "policy"
-

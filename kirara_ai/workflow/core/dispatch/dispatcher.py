@@ -1,6 +1,7 @@
 import re
 
 from kirara_ai.im.adapter import IMAdapter
+from kirara_ai.im.delivery_timing_store import DeliveryTimingStore
 from kirara_ai.im.message import IMMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
 from kirara_ai.ioc.container import DependencyContainer
@@ -43,6 +44,20 @@ class WorkflowDispatcher:
         self.dispatch_registry.register(rule)
         self.logger.info(f"Registered dispatch rule: {rule}")
 
+    @staticmethod
+    def _record_stage(message: IMMessage, stage: str, **details) -> None:
+        """记录一个链路阶段；旧的自定义 IMMessage 实现没有这个方法时静默跳过。
+
+        观测不能成为新的失败点：第三方适配器可能传入自己的消息对象，
+        缺少时间线接口只应失去观测数据，不应让这条消息发不出去。
+        """
+        recorder = getattr(message, "record_delivery_stage", None)
+        if callable(recorder):
+            try:
+                recorder(stage, **details)
+            except Exception:  # noqa: BLE001 - 观测失败不得影响消息投递
+                pass
+
     async def dispatch(
         self,
         source: IMAdapter,
@@ -60,6 +75,11 @@ class WorkflowDispatcher:
         with self.container.scoped() as scoped_container:
             scoped_container.register(IMAdapter, source)
             scoped_container.register(IMMessage, message)
+
+            # 收到事件的时刻必须先记下来：适配器只能测到自己那几步，
+            # 「排队等到工作流开始」这一段此前没有任何时间戳，
+            # 于是「QQ 慢」和「模型慢」在事后无法区分。
+            self._record_stage(message, "received_event")
 
             confirmation_id = self._parse_confirmation(message.content)
             if confirmation_id is not None and self.container.has(
@@ -191,11 +211,13 @@ class WorkflowDispatcher:
 
         runtime = self.container.resolve(AgentRuntimeExecutor)
         context = ChannelContext.from_message(source, message)
+        self._record_stage(message, "workflow_started", agent_id=agent_id)
         result = await runtime.run(
             context,
             message,
             session_agent_id=agent_id,
         )
+        self._record_model_stages(message, result)
 
         return await self._deliver_runtime_result(source, message, result)
 
@@ -217,6 +239,96 @@ class WorkflowDispatcher:
             confirmation_flow=True,
         )
 
+    def _record_model_stages(self, message: IMMessage, result) -> None:
+        """把模型侧的首字节与完成时刻并入同一条链路时间线。
+
+        ``LLMManager`` 已经在 ``ProviderAttempt`` 上记录了 ``first_byte_at``，
+        但那份数据存在另一个结构里，从来没有和消息投递时间线合并过——
+        于是「模型首字节用了多久」和「适配器发送用了多久」无法在同一条链路上比较。
+        非流式请求没有真实首字节，这里不会伪造一个。
+        """
+        response = getattr(result, "response", None)
+        usage = getattr(response, "usage", None)
+        details = {}
+        if usage is not None:
+            for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                value = getattr(usage, name, None)
+                if value is not None:
+                    details[name] = value
+        trace_ids = getattr(result, "trace_ids", ())
+        if trace_ids:
+            details["trace_id"] = trace_ids[-1]
+        self._record_stage(message, "llm_completed", **details)
+
+    def _carry_timeline(self, source_message: IMMessage, reply: IMMessage) -> None:
+        """把入站阶段复制到回复消息，形成一条端到端时间线。"""
+        events = getattr(source_message, "delivery_timeline", ())
+        recorder = getattr(reply, "record_delivery_stage_at", None)
+        if not events or not callable(recorder):
+            return
+        for event in events:
+            try:
+                recorder(event.stage, event.timestamp, **dict(event.details))
+            except Exception:  # noqa: BLE001 - 观测失败不得影响消息投递
+                return
+
+    def _log_delivery_durations(self, message: IMMessage) -> None:
+        """把各阶段耗时写进日志，便于事后回答「慢在哪一段」。"""
+        durations = getattr(message, "delivery_durations", None)
+        if not callable(durations):
+            return
+        try:
+            measured = durations()
+        except Exception:  # noqa: BLE001 - 观测失败不得影响消息投递
+            return
+        if measured:
+            summary = " ".join(f"{name}={value:.3f}s" for name, value in measured.items())
+            self.logger.debug(f"Delivery timeline: {summary}")
+
+    def _persist_delivery_durations(
+        self,
+        source: IMAdapter,
+        message: IMMessage,
+        reply: IMMessage,
+    ) -> None:
+        """把本次回复的各阶段耗时落库，供事后按时间范围回查。
+
+        日志只能回答「刚才那条为什么慢」；一周后问「上周二 QQ 慢是模型还是发送」
+        需要行。这里只写时长与计数，不写任何消息正文；会话键做摘要后存储。
+        """
+        if not self.container.has(DeliveryTimingStore):
+            return
+        durations = getattr(reply, "delivery_durations", None)
+        if not callable(durations):
+            return
+        try:
+            measured = durations()
+        except Exception:  # noqa: BLE001 - 观测失败不得影响消息投递
+            return
+        if not measured:
+            return
+        try:
+            context = ChannelContext.from_message(source, message)
+            stages = {event.stage for event in getattr(reply, "delivery_timeline", ())}
+            segment_count = None
+            retry_count = None
+            for event in getattr(reply, "delivery_timeline", ()):
+                if event.stage == "formatting_completed":
+                    segment_count = event.details.get("segment_count", segment_count)
+                if event.stage in {"send_succeeded", "send_failed"}:
+                    retry_count = event.details.get("retry_count", retry_count)
+            self.container.resolve(DeliveryTimingStore).record(
+                channel=context.channel_type,
+                adapter_instance=context.adapter_instance,
+                durations=measured,
+                status="failed" if "send_failed" in stages else "succeeded",
+                conversation_key=context.conversation_scope,
+                segment_count=segment_count,
+                retry_count=retry_count,
+            )
+        except Exception:  # noqa: BLE001 - 观测失败不得影响消息投递
+            self.logger.debug("Delivery timing persistence failed", exc_info=True)
+
     async def _deliver_runtime_result(
         self,
         source: IMAdapter,
@@ -229,13 +341,16 @@ class WorkflowDispatcher:
 
         if result.status is RuntimeStatus.COMPLETED:
             if result.text:
-                await source.send_message(
-                    IMMessage(
-                        sender=ChatSender.get_bot_sender(),
-                        message_elements=[TextMessage(result.text)],
-                    ),
-                    message.sender,
+                reply = IMMessage(
+                    sender=ChatSender.get_bot_sender(),
+                    message_elements=[TextMessage(result.text)],
                 )
+                # 把入站消息已经记录的阶段带到回复对象上，
+                # 适配器随后追加的格式化与发送阶段才能与前半段拼成一条完整链路。
+                self._carry_timeline(message, reply)
+                await source.send_message(reply, message.sender)
+                self._log_delivery_durations(reply)
+                self._persist_delivery_durations(source, message, reply)
             return result
 
         if result.status is RuntimeStatus.AWAITING_CONFIRMATION:

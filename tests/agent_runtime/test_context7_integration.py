@@ -26,12 +26,20 @@ from kirara_ai.llm.format.response import LLMChatResponse, Message
 from kirara_ai.llm.format.tool import Function, ToolCall
 from kirara_ai.llm.resilience import ChatExecutionResult, FailoverExecutionError
 from kirara_ai.mcp_module.manager import MCPServerManager
+from kirara_ai.web.auth.principal import RuntimePrincipal, runtime_principal_context
 
 
 HASH_PROMPT = "a" * 64
 HASH_SKILL = "b" * 64
 HASH_MEMORY = "c" * 64
 HASH_MCP = "d" * 64
+CREATOR = RuntimePrincipal(subject="context7-test-creator", is_creator=True)
+
+
+@pytest.fixture
+def creator_principal():
+    with runtime_principal_context(CREATOR):
+        yield
 
 
 class ControlledLLMManager:
@@ -119,6 +127,7 @@ def _agent() -> AgentDefinition:
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+@pytest.mark.usefixtures("creator_principal")
 async def test_real_context7_mcp_completes_agent_turn_after_model_failover():
     config = GlobalConfig(
         mcp=MCPConfig(

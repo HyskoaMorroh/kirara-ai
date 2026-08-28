@@ -18,6 +18,7 @@ import { useVueFlow } from '@vue-flow/core'
 import type { BlockType } from '@/api/block'
 import { getTypeColor } from '@/utils/node-colors'
 import { createUniqueNodeName } from './workflow-node-utils'
+import { estimateBlockTypeSize, findFreeNodePosition, snapToGrid } from './useLayout'
 
 const props = defineProps<{
   blockTypes: BlockType[]
@@ -158,13 +159,28 @@ const onDragStart = (event: DragEvent, blockType: BlockType) => {
  *
  * 画布侧的 drop handler 也应复用 workflow-node-utils 中的命名规则；这里不再
  * 保留另一套 `split(':')` 的重复实现，避免两种添加方式生成不同的节点名称。
+ *
+ * 落点同样复用画布 drop 路径的两步处理：先对齐到 20px 网格，再找一个不与既有
+ * 节点重叠的空位。此前这里直接用 `project()` 的原始坐标，因此从节点列表添加的
+ * 节点可以正好压在已有节点上——同一个操作在两条路径上表现不一致。
  */
 const addBlockNode = (blockType: BlockType, clientPosition: { x: number; y: number }) => {
-  const position = project(clientPosition)
+  const projected = project(clientPosition)
   const name = createUniqueNodeName(
     blockType.type_name,
     getNodes.value.map((node) => node.id)
   )
+
+  const size = estimateBlockTypeSize(blockType)
+  const snapped = { x: snapToGrid(projected.x), y: snapToGrid(projected.y) }
+  const occupied = getNodes.value.map((node) => ({
+    id: node.id,
+    x: node.position.x,
+    y: node.position.y,
+    width: node.dimensions?.width || size.width,
+    height: node.dimensions?.height || size.height
+  }))
+  const position = findFreeNodePosition(snapped, size, occupied)
 
   addNodes([
     {

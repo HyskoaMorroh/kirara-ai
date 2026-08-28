@@ -54,7 +54,22 @@
 
 ### 每条记录包含什么
 
-`trace_id`、`model_id`、`backend_name`、`request_time` / `response_time` / `duration`、`prompt_tokens` / `completion_tokens` / `total_tokens` / `cached_tokens`、`status`（`pending` / `success` / `failed`）、`error`，以及可选的 `request_json` / `response_json`。
+`trace_id`、`correlation_id`、`model_id`、`backend_name`、`provider`、
+`request_time` / `response_time` / `duration`、
+`prompt_tokens` / `completion_tokens` / `total_tokens` / `cached_tokens` / `cache_write_tokens`、
+`usage_source`（`provider` / `estimated` / `unknown`）、`ttft_ms`（首字节毫秒数）、
+`attempt_count` 与 `attempts_json`（每次 Provider 尝试的顺序与失败原因）、
+`cost_snapshot_json`（请求当时的价格快照）、`status`（`pending` / `success` / `failed`）、
+`error`、`error_category`，以及可选的 `request_json` / `response_json`。
+
+关于其中三个容易误读的字段：
+
+- `usage_source` 区分「供应商返回的用量」与「未知」。**当前没有本地估算器**，
+  因此不会出现 `estimated`；供应商没返回 usage 时记为 `unknown`，不会拿字符数冒充真实消耗。
+- `ttft_ms` 只有在真的观测到首字节时才有值。非流式请求没有首字节概念，
+  该字段为空而**不是 0**——把「没测到」写成 0 会被读成「极快」。
+- `cost_snapshot_json` 是请求完成时冻结的价格快照。后来改价**不会**改写历史账单。
+  没有匹配价格版本时该字段为空，并在统计里计入「未定价请求」，而不是按 0 元计。
 
 **请求与响应正文默认不记录。** `LLMTracer` 三个事件处理器都会先检查 `config.tracing.llm_tracing_content`（默认 `False`，见 `kirara_ai/config/global_config.py:152`）。要看完整 prompt 和回复，去「设置 → 系统设置 → LLM请求记录时包含完整内容」打开（`TracingCard.vue`，写入接口 `POST /backend-api/api/system/config/tracing`）。这是隐私与磁盘占用的权衡，打开后聊天正文会进数据库。
 
@@ -66,22 +81,31 @@
 | --- | --- |
 | `TracingView.vue` | 追踪模块的容器路由 |
 | `tracing.vm.ts` | 通用追踪视图模型（分页、筛选、WebSocket 实时推送） |
-| `llm/LLMTraceList.vue` | 请求列表 + 顶部统计卡片 + 按模型/后端/状态筛选 |
-| `llm/LLMTraceDetail.vue` | 单条请求详情：时间、耗时、错误信息、四类 token、请求内容、响应内容 |
+| `llm/LLMTraceList.vue` | 请求列表 + 顶部统计卡片 + 多维筛选 + CSV 导出 |
+| `llm/LLMTraceDetail.vue` | 单条请求详情：时间、耗时、错误信息、token、用量来源、首字节、尝试次数、成本快照 |
 | `llm/llm-tracing.vm.ts` | LLM 专属的表格列、统计卡片与详情字段定义 |
 
 路由为 `/tracing`（索引）、`/tracing/llm`（列表）、`/tracing/llm/detail/:traceId`（详情），见 `webui/src/router/index.ts`。
 
-统计卡片展示 5 个数字：总请求数、请求中、成功请求、失败请求、总 Token 数（`llm-tracing.vm.ts` 的 `formatStatistics`）。
+统计卡片按数据可得性展示：总请求数、请求中、成功、失败、总 Token，
+以及总成本（附计价货币）、未定价请求数、平均首字节。
+**筛选条件与浏览器时区会一并送到统计接口**，因此列表与卡片始终描述同一批数据；
+不传时区会让后端按服务器时区分桶，跨时区用户看到的「今天」是错的。
+
+筛选维度：回合 ID、模型、供应商、后端、请求状态、失败类型、用量来源、
+请求时间范围（带时区的 ISO-8601）与关键词。「导出 CSV」使用同一份筛选条件，
+超过单次上限时会明确提示已截断并要求收窄条件。
 
 ### 对应接口
 
 | 接口 | 用途 |
 | --- | --- |
 | `GET /backend-api/api/tracing/types` | 列出已注册的追踪器类型（当前只有 `llm`） |
-| `POST /backend-api/api/tracing/llm/traces` | 分页查询，body 支持 `page`、`page_size`、`model_id`、`backend_name`、`status` |
+| `POST /backend-api/api/tracing/llm/traces` | 分页查询，body 支持 `page`、`page_size`、`model_id`、`backend_name`、`provider`、`status`、`error_category`、`usage_source`、`correlation_id`、`start_time`、`end_time`、`query` |
 | `GET /backend-api/api/tracing/llm/detail/<trace_id>` | 单条详情 |
-| `GET /backend-api/api/tracing/llm/statistics` | 总览 + 近 30 天每日统计 + 按模型分组统计 |
+| `GET /backend-api/api/tracing/llm/statistics` | 总览（含成本）+ 首字节/尝试次数摘要 + 每日与每小时分桶 + 按模型/后端/供应商/用量来源/失败类型分组，支持同一套筛选参数与 `timezone` |
+| `POST /backend-api/api/tracing/llm/export` | 导出筛选结果，`format` 为 `json` 或 `csv`，`limit` 1–10000 |
+| `GET /backend-api/api/llm/resilience/status` | 各 Provider 的熔断状态与最近尝试快照 |
 | `WS /tracing/ws` | 实时推送新的追踪事件 |
 
 ```bash
@@ -89,6 +113,30 @@ curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/js
   -d '{"page":1,"page_size":20,"status":"failed"}' \
   http://127.0.0.1:8080/backend-api/api/tracing/llm/traces
 ```
+
+### 投递时间线：回答「为什么这条回复慢」
+
+LLM 追踪只覆盖模型调用那一段。一条回复从收到消息到发出去还有排队、排版与发送，
+这些阶段记在 `IMMessage` 的投递时间线上（`kirara_ai/im/message.py`）：
+
+| 阶段 | 含义 |
+| --- | --- |
+| `received_event` | 适配器收到 IM 事件 |
+| `workflow_started` | 工作流 / Agent 开始执行 |
+| `llm_first_byte` | 模型首字节（非流式请求没有这一项，不会伪造） |
+| `llm_completed` | 模型输出完成 |
+| `formatting_started` / `formatting_completed` | 排版与分页，附分段数量 |
+| `send_started` | 开始调用平台接口 |
+| `send_succeeded` / `send_failed` | 发送结果，附重试次数与错误类型 |
+
+`delivery_durations()` 据此换算出 `queue_seconds`、`llm_first_byte_seconds`、
+`llm_generation_seconds`、`formatting_seconds`、`send_seconds`、`total_seconds`。
+**缺少证据的阶段不会输出**，不会用 0 顶替。四个渠道使用同一套阶段命名，
+可以横向比较同一问题在 QQ、Telegram、WeCom 上的耗时分布。
+
+时间线会随 `IMMessage.to_dict()` 一起序列化，可进日志或接口响应；
+`WorkflowDispatcher` 在 DEBUG 级别打印一行各阶段耗时汇总。
+QQ 侧的具体排查顺序见 [`QQ_ONEBOT_OPERATIONS.md`](QQ_ONEBOT_OPERATIONS.md) 第七节。
 
 ### 追踪覆盖不到的部分
 
@@ -286,9 +334,30 @@ curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/js
 
 - **没有匿名指标/监控端点**：没有 Prometheus `/metrics`；readiness 与 `GET /backend-api/api/system/status` 都需要鉴权，不适合直接作为匿名容器探针。
 - **没有工作流执行历史**：跑过哪些工作流、每个节点花了多久、中间值是什么，都没有持久化。只有 LLM 请求那一层有记录。
-- **没有分布式追踪**：`trace_id` 只在 LLM 请求内部有意义，不会串起「一条消息 → 一次调度 → 一次工作流 → 多次 LLM 调用」的完整链路。
+- **投递时间线不落库**：各阶段耗时可以序列化、可以进日志，但没有持久化表，
+  因此**不能**按时间范围回查「上周 QQ 的平均发送耗时」。要长期留存需要自己
+  在适配器发送完成后把 `to_dict()["delivery_durations"]` 写到自己的存储里。
+- **没有分布式追踪**：`trace_id` 只在 LLM 请求内部有意义，`correlation_id` 能把
+  同一回合的多次 LLM 调用串起来，但不会串成「一条消息 → 一次调度 → 一次工作流」的完整链路。
 - **没有告警**：日志和追踪都只是被动记录，框架不会主动通知。
 - **`WorkflowExecutionBegin` / `WorkflowExecutionEnd` 没有内置消费者**：事件确实发出来了，但要用起来必须自己写插件监听。
 - **日志广播的下限是 `INFO`**：WebUI 控制台看不到 `DEBUG`。
 
 前三条要补齐都需要写代码（监听 `WorkflowExecutionEnd` 落库 + 加一组只读接口），不是配置开关能打开的。
+
+### 关于 token 用量与熔断状态的两点说明
+
+这两项曾经属于「不存在的能力」，现在已经具备，但它们的**精度边界**必须写清楚：
+
+- **`usage_source` 会出现 `estimated`**。供应商不返回 usage 时，
+  `kirara_ai/llm/token_estimator.py` 会给出一个脚本感知的估算值
+  （CJK 按字符计，拉丁按约 4 字符 1 token，标点各计 1），并标记为 `estimated`。
+  它**不是**任何具体词表的精确复现，不能当作账单依据；用它是因为
+  「0」是一个错误的断言，而「估算并标明是估算」不是。
+  完全没有可测内容时仍保持 `unknown`，不会硬造数字。
+- **熔断状态会跨重启保留**。`data/llm/circuit-state.json` 只持久化
+  「已打开 / 半开」的熔断器及其打开时刻；恢复等待时间在停机期间继续流逝，
+  因此重启不会让等待从头开始。**结果环形缓冲区不持久化**：错误率描述的是最近的
+  真实流量，把重启前的窗口搬回来会让一个现在健康的上游被过期样本重新熔断。
+  重启后由连续失败阈值接手。状态文件超过 24 小时或损坏时直接忽略。
+  多 worker 部署下各进程仍各写各的文件，跨进程共享熔断状态仍未实现。

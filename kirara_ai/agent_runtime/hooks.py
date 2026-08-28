@@ -19,7 +19,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from .core import AgentDefinition, ChannelContext, ResourceBinding, ResourceSnapshot
+from .core import (
+    AgentDefinition,
+    ChannelContext,
+    ResourceBinding,
+    ResourceSnapshot,
+    principal_can_control_agent,
+)
 
 
 HOOK_EVENTS = frozenset(
@@ -123,6 +129,22 @@ class _HookSpec:
     required_capabilities: frozenset[str] = frozenset()
     required_permissions: frozenset[str] = frozenset()
     deny: bool = False
+    #: 工具名匹配表达式；``None`` 表示该事件适用于所有调用（与历史行为一致）。
+    matcher: Optional[str] = None
+
+    def matches_tool(self, tool_name: Optional[str]) -> bool:
+        """Decide whether this event applies to the tool in the payload.
+
+        没有声明 matcher 时保持原有的「全部适用」行为，既有声明不受影响。
+        声明了 matcher 但事件里没有工具名（例如 ``SessionStart``）时不触发：
+        一个按工具限定的 Hook 不应该在无关事件上执行。
+        匹配采用整名匹配，``Bash`` 不会命中 ``BashOutput``。
+        """
+        if self.matcher is None:
+            return True
+        if not tool_name:
+            return False
+        return re.fullmatch(self.matcher, str(tool_name)) is not None
 
 
 @dataclass(frozen=True)
@@ -175,6 +197,108 @@ class AgentHookRuntime:
         if not key or not re.fullmatch(r"[A-Za-z0-9._:-]+", key):
             raise ValueError("hook handler name is invalid")
         self.handlers[key] = handler if isinstance(handler, HookHandler) else HookHandler(handler)
+
+    def describe_binding(self, binding: ResourceBinding) -> dict[str, Any]:
+        """Describe one hook resource's declared events without executing anything.
+
+        Hook 此前只能「装上再看它会不会跑」：声明里写错事件名、matcher 写成非法
+        正则、把 `command` 写进不该写的位置，全部只能在真实请求里暴露，
+        而那时它已经在生产路径上了。这个只读描述让界面在启用前就能列出
+        「哪些事件会触发、限定了哪些工具、是否需要进程执行权限」。
+
+        不执行任何 handler、不启动任何进程；解析失败时返回错误说明而不是抛出，
+        以便一个坏声明不会让整份列表打不开。
+        """
+        summary: dict[str, Any] = {
+            "resource_id": binding.resource_id,
+            "version": binding.version,
+            "enabled": bool(binding.enabled),
+            "events": [],
+        }
+        try:
+            declaration = self._read_declaration(binding)
+        except Exception as error:  # noqa: BLE001 - 坏声明不应影响其余条目
+            summary["error"] = f"{type(error).__name__}: {str(error)[:160]}"
+            return summary
+
+        declared = declaration.get("events")
+        if not isinstance(declared, Mapping):
+            summary["error"] = "hook declaration must contain an events object"
+            return summary
+
+        for event in sorted(str(name) for name in declared):
+            entry: dict[str, Any] = {"event": event}
+            if event not in HOOK_EVENTS:
+                entry["error"] = "unsupported event"
+                summary["events"].append(entry)
+                continue
+            try:
+                spec = self._spec_for_event(binding, declaration, event)
+            except Exception as error:  # noqa: BLE001 - 单个事件的错误单独呈现
+                entry["error"] = f"{type(error).__name__}: {str(error)[:160]}"
+                summary["events"].append(entry)
+                continue
+            if spec is None:
+                # 显式声明了但被 enabled=false 关停。
+                entry["enabled"] = False
+                summary["events"].append(entry)
+                continue
+            entry.update(
+                {
+                    "enabled": True,
+                    "kind": spec.kind,
+                    "matcher": spec.matcher,
+                    "timeout_ms": spec.timeout_ms,
+                    "max_output_bytes": spec.max_output_bytes,
+                    "deny": spec.deny,
+                    "requires_process_execution": spec.kind == "command",
+                    "required_capabilities": sorted(spec.required_capabilities),
+                    "required_permissions": sorted(spec.required_permissions),
+                }
+            )
+            summary["events"].append(entry)
+        return summary
+
+    def preview_event(
+        self,
+        binding: ResourceBinding,
+        event: str,
+        *,
+        tool_name: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Answer "would this hook run for this tool?" without running it.
+
+        这是 dry-run 的核心问题。返回 ``would_run`` 及其原因，
+        因此用户能在把 Hook 放到生产路径之前验证 matcher 是否如预期收窄。
+        """
+        if event not in HOOK_EVENTS:
+            return {"would_run": False, "reason": "unsupported_event"}
+        if not binding.enabled:
+            return {"would_run": False, "reason": "binding_disabled"}
+        try:
+            declaration = self._read_declaration(binding)
+            spec = self._spec_for_event(binding, declaration, event)
+        except Exception as error:  # noqa: BLE001 - 预览不应把异常抛给调用方
+            return {
+                "would_run": False,
+                "reason": "declaration_invalid",
+                "error": f"{type(error).__name__}: {str(error)[:160]}",
+            }
+        if spec is None:
+            return {"would_run": False, "reason": "event_not_declared_or_disabled"}
+        if not spec.matches_tool(tool_name):
+            return {
+                "would_run": False,
+                "reason": "matcher_not_matched",
+                "matcher": spec.matcher,
+            }
+        return {
+            "would_run": True,
+            "kind": spec.kind,
+            "matcher": spec.matcher,
+            "deny": spec.deny,
+            "requires_process_execution": spec.kind == "command",
+        }
 
     async def run_event(
         self,
@@ -234,6 +358,19 @@ class AgentHookRuntime:
                         context,
                         "skipped",
                         "event_not_declared",
+                        correlation_id=correlation_id,
+                    )
+                    continue
+
+                # 按工具名过滤：一个只针对某个危险工具写的 PreToolUse Hook
+                # 不应该在每次无关的工具调用上都被拉起来执行。
+                if not spec.matches_tool((payload or {}).get("tool_name")):
+                    self._audit(
+                        event,
+                        binding,
+                        context,
+                        "skipped",
+                        "matcher_not_matched",
                         correlation_id=correlation_id,
                     )
                     continue
@@ -399,6 +536,15 @@ class AgentHookRuntime:
         if not isinstance(raw, dict):
             raise ValueError("hook event declaration must be an object")
 
+        # 单个事件可以在不删除整个 Hook 的情况下关停；此前只能改文件重装。
+        raw_enabled = raw.get("enabled", True)
+        if not isinstance(raw_enabled, bool):
+            raise ValueError("hook event enabled flag must be a boolean")
+        if not raw_enabled:
+            return None
+
+        matcher = self._matcher_value(raw.get("matcher"))
+
         raw_kind = raw.get("type")
         if raw_kind is None:
             kind = "handler" if raw.get("handler") is not None else "command"
@@ -461,7 +607,39 @@ class AgentHookRuntime:
             required_capabilities=frozenset(required_capabilities),
             required_permissions=frozenset(required_permissions),
             deny=bool(raw.get("deny", False)),
+            matcher=matcher,
         )
+
+    @staticmethod
+    def _matcher_value(value: Any) -> Optional[str]:
+        """Normalize a tool matcher into one anchored regular expression.
+
+        接受两种写法，与 Claude Code / CC Switch 的 Hook 声明保持一致：
+        单个正则字符串（``"Edit|Write"``），或工具名列表（``["Bash", "Write"]``）。
+        列表会被转成对各名称做字面量转义后的并集，避免工具名里的 ``.`` 被当通配符。
+        """
+        if value is None:
+            return None
+        if isinstance(value, str):
+            pattern = value.strip()
+            if not pattern:
+                raise ValueError("hook event matcher cannot be empty")
+        elif isinstance(value, (list, tuple)):
+            names = [str(item).strip() for item in value if str(item).strip()]
+            if not names:
+                raise ValueError("hook event matcher cannot be empty")
+            if len(names) > _MAX_COMMAND_PARTS:
+                raise ValueError("hook event matcher has too many entries")
+            pattern = "|".join(re.escape(name) for name in names)
+        else:
+            raise ValueError("hook event matcher must be a string or a list of tool names")
+        if len(pattern) > 1024:
+            raise ValueError("hook event matcher is too long")
+        try:
+            re.compile(pattern)
+        except re.error as error:
+            raise ValueError("hook event matcher is not a valid pattern") from error
+        return pattern
 
     def _check_capabilities(
         self,
@@ -478,8 +656,13 @@ class AgentHookRuntime:
             raise PermissionError("hook capabilities are not granted to the Agent")
         if not set(binding.permissions).issubset(_SUPPORTED_PERMISSIONS):
             raise PermissionError("hook binding contains an unsupported permission")
-        if spec.kind == "command" and not self.process_execution_enabled:
-            raise PermissionError("command Hook execution is disabled by runtime policy")
+        if spec.kind == "command":
+            if not principal_can_control_agent(agent.owner_subject):
+                raise PermissionError(
+                    "command Hook requires the matching Agent creator"
+                )
+            if not self.process_execution_enabled:
+                raise PermissionError("command Hook execution is disabled by runtime policy")
 
     async def _invoke(
         self,

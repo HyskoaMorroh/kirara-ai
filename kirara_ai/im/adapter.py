@@ -26,9 +26,41 @@ class IMActionTimeoutError(asyncio.TimeoutError):
 
 
 class AdapterHealthSnapshot(BaseModel):
-    """Secret-free connection health exposed by capable IM adapters."""
+    """Secret-free connection health exposed by capable IM adapters.
 
-    status: Literal["connected", "waiting", "disconnected", "stale"]
+    ``status`` deliberately separates situations that a restart cycle makes look
+    identical from the outside:
+
+    - ``initializing`` — the process is up but the adapter has not finished
+      ``start()``; nothing is wrong yet.
+    - ``waiting`` — the adapter is listening and the upstream implementation has
+      simply not dialed in yet.
+    - ``connected`` — at least one account is live.
+    - ``stale`` — an established link stopped sending heartbeats.
+    - ``credential_rejected`` — the upstream reached us and was refused on its
+      access token; retrying will not help until the token is fixed.
+    - ``upstream_refused`` — the upstream reached us with a handshake we cannot
+      accept (missing or unsupported role, missing account id).
+    - ``disconnected`` — the adapter is stopped.
+
+    ``last_disconnect_reason`` is a stable, secret-free enum-like string (never a
+    raw upstream message) so an operator can tell "not dialed in yet" apart from
+    "dialed in and was rejected" without reading server logs.
+
+    The three legacy statuses (``connected``, ``waiting``, ``disconnected``,
+    ``stale``) keep their exact meaning, so an existing consumer that only knows
+    those keeps working; new states are additive.
+    """
+
+    status: Literal[
+        "connected",
+        "waiting",
+        "disconnected",
+        "stale",
+        "initializing",
+        "credential_rejected",
+        "upstream_refused",
+    ]
     connected_account_count: int = Field(default=0, ge=0)
     last_heartbeat_age_seconds: Optional[float] = Field(default=None, ge=0)
     adapter_started: Optional[bool] = None
@@ -38,6 +70,17 @@ class AdapterHealthSnapshot(BaseModel):
             "unknown",
             "upstream_reported_online",
             "upstream_reported_offline",
+        ]
+    ] = None
+    last_disconnect_reason: Optional[
+        Literal[
+            "access_token_missing",
+            "access_token_mismatch",
+            "invalid_client_role",
+            "missing_self_id",
+            "heartbeat_timeout",
+            "upstream_lifecycle_disconnect",
+            "adapter_stopped",
         ]
     ] = None
     outbox: Optional[Dict[str, int]] = None

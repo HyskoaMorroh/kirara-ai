@@ -230,6 +230,8 @@ class ResourceSourceService:
                     "directory": directory,
                     "name": metadata["name"] or directory_path.name,
                     "description": metadata["description"],
+                    # 让「发现」阶段就能看到上游声明的版本，而不是等装完才知道。
+                    "version": metadata["version"],
                     "source_url": f"https://github.com/{owner}/{name}/tree/{urllib.parse.quote(branch, safe='/')}/{directory}",
                 }
             )
@@ -275,7 +277,8 @@ class ResourceSourceService:
             resource_id=resource_id,
             source_key=generated_source_key,
             source_url=self._skill_source_url(owner, name, branch, resolved_directory),
-            version="1.0.0",
+            # 采用上游 SKILL.md 声明的版本；缺失或不可解析时回落到 1.0.0。
+            version=metadata["version"],
             metadata={
                 "provider": "github",
                 "owner": owner,
@@ -312,7 +315,27 @@ class ResourceSourceService:
         results: list[dict[str, Any]] = []
         for resource in resources:
             metadata = resource.get("source_metadata") or {}
-            if not isinstance(metadata, Mapping) or metadata.get("provider") != "github":
+            if not isinstance(metadata, Mapping):
+                continue
+            provider = metadata.get("provider")
+            if provider != "github":
+                # catalog 与 skills.sh 安装的 Skill 也应有更新出口：此前直接跳过，
+                # 于是这些来源装完就再也检查不到更新，界面上只会显示「无更新」。
+                results.append(
+                    {
+                        "resource_id": resource.get("resource_id"),
+                        "source_key": resource.get("source_key"),
+                        "current_version": resource.get("current_version"),
+                        "current_content_sha256": resource.get("content_sha256"),
+                        "remote_content_sha256": None,
+                        "update_available": False,
+                        "update_channel_supported": False,
+                        "source_provider": str(provider) if provider else None,
+                        "error": (
+                            "该来源暂不支持自动检查更新；请从来源页面重新安装以获取新版本"
+                        ),
+                    }
+                )
                 continue
             owner = str(metadata.get("owner", ""))
             repository = str(metadata.get("repository", ""))
@@ -335,7 +358,12 @@ class ResourceSourceService:
                         "current_content_sha256": current_hash,
                         "remote_content_sha256": remote_hash,
                         "update_available": remote_hash != current_hash,
-                        "next_version": self._next_version(resource["current_version"]),
+                        "update_channel_supported": True,
+                        "source_provider": "github",
+                        "next_version": self._next_version(
+                            resource["current_version"],
+                            remote_version=remote_metadata.get("version"),
+                        ),
                         "source_metadata": {
                             "provider": "github",
                             "owner": owner,
@@ -358,6 +386,8 @@ class ResourceSourceService:
                         "current_content_sha256": resource.get("content_sha256"),
                         "remote_content_sha256": None,
                         "update_available": False,
+                        "update_channel_supported": True,
+                        "source_provider": "github",
                         "error": self._safe_source_error(error),
                     }
                 )
@@ -389,7 +419,10 @@ class ResourceSourceService:
             resource_id=resource_id,
             source_key=source_key,
             source_url=self._skill_source_url(owner, repository, branch, resolved_directory),
-            version=self._next_version(resource["current_version"]),
+            version=self._next_version(
+                resource["current_version"],
+                remote_version=skill_metadata.get("version"),
+            ),
             metadata={
                 "provider": "github",
                 "owner": owner,
@@ -542,11 +575,38 @@ class ResourceSourceService:
         ).hexdigest()
 
     @classmethod
-    def _next_version(cls, current_version: str) -> str:
+    def _next_version(
+        cls,
+        current_version: str,
+        *,
+        remote_version: str | None = None,
+    ) -> str:
+        """Choose the version to install for a repository-sourced Skill.
+
+        原实现只做本地 patch 递增，忽略上游 SKILL.md 里声明的 ``version``：
+        安装恒为 ``1.0.0``，更新恒为 ``1.0.1``、``1.0.2``……于是
+        ``ResourceLifecycleService`` 的降级保护（比较 semver）对远端 Skill 形同虚设——
+        把上游旧版本重新装回来会被当成升级接受。
+
+        现在优先采用上游声明的版本，但只在它确实高于已装版本时采用；
+        上游没写版本、版本不可解析或版本反而变低时，仍退回本地 patch 递增，
+        保证「内容变了但版本没动」的仓库依然能装进一个新版本。
+        """
         try:
             parsed = Version(str(current_version))
-        except InvalidVersion as error:
-            raise ResourceSourceError("installed resource version is invalid") from error
+        except InvalidVersion:
+            parsed = None
+
+        if remote_version:
+            try:
+                remote = Version(str(remote_version))
+            except InvalidVersion:
+                remote = None
+            if remote is not None and (parsed is None or remote > parsed):
+                return str(remote)
+
+        if parsed is None:
+            raise ResourceSourceError("installed resource version is invalid")
         release = parsed.release
         major, minor, patch = (release + (0, 0, 0))[:3]
         return f"{major}.{minor}.{patch + 1}"
@@ -671,22 +731,38 @@ class ResourceSourceService:
 
     @staticmethod
     def _parse_skill_front_matter(content: bytes) -> dict[str, str]:
+        """Read ``name`` / ``description`` / ``version`` from a Skill's front matter.
+
+        ``version`` 此前完全没有被读取，安装时写死 ``1.0.0``。这里把上游声明的
+        版本取出来，不可解析或缺失时回落到 ``1.0.0``，让「上游声明什么版本」这件事
+        第一次真正进入版本决策。
+        """
+        default_version = "1.0.0"
         try:
             text = content.decode("utf-8")
         except UnicodeDecodeError as error:
             raise ResourceSourceError("SKILL.md must be UTF-8 text") from error
+        empty = {"name": "", "description": "", "version": default_version}
         if not text.startswith("---"):
-            return {"name": "", "description": ""}
+            return dict(empty)
         lines = text.splitlines()
         try:
             end = next(index for index, line in enumerate(lines[1:], 1) if line.strip() == "---")
         except StopIteration:
-            return {"name": "", "description": ""}
-        values: dict[str, str] = {"name": "", "description": ""}
+            return dict(empty)
+        values: dict[str, str] = dict(empty)
         for line in lines[1:end]:
             key, separator, value = line.partition(":")
             if separator and key.strip() in values:
                 values[key.strip()] = value.strip().strip("'\"")[:1000]
+        if not values["version"]:
+            values["version"] = default_version
+        else:
+            try:
+                Version(values["version"])
+            except InvalidVersion:
+                # 版本写得不合规范时不能中断安装，退回默认值即可。
+                values["version"] = default_version
         return values
 
     @staticmethod

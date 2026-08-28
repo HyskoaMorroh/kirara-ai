@@ -18,6 +18,7 @@ from wechatpy.exceptions import InvalidSignatureException
 from wechatpy.messages import BaseMessage
 from wechatpy.replies import create_reply
 
+from kirara_ai.config import DATA_PATH
 from kirara_ai.database import DatabaseManager
 from kirara_ai.im.adapter import IMAdapter
 from kirara_ai.im.message import (FileElement, ImageMessage, IMMessage, MessageElement, TextMessage, VideoElement,
@@ -30,7 +31,10 @@ from kirara_ai.workflow.core.dispatch.dispatcher import WorkflowDispatcher
 from .delegates import CorpWechatApiDelegate, PublicWechatApiDelegate, WechatApiDelegate, markdown_to_plain_text, split_long_message
 from .outbox import WecomDeliveryResult, WecomOutboxService
 
-WECOM_TEMP_DIR = os.path.join(os.getcwd(), 'data', 'temp', 'wecom')
+# 媒体临时目录必须挂在 DATA_PATH 下：此前用 os.getcwd() 拼接，
+# 一旦容器工作目录与数据卷挂载点不同，临时文件就会落在卷外，
+# 既进不了备份，也会在每次重建容器时丢失。
+WECOM_TEMP_DIR = os.path.join(DATA_PATH, 'temp', 'wecom')
 
 WEBHOOK_URL_PREFIX = "/im/webhook/wechat"
 
@@ -632,7 +636,13 @@ class WecomAdapter(IMAdapter):
         delivery_id: Optional[str] = None,
     ):
         """Render and persist every WeCom send unit before network I/O."""
+        message.record_delivery_stage("formatting_started", adapter="wecom")
         recipient_key, units, text_reply = await self._render_send_units(message, recipient)
+        message.record_delivery_stage(
+            "formatting_completed",
+            adapter="wecom",
+            segment_count=len(units),
+        )
         if not units:
             reply_task = self._get_reply_task(recipient)
             if reply_task is not None and not reply_task.done():
@@ -663,17 +673,20 @@ class WecomAdapter(IMAdapter):
             unit_ids.append(unit_id)
             outbox.enqueue(unit_id, recipient_key, unit.action, unit.params)
 
+        message.record_delivery_stage("send_started", adapter="wecom")
+        results: list[WecomDeliveryResult] = []
         try:
             for unit_id in unit_ids:
                 result = await outbox.deliver(unit_id)
+                results.append(result)
                 if result.status != "accepted":
                     raise self._delivery_error(result)
             if reply_task is not None and not reply_task.done():
-                reply_task.set_result(text_reply)
+                reply_task.set_result(None)
             if recipient.raw_metadata:
                 reply_id = recipient.raw_metadata.get("reply")
                 if reply_id is not None:
-                    outbox.complete_inbound(str(reply_id), text_reply)
+                    outbox.complete_inbound(str(reply_id), None)
         except Exception as exc:
             if "Error code: 48001" in str(exc):
                 if reply_task is not None and not reply_task.done():
@@ -681,13 +694,39 @@ class WecomAdapter(IMAdapter):
                         "未开通主动回复能力，将采用被动回复消息 API，此模式下只能回复一条消息。"
                     )
                     reply_task.set_result(text_reply)
+                    message.record_delivery_stage(
+                        "send_succeeded",
+                        adapter="wecom",
+                        retry_count=sum(
+                            max(0, item.attempt_count - 1) for item in results
+                        ),
+                        delivery_mode="passive_reply",
+                    )
                     return
                 self.logger.warning("未开通主动回复能力，且不在上下文中，无法发送消息。")
-                return
+                message.record_delivery_stage(
+                    "send_failed",
+                    adapter="wecom",
+                    error_type=type(exc).__name__,
+                    retry_count=sum(
+                        max(0, item.attempt_count - 1) for item in results
+                    ),
+                )
+                raise
             self.logger.error(f"Failed to send message: {exc}")
-            if reply_task is not None and not reply_task.done():
-                reply_task.set_result(text_reply)
+            message.record_delivery_stage(
+                "send_failed",
+                adapter="wecom",
+                error_type=type(exc).__name__,
+                retry_count=sum(max(0, item.attempt_count - 1) for item in results),
+            )
             raise
+        message.record_delivery_stage(
+            "send_succeeded",
+            adapter="wecom",
+            retry_count=sum(max(0, item.attempt_count - 1) for item in results),
+            delivery_mode="active",
+        )
 
     async def _start_standalone_server(self):
         """启动服务"""

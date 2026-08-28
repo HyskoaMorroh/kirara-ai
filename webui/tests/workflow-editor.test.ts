@@ -154,6 +154,27 @@ describe('workflow editor history', () => {
     expect(viewState.value.name).toBe('after')
   })
 
+  it('keeps performActionWithoutHistory available through the public intent', () => {
+    const intent = workflowEditorModel.getIntent()
+    const viewState = workflowEditorModel.getViewState()
+    intent.initialize({
+      blocks: [],
+      wires: [],
+      blockTypes: [],
+      name: 'before',
+      workflowId: 'user:public-suppression',
+      config: { max_execution_time: 0 }
+    })
+
+    intent.performActionWithoutHistory(() => {
+      intent.saveToHistory()
+      intent.updateName('after')
+    })
+
+    expect(viewState.value.canUndo).toBe(false)
+    expect(viewState.value.name).toBe('after')
+  })
+
   it('restores history saving after a suppressed action throws', () => {
     const viewState = workflowEditorModel.getViewState()
 

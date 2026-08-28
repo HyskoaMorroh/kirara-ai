@@ -34,7 +34,10 @@ vi.mock('naive-ui', () => ({
   NCard: { template: '<div><slot /></div>' }
 }))
 
-vi.mock('../src/api/llm', () => ({ llmApi }))
+vi.mock('../src/api/llm', async () => {
+  const actual = await vi.importActual<typeof import('../src/api/llm')>('../src/api/llm')
+  return { resilienceDefaults: actual.resilienceDefaults, llmApi }
+})
 
 const backend = (name: string, adapter: string): LLMBackend => ({
   name,

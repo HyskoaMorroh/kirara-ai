@@ -16,7 +16,10 @@ from mcp.shared.session import RequestResponder
 
 from kirara_ai.config.global_config import GlobalConfig, MCPServerConfig
 from kirara_ai.config import DATA_PATH
-from kirara_ai.agent_runtime.core import resolve_mcp_tool_allowlist
+from kirara_ai.agent_runtime.core import (
+    principal_can_control_agent,
+    resolve_mcp_tool_allowlist,
+)
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.logger import get_logger
 from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
@@ -572,6 +575,7 @@ class MCPServerManager:
         *,
         agent_allowlist: Optional[set[str] | frozenset[str]] = None,
         agent_mcp_server_ids: Optional[Iterable[str]] = None,
+        agent_owner_subject: Optional[str] = None,
         session_allowlist: Optional[set[str] | frozenset[str]] = None,
         workflow_allowlist: Optional[set[str] | frozenset[str]] = None,
         confirmed: bool = False,
@@ -590,6 +594,16 @@ class MCPServerManager:
         started_at = time.monotonic()
         entry = self.tools_cache.get(tool_name)
         server_id = entry.server_id if entry is not None else "unavailable"
+        if not principal_can_control_agent(agent_owner_subject):
+            logger.warning("Rejected unauthorized host MCP tool execution")
+            self._audit_operation(
+                server_id,
+                "call_tool",
+                started_at,
+                "host_unauthorized",
+                correlation_id=correlation_id,
+            )
+            return None
         result = self.get_tool_server(tool_name)
         if not result:
             logger.error(f"Tool {tool_name} not found or server not available")
@@ -698,9 +712,14 @@ class MCPServerManager:
             return None
 
     @staticmethod
-    def _tool_requires_confirmation(tool_info: types.Tool) -> bool:
-        """Gate destructive MCP annotations and local confirmation metadata."""
+    def tool_requires_confirmation(tool_info: types.Tool) -> bool:
+        """Public predicate for callers that must decide before invoking a tool.
 
+        The HTTP route needs this to issue a confirmation token, and the runtime
+        needs it to refuse an unconfirmed call. It was reachable only as a private
+        method, which made the boundary look accidental; the behavior is
+        unchanged and the old private name is kept as an alias.
+        """
         annotations = getattr(tool_info, "annotations", None)
         if annotations is not None and getattr(annotations, "destructiveHint", False) is True:
             return True
@@ -708,6 +727,9 @@ class MCPServerManager:
         if not isinstance(metadata, dict):
             return False
         return metadata.get("requires_confirmation") is True
+
+    # 兼容既有调用方（含外部插件）：保留原私有名，行为完全一致。
+    _tool_requires_confirmation = tool_requires_confirmation
         
     async def _update_prompts_cache(self, server_id: str) -> bool:
         """

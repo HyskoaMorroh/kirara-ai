@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useMessage, NModal, NCard } from 'naive-ui'
-import { llmApi } from '@/api/llm'
+import { llmApi, resilienceDefaults } from '@/api/llm'
 import type { LLMBackend, ConfigSchema } from '@/api/llm'
 import type { ModelInfo } from '@/components/form/types'
 import { useLatestRequest } from '@/composables/useLatestRequest'
@@ -140,7 +140,9 @@ const handleAdapterSelect = async (adapter: LLMBackend) => {
     enable: true,
     models: []
   }
-  currentAdapter.value = { ...adapter }
+  // 后端返回的字段优先；只对旧数据缺失的容错字段补默认值，
+  // 避免保存时把未声明的字段提交成 undefined 而被后端重置。
+  currentAdapter.value = { ...resilienceDefaults(), ...adapter }
   originalAdapterName.value = adapter.name
 }
 
@@ -151,7 +153,8 @@ const handleCreateAdapter = async (adapter: string | null = null) => {
     adapter: adapter ?? '',
     config: {},
     enable: true,
-    models: []
+    models: [],
+    ...resilienceDefaults()
   }
   // 创建新配置时，清空原始名称
   originalAdapterName.value = ''

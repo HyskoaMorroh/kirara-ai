@@ -3,15 +3,25 @@ import { computed, onMounted, ref } from 'vue'
 import { NAlert, NButton, NInput, NInputNumber, NSelect, NSwitch, NTag } from 'naive-ui'
 
 import {
+  clearSessionHistory,
   createAgentConfiguration,
+  deleteSession,
   listAgents,
+  listHookDeclarations,
+  listPendingConfirmations,
+  listSessions,
+  previewHookEvent,
   updateAgentConfiguration,
   type AgentChannel,
   type AgentConfigurationRequest,
   type AgentRelations,
   type AgentResourceBindingInput,
   type AgentResourceType,
-  type AgentSummary
+  type AgentSummary,
+  type HookDeclarationSummary,
+  type HookPreviewResult,
+  type PendingConfirmation,
+  type SessionSummary
 } from '@/api/agent'
 import { listResources } from '@/api/resource'
 import type { ManagedResource } from '@/api/resource'
@@ -58,6 +68,32 @@ const agentLoadError = ref('')
 const resourceLoadError = ref('')
 const errorMessage = ref('')
 const savedMessage = ref('')
+
+/**
+ * 会话与待确认队列。
+ *
+ * 会话此前只有一个手填的绑定输入框：既列不出实际存在的会话，也看不到
+ * 有没有操作卡在待确认上。这里补上只读列表与清理动作；后端只返回
+ * 计数与时间戳，不含任何对话正文或工具参数。
+ */
+const sessions = ref<SessionSummary[]>([])
+const confirmations = ref<PendingConfirmation[]>([])
+const sessionsLoading = ref(false)
+const sessionsError = ref('')
+const sessionBusyId = ref('')
+
+/**
+ * Hook 声明与 dry-run。
+ *
+ * Hook 此前只能「装上再看它会不会跑」：事件名写错、matcher 写成非法正则、
+ * 把 command 写进不该写的位置，都只能在真实请求里暴露——而那时它已经在
+ * 生产路径上了。这里列出每个 Hook 声明的事件，并允许输入一个工具名做预演。
+ */
+const hooks = ref<HookDeclarationSummary[]>([])
+const hooksLoading = ref(false)
+const hooksError = ref('')
+const previewToolName = ref('')
+const previewResults = ref<Record<string, HookPreviewResult>>({})
 const providerText = ref('')
 const capabilitiesText = ref('')
 const mcpAllowlistText = ref('')
@@ -339,7 +375,103 @@ async function save() {
 
 onMounted(() => {
   void load()
+  void loadSessions()
+  void loadHooks()
 })
+
+/** 读取所有 Hook 的声明摘要；未部署 Agent 运行时返回 503。 */
+async function loadHooks() {
+  hooksLoading.value = true
+  hooksError.value = ''
+  try {
+    const response = await listHookDeclarations()
+    hooks.value = response.items
+  } catch (error) {
+    hooks.value = []
+    hooksError.value =
+      error instanceof Error ? error.message : 'Hook 声明加载失败，请稍后重试。'
+  } finally {
+    hooksLoading.value = false
+  }
+}
+
+/** 对一个 Hook 的某个事件做预演；不会执行 handler，也不会启动进程。 */
+async function runHookPreview(hook: HookDeclarationSummary, event: string) {
+  const key = `${hook.resource_id}::${event}`
+  try {
+    previewResults.value = {
+      ...previewResults.value,
+      [key]: await previewHookEvent(
+        hook.resource_id,
+        event,
+        previewToolName.value.trim() || undefined
+      )
+    }
+  } catch (error) {
+    previewResults.value = {
+      ...previewResults.value,
+      [key]: {
+        would_run: false,
+        reason: 'request_failed',
+        error: error instanceof Error ? error.message : '预演失败'
+      }
+    }
+  }
+}
+
+function previewFor(hook: HookDeclarationSummary, event: string) {
+  return previewResults.value[`${hook.resource_id}::${event}`]
+}
+
+/** 读取会话列表与待确认队列；未部署 Agent 运行时会返回 503，此时给出可读说明。 */
+async function loadSessions() {
+  sessionsLoading.value = true
+  sessionsError.value = ''
+  try {
+    const [sessionResponse, confirmationResponse] = await Promise.all([
+      listSessions(),
+      listPendingConfirmations()
+    ])
+    sessions.value = sessionResponse.items
+    confirmations.value = confirmationResponse.items
+  } catch (error) {
+    sessions.value = []
+    confirmations.value = []
+    sessionsError.value =
+      error instanceof Error ? error.message : '会话列表加载失败，请稍后重试。'
+  } finally {
+    sessionsLoading.value = false
+  }
+}
+
+async function handleClearHistory(session: SessionSummary) {
+  sessionBusyId.value = session.session_id
+  try {
+    await clearSessionHistory(session.session_id)
+    await loadSessions()
+  } catch (error) {
+    sessionsError.value = error instanceof Error ? error.message : '清空会话历史失败'
+  } finally {
+    sessionBusyId.value = ''
+  }
+}
+
+async function handleDeleteSession(session: SessionSummary) {
+  sessionBusyId.value = session.session_id
+  try {
+    await deleteSession(session.session_id)
+    await loadSessions()
+  } catch (error) {
+    sessionsError.value = error instanceof Error ? error.message : '删除会话失败'
+  } finally {
+    sessionBusyId.value = ''
+  }
+}
+
+/** 会话 ID 是 64 位摘要，界面上只显示前 12 位，完整值放到 title 里。 */
+function shortSessionId(sessionId: string) {
+  return sessionId.slice(0, 12)
+}
 </script>
 
 <template>
@@ -479,6 +611,168 @@ onMounted(() => {
             </div>
           </div>
         </section>
+
+        <section class="editor-section" aria-labelledby="session-management-title">
+          <div class="section-heading">
+            <div>
+              <h3 id="session-management-title">会话与待确认</h3>
+              <p>
+                已持久化的会话及其历史长度。这里只显示计数与时间，不展示任何对话内容；
+                需要重置某个会话的上下文时，清空历史即可，绑定关系不受影响。
+              </p>
+            </div>
+            <n-button size="small" secondary :loading="sessionsLoading" @click="loadSessions">
+              刷新
+            </n-button>
+          </div>
+
+          <n-alert v-if="sessionsError" type="warning" :show-icon="true" role="alert">
+            {{ sessionsError }}
+          </n-alert>
+
+          <div v-if="confirmations.length" class="confirmation-list" role="status">
+            <h4>等待确认（{{ confirmations.length }}）</h4>
+            <div v-for="item in confirmations" :key="item.confirmation_id" class="confirmation-row">
+              <span class="mono" :title="item.confirmation_id">
+                {{ shortSessionId(item.confirmation_id) }}
+              </span>
+              <span>{{ item.tool_name || '未记录工具' }}</span>
+              <n-tag size="small" type="warning">{{ item.status }}</n-tag>
+              <span class="confirmation-expiry">到期 {{ item.expires_at || '未知' }}</span>
+            </div>
+          </div>
+
+          <div v-if="sessionsLoading && !sessions.length" class="binding-empty" aria-busy="true">
+            正在读取会话...
+          </div>
+          <div v-else-if="!sessions.length" class="binding-empty">暂无持久化会话</div>
+          <div v-else class="session-table" role="table" aria-label="持久化会话">
+            <div class="session-table-head" role="row">
+              <span role="columnheader">会话</span>
+              <span role="columnheader">Agent</span>
+              <span role="columnheader">消息数</span>
+              <span role="columnheader">待确认</span>
+              <span role="columnheader">最近更新</span>
+              <span role="columnheader">操作</span>
+            </div>
+            <div
+              v-for="session in sessions"
+              :key="session.session_id"
+              class="session-table-row"
+              role="row"
+            >
+              <span class="mono" role="cell" :title="session.session_id">
+                {{ shortSessionId(session.session_id) }}
+              </span>
+              <span role="cell">{{ session.agent_id || '未绑定' }}</span>
+              <span role="cell">{{ session.message_count }}</span>
+              <span role="cell">{{ session.pending_confirmations }}</span>
+              <span role="cell">{{ session.updated_at || '未知' }}</span>
+              <span class="session-actions" role="cell">
+                <n-button
+                  quaternary
+                  size="small"
+                  :loading="sessionBusyId === session.session_id"
+                  :aria-label="`清空会话 ${shortSessionId(session.session_id)} 的历史`"
+                  @click="handleClearHistory(session)"
+                >
+                  清空历史
+                </n-button>
+                <n-button
+                  quaternary
+                  size="small"
+                  :loading="sessionBusyId === session.session_id"
+                  :aria-label="`删除会话 ${shortSessionId(session.session_id)}`"
+                  @click="handleDeleteSession(session)"
+                >
+                  删除
+                </n-button>
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <section class="editor-section" aria-labelledby="hook-inspection-title">
+          <div class="section-heading">
+            <div>
+              <h3 id="hook-inspection-title">Hook 声明与预演</h3>
+              <p>
+                列出每个已安装 Hook 声明的事件、限定的工具与是否需要进程执行权限。
+                填入工具名可以预演它是否会触发——预演不执行 handler，也不启动任何进程。
+              </p>
+            </div>
+            <n-button size="small" secondary :loading="hooksLoading" @click="loadHooks">
+              刷新
+            </n-button>
+          </div>
+
+          <n-alert v-if="hooksError" type="warning" :show-icon="true" role="alert">
+            {{ hooksError }}
+          </n-alert>
+
+          <div class="field hook-preview-field">
+            <label for="hook-preview-tool">预演工具名</label>
+            <n-input
+              id="hook-preview-tool"
+              v-model:value="previewToolName"
+              placeholder="例如 Bash；留空表示不带工具名的事件"
+              :input-props="{ 'aria-label': '预演工具名' }"
+            />
+          </div>
+
+          <div v-if="hooksLoading && !hooks.length" class="binding-empty" aria-busy="true">
+            正在读取 Hook 声明...
+          </div>
+          <div v-else-if="!hooks.length" class="binding-empty">尚未安装 Hook</div>
+          <div v-else class="hook-list">
+            <div v-for="hook in hooks" :key="hook.resource_id" class="hook-card">
+              <div class="hook-card-header">
+                <span class="mono">{{ hook.resource_id }}</span>
+                <n-tag size="small" :type="hook.enabled ? 'success' : 'default'">
+                  {{ hook.enabled ? '已启用' : '未启用' }}
+                </n-tag>
+                <span class="hook-version">v{{ hook.version }}</span>
+              </div>
+              <n-alert v-if="hook.error" type="error" :show-icon="false" class="hook-error">
+                {{ hook.error }}
+              </n-alert>
+              <div v-else-if="!hook.events.length" class="binding-empty">未声明任何事件</div>
+              <div v-for="item in hook.events" :key="item.event" class="hook-event-row">
+                <span class="hook-event-name">{{ item.event }}</span>
+                <n-tag size="small" :type="item.enabled === false ? 'default' : 'info'">
+                  {{ item.enabled === false ? '已关停' : item.kind || '未知' }}
+                </n-tag>
+                <span class="hook-matcher">
+                  {{ item.matcher ? `限定工具：${item.matcher}` : '适用于全部调用' }}
+                </span>
+                <n-tag v-if="item.requires_process_execution" size="small" type="warning">
+                  需要进程执行权限
+                </n-tag>
+                <span v-if="item.error" class="hook-event-error">{{ item.error }}</span>
+                <n-button
+                  v-else
+                  quaternary
+                  size="small"
+                  :aria-label="`预演 ${hook.resource_id} 的 ${item.event} 事件`"
+                  @click="runHookPreview(hook, item.event)"
+                >
+                  预演
+                </n-button>
+                <span
+                  v-if="previewFor(hook, item.event)"
+                  class="hook-preview-result"
+                  :class="{ 'would-run': previewFor(hook, item.event)?.would_run }"
+                >
+                  {{
+                    previewFor(hook, item.event)?.would_run
+                      ? '会触发'
+                      : `不触发（${previewFor(hook, item.event)?.reason}）`
+                  }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </section>
       </form>
       </template>
     </section>
@@ -540,6 +834,56 @@ h4 { margin: 0; font-size: var(--font-size-base); }
 .relation-row { gap: var(--space-2); min-width: 0; margin-top: var(--space-2); }
 .session-row > .n-input { flex: 1; }
 
+/* 会话与待确认列表：用网格保证六列在窄屏下仍能各自换行而不挤成一团。 */
+.session-table { display: grid; gap: var(--space-1); margin-top: var(--space-3); min-width: 0; }
+.session-table-head, .session-table-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) 72px 72px minmax(0, 1.4fr) minmax(0, auto);
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-size-sm);
+}
+.session-table-head { color: var(--text-color-secondary); font-weight: 650; }
+.session-table-row { border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--muted-bg-color); }
+.session-table-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-1); }
+.confirmation-list { display: grid; gap: var(--space-2); margin-top: var(--space-4); }
+.confirmation-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--warning-color, var(--border-color));
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+}
+.confirmation-expiry { color: var(--text-color-secondary); font-size: var(--font-size-xs); }
+
+/* Hook 声明与预演 */
+.hook-preview-field { max-width: 420px; margin-top: var(--space-4); }
+.hook-list { display: grid; gap: var(--space-3); margin-top: var(--space-4); }
+.hook-card { min-width: 0; padding: var(--space-4); border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--muted-bg-color); }
+.hook-card-header { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
+.hook-version { color: var(--text-color-secondary); font-size: var(--font-size-xs); }
+.hook-error { margin-bottom: var(--space-2); }
+.hook-event-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border-color);
+  font-size: var(--font-size-sm);
+}
+.hook-event-name { font-weight: 650; }
+.hook-matcher { color: var(--text-color-secondary); }
+.hook-event-error { color: var(--error-color); }
+.hook-preview-result { color: var(--text-color-secondary); }
+.hook-preview-result.would-run { color: var(--success-color); font-weight: 650; }
+
 @media (max-width: 1024px) {
   .agent-page { grid-template-columns: 230px minmax(0, 1fr); }
   .editor-panel { padding: var(--space-6) var(--space-4); }
@@ -553,6 +897,10 @@ h4 { margin: 0; font-size: var(--font-size-base); }
   .agent-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .editor-panel { padding: var(--space-5) var(--space-4) var(--space-8); }
   .editor-section { padding: var(--space-4); }
+  /* 六列表格在窄屏上改为纵向字段布局，避免列宽被挤到不可读。 */
+  .session-table-head { display: none; }
+  .session-table-row { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
+  .session-actions { justify-content: flex-start; }
 }
 
 @media (max-width: 520px) {

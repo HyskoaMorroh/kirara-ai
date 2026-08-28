@@ -221,7 +221,46 @@ def test_docker_default_data_starts_without_runtime_test_fixture():
     start_script = (PROJECT_ROOT / "docker" / "start.sh").read_text(encoding="utf-8")
     dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
 
-    assert "COPY ./data /tmp/data" in dockerfile
+    assert "COPY ./data /tmp/data" not in dockerfile
+    assert "COPY ./data/dispatch_rules /tmp/data/dispatch_rules" in dockerfile
+    assert "COPY ./data/workflows /tmp/data/workflows" in dockerfile
+    assert "COPY ./data/fonts /tmp/data/fonts" in dockerfile
     assert 'cp -r /tmp/data/. /app/data' in start_script
     assert "data/workflows/**/test-workflow-new.yaml" in dockerignore
     assert "data/web/password.hash" in dockerignore
+    # 创建者身份等同于凭据：镜像里出现它就等于把服务器侧操作权限打包分发。
+    assert "data/web/creator.subject" in dockerignore
+    assert "data/creator.subject" in dockerignore
+
+
+def test_docker_context_excludes_local_audit_and_runtime_state():
+    """本地审计、浏览器状态和运行态数据不得上传到 Docker 构建上下文。"""
+    dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
+    required_patterns = {
+        ".qa-*",
+        ".playwright-mcp",
+        # 浏览器自动化与规划留痕都不属于发布内容：镜像里出现它们就是把
+        # 本地探索产物打进了产品。
+        ".playwright-cli",
+        ".superpowers",
+        "PATHFINDER-2026-08-21",
+        "data/db",
+        "data/mcp",
+        "data/resources",
+        "data/sessions",
+        "data/plugins",
+        "data/dispatch_rules/.transactions",
+        "data/workflows/.transactions",
+        "*.db",
+        "*.sqlite",
+        "*.sqlite3",
+        "*.log",
+        "*.pid",
+    }
+
+    configured_patterns = {
+        line.strip().rstrip("/")
+        for line in dockerignore.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert required_patterns.issubset(configured_patterns)

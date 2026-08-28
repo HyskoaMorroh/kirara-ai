@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Union
 
 from typing_extensions import deprecated
@@ -71,7 +72,10 @@ class LLMManager:
             for name, breaker in self._resilience_breakers.items()
             if name in configured_names
         }
+        created: list[str] = []
         for backend in self.config.llms.api_backends:
+            if backend.name not in self._resilience_breakers:
+                created.append(backend.name)
             self._resilience_breakers.setdefault(
                 backend.name,
                 CircuitBreaker(
@@ -83,7 +87,47 @@ class LLMManager:
                 ),
             )
             self._resilience_attempts.setdefault(backend.name, [])
+        if created:
+            # 重启后恢复「停机前处于熔断/半开」的 Provider：否则刚被隔离的上游
+            # 会被立刻当作健康重试，下一个请求再付一次超时。
+            self._restore_circuit_state({name: self._resilience_breakers[name] for name in created})
         self._resilience_initialized = True
+
+    def _circuit_store(self):
+        """Return the durable breaker store, or ``None`` when no data path is set."""
+        store = getattr(self, "_resilience_store", None)
+        if store is not None:
+            return store
+        try:
+            from kirara_ai.config import DATA_PATH
+            from kirara_ai.llm.circuit_store import CircuitBreakerStore
+        except Exception:  # noqa: BLE001 - 缺少可选依赖不应影响请求路径
+            return None
+        store = CircuitBreakerStore(Path(DATA_PATH) / "llm" / "circuit-state.json")
+        self._resilience_store = store
+        return store
+
+    def _restore_circuit_state(self, breakers: Dict[str, CircuitBreaker]) -> None:
+        store = self._circuit_store()
+        if store is None or not breakers:
+            return
+        try:
+            restored = store.restore(breakers)
+        except Exception as error:  # noqa: BLE001 - 恢复失败只损失一次保护
+            self.logger.warning(f"熔断状态恢复失败：{error}")
+            return
+        if restored:
+            self.logger.info(f"已恢复 {restored} 个 Provider 的熔断状态")
+
+    def _persist_circuit_state(self) -> None:
+        """Persist open/half-open breakers so a restart does not clear them."""
+        store = self._circuit_store()
+        if store is None:
+            return
+        try:
+            store.save(self._resilience_breakers)
+        except Exception as error:  # noqa: BLE001 - 持久化失败不得影响请求
+            self.logger.debug(f"熔断状态持久化失败：{error}")
 
     def load_config(self):
         """加载配置文件中的所有启用的后端"""
@@ -214,9 +258,15 @@ class LLMManager:
 
     def get_llm(self, model_id: str) -> Optional[LLMBackendAdapter]:
         """
-        从指定模型的活跃后端中随机返回一个适配器实例
+        返回指定模型优先级最高的活跃适配器实例
         :param model_id: 模型ID
         :return: LLM适配器实例,如果没有找到则返回None
+
+        历史实现在活跃后端里 ``random.choice``，与 ``get_provider_candidates`` 建立的
+        确定性优先级队列互相矛盾：同一个模型两次调用可能落到不同 Provider，配置里的
+        ``priority`` 对这条入口完全无效。现在复用同一套排序，只在队列为空时（例如所有
+        候选都被 ``participate_in_failover=False`` 排除）回退到原有的活跃后端列表，
+        保证「只配了一个不参与故障转移的后端」这类既有配置仍然可用。
         """
         if model_id not in self.active_backends:
             return None
@@ -224,8 +274,11 @@ class LLMManager:
         backends = self.active_backends[model_id]
         if not backends:
             return None
-        # TODO: 后续考虑支持更多的选择策略
-        return random.choice(backends)
+
+        prioritized = self.get_provider_candidates(model_id)
+        if prioritized:
+            return prioritized[0]
+        return backends[0]
 
     def get_provider_candidates(
         self,
@@ -465,6 +518,9 @@ class LLMManager:
                     category = classify_llm_error(error)
                     completed = time.monotonic()
                     breaker.record_failure(completed)
+                    # 打开熔断的那一刻就落盘：进程随后被重启时，这个 Provider
+                    # 不会因为状态丢失而被立刻当作健康重试。
+                    self._persist_circuit_state()
                     failed_attempt = ProviderAttempt(
                         trace_id=trace_id,
                         model=model_id,
@@ -545,9 +601,7 @@ class LLMManager:
             configured_deadline = deadline_seconds
             if configured_deadline is None:
                 first_config = self._backend_config(getattr(candidates[0], "backend_name", ""))
-                configured_deadline = (
-                    first_config.request_timeout_seconds if first_config else 60.0
-                )
+                configured_deadline = self._stream_timeout(first_config)
             deadline = started + max(0.0, configured_deadline)
             provider_iterator = self._execute_stream_iterator(
                 request=request,
@@ -783,6 +837,9 @@ class LLMManager:
                     category = classify_llm_error(error)
                     completed = time.monotonic()
                     breaker.record_failure(completed)
+                    # 打开熔断的那一刻就落盘：进程随后被重启时，这个 Provider
+                    # 不会因为状态丢失而被立刻当作健康重试。
+                    self._persist_circuit_state()
                     failed_attempt = ProviderAttempt(
                         trace_id=trace_id,
                         model=model_id,
@@ -883,6 +940,22 @@ class LLMManager:
         configured_fields = getattr(backend, "model_fields_set", set())
         if "non_stream_timeout_seconds" in configured_fields:
             return backend.non_stream_timeout_seconds
+        return backend.request_timeout_seconds
+
+    @staticmethod
+    def _stream_timeout(backend) -> float:
+        """Return the stream deadline, preferring the stream key over the legacy one.
+
+        The synchronous path already honored ``non_stream_timeout_seconds``; the
+        stream path read ``request_timeout_seconds`` directly, so a backend that
+        configured only the newer stream keys still ran streams on the 60 second
+        legacy default.
+        """
+        if backend is None:
+            return 60.0
+        configured_fields = getattr(backend, "model_fields_set", set())
+        if "stream_total_timeout_seconds" in configured_fields:
+            return backend.stream_total_timeout_seconds
         return backend.request_timeout_seconds
 
     @staticmethod

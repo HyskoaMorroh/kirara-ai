@@ -130,9 +130,18 @@ class TracerBase(Generic[R], abc.ABC):
             # 应用过滤条件
             if filters:
                 for field, value in filters.items():
-                    if value is not None and hasattr(self.record_class, field):
-                        stmt = stmt.filter(getattr(self.record_class, field) == value)
-                        count_query = count_query.filter(getattr(self.record_class, field) == value)
+                    if value is None:
+                        continue
+                    if field == "start_time":
+                        condition = self.record_class.request_time >= value
+                    elif field == "end_time":
+                        condition = self.record_class.request_time < value
+                    elif hasattr(self.record_class, field):
+                        condition = getattr(self.record_class, field) == value
+                    else:
+                        continue
+                    stmt = stmt.filter(condition)
+                    count_query = count_query.filter(condition)
 
             search_term = (query or "").strip()
             columns = [
@@ -156,6 +165,8 @@ class TracerBase(Generic[R], abc.ABC):
             if hasattr(self.record_class, order_by):
                 order_func = desc if order_desc else asc
                 stmt = stmt.order_by(order_func(getattr(self.record_class, order_by)))
+                if order_by != "id" and hasattr(self.record_class, "id"):
+                    stmt = stmt.order_by(order_func(getattr(self.record_class, "id")))
             
             # 应用分页
             if page > 0 and page_size > 0:

@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from ymbotpy.errors import AuthenticationFailedError, SequenceNumberError, ServerError
 
 from kirara_ai.database import DatabaseManager
-from kirara_ai.im.message import IMMessage, ImageMessage, TextMessage
+from kirara_ai.im.message import FileMessage, IMMessage, ImageMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.plugins.im_qqbot_adapter.adapter import QQBotAdapter, QQBotConfig
@@ -78,6 +78,12 @@ def fake_image(data: bytes = b"image-bytes") -> ImageMessage:
     image = object.__new__(ImageMessage)
     image.get_data = AsyncMock(return_value=data)
     return image
+
+
+def fake_file(data: bytes = b"file-bytes") -> FileMessage:
+    file = object.__new__(FileMessage)
+    file.get_data = AsyncMock(return_value=data)
+    return file
 
 
 def deliveries(database: DatabaseManager, logical_id: str) -> list[QQBotDelivery]:
@@ -231,3 +237,180 @@ def test_health_snapshot_exposes_outbox_counts_without_account_identifiers(
     assert payload["adapter_started"] is True
     assert payload["outbox"]["queued"] == 1
     assert "account-id-must-not-be-exposed" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_qqbot_renders_math_and_paginates_utf8_text_before_persisting(
+    tmp_path: Path,
+):
+    adapter, database = make_persistent_adapter(tmp_path)
+    source = "温度 $T \\to 0$，面积 $a \\times b$。" + ("中文🙂" * 1500)
+
+    await adapter.send_message(
+        IMMessage(ChatSender.get_bot_sender(), [TextMessage(source)]),
+        c2c_recipient(),
+        delivery_id="logical-pages",
+    )
+
+    persisted = deliveries(database, "logical-pages")
+    contents = [json.loads(str(item.params_json))["content"] for item in persisted]
+    assert len(contents) > 1
+    assert all(len(content.encode("utf-8")) <= 3800 for content in contents)
+    assert contents[0].startswith(f"第 1 页 / 共 {len(contents)} 页\n")
+    assert contents[-1].startswith(
+        f"第 {len(contents)} 页 / 共 {len(contents)} 页\n"
+    )
+    assert all("\\to" not in content and "$" not in content for content in contents)
+    assert "→" in "".join(contents) and "×" in "".join(contents)
+    assert [item.status for item in persisted] == ["accepted"] * len(persisted)
+
+
+@pytest.mark.asyncio
+async def test_qqbot_keeps_text_image_file_and_following_text_in_order(
+    tmp_path: Path,
+):
+    adapter, database = make_persistent_adapter(tmp_path)
+    message = IMMessage(
+        ChatSender.get_bot_sender(),
+        [
+            TextMessage("before"),
+            fake_image(),
+            fake_file(),
+            TextMessage("after"),
+        ],
+    )
+
+    await adapter.send_message(message, c2c_recipient(), delivery_id="logical-mixed")
+
+    persisted = deliveries(database, "logical-mixed")
+    payloads = [json.loads(str(item.params_json)) for item in persisted]
+    assert len(persisted) == 4
+    assert [payload.get("content") for payload in payloads] == [
+        "before",
+        None,
+        None,
+        "after",
+    ]
+    assert [item.media_file_type for item in persisted] == [None, 1, 4, None]
+    assert [payload["msg_seq"] for payload in payloads] == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_qqbot_partial_page_timeout_does_not_resend_accepted_page(
+    tmp_path: Path,
+):
+    adapter, database = make_persistent_adapter(tmp_path, send_timeout_seconds=0.01)
+    calls = 0
+
+    async def first_accepts_second_times_out(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"id": "accepted"}
+        await asyncio.sleep(1)
+
+    adapter.api.post_c2c_message = AsyncMock(side_effect=first_accepts_second_times_out)
+    message = IMMessage(
+        ChatSender.get_bot_sender(),
+        [TextMessage("内容🙂" * 3000)],
+    )
+
+    with pytest.raises(asyncio.TimeoutError):
+        await adapter.send_message(
+            message,
+            c2c_recipient(),
+            delivery_id="logical-partial",
+        )
+    with pytest.raises(asyncio.TimeoutError):
+        await adapter.send_message(
+            message,
+            c2c_recipient(),
+            delivery_id="logical-partial",
+        )
+
+    persisted = deliveries(database, "logical-partial")
+    assert len(persisted) > 2
+    assert persisted[0].status == "accepted"
+    assert persisted[1].status == "ambiguous"
+    assert all(item.status == "queued" for item in persisted[2:])
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_qqbot_message_timeline_records_local_delivery_stages(tmp_path: Path):
+    adapter, _database = make_persistent_adapter(tmp_path)
+    message = IMMessage(ChatSender.get_bot_sender(), [TextMessage("hello")])
+
+    await adapter.send_message(message, c2c_recipient(), delivery_id="logical-timeline")
+
+    events = message.delivery_timeline
+    assert [event.stage for event in events] == [
+        "formatting_started",
+        "formatting_completed",
+        "send_started",
+        "send_succeeded",
+    ]
+    assert events[1].details["segment_count"] == 1
+    assert events[-1].details["retry_count"] == 0
+    assert [event.timestamp for event in events] == sorted(
+        event.timestamp for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_qqbot_message_timeline_records_send_failure_category(tmp_path: Path):
+    adapter, _database = make_persistent_adapter(
+        tmp_path,
+        send_timeout_seconds=0.01,
+    )
+
+    async def hangs(**_kwargs):
+        await asyncio.sleep(1)
+
+    adapter.api.post_c2c_message = AsyncMock(side_effect=hangs)
+    message = IMMessage(ChatSender.get_bot_sender(), [TextMessage("hello")])
+
+    with pytest.raises(asyncio.TimeoutError):
+        await adapter.send_message(
+            message,
+            c2c_recipient(),
+            delivery_id="logical-timeline-failure",
+        )
+
+    assert [event.stage for event in message.delivery_timeline] == [
+        "formatting_started",
+        "formatting_completed",
+        "send_started",
+        "send_failed",
+    ]
+    failed = message.delivery_timeline[-1]
+    assert failed.details["error_type"] == "TimeoutError"
+    assert failed.details["retry_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_qqbot_timeline_counts_media_upload_retries(tmp_path: Path):
+    adapter, database = make_persistent_adapter(tmp_path, max_attempts=2)
+    adapter.api._http.request = AsyncMock(
+        side_effect=[
+            ServerError("temporary upload refusal"),
+            {
+                "file_uuid": "media-id",
+                "file_info": "media-token",
+                "ttl": 60,
+            },
+        ]
+    )
+    message = IMMessage(ChatSender.get_bot_sender(), [fake_image()])
+
+    await adapter.send_message(
+        message,
+        c2c_recipient(),
+        delivery_id="logical-upload-retry-timeline",
+    )
+
+    persisted = deliveries(database, "logical-upload-retry-timeline")
+    assert persisted[0].upload_attempt_count == 2
+    assert persisted[0].attempt_count == 1
+    assert message.delivery_timeline[-1].stage == "send_succeeded"
+    assert message.delivery_timeline[-1].details["retry_count"] == 1

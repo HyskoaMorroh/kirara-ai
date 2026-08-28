@@ -143,7 +143,7 @@ export interface LayoutMissingNodesOptions {
 }
 
 /** 估算普通节点的尺寸；纯函数，不依赖 vue-flow */
-function estimateBlockSize(block: LayoutBlockDescriptor): { width: number; height: number } {
+export function estimateBlockSize(block: LayoutBlockDescriptor): { width: number; height: number } {
   const inputs = block.inputs || []
   const outputs = block.outputs || []
   const configs = block.configs || []
@@ -210,7 +210,7 @@ function estimateBlockSize(block: LayoutBlockDescriptor): { width: number; heigh
  * （例如带 5 个模型配置的「LLM: 执行对话」）就会被按矮节点排布而纵向压叠。
  * 这里按端口数与配置项数推算高度，让 dagre 拿到接近真实的尺寸。
  */
-function estimateNodeSize(node: Node): { width: number; height: number } {
+export function estimateNodeSize(node: Node): { width: number; height: number } {
   const data: any = node.data || {}
   return estimateBlockSize({
     id: node.id,
@@ -219,6 +219,30 @@ function estimateNodeSize(node: Node): { width: number; height: number } {
     inputs: data.inputs || [],
     outputs: data.outputs || [],
     configs: data.blockType?.configs || []
+  })
+}
+
+/**
+ * 估算「还没有实例」的节点尺寸，只依据 block 类型元数据。
+ *
+ * 拖放和从节点列表添加节点都需要在插入前知道尺寸，才能找一个不重叠的落点。
+ * 这里与 {@link estimateNodeSize} 共用同一套版式常量，避免两条添加路径按不同
+ * 尺寸判断重叠。
+ */
+export function estimateBlockTypeSize(blockType: {
+  type_name?: string
+  label?: string
+  inputs?: LayoutPortDescriptor[]
+  outputs?: LayoutPortDescriptor[]
+  configs?: LayoutConfigDescriptor[]
+}): { width: number; height: number } {
+  return estimateBlockSize({
+    id: blockType.type_name || 'node',
+    type: blockType.type_name === 'internal:code' ? 'code' : 'custom',
+    label: blockType.label,
+    inputs: blockType.inputs || [],
+    outputs: blockType.outputs || [],
+    configs: blockType.configs || []
   })
 }
 

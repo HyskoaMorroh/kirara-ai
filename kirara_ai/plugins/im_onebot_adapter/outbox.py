@@ -25,6 +25,7 @@ from sqlalchemy import (
 )
 
 from kirara_ai.database import Base, DatabaseManager
+from kirara_ai.im.outbox_backoff import retry_backoff_seconds
 
 
 TERMINAL_STATUSES = frozenset({"accepted", "ambiguous", "dead_letter"})
@@ -418,7 +419,10 @@ class OneBotOutboxService:
     def _mark_retry_wait(
         self, delivery_id: str, error: str, attempt_count: int
     ) -> None:
-        delay = self.retry_delay_seconds * (2 ** max(0, attempt_count - 1))
+        # Shared, capped and jittered schedule: the previous raw
+        # `retry_delay_seconds * 2 ** (attempt - 1)` had no ceiling, so the
+        # configuration surface's own maximums produced a multi-hour sleep.
+        delay = retry_backoff_seconds(self.retry_delay_seconds, attempt_count)
         now = _utcnow()
         with self.database.get_session() as session:
             delivery = session.execute(

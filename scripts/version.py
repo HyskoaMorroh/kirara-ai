@@ -70,6 +70,8 @@ SKIP_SCAN_DIRECTORIES = frozenset(
     {
         ".git",
         ".mypy_cache",
+        ".playwright-cli",
+        ".playwright-mcp",
         ".pytest_cache",
         ".ruff_cache",
         ".tox",

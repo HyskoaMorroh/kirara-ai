@@ -56,9 +56,26 @@ python -m kirara_ai
 
 ## 第 2 步：接入聊天平台
 
-打开「IM 平台」，选一个适配器（`telegram`、`http_legacy`、`qqbot`、`wecom` 等由 `kirara_ai/plugins/` 下的内置插件注册），填入平台令牌，保存并启动。
+打开「IM 平台」，选一个适配器（`telegram`、`http_legacy`、`onebot`、`qqbot`、`wecom` 等由 `kirara_ai/plugins/` 下的内置插件注册），填入平台令牌，保存并启动。
 
 只想先本地验证、不想注册任何平台账号时，用 `http_legacy` 适配器最快：它把 `POST /v1/chat` 挂在主 Web 服务上（`kirara_ai/plugins/im_http_legacy_adapter/adapter.py` 的 `setup_routes`），可以用 curl 直接发消息。
+
+### 接 QQ（OneBot）
+
+QQ 走 OneBot V11 反向 WebSocket，且**方向与其他平台相反**：Kirara 是服务端，
+OneBot 实现（LLOneBot / NapCat 等）主动连过来。因此保存适配器后不会立刻「已连接」，
+而是先显示「等待连接」，直到对方接入。
+
+三件事按顺序做：
+
+1. 在适配器详情页复制 `websocket_url`（形如 `/im/websocket/onebot/<随机段>/ws`），
+   拼上你的公网地址填进 OneBot 实现的反向 WebSocket 配置。
+2. 两侧的访问 Token 必须一致。填错时状态会显示**「凭据被拒」**并给出原因，
+   这种情况再等也不会自己好，必须改配置。
+3. QQ 侧容器从启动到登录完成通常要 30–90 秒，这段时间显示「等待连接」是正常的。
+
+状态含义、断开原因码对照、数据目录清单与 Compose 验收矩阵见
+[`QQ_ONEBOT_OPERATIONS.md`](QQ_ONEBOT_OPERATIONS.md)。
 
 ---
 
@@ -91,6 +108,27 @@ python -m kirara_ai
 相关接口：`GET /backend-api/api/llm/auto-detect-schedule` 查看各后端计划与上次执行时间，`PUT /backend-api/api/llm/backends/<backend_name>/auto-detect-schedule` 改间隔天数，`POST /backend-api/api/llm/auto-detect-schedule/run` 立刻强制跑一轮。后两项会写配置/状态，强制检测还会访问远端；不要把它们放进默认只读 smoke。
 
 > 注意：截至当前版本，这三个接口**没有对应的 WebUI 界面**，只能用 API 调用（下面第 6 步给了可直接复制的命令）。间隔天数也可以直接改 `data/config.yaml` 里后端的 `auto_detect_interval_days` 后重启。
+
+### 回复生成模式：非流式（默认）与流式
+
+`data/config.yaml` 的 `agent_runtime.reply_stream_mode` 有两个取值：
+
+| 取值 | 行为 | 何时用 |
+|---|---|---|
+| `off`（默认） | 非流式请求，一次拿到完整回复 | 默认；与既有部署行为完全一致 |
+| `aggregate` | 以**流式**方式向上游取回内容，再整段投递 | 想让流式超时与首字节前的故障转移生效时 |
+
+`aggregate` **不是**逐字推送。QQ、Telegram、WeCom 都不支持对已发出的消息逐字编辑，
+逐字推送只会变成几十条碎片消息。它的实际收益是三条容错路径开始生效：
+
+- `stream_first_byte_timeout_seconds`：等首个数据块的上限，超时可切换下一个供应商；
+- `stream_idle_timeout_seconds`：识别中途卡住的流；
+- **首字节之前**的故障转移是安全的（还没有任何内容发给用户）；一旦已经产出内容，
+  系统不会切换并拼接，避免用户看到两段重复回复。
+
+前提是所用适配器实现了流式接口。OpenAI 兼容适配器已实现；未实现的适配器会自动
+回退到非流式路径，不会报错。工具调用轮次始终走非流式——工具轮需要结构化的
+`tool_calls`，聚合文本会把它丢掉。
 
 ---
 
@@ -185,6 +223,7 @@ curl -X POST -H "Authorization: Bearer <token>" \
 
 ## 下一步
 
+- QQ / OneBot 接入后的状态判读、目录挂载与重启恢复：`docs/QQ_ONEBOT_OPERATIONS.md`
 - 想加自己的节点、插件、MCP 服务器、工作流模板或调度规则：`docs/EXTENDING.md`
 - 想搞清楚系统在干什么、出错怎么定位：`docs/OBSERVABILITY.md`
 - 从旧实例升级或回滚：`docs/UPGRADING.md`

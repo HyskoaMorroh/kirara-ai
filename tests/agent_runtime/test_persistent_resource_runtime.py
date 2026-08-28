@@ -38,6 +38,16 @@ from kirara_ai.media.carrier.service import MediaCarrierService
 from kirara_ai.media.manager import MediaManager
 from kirara_ai.mcp_module.manager import MCPServerManager
 from kirara_ai.agent_runtime.session_store import SessionStore
+from kirara_ai.web.auth.principal import RuntimePrincipal, runtime_principal_context
+
+
+CREATOR = RuntimePrincipal(subject="persistent-runtime-test-creator", is_creator=True)
+
+
+@pytest.fixture
+def creator_principal():
+    with runtime_principal_context(CREATOR):
+        yield
 
 
 class ControlledLLM:
@@ -230,6 +240,7 @@ def _agent(lifecycle):
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+@pytest.mark.usefixtures("creator_principal")
 async def test_persisted_ccswitch_resources_drive_one_real_agent_turn(tmp_path: Path):
     lifecycle = ResourceLifecycleService(tmp_path / "vps-data")
     catalog = ResourceCatalogService(lifecycle)
@@ -494,6 +505,7 @@ async def test_persisted_hook_can_block_context7_before_transport_call(tmp_path:
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+@pytest.mark.usefixtures("creator_principal")
 async def test_real_downloaded_agent_browser_skill_enters_persistent_runtime(tmp_path: Path):
     """Prove the server-downloaded Skill, rather than a test stub, reaches the model."""
 

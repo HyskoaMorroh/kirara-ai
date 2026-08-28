@@ -49,6 +49,37 @@ RESILIENCE_SETTINGS = {
     "circuit_recovery_timeout_seconds": 17.0,
 }
 
+SENSITIVE_CONFIG = {
+    "api_key": "test-key",
+    "token": "test-token",
+    "Authorization": "Bearer test-authorization",
+    "Cookie": "session=test-cookie",
+    "password": "test-password-value",
+    "client_secret": "test-client-secret",
+    "credential": "test-credential",
+    "nested": {"refresh_token": "test-refresh-token"},
+}
+
+
+def assert_backend_secrets_redacted(backend, *secret_values: str):
+    config = backend["config"]
+    assert config["api_key"] == ""
+    assert config["token"] == ""
+    assert config["Authorization"] == ""
+    assert config["Cookie"] == ""
+    assert config["password"] == ""
+    assert config["client_secret"] == ""
+    assert config["credential"] == ""
+    assert config["nested"]["refresh_token"] == ""
+    serialized = str(backend)
+    pending = list(secret_values)
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            pending.extend(value.values())
+        elif isinstance(value, str):
+            assert value not in serialized
+
 
 def assert_resilience_settings(backend, expected=RESILIENCE_SETTINGS):
     for field, value in expected.items():
@@ -326,7 +357,7 @@ def app():
         LLMBackendConfig(
             name=TEST_BACKEND_NAME,
             adapter=TEST_ADAPTER_TYPE,
-            config={"api_key": "test-key", "model": "test-model"},
+            config={**SENSITIVE_CONFIG, "model": "test-model"},
             enable=True,
             models=["test-model"],
             **RESILIENCE_SETTINGS,
@@ -349,6 +380,7 @@ def app():
 
     web_server = WebServer(container)
     container.register(WebServer, web_server)
+    web_server.app.state.container = container
     return web_server.app
 
 
@@ -385,6 +417,7 @@ class TestLLMBackend:
         assert len(backends) == 1
         assert backends[0].get("name") == TEST_BACKEND_NAME
         assert backends[0].get("adapter") == TEST_ADAPTER_TYPE
+        assert_backend_secrets_redacted(backends[0], *SENSITIVE_CONFIG.values())
         assert_resilience_settings(backends[0])
 
     @pytest.mark.asyncio
@@ -399,6 +432,7 @@ class TestLLMBackend:
         backend = data.get("data")
         assert backend.get("name") == TEST_BACKEND_NAME
         assert backend.get("adapter") == TEST_ADAPTER_TYPE
+        assert_backend_secrets_redacted(backend, *SENSITIVE_CONFIG.values())
         assert_resilience_settings(backend)
 
     @pytest.mark.asyncio
@@ -448,7 +482,11 @@ class TestLLMBackend:
         new_backend = LLMBackendConfig(
             name="new-backend",
             adapter=TEST_ADAPTER_TYPE,
-            config={"api_key": "new-key", "model": "new-model"},
+            config={
+                **SENSITIVE_CONFIG,
+                "api_key": "new-key",
+                "model": "new-model",
+            },
             enable=True,
             models=["new-model"],
             **RESILIENCE_SETTINGS,
@@ -469,6 +507,17 @@ class TestLLMBackend:
             backend = data.get("data")
             assert backend.get("name") == "new-backend"
             assert backend.get("adapter") == TEST_ADAPTER_TYPE
+            assert_backend_secrets_redacted(
+                backend,
+                "new-key",
+                "test-token",
+                "test-authorization",
+                "test-cookie",
+                "test-password-value",
+                "test-client-secret",
+                "test-credential",
+                "test-refresh-token",
+            )
             assert_resilience_settings(backend)
 
             # 验证配置保存
@@ -477,10 +526,15 @@ class TestLLMBackend:
     @pytest.mark.asyncio
     async def test_update_backend(self, test_client, auth_headers):
         """测试更新后端"""
+        updated_secrets = {
+            **SENSITIVE_CONFIG,
+            "api_key": "updated-key",
+            "nested": {"refresh_token": "updated-refresh-token"},
+        }
         updated_config = LLMBackendConfig(
             name=TEST_BACKEND_NAME,
             adapter=TEST_ADAPTER_TYPE,
-            config={"api_key": "updated-key", "model": "updated-model"},
+            config={**updated_secrets, "model": "updated-model"},
             enable=True,
             models=["updated-model"],
             **RESILIENCE_SETTINGS,
@@ -499,11 +553,54 @@ class TestLLMBackend:
         assert "data" in data
         backend = data.get("data")
         assert backend.get("name") == TEST_BACKEND_NAME
-        assert backend.get("config").get("api_key") == "updated-key"
+        assert_backend_secrets_redacted(
+            backend,
+            "updated-key",
+            "updated-refresh-token",
+            "test-token",
+            "test-authorization",
+            "test-cookie",
+            "test-password-value",
+            "test-client-secret",
+            "test-credential",
+        )
         assert_resilience_settings(backend)
 
         # 验证配置保存
         ConfigLoader.save_config_with_backup.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_update_backend_blank_secret_placeholders_keep_existing_values(
+        self, app, test_client, auth_headers
+    ):
+        config = app.state.container.resolve(GlobalConfig)
+        current = next(
+            backend
+            for backend in config.llms.api_backends
+            if backend.name == TEST_BACKEND_NAME
+        )
+        existing_api_key = current.config["api_key"]
+        existing_refresh_token = current.config["nested"]["refresh_token"]
+        update = current.model_dump()
+        update["config"]["api_key"] = ""
+        update["config"]["nested"]["refresh_token"] = ""
+
+        with patch.object(ConfigLoader, "save_config_with_backup"):
+            response = test_client.put(
+                f"/backend-api/api/llm/backends/{TEST_BACKEND_NAME}",
+                headers=auth_headers,
+                json=update,
+            )
+
+        assert response.status_code == 200
+        assert_backend_secrets_redacted(response.json()["data"])
+        stored = next(
+            backend
+            for backend in config.llms.api_backends
+            if backend.name == TEST_BACKEND_NAME
+        )
+        assert stored.config["api_key"] == existing_api_key
+        assert stored.config["nested"]["refresh_token"] == existing_refresh_token
 
     @pytest.mark.asyncio
     async def test_update_backend_restores_previous_state_when_loading_fails(
@@ -564,6 +661,7 @@ class TestLLMBackend:
         assert "data" in data
         backend = data.get("data")
         assert backend.get("name") == TEST_BACKEND_NAME
+        assert_backend_secrets_redacted(backend)
         assert_resilience_settings(backend)
         ConfigLoader.save_config_with_backup.assert_called_once()
 

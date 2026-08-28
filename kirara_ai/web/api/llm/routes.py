@@ -1,17 +1,22 @@
+from copy import deepcopy
 from functools import wraps
+import json
+from typing import Any
 
 from pydantic import ValidationError
-from quart import Blueprint, g, jsonify, request
+from quart import Blueprint, Response, g, jsonify, request
 
 from kirara_ai.agent_runtime import AgentRegistry, RuntimeStatus
 from kirara_ai.config.config_loader import CONFIG_FILE, ConfigLoader
-from kirara_ai.config.global_config import GlobalConfig
+from kirara_ai.config.global_config import GlobalConfig, LLMBackendConfig
 from kirara_ai.im.message import IMMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
 from kirara_ai.llm.adapter import AutoDetectModelsProtocol
 from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.llm.llm_registry import LLMBackendRegistry
+from kirara_ai.llm.pricing import PriceCatalog, PriceCatalogConflictError, PriceVersion
 from kirara_ai.logger import get_logger
+from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
 from kirara_ai.scheduler import TaskScheduler
 from kirara_ai.scheduler.model_catalog import normalize_detected_models
 from kirara_ai.scheduler.scheduler import CONFIG_UPDATE_LOCK
@@ -25,6 +30,345 @@ from ...auth.middleware import require_auth
 
 llm_bp = Blueprint("llm", __name__)
 logger = get_logger("WebServer.LLM")
+
+
+_PRICE_VERSION_FIELDS = frozenset(
+    {
+        "version_id",
+        "provider",
+        "model",
+        "effective_from",
+        "currency",
+        "input_per_million",
+        "output_per_million",
+        "cache_read_per_million",
+        "cache_write_per_million",
+    }
+)
+
+
+async def _pricing_json_object(
+    allowed_fields: frozenset[str],
+) -> tuple[dict[str, Any] | None, tuple[Response, int] | None]:
+    payload = await request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return None, (jsonify({"error": "Request body must be a JSON object"}), 400)
+    if set(payload) - allowed_fields:
+        return None, (jsonify({"error": "Request contains unknown fields"}), 400)
+    return payload, None
+
+
+def _pricing_expected_revision(payload: dict[str, Any]) -> int | None:
+    value = payload.get("expected_revision")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("expected_revision must be a non-negative integer")
+    return value
+
+
+def _pricing_version(payload: object) -> PriceVersion:
+    if not isinstance(payload, dict):
+        raise ValueError("version must be a JSON object")
+    if set(payload) - _PRICE_VERSION_FIELDS:
+        raise ValueError("version contains unknown fields")
+    return PriceVersion.model_validate(payload)
+
+
+def _pricing_version_payload(version: PriceVersion) -> dict[str, Any]:
+    return version.model_dump(mode="json")
+
+
+def _pricing_catalog() -> PriceCatalog:
+    catalog = g.container.resolve(PriceCatalog)
+    if not isinstance(catalog, PriceCatalog):
+        raise RuntimeError("price catalog is unavailable")
+    return catalog
+
+
+def _pricing_conflict(catalog: PriceCatalog, expected: int | None):
+    try:
+        current = catalog.refresh()
+    except Exception:
+        current = catalog.revision
+    return jsonify(
+        {
+            "error": "Price catalog revision conflict",
+            "code": "revision_conflict",
+            "expected_revision": expected,
+            "current_revision": current,
+        }
+    ), 409
+
+
+def _audit_pricing_success(operation: str) -> None:
+    """Record bounded identity metadata only after a successful mutation."""
+
+    record: dict[str, Any] = {
+        "component": "llm_pricing",
+        "operation": operation,
+        "outcome": "success",
+    }
+    principal = getattr(g, "auth_principal", None)
+    if principal is not None:
+        record.update(principal.audit_fields())
+    try:
+        lifecycle: ResourceLifecycleService = g.container.resolve(
+            ResourceLifecycleService
+        )
+        lifecycle.append_runtime_audit(record)
+    except Exception as error:
+        # The catalog is already durable, so a sink outage must not turn a
+        # successful operation into a misleading API failure.
+        logger.warning("Pricing audit sink unavailable: {}", type(error).__name__)
+
+
+def _pricing_internal_failure(error: Exception):
+    logger.error("Price catalog operation failed: {}", type(error).__name__)
+    return jsonify({"error": "Price catalog operation failed"}), 500
+
+
+@llm_bp.route("/pricing", methods=["GET"])
+@require_auth("llm.pricing.read")
+async def list_pricing():
+    try:
+        catalog = _pricing_catalog()
+        catalog.refresh()
+        return jsonify(
+            {
+                "data": {
+                    "revision": catalog.revision,
+                    "versions": [
+                        _pricing_version_payload(version)
+                        for version in catalog.values()
+                    ],
+                    "backup_generations": list(catalog.backup_generations()),
+                }
+            }
+        )
+    except Exception as error:
+        return _pricing_internal_failure(error)
+
+
+@llm_bp.route("/pricing/<version_id>", methods=["GET"])
+@require_auth("llm.pricing.read")
+async def get_pricing(version_id: str):
+    try:
+        catalog = _pricing_catalog()
+        catalog.refresh()
+        version = next(
+            (item for item in catalog.values() if item.version_id == version_id),
+            None,
+        )
+        if version is None:
+            return jsonify({"error": "Price version not found"}), 404
+        return jsonify(
+            {
+                "data": {
+                    "revision": catalog.revision,
+                    "version": _pricing_version_payload(version),
+                }
+            }
+        )
+    except Exception as error:
+        return _pricing_internal_failure(error)
+
+
+@llm_bp.route("/pricing", methods=["POST"])
+@require_auth("llm.pricing.manage")
+async def create_pricing():
+    expected_revision: int | None = None
+    try:
+        payload, failure = await _pricing_json_object(
+            frozenset({"expected_revision", "version"})
+        )
+        if failure is not None:
+            return failure
+        assert payload is not None
+        expected_revision = _pricing_expected_revision(payload)
+        version = _pricing_version(payload.get("version"))
+        catalog = _pricing_catalog()
+        catalog.add(version, expected_revision=expected_revision)
+        _audit_pricing_success("create")
+        return jsonify(
+            {
+                "data": {
+                    "revision": catalog.revision,
+                    "version": _pricing_version_payload(version),
+                }
+            }
+        ), 201
+    except PriceCatalogConflictError:
+        return _pricing_conflict(_pricing_catalog(), expected_revision)
+    except (ValidationError, ValueError, TypeError) as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _pricing_internal_failure(error)
+
+
+@llm_bp.route("/pricing/<version_id>", methods=["PUT"])
+@require_auth("llm.pricing.manage")
+async def update_pricing(version_id: str):
+    expected_revision: int | None = None
+    try:
+        payload, failure = await _pricing_json_object(
+            frozenset({"expected_revision", "version"})
+        )
+        if failure is not None:
+            return failure
+        assert payload is not None
+        expected_revision = _pricing_expected_revision(payload)
+        version = _pricing_version(payload.get("version"))
+        if version.version_id != version_id:
+            return jsonify({"error": "URL and body version IDs must match"}), 400
+        catalog = _pricing_catalog()
+        if not any(item.version_id == version_id for item in catalog.values()):
+            return jsonify({"error": "Price version not found"}), 404
+        catalog.update(version, expected_revision=expected_revision)
+        _audit_pricing_success("update")
+        return jsonify(
+            {
+                "data": {
+                    "revision": catalog.revision,
+                    "version": _pricing_version_payload(version),
+                }
+            }
+        )
+    except PriceCatalogConflictError:
+        return _pricing_conflict(_pricing_catalog(), expected_revision)
+    except KeyError:
+        return jsonify({"error": "Price version not found"}), 404
+    except (ValidationError, ValueError, TypeError) as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _pricing_internal_failure(error)
+
+
+@llm_bp.route("/pricing/<version_id>", methods=["DELETE"])
+@require_auth("llm.pricing.manage")
+async def delete_pricing(version_id: str):
+    expected_revision: int | None = None
+    try:
+        payload, failure = await _pricing_json_object(
+            frozenset({"expected_revision", "confirmed"})
+        )
+        if failure is not None:
+            return failure
+        assert payload is not None
+        expected_revision = _pricing_expected_revision(payload)
+        if payload.get("confirmed") is not True:
+            return jsonify({"error": "Deletion requires confirmed: true"}), 400
+        catalog = _pricing_catalog()
+        if not any(item.version_id == version_id for item in catalog.values()):
+            return jsonify({"error": "Price version not found"}), 404
+        catalog.remove(version_id, expected_revision=expected_revision)
+        _audit_pricing_success("delete")
+        return jsonify(
+            {"data": {"revision": catalog.revision, "version_id": version_id}}
+        )
+    except PriceCatalogConflictError:
+        return _pricing_conflict(_pricing_catalog(), expected_revision)
+    except KeyError:
+        return jsonify({"error": "Price version not found"}), 404
+    except (ValidationError, ValueError, TypeError) as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _pricing_internal_failure(error)
+
+
+@llm_bp.route("/pricing/export", methods=["GET"])
+@require_auth("llm.pricing.read")
+async def export_pricing():
+    try:
+        catalog = _pricing_catalog()
+        catalog.refresh()
+        body = json.dumps(
+            catalog.export_document(), ensure_ascii=False, indent=2, sort_keys=True
+        ) + "\n"
+        response = Response(body, content_type="application/json")
+        response.headers["Content-Disposition"] = (
+            'attachment; filename="price-catalog.json"'
+        )
+        return response
+    except Exception as error:
+        return _pricing_internal_failure(error)
+
+
+@llm_bp.route("/pricing/import", methods=["POST"])
+@require_auth("llm.pricing.manage")
+async def import_pricing():
+    expected_revision: int | None = None
+    try:
+        payload, failure = await _pricing_json_object(
+            frozenset({"expected_revision", "catalog"})
+        )
+        if failure is not None:
+            return failure
+        assert payload is not None
+        expected_revision = _pricing_expected_revision(payload)
+        catalog = _pricing_catalog()
+        imported_count = catalog.import_document(
+            payload.get("catalog"), expected_revision=expected_revision
+        )
+        _audit_pricing_success("import")
+        return jsonify(
+            {
+                "data": {
+                    "revision": catalog.revision,
+                    "imported_count": imported_count,
+                }
+            }
+        )
+    except PriceCatalogConflictError:
+        return _pricing_conflict(_pricing_catalog(), expected_revision)
+    except (ValidationError, ValueError, TypeError) as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _pricing_internal_failure(error)
+
+
+@llm_bp.route("/pricing/restore", methods=["POST"])
+@require_auth("llm.pricing.manage")
+async def restore_pricing():
+    expected_revision: int | None = None
+    try:
+        payload, failure = await _pricing_json_object(
+            frozenset({"expected_revision", "generation", "confirmed"})
+        )
+        if failure is not None:
+            return failure
+        assert payload is not None
+        expected_revision = _pricing_expected_revision(payload)
+        if payload.get("confirmed") is not True:
+            return jsonify({"error": "Restore requires confirmed: true"}), 400
+        generation = payload.get("generation")
+        if generation is not None and (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+            or generation > 3
+        ):
+            return jsonify({"error": "generation must be between 1 and 3"}), 400
+        catalog = _pricing_catalog()
+        catalog.restore_backup(
+            generation=generation, expected_revision=expected_revision
+        )
+        _audit_pricing_success("restore")
+        return jsonify(
+            {
+                "data": {
+                    "revision": catalog.revision,
+                    "restored_generation": generation if generation is not None else 1,
+                    "version_count": len(catalog.values()),
+                }
+            }
+        )
+    except PriceCatalogConflictError:
+        return _pricing_conflict(_pricing_catalog(), expected_revision)
+    except (ValidationError, ValueError, TypeError) as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _pricing_internal_failure(error)
 
 
 @llm_bp.route("/chat", methods=["POST"])
@@ -99,9 +443,74 @@ async def webui_chat():
         return jsonify({"error": "Agent runtime dispatch failed"}), 502
 
 
-def _backend_info(backend) -> LLMBackendInfo:
-    """Serialize a backend without dropping newly added resilience settings."""
-    return LLMBackendInfo.model_validate(backend.model_dump())
+SENSITIVE_CONFIG_KEYS = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "password",
+        "secret",
+        "credential",
+        "token",
+        "api_key",
+        "apikey",
+    }
+)
+SENSITIVE_CONFIG_SUFFIXES = ("_token", "_secret", "_password", "_credential")
+NON_SECRET_TOKEN_KEYS = frozenset(
+    {"max_tokens", "prompt_tokens", "completion_tokens", "total_tokens"}
+)
+
+
+def _is_sensitive_config_key(key: object) -> bool:
+    normalized = str(key).strip().lower()
+    if normalized in NON_SECRET_TOKEN_KEYS:
+        return False
+    return normalized in SENSITIVE_CONFIG_KEYS or normalized.endswith(
+        SENSITIVE_CONFIG_SUFFIXES
+    )
+
+
+def _redact_sensitive_config(value: Any) -> Any:
+    """Return an API-safe copy without provider credentials."""
+    if isinstance(value, dict):
+        return {
+            key: "" if _is_sensitive_config_key(key) else _redact_sensitive_config(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive_config(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_sensitive_config(item) for item in value)
+    return deepcopy(value)
+
+
+def _restore_unchanged_secrets(submitted: Any, current: Any) -> Any:
+    """Treat blank secret fields in update requests as keep-existing placeholders."""
+    if not isinstance(submitted, dict) or not isinstance(current, dict):
+        return deepcopy(submitted)
+
+    restored: dict[str, Any] = {}
+    for key, value in submitted.items():
+        old_value = current.get(key)
+        if _is_sensitive_config_key(key) and value == "" and key in current:
+            restored[key] = deepcopy(old_value)
+        else:
+            restored[key] = _restore_unchanged_secrets(value, old_value)
+    return restored
+
+
+def _backend_config(value: Any) -> LLMBackendConfig:
+    """Build the persisted backend model without exposing its secrets."""
+    if hasattr(value, "model_dump"):
+        value = value.model_dump()
+    return LLMBackendConfig.model_validate(value)
+
+
+def _backend_info(backend: LLMBackendConfig) -> LLMBackendInfo:
+    """Serialize a backend without dropping resilience settings or credentials safely."""
+    payload = backend.model_dump()
+    payload["config"] = _redact_sensitive_config(payload.get("config", {}))
+    return LLMBackendInfo.model_validate(payload)
 
 
 def serialize_config_update(func):
@@ -189,7 +598,7 @@ async def create_backend():
             )
 
         # 创建新的后端配置
-        backend = _backend_info(request_data)
+        backend = _backend_config(request_data)
 
         # 添加到配置中
         config.llms.api_backends.append(backend)
@@ -199,7 +608,7 @@ async def create_backend():
             manager.load_backend(backend.name)
 
         ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
-        return LLMBackendResponse(data=backend).model_dump()
+        return LLMBackendResponse(data=_backend_info(backend)).model_dump()
     except Exception as e:
         logger.opt(exception=e).error("Failed to create backend")
         return jsonify({"error": str(e)}), 500
@@ -229,10 +638,15 @@ async def update_backend(backend_name: str):
         if backend_index == -1:
             return jsonify({"error": f"Backend {backend_name} not found"}), 404
 
-        # 创建更新后的后端配置
-        updated_backend = _backend_info(request_data)
-
         original_backend = config.llms.api_backends[backend_index]
+        submitted = request_data.model_dump()
+        if request_data.adapter == original_backend.adapter:
+            submitted["config"] = _restore_unchanged_secrets(
+                submitted.get("config", {}), original_backend.config
+            )
+        # Keep the real configuration in memory and on disk; only the response
+        # serializer is allowed to redact it.
+        updated_backend = _backend_config(submitted)
         backend_was_loaded = backend_name in manager.backends
 
         # 如果原后端已启用，先卸载
@@ -266,7 +680,7 @@ async def update_backend(backend_name: str):
                 )
             raise
 
-        return LLMBackendResponse(data=updated_backend).model_dump()
+        return LLMBackendResponse(data=_backend_info(updated_backend)).model_dump()
     except Exception as e:
         logger.opt(exception=e).error("Failed to update backend")
         return jsonify({"error": str(e)}), 500

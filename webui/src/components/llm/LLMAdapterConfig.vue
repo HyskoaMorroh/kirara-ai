@@ -5,6 +5,7 @@ import {
   NFormItem,
   NSwitch,
   NInput,
+  NInputNumber,
   NSelect,
   NCard,
   NButton,
@@ -12,11 +13,17 @@ import {
   NScrollbar,
   NSpin,
   NIcon,
-  NTooltip
+  NTooltip,
+  NCollapse,
+  NCollapseItem,
+  NAlert,
+  NGrid,
+  NGi
 } from 'naive-ui'
 import { AddOutline as AddIcon, RefreshOutline as RefreshIcon } from '@vicons/ionicons5'
 import type { FormItemRule, FormInst } from 'naive-ui'
 import type { LLMBackend, ConfigSchema } from '@/api/llm'
+import { resilienceDefaults } from '@/api/llm'
 import ModelListForm from '@/components/form/ModelListForm.vue'
 import DynamicConfigForm from '@/components/form/DynamicConfigForm.vue'
 import type { ModelInfo } from '@/components/form/types'
@@ -104,6 +111,155 @@ const updateAdapter = (update: (adapter: LLMBackend) => void) => {
   const adapter = deepClone(props.adapter)
   update(adapter)
   emit('update:adapter', adapter)
+}
+
+/**
+ * 容错预算字段表。
+ *
+ * 与 `kirara_ai/config/global_config.py` 的 `LLMBackendConfig` 一一对应，分组与
+ * 取值范围沿用后端校验；帮助文案说明「这个值不填会怎样」而不是复述字段名。
+ * 分成三组是因为这三类参数的调整场合完全不同：重试关心瞬态失败，超时关心
+ * 单次请求的等待上限，熔断关心一个 Provider 何时被整体跳过。
+ */
+type ResilienceField = {
+  key: keyof LLMBackend
+  label: string
+  min: number
+  max: number
+  step: number
+  help: string
+}
+
+const queueFields: ResilienceField[] = [
+  {
+    key: 'priority',
+    label: '队列优先级',
+    min: 0,
+    max: 10000,
+    step: 1,
+    help: '数字越小越先被使用；同一模型下多个供应商按此升序组成故障转移队列'
+  },
+  {
+    key: 'max_retries',
+    label: '最大重试次数',
+    min: 0,
+    max: 10,
+    step: 1,
+    help: '同一供应商内部的重试次数（0-10）；只对网络、超时、限流和上游 5xx 生效'
+  },
+  {
+    key: 'retry_backoff_seconds',
+    label: '重试初始退避（秒）',
+    min: 0,
+    max: 600,
+    step: 0.5,
+    help: '第一次重试前的等待秒数，之后按 2 倍增长'
+  },
+  {
+    key: 'retry_backoff_max_seconds',
+    label: '重试退避上限（秒）',
+    min: 0,
+    max: 600,
+    step: 0.5,
+    help: '退避的封顶值，防止指数增长把单次请求拖到不可接受的时长'
+  }
+]
+
+const timeoutFields: ResilienceField[] = [
+  {
+    key: 'stream_first_byte_timeout_seconds',
+    label: '流式首字节超时（秒）',
+    min: 1,
+    max: 600,
+    step: 1,
+    help: '等待首个数据块的最长时间；超时会切换到队列中的下一个供应商'
+  },
+  {
+    key: 'stream_idle_timeout_seconds',
+    label: '流式静默超时（秒）',
+    min: 1,
+    max: 1200,
+    step: 1,
+    help: '两个数据块之间的最长间隔，用于识别中途卡住的流'
+  },
+  {
+    key: 'stream_total_timeout_seconds',
+    label: '流式总超时（秒）',
+    min: 1,
+    max: 3600,
+    step: 10,
+    help: '一次流式请求的总时间预算；必须不小于首字节超时与静默超时之和'
+  },
+  {
+    key: 'non_stream_timeout_seconds',
+    label: '非流式总超时（秒）',
+    min: 1,
+    max: 3600,
+    step: 10,
+    help: '非流式请求的总时间预算，包含该供应商内部的全部重试与退避'
+  }
+]
+
+const circuitFields: ResilienceField[] = [
+  {
+    key: 'circuit_failure_threshold',
+    label: '连续失败阈值',
+    min: 1,
+    max: 100,
+    step: 1,
+    help: '连续失败多少次后打开熔断器（建议 3-10）'
+  },
+  {
+    key: 'circuit_error_rate_threshold',
+    label: '错误率阈值',
+    min: 0,
+    max: 1,
+    step: 0.05,
+    help: '达到最小请求数后，错误率超过此值即打开熔断器（0-1）'
+  },
+  {
+    key: 'circuit_min_requests',
+    label: '最小请求数',
+    min: 1,
+    max: 1000,
+    step: 1,
+    help: '计算错误率前至少需要的样本数，避免小样本误判'
+  },
+  {
+    key: 'circuit_recovery_timeout_seconds',
+    label: '恢复等待时间（秒）',
+    min: 0,
+    max: 3600,
+    step: 5,
+    help: '熔断打开后等待多久进入半开探测（建议 30-120）'
+  },
+  {
+    key: 'circuit_recovery_success_threshold',
+    label: '恢复成功阈值',
+    min: 1,
+    max: 100,
+    step: 1,
+    help: '半开状态下连续成功多少次后关闭熔断器'
+  }
+]
+
+const resilienceValue = (key: keyof LLMBackend): number => {
+  const current = props.adapter?.[key]
+  if (typeof current === 'number') return current
+  return resilienceDefaults()[key as keyof ReturnType<typeof resilienceDefaults>] as number
+}
+
+const updateResilience = (key: keyof LLMBackend, value: number | null) => {
+  if (value === null) return
+  updateAdapter((nextAdapter) => {
+    ;(nextAdapter as Record<string, unknown>)[key as string] = value
+  })
+}
+
+const resetResilience = () => {
+  updateAdapter((nextAdapter) => {
+    Object.assign(nextAdapter, resilienceDefaults())
+  })
 }
 </script>
 
@@ -219,6 +375,86 @@ const updateAdapter = (update: (adapter: LLMBackend) => void) => {
             @update:value="(value) => updateAdapter((nextAdapter) => (nextAdapter.models = value))"
           />
         </n-card>
+
+        <n-card class="config-section" title="自动故障转移">
+          <template #header-extra>
+            <n-button size="small" quaternary @click="resetResilience">恢复默认</n-button>
+          </template>
+
+          <n-alert type="info" :bordered="false" class="resilience-hint">
+            同一模型下配置了多个供应商时，请求失败会按「队列优先级」升序依次尝试。
+            某个供应商连续失败达到阈值后，熔断器打开并在恢复等待时间内跳过它。
+            认证失败、参数错误和内容策略拒绝不会触发重试或转移。
+          </n-alert>
+
+          <n-form label-placement="top" class="form">
+            <n-form-item label="参与故障转移队列">
+              <n-switch
+                :value="adapter.participate_in_failover !== false"
+                @update:value="
+                  (value) =>
+                    updateAdapter((nextAdapter) => (nextAdapter.participate_in_failover = value))
+                "
+              />
+              <span class="resilience-inline-help">
+                关闭后该供应商仍可被直接选用，但不会出现在自动故障转移队列里
+              </span>
+            </n-form-item>
+          </n-form>
+
+          <n-collapse :default-expanded-names="['queue']">
+            <n-collapse-item title="重试与队列" name="queue">
+              <n-grid :cols="2" :x-gap="16" responsive="screen" item-responsive>
+                <n-gi v-for="field in queueFields" :key="field.key" span="2 s:2 m:1">
+                  <n-form-item :label="field.label" :feedback="field.help">
+                    <n-input-number
+                      :value="resilienceValue(field.key)"
+                      :min="field.min"
+                      :max="field.max"
+                      :step="field.step"
+                      class="resilience-input"
+                      @update:value="(value) => updateResilience(field.key, value)"
+                    />
+                  </n-form-item>
+                </n-gi>
+              </n-grid>
+            </n-collapse-item>
+
+            <n-collapse-item title="超时配置" name="timeout">
+              <n-grid :cols="2" :x-gap="16" responsive="screen" item-responsive>
+                <n-gi v-for="field in timeoutFields" :key="field.key" span="2 s:2 m:1">
+                  <n-form-item :label="field.label" :feedback="field.help">
+                    <n-input-number
+                      :value="resilienceValue(field.key)"
+                      :min="field.min"
+                      :max="field.max"
+                      :step="field.step"
+                      class="resilience-input"
+                      @update:value="(value) => updateResilience(field.key, value)"
+                    />
+                  </n-form-item>
+                </n-gi>
+              </n-grid>
+            </n-collapse-item>
+
+            <n-collapse-item title="熔断器设置" name="circuit">
+              <n-grid :cols="2" :x-gap="16" responsive="screen" item-responsive>
+                <n-gi v-for="field in circuitFields" :key="field.key" span="2 s:2 m:1">
+                  <n-form-item :label="field.label" :feedback="field.help">
+                    <n-input-number
+                      :value="resilienceValue(field.key)"
+                      :min="field.min"
+                      :max="field.max"
+                      :step="field.step"
+                      class="resilience-input"
+                      @update:value="(value) => updateResilience(field.key, value)"
+                    />
+                  </n-form-item>
+                </n-gi>
+              </n-grid>
+            </n-collapse-item>
+          </n-collapse>
+        </n-card>
       </div>
     </n-scrollbar>
   </div>
@@ -257,6 +493,21 @@ const updateAdapter = (update: (adapter: LLMBackend) => void) => {
   display: flex;
   flex-direction: column;
   gap: 24px;
+}
+
+.resilience-hint {
+  margin-bottom: 16px;
+  line-height: var(--line-height-normal, 1.5);
+}
+
+.resilience-inline-help {
+  margin-left: 12px;
+  color: var(--text-color-3, #909399);
+  font-size: var(--font-size-sm, 0.85rem);
+}
+
+.resilience-input {
+  width: 100%;
 }
 
 .action-button {

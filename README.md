@@ -71,7 +71,8 @@
 | 文档 | 用途 |
 |---|---|
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | 首次部署走一遍：首次登录设定密码、内置模板与规则的释放、配置 LLM 后端与手动选模型、确认调度规则、发出第一条可验证的回复 |
-| [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | 怎么看清系统在干什么：日志去向、LLM 请求追踪、工作流结构预检与全部 issue code、调度规则试运行与静态可达性分析，以及明确不存在的观测能力 |
+| [`docs/QQ_ONEBOT_OPERATIONS.md`](docs/QQ_ONEBOT_OPERATIONS.md) | QQ / OneBot 专项：连接方向、七种连接状态与原因码、数据目录清单、Compose 参考与验收矩阵、二维码与登录、回复慢的分段定位 |
+| [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | 怎么看清系统在干什么：日志去向、LLM 请求追踪、投递时间线、成本统计、工作流结构预检与全部 issue code、调度规则试运行与静态可达性分析，以及明确不存在的观测能力 |
 | [`docs/EXTENDING.md`](docs/EXTENDING.md) | 扩展开发：自定义 Block、插件、MCP 接入、预设 YAML、调度规则、事件总线、定时任务，并逐条写明当前**没有**的扩展点 |
 | [`docs/WORKFLOW_OPERATIONS_GUIDE.md`](docs/WORKFLOW_OPERATIONS_GUIDE.md) | 从部署到首条回复：模板选型、手动选模型、自动探测边界、默认规则、画布操作、排错顺序与扩展边界 |
 | [`docs/EXCELLENCE_DEPLOYMENT_GUIDE.md`](docs/EXCELLENCE_DEPLOYMENT_GUIDE.md) | 面向生产部署的品质路线图：现有能力的正确使用、画布体验基线、可靠性门禁，以及 Agents、Skills、Hooks、MCP 与可观测性的分阶段接入方式 |
@@ -156,6 +157,27 @@ WebUI 内置 6 套配色方案，每套都有独立的浅色与深色取值：
 * [x] 支持 Web 管理后台
 * [x] 内置 Frpc 内网穿透
 
+### 可靠性与可观测性
+
+* [x] **内置 OneBot V11 / QQ 适配器**：反向 WebSocket、多账号 `self_id` 路由、
+  七种连接状态与固定原因码（区分「等待接入」「凭据被拒」「握手被拒」「心跳超时」），
+  详见 [`docs/QQ_ONEBOT_OPERATIONS.md`](docs/QQ_ONEBOT_OPERATIONS.md)
+* [x] **持久化投递队列**：长回复按页独立投递，结果未知的投递被隔离而**不会重发**，
+  明确失败按「指数退避 + 抖动 + 上限」有限重试
+* [x] **统一排版管线**：QQ / Telegram / WeCom 共用一套结构化渲染，
+  表格转规整框线表、代码保持原始缩进、常见 LaTeX 降级为可读符号、
+  长回复统一标注「第 N 页 / 共 M 页」
+* [x] **代码可复制**：QQ 无可用按钮，改为让代码单独成条，长按即可整段复制
+* [x] **端到端投递时间线**：从收到事件、工作流开始、模型首字节、模型完成、
+  排版、发送到结果，逐段计时，把「模型慢」和「QQ 慢」分开
+* [x] **多 Provider 故障转移**：优先级队列、可重试错误分类（认证/参数/内容策略不重试）、
+  流式首字节与静默超时、总截止时间与取消传播、三态熔断器
+* [x] **真实成本统计**：按请求当时的价格快照计费，区分供应商用量与未定价请求，
+  支持按 Provider / 模型 / 失败类型聚合与 CSV 导出
+* [x] **受控扩展**：Skill / Hook / MCP / Prompt 带 manifest、版本、来源、权限边界与审计，
+  Hook 支持按工具名匹配与按事件启停
+* [x] **会话可管理**：列出持久化会话与待确认队列、清空单个会话历史（不含对话正文出网）
+
 # **🤖 聊天平台**  
 
 我们支持多种聊天平台。  
@@ -168,7 +190,11 @@ WebUI 内置 6 套配色方案，每套都有独立的浅色与深色取值：
 | 飞书机器人  | 重构中   | 重构中   | 重构中 | 重构中  | 重构中  | 重构中   |
 | 企业微信应用 | 支持   | 支持   | 支持 | 不支持  | 支持  | 支持   |
 | 微信公众号 | 支持   | 支持   | 支持 | 不支持  | 支持  | 支持   |
-| OneBot   | 插件支持   | 插件支持   | 插件支持   | 插件支持    | 插件支持  | 插件支持   |
+| OneBot   | 内置支持   | 内置支持   | 内置支持   | 内置支持    | 内置支持  | 内置支持   |
+
+> OneBot V11 适配器已内置（反向 WebSocket + 多账号路由），无需额外安装插件。
+> 接入步骤、连接状态含义与排障顺序见
+> [`docs/QQ_ONEBOT_OPERATIONS.md`](docs/QQ_ONEBOT_OPERATIONS.md)。
 
 ## 🐎 命令
 

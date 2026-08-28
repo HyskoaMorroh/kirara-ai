@@ -1,19 +1,18 @@
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from functools import wraps
 from typing import Any
 
 from quart import g, jsonify, request
 
 from kirara_ai.web.auth.services import AuthService
+from kirara_ai.web.auth.principal import RuntimePrincipal, runtime_principal_context
 
 
-def _has_required_scopes(claims: Mapping[str, Any], required_scopes: tuple[str, ...]) -> bool:
-    if not required_scopes:
-        return True
-    role = str(claims.get("role", "")).lower()
-    raw_scopes = claims.get("scopes", [])
-    scopes = {str(scope) for scope in raw_scopes if isinstance(scope, str)}
-    return role == "admin" or "*" in scopes or set(required_scopes).issubset(scopes)
+def _has_required_scopes(
+    principal: RuntimePrincipal,
+    required_scopes: tuple[str, ...],
+) -> bool:
+    return principal.has_scopes(required_scopes)
 
 
 def _decorate(f: Callable[..., Any], required_scopes: tuple[str, ...]):
@@ -26,14 +25,15 @@ def _decorate(f: Callable[..., Any], required_scopes: tuple[str, ...]):
 
         token = parts[1]
         auth_service: AuthService = g.container.resolve(AuthService)
-        claims = auth_service.get_token_claims(token)
-        if not claims:
+        principal = auth_service.get_runtime_principal(token)
+        if principal is None:
             return jsonify({"error": "Invalid token"}), 401
-        if not _has_required_scopes(claims, required_scopes):
+        if not _has_required_scopes(principal, required_scopes):
             return jsonify({"error": "Insufficient permissions"}), 403
 
-        g.auth_principal = claims
-        return await f(*args, **kwargs)
+        g.auth_principal = principal
+        with runtime_principal_context(principal):
+            return await f(*args, **kwargs)
 
     return decorated_function
 

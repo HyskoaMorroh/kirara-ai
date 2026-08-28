@@ -604,6 +604,7 @@ class ResourceLifecycleService:
             "session",
             "server",
             "duration_ms",
+            "subject_digest",
         }
         sanitized: dict[str, Any] = {}
         for key in allowed_keys:
@@ -760,23 +761,17 @@ class ResourceLifecycleService:
             resource_id = metadata.get("resource_id")
             if not isinstance(resource_id, str) or not isinstance(version, str):
                 raise ResourceValidationError("backup identity is invalid")
-            manifest_path = backup_path / "manifest.json"
-            if not manifest_path.is_file() or manifest_path.is_symlink():
-                raise ResourceValidationError("backup manifest is unavailable")
-            try:
-                manifest = self._parse_manifest(
-                    json.loads(manifest_path.read_text(encoding="utf-8"))
-                )
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise ResourceValidationError("backup manifest is invalid") from error
-            if manifest.resource_id != resource_id or manifest.version != version:
-                raise ResourceValidationError("backup manifest identity does not match")
+            manifest = self._validate_backup_directory(
+                backup_path, metadata, expected_resource_id=resource_id, expected_version=version
+            )
 
             stage_root = self.staging_path / f"restore-{uuid.uuid4().hex}"
             staged_version = stage_root / resource_id / version
             try:
                 shutil.copytree(backup_path, staged_version, symlinks=False)
+                self._validate_resource_directory(staged_version, manifest, allow_backup=True)
                 (staged_version / "backup.json").unlink(missing_ok=True)
+                self._validate_resource_directory(staged_version, manifest, allow_backup=False)
                 final_version = self._version_path(resource_id, version)
                 final_version.parent.mkdir(parents=True, exist_ok=True)
                 if final_version.exists() or final_version.is_symlink():
@@ -1189,7 +1184,12 @@ class ResourceLifecycleService:
                 continue
             path = resource_dir / backup_id
             metadata_path = path / "backup.json"
-            if not path.is_dir() or path.is_symlink() or not metadata_path.is_file():
+            if (
+                not path.is_dir()
+                or path.is_symlink()
+                or not metadata_path.is_file()
+                or metadata_path.is_symlink()
+            ):
                 continue
             try:
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -1199,6 +1199,129 @@ class ResourceLifecycleService:
                 raise ResourceValidationError("backup metadata is invalid")
             return path, metadata
         raise ResourceStateError("backup is not found")
+
+    def _validate_backup_directory(
+        self,
+        backup_path: Path,
+        metadata: Mapping[str, Any],
+        *,
+        expected_resource_id: str,
+        expected_version: str,
+    ) -> ResourceManifest:
+        """Validate a backup completely before it can replace an installed version."""
+        if not isinstance(metadata, dict):
+            raise ResourceValidationError("backup metadata is invalid")
+        if metadata.get("resource_id") != expected_resource_id or metadata.get("version") != expected_version:
+            raise ResourceValidationError("backup metadata identity does not match")
+        if not backup_path.is_dir() or backup_path.is_symlink():
+            raise ResourceValidationError("backup directory is unavailable")
+
+        metadata_path = backup_path / "backup.json"
+        manifest_path = backup_path / "manifest.json"
+        if (
+            not metadata_path.is_file()
+            or metadata_path.is_symlink()
+            or not manifest_path.is_file()
+            or manifest_path.is_symlink()
+        ):
+            raise ResourceValidationError("backup metadata or manifest is unavailable")
+        try:
+            stored_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = self._parse_manifest(manifest_payload)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ResourceValidationError("backup metadata or manifest is invalid") from error
+
+        if stored_metadata != metadata:
+            metadata = stored_metadata
+        if not self._valid_backup_metadata(metadata, backup_path.name):
+            raise ResourceValidationError("backup metadata is invalid")
+        if manifest.resource_id != expected_resource_id or manifest.version != expected_version:
+            raise ResourceValidationError("backup manifest identity does not match")
+        if metadata.get("content_sha256") != manifest.content_sha256:
+            raise ResourceValidationError("backup metadata digest does not match manifest")
+        resource_snapshot = metadata.get("resource")
+        if (
+            not isinstance(resource_snapshot, dict)
+            or resource_snapshot.get("resource_id") != manifest.resource_id
+            or resource_snapshot.get("current_version") != manifest.version
+            or resource_snapshot.get("content_sha256") != manifest.content_sha256
+        ):
+            raise ResourceValidationError("backup resource snapshot does not match manifest")
+
+        self._validate_resource_directory(backup_path, manifest, allow_backup=True)
+        return manifest
+
+    def _validate_resource_directory(
+        self, root: Path, manifest: ResourceManifest, *, allow_backup: bool
+    ) -> None:
+        """Validate a materialized resource tree against its manifest."""
+        if not root.is_dir() or root.is_symlink():
+            raise ResourceValidationError("resource directory is unavailable")
+
+        expected_files = {"manifest.json", *(file.path for file in manifest.files)}
+        if allow_backup:
+            expected_files.add("backup.json")
+        actual_files: set[str] = set()
+        actual_directories: set[str] = set()
+        try:
+            for directory, directories, files in os.walk(root, topdown=True, followlinks=False):
+                directory_path = Path(directory)
+                if directory_path.is_symlink():
+                    raise ResourceValidationError("resource backup contains a symbolic link")
+                for name in directories:
+                    child = directory_path / name
+                    if child.is_symlink():
+                        raise ResourceValidationError("resource backup contains a symbolic link")
+                    actual_directories.add(child.relative_to(root).as_posix())
+                for name in files:
+                    child = directory_path / name
+                    if child.is_symlink():
+                        raise ResourceValidationError("resource backup contains a symbolic link")
+                    actual_files.add(child.relative_to(root).as_posix())
+        except OSError as error:
+            raise ResourceValidationError("resource directory cannot be inspected") from error
+
+        if actual_files != expected_files:
+            raise ResourceValidationError("backup contains undeclared or missing files")
+        expected_directories = {
+            parent.as_posix()
+            for filename in expected_files
+            for parent in PurePosixPath(filename).parents
+            if str(parent) != "."
+        }
+        if actual_directories != expected_directories:
+            raise ResourceValidationError("backup contains undeclared directories")
+
+        manifest_path = root / "manifest.json"
+        try:
+            parsed_manifest = self._parse_manifest(
+                json.loads(manifest_path.read_text(encoding="utf-8"))
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ResourceValidationError("resource manifest is invalid") from error
+        if (
+            parsed_manifest.resource_id != manifest.resource_id
+            or parsed_manifest.version != manifest.version
+            or parsed_manifest.content_sha256 != manifest.content_sha256
+        ):
+            raise ResourceValidationError("resource manifest does not match its expected identity")
+
+        for file in manifest.files:
+            path = root / PurePosixPath(file.path)
+            try:
+                if path.stat().st_size != file.size:
+                    raise ResourceValidationError("resource file size does not match manifest")
+                digest = hashlib.sha256()
+                with path.open("rb") as source:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            except OSError as error:
+                raise ResourceValidationError("resource file cannot be read") from error
+            if digest.hexdigest() != file.sha256:
+                raise ResourceValidationError("resource file digest does not match manifest")
+        if self._content_hash(manifest.files) != manifest.content_sha256:
+            raise ResourceValidationError("resource content digest does not match manifest")
 
     def _audit(
         self,

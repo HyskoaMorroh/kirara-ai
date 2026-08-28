@@ -1,8 +1,14 @@
 import asyncio
+import csv
+import io
 import json
+from datetime import datetime
+from typing import Any, Mapping, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from quart import Blueprint, g, jsonify, request, websocket
+from quart import Blueprint, Response, g, jsonify, request, websocket
 
+from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.internal import shutdown_event
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.logger import get_logger
@@ -14,6 +20,106 @@ from kirara_ai.web.auth.services import AuthService
 tracing_bp = Blueprint("tracing", __name__, url_prefix="/api/tracing")
 
 logger = get_logger("Tracing-API")
+
+_TRACE_SEARCH_FIELDS = (
+    "trace_id",
+    "correlation_id",
+    "provider",
+    "model_id",
+    "backend_name",
+    "status",
+    "error_category",
+    "usage_source",
+)
+
+
+def _timezone_or_error(name: Any, default: str):
+    if name is not None and name != "" and not isinstance(name, str):
+        return None, (jsonify({
+            "error": "timezone must be a valid IANA timezone name"
+        }), 400)
+    timezone_name = name or default
+    try:
+        return ZoneInfo(timezone_name), None
+    except (ZoneInfoNotFoundError, KeyError):
+        return None, (jsonify({"error": f"Unknown timezone: {timezone_name}"}), 400)
+
+
+def _parse_iso_datetime(value: Any, field: str, storage_timezone: ZoneInfo):
+    if value is None:
+        return None, None
+    if not isinstance(value, str):
+        return None, (jsonify({
+            "error": f"{field} must be an ISO-8601 datetime with a timezone"
+        }), 400)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None, (jsonify({
+            "error": f"{field} must be an ISO-8601 datetime with a timezone"
+        }), 400)
+    return parsed.astimezone(storage_timezone).replace(tzinfo=None), None
+
+
+async def _trace_request_options(data: Mapping[str, Any], config: GlobalConfig):
+    timezone, error = _timezone_or_error(data.get("timezone"), config.system.timezone)
+    if error:
+        return None, error
+    storage_timezone, error = _timezone_or_error(config.system.timezone, config.system.timezone)
+    if error:
+        return None, error
+
+    filters = {}
+    aliases = (
+        ("provider", "provider"),
+        ("backend", "backend_name"),
+        ("backend_name", "backend_name"),
+        ("model", "model_id"),
+        ("model_id", "model_id"),
+        ("status", "status"),
+        ("error_category", "error_category"),
+        ("usage_source", "usage_source"),
+        ("correlation_id", "correlation_id"),
+    )
+    for source, target in aliases:
+        value = data.get(source)
+        if value is not None and value != "":
+            filters[target] = value
+
+    start_time, error = _parse_iso_datetime(data.get("start_time"), "start_time", storage_timezone)
+    if error:
+        return None, error
+    end_time, error = _parse_iso_datetime(data.get("end_time"), "end_time", storage_timezone)
+    if error:
+        return None, error
+    if start_time is not None:
+        filters["start_time"] = start_time
+    if end_time is not None:
+        filters["end_time"] = end_time
+    if start_time is not None and end_time is not None and start_time >= end_time:
+        return None, (jsonify({"error": "start_time must be earlier than end_time"}), 400)
+
+    return {"filters": filters, "timezone": timezone.key}, None
+
+
+def _tracer_or_error() -> tuple[Optional[LLMTracer], Optional[Response]]:
+    container: DependencyContainer = g.container
+    tracing_manager = container.resolve(TracingManager)
+    llm_tracer = tracing_manager.get_tracer("llm")
+    if not llm_tracer:
+        return None, (jsonify({"error": "LLM tracer not found"}), 404)
+    assert isinstance(llm_tracer, LLMTracer)
+    return llm_tracer, None
+
+
+def _export_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value)
 
 
 @tracing_bp.route("/types", methods=["GET"])
@@ -33,44 +139,36 @@ async def get_trace_types():
 async def get_llm_traces():
     """获取LLM追踪记录，支持筛选和分页"""
     # 获取查询参数
-    data = await request.json
+    data = await request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
+
     page = data.get("page", 1)
     page_size = data.get("page_size", 20)
-    model_id = data.get("model_id")
-    backend_name = data.get("backend_name")
-    status = data.get("status")
-    correlation_id = data.get("correlation_id")
+    if type(page) is not int or page < 1:
+        return jsonify({"error": "page must be an integer greater than or equal to 1"}), 400
+    if type(page_size) is not int or not 1 <= page_size <= 200:
+        return jsonify({"error": "page_size must be an integer between 1 and 200"}), 400
     query = data.get("query")
 
+    config: GlobalConfig = g.container.resolve(GlobalConfig)
+    options, error = await _trace_request_options(data, config)
+    if error:
+        return error
+
     # 构建过滤条件
-    filters = {}
-    if model_id:
-        filters["model_id"] = model_id
-    if backend_name:
-        filters["backend_name"] = backend_name
-    if status:
-        filters["status"] = status
-    if correlation_id:
-        filters["correlation_id"] = correlation_id
+    filters = options["filters"]
 
-    container: DependencyContainer = g.container
-    tracing_manager = container.resolve(TracingManager)
-    llm_tracer = tracing_manager.get_tracer("llm")
-
-    if not llm_tracer:
-        return jsonify({"error": "LLM tracer not found"}), 404
+    llm_tracer, error = _tracer_or_error()
+    if error:
+        return error
+    assert llm_tracer is not None
 
     # 使用统一的查询接口
     records, total = llm_tracer.get_traces(
         filters=filters,
         query=query,
-        search_fields=(
-            "trace_id",
-            "correlation_id",
-            "model_id",
-            "backend_name",
-            "status",
-        ),
+        search_fields=_TRACE_SEARCH_FIELDS,
         page=page,
         page_size=page_size
     )
@@ -80,7 +178,8 @@ async def get_llm_traces():
         "total": total,
         "page": page,
         "page_size": page_size,
-        "total_pages": (total + page_size - 1) // page_size
+        "total_pages": (total + page_size - 1) // page_size,
+        "timezone": options["timezone"],
     })
 
 
@@ -106,15 +205,101 @@ async def get_llm_trace_detail(trace_id: str):
 @require_auth
 async def get_llm_statistics():
     """获取LLM统计信息"""
-    container: DependencyContainer = g.container
-    tracing_manager = container.resolve(TracingManager)
-    llm_tracer = tracing_manager.get_tracer("llm")
-
-    if not llm_tracer:
-        return jsonify({"error": "LLM tracer not found"}), 404
-    assert isinstance(llm_tracer, LLMTracer)
-    stats = llm_tracer.get_statistics()
+    config: GlobalConfig = g.container.resolve(GlobalConfig)
+    options, error = await _trace_request_options(request.args, config)
+    if error:
+        return error
+    llm_tracer, error = _tracer_or_error()
+    if error:
+        return error
+    assert llm_tracer is not None
+    stats = llm_tracer.get_statistics(
+        filters=options["filters"],
+        timezone_name=options["timezone"],
+    )
     return jsonify(stats)
+
+
+@tracing_bp.route("/llm/export", methods=["POST"])
+@require_auth
+async def export_llm_traces():
+    """导出筛选后的 LLM 追踪记录，限制单次导出大小。"""
+    data = await request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
+
+    export_format = data.get("format", "json")
+    if export_format not in {"json", "csv"}:
+        return jsonify({"error": "format must be either json or csv"}), 400
+    limit = data.get("limit", 1000)
+    if type(limit) is not int or not 1 <= limit <= 10000:
+        return jsonify({"error": "limit must be an integer between 1 and 10000"}), 400
+
+    config: GlobalConfig = g.container.resolve(GlobalConfig)
+    options, error = await _trace_request_options(data, config)
+    if error:
+        return error
+    llm_tracer, error = _tracer_or_error()
+    if error:
+        return error
+    assert llm_tracer is not None
+    records, total = llm_tracer.get_traces(
+        filters=options["filters"],
+        query=data.get("query"),
+        search_fields=_TRACE_SEARCH_FIELDS,
+        page=1,
+        page_size=limit,
+    )
+    items = [record.to_dict() for record in records]
+    truncated = total > limit
+
+    if export_format == "json":
+        response = jsonify({
+            "items": items,
+            "exported": len(items),
+            "total": total,
+            "truncated": truncated,
+            "timezone": options["timezone"],
+        })
+        response.headers["Content-Disposition"] = 'attachment; filename="llm-traces.json"'
+        return response
+
+    fields = (
+        "id",
+        "trace_id",
+        "correlation_id",
+        "provider",
+        "backend_name",
+        "model_id",
+        "request_time",
+        "response_time",
+        "duration",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "cache_write_tokens",
+        "usage_source",
+        "ttft_ms",
+        "attempt_count",
+        "status",
+        "error_category",
+        # 成本快照此前不在导出列里：导出的账单看不到钱，
+        # 只能回到界面上逐条点开，等于没有导出。
+        "cost_snapshot",
+        "error",
+    )
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=fields)
+    writer.writeheader()
+    for item in items:
+        writer.writerow({field: _export_value(item.get(field)) for field in fields})
+    response = Response("\ufeff" + output.getvalue(), mimetype="text/csv; charset=utf-8")
+    response.headers["Content-Disposition"] = 'attachment; filename="llm-traces.csv"'
+    response.headers["X-Exported-Count"] = str(len(items))
+    response.headers["X-Total-Count"] = str(total)
+    response.headers["X-Export-Truncated"] = str(truncated).lower()
+    return response
 
 
 @tracing_bp.websocket("/ws")

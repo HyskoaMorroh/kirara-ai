@@ -1,3 +1,4 @@
+import asyncio
 import time
 
 import pytest
@@ -116,3 +117,130 @@ def test_reverse_websocket_rejects_api_roles_without_self_id(role: str):
             pass
 
     assert rejected.value.code == 4400
+
+
+@pytest.mark.asyncio
+async def test_asgi_treats_cancellation_after_disconnect_as_normal_close():
+    adapter, _, _ = make_client()
+
+    class DisconnectingBot:
+        async def asgi(self, scope, receive, send):
+            assert await receive() == {"type": "websocket.disconnect"}
+            raise asyncio.CancelledError
+
+    adapter.bot = DisconnectingBot()  # type: ignore[assignment]
+
+    async def receive():
+        return {"type": "websocket.disconnect"}
+
+    await adapter.asgi(
+        {
+            "type": "websocket",
+            "headers": [
+                (b"x-client-role", b"event"),
+                (b"x-self-id", b"10001"),
+            ],
+        },
+        receive,
+        lambda message: None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_asgi_treats_cancellation_with_queued_disconnect_as_normal_close():
+    adapter, _, _ = make_client()
+    receive_queue = asyncio.Queue()
+    receive_started = asyncio.Event()
+    receive_calls = 0
+
+    class DisconnectingBot:
+        async def asgi(self, scope, receive, send):
+            assert await receive() == {"type": "websocket.connect"}
+            await receive()
+
+    adapter.bot = DisconnectingBot()  # type: ignore[assignment]
+
+    async def receive():
+        nonlocal receive_calls
+        receive_calls += 1
+        if receive_calls == 1:
+            return {"type": "websocket.connect"}
+        if receive_calls == 2:
+            receive_started.set()
+            await asyncio.Future()
+        return receive_queue.get_nowait()
+
+    task = asyncio.create_task(
+        adapter.asgi(
+            {
+                "type": "websocket",
+                "headers": [
+                    (b"x-client-role", b"event"),
+                    (b"x-self-id", b"10001"),
+                ],
+            },
+            receive,
+            lambda message: None,
+        )
+    )
+    await asyncio.wait_for(receive_started.wait(), timeout=1)
+    receive_queue.put_nowait({"type": "websocket.disconnect", "code": 1000})
+    task.cancel()
+    await task
+
+    assert receive_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_asgi_propagates_cancellation_without_disconnect():
+    adapter, _, _ = make_client()
+
+    class CancelledBot:
+        async def asgi(self, scope, receive, send):
+            raise asyncio.CancelledError
+
+    adapter.bot = CancelledBot()  # type: ignore[assignment]
+
+    async def receive():
+        return {"type": "websocket.connect"}
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.asgi(
+            {
+                "type": "websocket",
+                "headers": [
+                    (b"x-client-role", b"event"),
+                    (b"x-self-id", b"10001"),
+                ],
+            },
+            receive,
+            lambda message: None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_asgi_propagates_business_errors_after_disconnect():
+    adapter, _, _ = make_client()
+
+    class FailingBot:
+        async def asgi(self, scope, receive, send):
+            assert await receive() == {"type": "websocket.disconnect"}
+            raise RuntimeError("handler failure")
+
+    adapter.bot = FailingBot()  # type: ignore[assignment]
+
+    async def receive():
+        return {"type": "websocket.disconnect"}
+
+    with pytest.raises(RuntimeError, match="handler failure"):
+        await adapter.asgi(
+            {
+                "type": "websocket",
+                "headers": [
+                    (b"x-client-role", b"event"),
+                    (b"x-self-id", b"10001"),
+                ],
+            },
+            receive,
+            lambda message: None,
+        )

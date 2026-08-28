@@ -17,6 +17,15 @@ from kirara_ai.plugin_manager.plugin_event_bus import PluginEventBus
 from kirara_ai.plugin_manager.plugin import Plugin
 from kirara_ai.plugin_manager.plugin_loader import PluginLoader
 from kirara_ai.entry import notify_extension_lifecycle
+from kirara_ai.web.auth.principal import RuntimePrincipal, runtime_principal_context
+
+
+_MANIFEST_CREATOR = RuntimePrincipal(
+    subject="manifest-test-creator",
+    role="admin",
+    scopes=frozenset({"*"}),
+    is_creator=True,
+)
 
 
 def test_no_manifest_keeps_legacy_event_registration():
@@ -282,9 +291,25 @@ async def test_mcp_operations_emit_redacted_audit_events():
     manager.servers["local-tools"] = server
     manager.tools_cache["search"] = ToolCacheEntry("local-tools", "search", MagicMock())
 
-    assert await manager.call_tool("search", {"password": "private-value"}) is None
-    assert await manager.get_prompt("local-tools", "draft", {"key": "private-value"}) == "prompt"
-    assert await manager.get_resource("local-tools", "secret://private-value") == "resource"
+    with runtime_principal_context(_MANIFEST_CREATOR):
+        assert (
+            await manager.call_tool(
+                "search",
+                {"password": "private-value"},
+                agent_owner_subject=_MANIFEST_CREATOR.subject,
+            )
+            is None
+        )
+        assert (
+            await manager.get_prompt(
+                "local-tools", "draft", {"key": "private-value"}
+            )
+            == "prompt"
+        )
+        assert (
+            await manager.get_resource("local-tools", "secret://private-value")
+            == "resource"
+        )
 
     assert [record["operation"] for record in audit] == [
         "call_tool",
@@ -471,14 +496,16 @@ async def test_mcp_tool_call_resolves_qualified_policy_and_legacy_narrowing_alia
         "context7", "query-docs", MagicMock()
     )
 
-    result = await manager.call_tool(
-        "query-docs",
-        {"libraryId": "/pytest-dev/pytest", "query": "fixtures"},
-        agent_allowlist={"context7.query-docs"},
-        agent_mcp_server_ids={"context7"},
-        session_allowlist={"query-docs"},
-        workflow_allowlist={"context7.query-docs"},
-    )
+    with runtime_principal_context(_MANIFEST_CREATOR):
+        result = await manager.call_tool(
+            "query-docs",
+            {"libraryId": "/pytest-dev/pytest", "query": "fixtures"},
+            agent_allowlist={"context7.query-docs"},
+            agent_mcp_server_ids={"context7"},
+            agent_owner_subject=_MANIFEST_CREATOR.subject,
+            session_allowlist={"query-docs"},
+            workflow_allowlist={"context7.query-docs"},
+        )
 
     assert result is not None
     server.call_tool.assert_awaited_once_with(

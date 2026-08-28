@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import Any, Dict, Optional, cast, Literal, TypedDict
+from typing import Any, Dict, Iterable, Optional, cast, Literal, TypedDict
 
 import aiohttp
 import requests
@@ -10,7 +10,8 @@ from pydantic import BaseModel, ConfigDict
 
 import kirara_ai.llm.format.tool as tools
 from kirara_ai.config.global_config import ModelConfig
-from kirara_ai.llm.adapter import AutoDetectModelsProtocol, LLMBackendAdapter, LLMChatProtocol, LLMEmbeddingProtocol
+from kirara_ai.llm.adapter import (AutoDetectModelsProtocol, LLMBackendAdapter, LLMChatProtocol,
+                                   LLMChatStreamProtocol, LLMEmbeddingProtocol)
 from kirara_ai.llm.format.message import (LLMChatContentPartType, LLMChatImageContent, LLMChatMessage,
                                           LLMChatTextContent, LLMToolCallContent, LLMToolResultContent)
 from kirara_ai.llm.format.request import LLMChatRequest, Tool
@@ -143,7 +144,12 @@ class OpenAIConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
-class OpenAIAdapterChatBase(LLMBackendAdapter, LLMChatProtocol, AutoDetectModelsProtocol):
+class OpenAIAdapterChatBase(
+    LLMBackendAdapter,
+    LLMChatProtocol,
+    LLMChatStreamProtocol,
+    AutoDetectModelsProtocol,
+):
     media_manager: MediaManager
 
     def __init__(self, config: OpenAIConfig):
@@ -289,6 +295,128 @@ class OpenAIAdapterChatBase(LLMBackendAdapter, LLMChatProtocol, AutoDetectModels
                 finish_reason=first_choice.get("finish_reason", ""),
             ),
         )
+
+    def stream_chat(self, req: LLMChatRequest) -> Iterable[LLMChatResponse]:
+        """Stream an OpenAI-compatible completion as incremental responses.
+
+        ``LLMChatStreamProtocol`` 此前没有任何适配器实现，`execute_stream` 因此
+        只被测试调用过——「流式 / 非流式回复模式」在产品上不可选。这里补上
+        OpenAI 兼容接口的 SSE 解析。
+
+        产出的每个元素都是一个只含增量文本的 ``LLMChatResponse``，
+        与非流式的整体响应形状一致，调用方无需分支处理。
+        用量只在上游最后一帧给出时附带（``stream_options.include_usage``），
+        没给就保持 ``None``，由上层估算器标记为估算——绝不在这里编造数字。
+        """
+        api_url = f"{self.config.api_base}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            messages = convert_llm_chat_message_to_openai_message(
+                req.messages, self.media_manager, loop
+            )
+        finally:
+            loop.close()
+
+        data: dict[str, Any] = {
+            "messages": messages,
+            "model": req.model,
+            "frequency_penalty": req.frequency_penalty,
+            "max_tokens": req.max_tokens,
+            "presence_penalty": req.presence_penalty,
+            "stop": req.stop,
+            "temperature": req.temperature,
+            "top_p": req.top_p,
+            "tools": convert_tools_to_openai_format(req.tools) if req.tools else None,
+            "tool_choice": req.tool_choice or ("auto" if req.tools else None),
+            # 流式是这条路径的前提，不接受调用方把它关掉。
+            "stream": True,
+            # 请求上游在最后一帧带上真实用量；不支持的实现会忽略该字段。
+            "stream_options": req.stream_options or {"include_usage": True},
+        }
+        data = {k: v for k, v in data.items() if v is not None}
+
+        with self._session.post(
+            api_url,
+            json=data,
+            headers=headers,
+            timeout=(10, 300),
+            stream=True,
+        ) as response:
+            try:
+                response.raise_for_status()
+            except Exception as error:
+                logger.error(f"Stream response: {response.text[:512]}")
+                raise error
+
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                payload = line[len("data:"):].strip()
+                if not payload or payload == "[DONE]":
+                    if payload == "[DONE]":
+                        break
+                    continue
+                try:
+                    chunk = json.loads(payload)
+                except ValueError:
+                    # 单个坏帧不应终止整条流；跳过并继续读下一帧。
+                    logger.warning("Skipped an unparsable stream chunk")
+                    continue
+                if not isinstance(chunk, dict):
+                    continue
+                _raise_for_business_error(chunk, "chat/completions")
+
+                usage = None
+                usage_data = chunk.get("usage")
+                if isinstance(usage_data, dict) and usage_data:
+                    usage = Usage(
+                        prompt_tokens=usage_data.get("prompt_tokens"),
+                        completion_tokens=usage_data.get("completion_tokens"),
+                        total_tokens=usage_data.get("total_tokens"),
+                    )
+
+                choices = chunk.get("choices")
+                delta_text = ""
+                finish_reason = None
+                if isinstance(choices, list) and choices:
+                    first = choices[0]
+                    if isinstance(first, dict):
+                        finish_reason = first.get("finish_reason")
+                        delta = first.get("delta")
+                        if isinstance(delta, dict):
+                            raw = delta.get("content")
+                            if isinstance(raw, str):
+                                delta_text = raw
+                            elif isinstance(raw, list):
+                                delta_text = "".join(
+                                    part.get("text", "")
+                                    for part in raw
+                                    if isinstance(part, dict)
+                                    and isinstance(part.get("text"), str)
+                                )
+
+                if not delta_text and usage is None and finish_reason is None:
+                    # 心跳帧或纯角色声明帧，没有可交付内容。
+                    continue
+
+                yield LLMChatResponse(
+                    model=req.model,
+                    usage=usage,
+                    message=Message(
+                        content=[LLMChatTextContent(text=delta_text)] if delta_text else [],
+                        role="assistant",
+                        finish_reason=finish_reason or "",
+                    ),
+                )
 
     async def auto_detect_models(self) -> list[ModelConfig]:
         models = await self.get_models()

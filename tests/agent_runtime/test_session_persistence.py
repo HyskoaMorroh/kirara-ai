@@ -25,10 +25,18 @@ from kirara_ai.llm.format.response import LLMChatResponse, Message
 from kirara_ai.llm.format.tool import Function, ToolCall
 from kirara_ai.llm.resilience import ChatExecutionResult
 from kirara_ai.memory.entry import MemoryEntry
+from kirara_ai.web.auth.principal import RuntimePrincipal, runtime_principal_context
 
 
 HASH_PROMPT = "a" * 64
 HASH_MCP = "c" * 64
+CREATOR = RuntimePrincipal(subject="session-test-creator", is_creator=True)
+
+
+@pytest.fixture
+def creator_principal():
+    with runtime_principal_context(CREATOR):
+        yield
 
 
 class FakeLLMManager:
@@ -483,6 +491,7 @@ def test_memory_sender_matches_the_runtime_conversation_scope(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_confirmation_persists_tool_call_result_and_final_reply_to_memory(
     tmp_path: Path,
 ):
@@ -580,6 +589,7 @@ def test_memory_message_redacts_sensitive_tool_parameters(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_pending_confirmation_survives_executor_restart(tmp_path: Path):
     context = _context()
     store = SessionStore(tmp_path)
@@ -607,6 +617,7 @@ async def test_pending_confirmation_survives_executor_restart(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_confirmation_can_only_be_claimed_by_its_original_session(tmp_path: Path):
     context = _context()
     store = SessionStore(tmp_path)
@@ -635,6 +646,7 @@ async def test_confirmation_can_only_be_claimed_by_its_original_session(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_two_runtime_instances_cannot_execute_one_confirmation_twice(tmp_path: Path):
     context = _context()
     store = SessionStore(tmp_path)
@@ -675,6 +687,7 @@ async def test_two_runtime_instances_cannot_execute_one_confirmation_twice(tmp_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_failed_tool_confirmation_is_terminal_and_is_not_retried(tmp_path: Path):
     class FailingMCPManager(FakeMCPManager):
         async def call_tool(self, name, args, **options):

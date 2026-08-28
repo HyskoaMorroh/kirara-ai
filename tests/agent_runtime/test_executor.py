@@ -22,6 +22,7 @@ from kirara_ai.llm.format.response import LLMChatResponse, Message
 from kirara_ai.llm.format.tool import Function, ToolCall
 from kirara_ai.llm.resilience import ChatExecutionResult, FailoverExecutionError
 from kirara_ai.memory.entry import MemoryEntry
+from kirara_ai.web.auth.principal import RuntimePrincipal, runtime_principal_context
 
 
 HASH_PROMPT = "a" * 64
@@ -29,6 +30,13 @@ HASH_SKILL = "b" * 64
 HASH_MCP = "c" * 64
 HASH_MEMORY = "d" * 64
 HASH_HOOK = "e" * 64
+CREATOR = RuntimePrincipal(subject="executor-test-creator", is_creator=True)
+
+
+@pytest.fixture
+def creator_principal():
+    with runtime_principal_context(CREATOR):
+        yield
 
 
 def hook_binding(resource_id: str = "hook-main", digest: str = HASH_HOOK) -> ResourceBinding:
@@ -334,6 +342,7 @@ def make_versioned_executor(llm, mcp, calls, *, agent=None):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_one_agent_turn_composes_prompt_skill_memory_context7_failover_and_hooks():
     prompt_text = "prompt body for the research agent"
     skill_text = "skill body: use Context7 when documentation evidence is needed"
@@ -534,6 +543,7 @@ async def test_one_agent_turn_composes_prompt_skill_memory_context7_failover_and
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_runtime_injects_resources_runs_tool_in_same_turn_and_uses_model_fallback():
     llm = FakeLLMManager(
         {
@@ -584,6 +594,7 @@ async def test_runtime_injects_resources_runs_tool_in_same_turn_and_uses_model_f
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_runtime_resolves_stable_server_qualified_tool_policy_to_cache_name():
     llm = FakeLLMManager(
         {
@@ -643,6 +654,7 @@ async def test_runtime_resolves_stable_server_qualified_tool_policy_to_cache_nam
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_runtime_qualified_policy_selects_the_bound_server_during_name_conflict():
     final = LLMChatResponse(
         model="model-primary",
@@ -676,6 +688,7 @@ async def test_runtime_qualified_policy_selects_the_bound_server_during_name_con
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_runtime_qualified_policy_takes_precedence_over_a_cache_name_alias():
     final = LLMChatResponse(
         model="model-primary",
@@ -933,6 +946,7 @@ async def test_runtime_intersects_agent_session_and_workflow_permissions_before_
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_runtime_requires_confirmation_without_executing_external_tool_then_resumes():
     llm = FakeLLMManager(
         {
@@ -972,6 +986,7 @@ async def test_runtime_requires_confirmation_without_executing_external_tool_the
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_confirmation_expires_when_tool_signature_changes_while_waiting():
     llm = FakeLLMManager(
         {
@@ -1035,6 +1050,7 @@ async def test_hook_runtime_exposes_the_complete_agent_lifecycle_event_set():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_runtime_dispatches_permission_request_before_waiting_and_stop_after_waiting():
     final = LLMChatResponse(
         model="model-primary",
@@ -1132,6 +1148,7 @@ async def test_session_and_prompt_hook_context_are_visible_to_the_next_model_req
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_pretool_updated_input_changes_only_arguments_before_mcp_execution():
     llm = FakeLLMManager(
         {
@@ -1176,6 +1193,7 @@ async def test_pretool_updated_input_changes_only_arguments_before_mcp_execution
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_pretool_updated_input_cannot_expand_tool_schema_or_server_scope():
     llm = FakeLLMManager(
         {
@@ -1231,6 +1249,7 @@ async def test_pretool_updated_input_cannot_expand_tool_schema_or_server_scope()
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_permission_request_hook_deny_does_not_create_usable_confirmation():
     final = LLMChatResponse(
         model="model-primary",
@@ -1287,6 +1306,7 @@ async def test_permission_request_hook_deny_does_not_create_usable_confirmation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_posttool_block_returns_model_feedback_without_replacing_tool_output():
     llm = FakeLLMManager(
         {
@@ -1383,6 +1403,7 @@ async def test_run_hook_preserves_all_hook_outcome_fields():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_runtime_dispatches_stop_after_a_normal_tool_turn():
     llm = FakeLLMManager(
         {
@@ -1670,6 +1691,7 @@ async def test_runtime_dispatches_stop_when_model_execution_fails():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_non_pretool_hook_denial_is_observational_only():
     llm = FakeLLMManager(
         {
@@ -1712,6 +1734,7 @@ async def test_non_pretool_hook_denial_is_observational_only():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_confirm_dispatches_only_resume_tool_events_and_stop():
     llm = FakeLLMManager(
         {
@@ -1808,6 +1831,7 @@ async def test_runtime_does_not_emit_session_end_or_subagent_events_without_life
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_runtime_stops_after_maximum_tool_rounds_and_does_not_loop_forever():
     responses = [
         LLMChatResponse(
@@ -1836,6 +1860,7 @@ async def test_runtime_stops_after_maximum_tool_rounds_and_does_not_loop_forever
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_mcp_tool_collection_is_frozen_for_a_turn_and_refreshes_next_turn():
     mcp = FakeMCPManager()
     mcp.tools = {"search": mcp.tools["search"]}
@@ -2326,6 +2351,7 @@ async def test_runtime_compactor_failure_falls_back_without_failing_agent_turn()
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
 async def test_runtime_compaction_preserves_current_tool_chain():
     llm = FakeLLMManager(
         {

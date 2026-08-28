@@ -59,8 +59,8 @@
       <!-- 过滤和搜索 -->
       <div class="filter-section">
         <n-card class="filter-card">
-          <n-grid :cols="5" :x-gap="16" :y-gap="16" responsive="screen">
-            <n-grid-item>
+          <n-grid :cols="4" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+            <n-grid-item span="4 s:4 m:2 l:1">
               <n-input
                 v-model:value="filterParams.correlationId"
                 placeholder="回合 ID"
@@ -68,7 +68,7 @@
                 class="filter-input"
               />
             </n-grid-item>
-            <n-grid-item>
+            <n-grid-item span="4 s:4 m:2 l:1">
               <n-select
                 v-model:value="filterParams.modelId"
                 placeholder="选择模型"
@@ -77,7 +77,16 @@
                 class="filter-select"
               />
             </n-grid-item>
-            <n-grid-item>
+            <n-grid-item span="4 s:4 m:2 l:1">
+              <n-select
+                v-model:value="filterParams.provider"
+                placeholder="选择供应商"
+                clearable
+                :options="filterOptions.provider"
+                class="filter-select"
+              />
+            </n-grid-item>
+            <n-grid-item span="4 s:4 m:2 l:1">
               <n-select
                 v-model:value="filterParams.backendName"
                 placeholder="选择后端"
@@ -86,7 +95,7 @@
                 class="filter-select"
               />
             </n-grid-item>
-            <n-grid-item>
+            <n-grid-item span="4 s:4 m:2 l:1">
               <n-select
                 v-model:value="filterParams.status"
                 placeholder="请求状态"
@@ -95,7 +104,25 @@
                 class="filter-select"
               />
             </n-grid-item>
-            <n-grid-item>
+            <n-grid-item span="4 s:4 m:2 l:1">
+              <n-select
+                v-model:value="filterParams.errorCategory"
+                placeholder="失败类型"
+                clearable
+                :options="filterOptions.errorCategory"
+                class="filter-select"
+              />
+            </n-grid-item>
+            <n-grid-item span="4 s:4 m:2 l:1">
+              <n-select
+                v-model:value="filterParams.usageSource"
+                placeholder="用量来源"
+                clearable
+                :options="filterOptions.usageSource"
+                class="filter-select"
+              />
+            </n-grid-item>
+            <n-grid-item span="4 s:4 m:2 l:1">
               <n-input
                 v-model:value="filterParams.query"
                 placeholder="搜索关键词"
@@ -107,12 +134,35 @@
                 </template>
               </n-input>
             </n-grid-item>
+            <n-grid-item span="4 s:4 m:4 l:2">
+              <!-- 时间范围此前完全没有入口：后端要求带时区的 ISO-8601，
+                   这里用日期时间区间选择器直接产出符合要求的值。 -->
+              <n-date-picker
+                v-model:value="timeRange"
+                type="datetimerange"
+                clearable
+                class="filter-range"
+                :placeholder="'请求时间范围'"
+                @update:value="handleTimeRangeChange"
+              />
+            </n-grid-item>
           </n-grid>
 
           <div class="filter-actions">
             <n-space>
-              <n-button @click="resetFilter" class="filter-button">重置</n-button>
+              <n-button @click="handleReset" class="filter-button">重置</n-button>
               <n-button @click="applyFilter" type="primary" class="filter-button">应用</n-button>
+              <n-button
+                @click="exportTraces"
+                :loading="isExporting"
+                class="filter-button"
+                aria-label="导出当前筛选结果"
+              >
+                <template #icon>
+                  <n-icon><download-outline /></n-icon>
+                </template>
+                导出 CSV
+              </n-button>
             </n-space>
           </div>
         </n-card>
@@ -153,7 +203,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import {
   NCard,
   NDataTable,
@@ -168,11 +218,14 @@ import {
   NInput,
   NAlert,
   NEmpty,
-  NSkeleton
+  NSkeleton,
+  NDatePicker,
+  useMessage
 } from 'naive-ui'
-import { RefreshOutline, SearchOutline } from '@vicons/ionicons5'
+import { RefreshOutline, SearchOutline, DownloadOutline } from '@vicons/ionicons5'
 import { useLLMTracingViewModel } from './llm-tracing.vm'
 import { formatLargeNumber } from '@/utils/formatters'
+import { http } from '@/utils/http'
 
 const {
   traces,
@@ -198,6 +251,85 @@ const {
   initialize,
   disconnectWebSocket
 } = useLLMTracingViewModel()
+
+const message = useMessage()
+const timeRange = ref<[number, number] | null>(null)
+const isExporting = ref(false)
+
+/**
+ * 时间范围控件产出毫秒时间戳，后端要求带时区的 ISO-8601；
+ * `toISOString()` 得到的是 UTC 表示，带 `Z` 后缀，符合该要求。
+ */
+const handleTimeRangeChange = (value: [number, number] | null) => {
+  if (!value) {
+    filterParams.value.startTime = null
+    filterParams.value.endTime = null
+    return
+  }
+  filterParams.value.startTime = new Date(value[0]).toISOString()
+  filterParams.value.endTime = new Date(value[1]).toISOString()
+}
+
+const handleReset = () => {
+  timeRange.value = null
+  resetFilter()
+}
+
+/**
+ * 导出当前筛选结果。
+ *
+ * 后端的 `/tracing/llm/export` 一直存在但界面上没有任何入口。
+ * 这里复用同一份筛选条件，保证「看到的」与「导出的」是同一批数据。
+ */
+const exportTraces = async () => {
+  isExporting.value = true
+  try {
+    const payload: Record<string, unknown> = {
+      format: 'csv',
+      limit: 10000,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+    }
+    const filters = filterParams.value
+    if (filters.correlationId) payload.correlation_id = filters.correlationId
+    if (filters.modelId) payload.model = filters.modelId
+    if (filters.backendName) payload.backend = filters.backendName
+    if (filters.provider) payload.provider = filters.provider
+    if (filters.status) payload.status = filters.status
+    if (filters.usageSource) payload.usage_source = filters.usageSource
+    if (filters.errorCategory) payload.error_category = filters.errorCategory
+    if (filters.startTime) payload.start_time = filters.startTime
+    if (filters.endTime) payload.end_time = filters.endTime
+    if (filters.query) payload.query = filters.query
+
+    // 导出返回 text/csv，不能走会解析 JSON 的 http.post；
+    // http.fetch 保留原始 Response，同时仍带上鉴权头与基础路径。
+    const response = await http.fetch('/tracing/llm/export', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    })
+    if (!response.ok) {
+      throw new Error(`导出失败 (HTTP ${response.status})`)
+    }
+    const csv = await response.text()
+    const truncated = response.headers.get('X-Export-Truncated') === 'true'
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'llm-traces.csv'
+    link.click()
+    URL.revokeObjectURL(url)
+    if (truncated) {
+      message.warning('结果超过单次导出上限，已导出前 10000 条；请收窄筛选条件')
+    } else {
+      message.success('已导出当前筛选结果')
+    }
+  } catch (error) {
+    message.error('导出失败，请稍后重试')
+  } finally {
+    isExporting.value = false
+  }
+}
 
 onMounted(() => {
   initialize()

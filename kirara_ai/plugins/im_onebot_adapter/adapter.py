@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import os
+import secrets
 import time
 import uuid
 from dataclasses import dataclass
@@ -43,6 +44,9 @@ from kirara_ai.web.app import WebServer
 from kirara_ai.workflow.core.dispatch.dispatcher import WorkflowDispatcher
 
 from .config import OneBotConfig
+from kirara_ai.im.inbound_receipts import InboundReceiptService
+from kirara_ai.im.text_render import CODE_COPY_HINT, split_for_copyable_code
+
 from .render import paginate_onebot_text, render_onebot_text
 from .outbox import OneBotDeliveryResult, OneBotOutboxService
 from .utils.media import (
@@ -92,11 +96,14 @@ class OneBotAdapter(
         self._heartbeat_task: Optional[asyncio.Task[Any]] = None
         self._outbox_resume_task: Optional[asyncio.Task[Any]] = None
         self._outbox: Optional[OneBotOutboxService] = None
+        self._inbound_receipts: Optional[InboundReceiptService] = None
         self._mount_path: Optional[str] = None
         self._mounted_route: Any = None
         self._started = False
+        self._ever_started = False
         self._connection_status = "waiting"
         self._external_login_status = "unknown"
+        self._last_disconnect_reason: Optional[str] = None
         self._last_heartbeat_at: Optional[float] = None
         self._profile_cache: dict[str, UserProfile] = {}
         self._profile_cache_time: dict[str, float] = {}
@@ -111,6 +118,47 @@ class OneBotAdapter(
         if isinstance(event, dict):
             return event.get(key, default)
         return getattr(event, key, default)
+
+    def _record_connection_failure(
+        self, reason: str, *, status: Optional[str] = None
+    ) -> None:
+        """Remember why the last inbound connection attempt did not succeed.
+
+        Only a fixed reason code is stored; upstream messages, tokens and account
+        identifiers never reach this field, because it is served over the health
+        API and rendered in the panel.
+        """
+        self._last_disconnect_reason = reason
+        if status is not None and not self.connections:
+            self._connection_status = status
+
+    def _clear_connection_failure(self) -> None:
+        self._last_disconnect_reason = None
+
+    def _classify_access_token(self, headers: dict[str, str]) -> Optional[str]:
+        """Return why the presented access token is unacceptable, or ``None``.
+
+        ``aiocqhttp`` performs the authoritative check and answers 401/403 on its
+        own; it does not report the outcome back to the adapter, so the handshake
+        state model would otherwise never learn that a credential was rejected.
+        This mirrors the same two header forms aiocqhttp accepts
+        (``Bearer <token>`` and ``Token <token>``) plus the ``access_token``
+        query parameter, and never logs or stores the token itself.
+        """
+        expected = getattr(getattr(self, "config", None), "access_token", None)
+        if not expected:
+            return None
+        authorization = headers.get("authorization", "")
+        presented = ""
+        if authorization:
+            parts = authorization.split(None, 1)
+            if len(parts) == 2 and parts[0].casefold() in {"bearer", "token"}:
+                presented = parts[1].strip()
+        if not presented:
+            return "access_token_missing"
+        if not secrets.compare_digest(presented, str(expected)):
+            return "access_token_mismatch"
+        return None
 
     async def _handle_meta(self, event: Event) -> None:
         self_id = self._event_value(event, "self_id")
@@ -127,6 +175,7 @@ class OneBotAdapter(
             )
             if not self.connections:
                 self._external_login_status = "upstream_reported_offline"
+                self._last_disconnect_reason = "upstream_lifecycle_disconnect"
             self.logger.warning("OneBot 连接已断开")
             return
         if meta_type in {"lifecycle", "heartbeat"}:
@@ -135,6 +184,7 @@ class OneBotAdapter(
             self._last_heartbeat_at = now
             self._connection_status = "connected"
             self._external_login_status = "upstream_reported_online"
+            self._clear_connection_failure()
             if meta_type == "lifecycle" and sub_type == "connect":
                 self.logger.info("OneBot 连接已建立")
             self._schedule_outbox_resume()
@@ -160,19 +210,34 @@ class OneBotAdapter(
             self.logger.warning("OneBot 连接心跳超时")
         if stale_ids:
             self._connection_status = "connected" if self.connections else "stale"
+            if not self.connections:
+                self._last_disconnect_reason = "heartbeat_timeout"
 
     def get_health_snapshot(
         self, now: Optional[float] = None
     ) -> AdapterHealthSnapshot:
         now = time.monotonic() if now is None else now
+        if self._started:
+            # Latch the fact that the adapter has been up at least once, so a
+            # later stop reports "disconnected" rather than "initializing".
+            self._ever_started = True
         if self.connections:
             self._prune_stale_connections(now)
 
         if not self._started:
-            status = "disconnected"
+            # Distinguish "the container just came up" from "we stopped on
+            # purpose": before the first successful start there is nothing to be
+            # disconnected from, and reporting a failure state there is what made
+            # a normal restart look broken.
+            status = "disconnected" if self._ever_started else "initializing"
         elif self.connections:
             status = "connected"
-        elif self._connection_status in {"stale", "disconnected"}:
+        elif self._connection_status in {
+            "stale",
+            "disconnected",
+            "credential_rejected",
+            "upstream_refused",
+        }:
             status = self._connection_status
         else:
             status = "waiting"
@@ -193,6 +258,11 @@ class OneBotAdapter(
             adapter_started=self._started,
             websocket_connected=bool(self.connections),
             external_login_status=self._external_login_status,
+            # A live connection means the previous failure no longer describes
+            # the current state, so it must not keep showing in the panel.
+            last_disconnect_reason=(
+                None if self.connections else self._last_disconnect_reason
+            ),
             outbox=self._outbox_counts(),
         )
 
@@ -262,9 +332,71 @@ class OneBotAdapter(
         except asyncio.CancelledError:
             raise
 
+    def _inbound_event_key(self, event: Event) -> Optional[str]:
+        """Build a stable per-event identity for inbound dedup.
+
+        OneBot V11 events carry ``message_id`` for messages; combined with
+        ``self_id`` that is unique per account. Falling back to
+        ``(self_id, user_id, time)`` covers implementations that omit
+        ``message_id``. Returning ``None`` means "cannot identify this event",
+        and the caller then processes it without dedup rather than dropping it —
+        losing a message is worse than a rare duplicate.
+        """
+        self_id = self._event_value(event, "self_id")
+        message_id = self._event_value(event, "message_id")
+        if message_id is not None:
+            return f"{self_id or '-'}:{message_id}"[:128]
+        user_id = self._event_value(event, "user_id")
+        timestamp = self._event_value(event, "time")
+        if user_id is not None and timestamp is not None:
+            return f"{self_id or '-'}:{user_id}:{timestamp}"[:128]
+        return None
+
+    def _ensure_inbound_receipts(self) -> Optional[InboundReceiptService]:
+        """Return the dedup service, or ``None`` when no database is wired."""
+        existing = getattr(self, "_inbound_receipts", None)
+        if existing is not None:
+            return existing
+        database = getattr(self, "database_manager", None)
+        if database is None:
+            return None
+        instance = getattr(self, "adapter_instance", None) or getattr(
+            self, "name", None
+        ) or "default"
+        service = InboundReceiptService(
+            database,
+            channel="onebot",
+            adapter_instance=str(instance),
+        )
+        self._inbound_receipts = service
+        return service
+
     async def _handle_message(self, event: Event) -> None:
-        message = await self.convert_to_message(event)
-        await self.dispatcher.dispatch(self, message, require_agent=True)
+        # 入站去重：反向 WebSocket 在投递中途断开时，上游无法知道我们是否已处理，
+        # 因此重投是它唯一安全的选择——去重必须由本侧完成。缺少这一层时，
+        # 重连后同一事件会把整条工作流再跑一遍（重复计费 + 重复回复）。
+        receipts = self._ensure_inbound_receipts()
+        event_key = self._inbound_event_key(event) if receipts is not None else None
+        if receipts is not None and event_key is not None:
+            if not receipts.claim(event_key, self._inbound_chat_key(event)):
+                self.logger.debug("OneBot 重复事件已忽略")
+                return
+        try:
+            message = await self.convert_to_message(event)
+            await self.dispatcher.dispatch(self, message, require_agent=True)
+        except BaseException:
+            # 处理失败时把收据放回可重领状态，让上游重投仍能被处理一次。
+            if receipts is not None and event_key is not None:
+                receipts.retry(event_key)
+            raise
+        if receipts is not None and event_key is not None:
+            receipts.complete(event_key)
+
+    def _inbound_chat_key(self, event: Event) -> str:
+        group_id = self._event_value(event, "group_id")
+        if group_id is not None:
+            return f"group:{group_id}"
+        return f"c2c:{self._event_value(event, 'user_id', '')}"
 
     async def convert_to_message(self, event: Event) -> IMMessage:
         event_self_id = self._event_value(event, "self_id")
@@ -449,10 +581,14 @@ class OneBotAdapter(
                 text = render_onebot_text(element.text)
                 if not text:
                     continue
-                for page in paginate_onebot_text(text):
+                for page, is_code in self._text_pages(text):
                     segments = [*pending_special, MessageSegment.text(page)]
                     batches.append(segments)
                     pending_special = []
+                    if is_code:
+                        # 代码已单独成条；紧随其后给出一句复制指引，
+                        # 而不是画一个 QQ 根本点不动的「复制」按钮。
+                        batches.append([MessageSegment.text(CODE_COPY_HINT)])
                 continue
 
             try:
@@ -473,11 +609,35 @@ class OneBotAdapter(
             batches.append(pending_special)
         return batches
 
+    def _text_pages(self, text: str) -> list[tuple[str, bool]]:
+        """Paginate one text element, optionally isolating code into its own page.
+
+        返回 ``(页面文本, 是否为代码页)``。代码单独成条后，用户长按整条消息
+        即可拿到干净代码；关闭 ``isolate_code_messages`` 时退回原有的混排分页，
+        既有部署的观感完全不变。
+        """
+        # 兼容以 object.__new__ 构造的轻量适配器实例（既有测试与部分插件如此使用）：
+        # 缺少 config 时按默认行为处理，而不是抛 AttributeError。
+        if not getattr(getattr(self, "config", None), "isolate_code_messages", True):
+            return [(page, False) for page in paginate_onebot_text(text)]
+
+        pages: list[tuple[str, bool]] = []
+        for part in split_for_copyable_code(text):
+            for page in paginate_onebot_text(part.text):
+                pages.append((page, part.is_code))
+        if not pages:
+            # split_for_copyable_code 会丢弃空代码块；若整段都被丢弃，
+            # 仍按原路径分页，避免把一条本该发出的消息静默吞掉。
+            return [(page, False) for page in paginate_onebot_text(text)]
+        return pages
+
     async def _send_message_unlocked(
-        self, message: IMMessage, recipient: ChatSender
+        self,
+        batches: list[list[MessageSegment]],
+        recipient: ChatSender,
     ) -> None:
         """Send message elements in order; API failures intentionally propagate."""
-        for segments in await self._render_message_batches(message):
+        for segments in batches:
             await self._send_segments(recipient, segments)
 
     @staticmethod
@@ -496,18 +656,13 @@ class OneBotAdapter(
 
     async def _send_via_outbox(
         self,
-        message: IMMessage,
+        batches: list[list[MessageSegment]],
         recipient: ChatSender,
         delivery_id: Optional[str],
-    ) -> None:
-        batches = await self._render_message_batches(message)
-        if not batches:
-            return
-        if delivery_id is None:
-            delivery_id = getattr(message, "_onebot_delivery_id", None)
+        results: list[OneBotDeliveryResult],
+    ) -> int:
         if delivery_id is None:
             delivery_id = uuid.uuid4().hex
-            setattr(message, "_onebot_delivery_id", delivery_id)
         if len(delivery_id) > 64:
             raise ValueError("OneBot delivery_id 不能超过 64 个字符")
 
@@ -530,8 +685,10 @@ class OneBotAdapter(
 
         for page_id in page_ids:
             result = await outbox.deliver(page_id)
+            results.append(result)
             if result.status != "accepted":
                 raise self._delivery_error(result)
+        return sum(max(0, item.attempt_count - 1) for item in results)
 
     async def send_message(
         self,
@@ -540,24 +697,63 @@ class OneBotAdapter(
         delivery_id: Optional[str] = None,
     ) -> None:
         """Serialize pages for one recipient while keeping other chats concurrent."""
-        if getattr(self, "database_manager", None) is not None:
-            await self._send_via_outbox(message, recipient, delivery_id)
+        message.record_delivery_stage("formatting_started", adapter="onebot")
+        batches = await self._render_message_batches(message)
+        message.record_delivery_stage(
+            "formatting_completed",
+            adapter="onebot",
+            segment_count=len(batches),
+        )
+        if not batches:
             return
-        locks = getattr(self, "_recipient_locks", None)
-        if locks is None:
-            locks = self._recipient_locks = {}
-        key = self._recipient_key(recipient)
-        state = locks.get(key)
-        if state is None:
-            state = locks[key] = _RecipientLockState(lock=asyncio.Lock())
-        state.users += 1
+
+        if delivery_id is None:
+            delivery_id = getattr(message, "_onebot_delivery_id", None)
+        if delivery_id is None:
+            delivery_id = uuid.uuid4().hex
+            setattr(message, "_onebot_delivery_id", delivery_id)
+
+        message.record_delivery_stage("send_started", adapter="onebot")
+        results: list[OneBotDeliveryResult] = []
+        retry_count = 0
         try:
-            async with state.lock:
-                await self._send_message_unlocked(message, recipient)
-        finally:
-            state.users -= 1
-            if state.users == 0 and not state.lock.locked():
-                locks.pop(key, None)
+            if getattr(self, "database_manager", None) is not None:
+                retry_count = await self._send_via_outbox(
+                    batches,
+                    recipient,
+                    delivery_id,
+                    results,
+                )
+            else:
+                locks = getattr(self, "_recipient_locks", None)
+                if locks is None:
+                    locks = self._recipient_locks = {}
+                key = self._recipient_key(recipient)
+                state = locks.get(key)
+                if state is None:
+                    state = locks[key] = _RecipientLockState(lock=asyncio.Lock())
+                state.users += 1
+                try:
+                    async with state.lock:
+                        await self._send_message_unlocked(batches, recipient)
+                finally:
+                    state.users -= 1
+                    if state.users == 0 and not state.lock.locked():
+                        locks.pop(key, None)
+        except Exception as exc:
+            retry_count = sum(max(0, item.attempt_count - 1) for item in results)
+            message.record_delivery_stage(
+                "send_failed",
+                adapter="onebot",
+                error_type=type(exc).__name__,
+                retry_count=retry_count,
+            )
+            raise
+        message.record_delivery_stage(
+            "send_succeeded",
+            adapter="onebot",
+            retry_count=retry_count,
+        )
 
     async def recall_message(
         self, message_id: int | str, delay: float = 0, self_id: Optional[str] = None
@@ -613,24 +809,78 @@ class OneBotAdapter(
 
     async def asgi(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         """Validate OneBot reverse WebSocket metadata before aiocqhttp handles it."""
-        if scope["type"] == "websocket":
-            headers = {
-                key.decode("latin-1").casefold(): value.decode("latin-1").strip()
-                for key, value in scope.get("headers", [])
-            }
-            role = headers.get("x-client-role")
-            if role not in {"event", "api", "universal"} or (
-                role in {"api", "universal"} and not headers.get("x-self-id")
-            ):
-                await send(
-                    {
-                        "type": "websocket.close",
-                        "code": 4400,
-                        "reason": "Invalid OneBot reverse WebSocket headers",
-                    }
-                )
+        if scope["type"] != "websocket":
+            await self.bot.asgi(scope, receive, send)
+            return
+
+        headers = {
+            key.decode("latin-1").casefold(): value.decode("latin-1").strip()
+            for key, value in scope.get("headers", [])
+        }
+        role = headers.get("x-client-role")
+        if role not in {"event", "api", "universal"}:
+            # The upstream did reach us; recording why it was refused is the
+            # difference between "QQ never dialed in" and "QQ dialed in with a
+            # handshake we reject".
+            self._record_connection_failure(
+                "invalid_client_role", status="upstream_refused"
+            )
+            self.logger.warning("OneBot 反向 WebSocket 握手缺少或使用了不支持的客户端角色")
+            await send(
+                {
+                    "type": "websocket.close",
+                    "code": 4400,
+                    "reason": "Invalid OneBot reverse WebSocket headers",
+                }
+            )
+            return
+        if role in {"api", "universal"} and not headers.get("x-self-id"):
+            self._record_connection_failure("missing_self_id", status="upstream_refused")
+            self.logger.warning("OneBot 反向 WebSocket 握手缺少账号标识")
+            await send(
+                {
+                    "type": "websocket.close",
+                    "code": 4400,
+                    "reason": "Invalid OneBot reverse WebSocket headers",
+                }
+            )
+            return
+
+        # aiocqhttp validates the access token itself and answers 401/403 without
+        # telling the adapter, so classify it here from the same header it reads.
+        token_reason = self._classify_access_token(headers)
+        if token_reason is not None:
+            self._record_connection_failure(token_reason, status="credential_rejected")
+            self.logger.warning("OneBot 反向 WebSocket 凭据校验未通过")
+
+        disconnected = False
+
+        async def receive_with_disconnect_state() -> Any:
+            nonlocal disconnected
+            try:
+                message = await receive()
+            except asyncio.CancelledError as cancellation:
+                # Starlette queues websocket.disconnect before cancelling the
+                # ASGI task. Give that queued close message a bounded chance
+                # to drain, while preserving unrelated cancellation.
+                try:
+                    message = await asyncio.wait_for(receive(), timeout=0.1)
+                except asyncio.CancelledError:
+                    raise cancellation
+                except Exception:
+                    raise cancellation
+                if message.get("type") != "websocket.disconnect":
+                    raise cancellation
+            if message.get("type") == "websocket.disconnect":
+                disconnected = True
+            return message
+
+        try:
+            await self.bot.asgi(scope, receive_with_disconnect_state, send)
+        except asyncio.CancelledError:
+            if disconnected:
                 return
-        await self.bot.asgi(scope, receive, send)
+            raise
 
     async def _start_standalone_server(self) -> None:
         config = Config()
@@ -751,8 +1001,19 @@ class OneBotAdapter(
         self._heartbeat_task = asyncio.create_task(self._monitor_heartbeats())
         if getattr(self, "database_manager", None) is not None:
             self._ensure_outbox().recover_on_startup()
+            receipts = self._ensure_inbound_receipts()
+            if receipts is not None:
+                # 上次进程中断时留在 processing 的事件重新开放认领，
+                # 既不丢事件，也不会因此产生第二条回复。
+                reopened = receipts.recover_on_startup()
+                if reopened:
+                    self.logger.info(
+                        f"OneBot 重新开放 {reopened} 个未完成的入站事件"
+                    )
         self._started = True
+        self._ever_started = True
         self._connection_status = "waiting"
+        self._clear_connection_failure()
 
     async def stop(self) -> None:
         if self._outbox_resume_task and not self._outbox_resume_task.done():

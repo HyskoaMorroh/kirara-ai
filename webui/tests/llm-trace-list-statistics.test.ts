@@ -22,9 +22,20 @@ const { vm } = vi.hoisted(() => ({
       modelId: null,
       backendName: null,
       status: null,
+      provider: null,
+      usageSource: null,
+      errorCategory: null,
+      startTime: null,
+      endTime: null,
       query: ''
     },
-    filterOptions: { modelId: [], backendName: [] },
+    filterOptions: {
+      modelId: [],
+      backendName: [],
+      provider: [],
+      usageSource: [],
+      errorCategory: []
+    },
     statusOptions: [],
     columns: [],
     fetchTraces: vi.fn(),
@@ -67,7 +78,9 @@ vi.mock('naive-ui', () => {
     },
     NSkeleton: passthrough('NSkeleton'),
     NSpace: passthrough('NSpace'),
-    NText: passthrough('NText', 'span')
+    NText: passthrough('NText', 'span'),
+    NDatePicker: passthrough('NDatePicker'),
+    useMessage: () => ({ error: vi.fn(), success: vi.fn(), warning: vi.fn() })
   }
 })
 

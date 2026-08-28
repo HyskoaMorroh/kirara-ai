@@ -18,8 +18,7 @@ def create_jwt_token(
     secret_key: str,
     expires_delta: Optional[timedelta] = None,
     *,
-    role: str = "admin",
-    scopes: Optional[list[str]] = None,
+    subject: str,
 ) -> str:
     if expires_delta:
         expire = datetime.now() + expires_delta
@@ -28,8 +27,7 @@ def create_jwt_token(
 
     to_encode: dict[str, Any] = {
         "exp": expire,
-        "role": role,
-        "scopes": list(scopes or []),
+        "sub": subject,
     }
     encoded_jwt = jwt.encode(to_encode, secret_key, algorithm="HS256")
     return encoded_jwt

@@ -25,6 +25,7 @@ from sqlalchemy import (
 )
 
 from kirara_ai.database import Base, DatabaseManager
+from kirara_ai.im.outbox_backoff import retry_backoff_seconds
 
 
 TERMINAL_STATUSES = frozenset({"accepted", "ambiguous", "dead_letter"})
@@ -466,7 +467,8 @@ class QQBotOutboxService:
                 select(QQBotDelivery).where(QQBotDelivery.delivery_id == delivery_id)
             ).scalar_one()
             count = delivery.upload_attempt_count if phase == "upload" else delivery.attempt_count
-            delay = self.retry_delay_seconds * (2 ** max(0, int(count) - 1))
+            # Shared, capped and jittered schedule; see kirara_ai/im/outbox_backoff.py.
+            delay = retry_backoff_seconds(self.retry_delay_seconds, int(count))
             delivery.status = "retry_wait"
             delivery.last_error = error[:2000]
             delivery.next_attempt_at = now + timedelta(seconds=delay)

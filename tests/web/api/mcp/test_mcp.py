@@ -12,7 +12,11 @@ from kirara_ai.mcp_module.audit_store import MCPAuditStore
 from kirara_ai.mcp_module.manager import MCPServerManager, ToolCacheEntry
 from kirara_ai.mcp_module.models import MCPConnectionState
 from kirara_ai.web.app import create_web_api_app
+from kirara_ai.web.auth.principal import RuntimePrincipal, runtime_principal_context
 from kirara_ai.web.auth.services import AuthService, MockAuthService
+
+
+_MCP_API_CREATOR_SUBJECT = "mcp-api-creator"
 
 
 @pytest.fixture
@@ -21,7 +25,10 @@ def mcp_api(tmp_path):
     container.register(DependencyContainer, container)
     config = GlobalConfig()
     container.register(GlobalConfig, config)
-    container.register(AuthService, MockAuthService())
+    container.register(
+        AuthService,
+        MockAuthService(creator=True, subject=_MCP_API_CREATOR_SUBJECT),
+    )
     container.register(AgentRegistry, AgentRegistry())
     manager = MCPServerManager(
         container,
@@ -266,21 +273,30 @@ async def test_mcp_api_tool_call_uses_manager_policy_and_confirmation(mcp_api):
     manager.tools_cache["search"] = ToolCacheEntry("tools", "search", tool)
 
     registry = manager.container.resolve(AgentRegistry)
-    registry.register(
-        AgentDefinition(
-            agent_id="tool-admin",
-            model_priority=("test-model",),
-            mcp_bindings=(
-                ResourceBinding(
-                    resource_id="mcp.tools",
-                    resource_type="mcp",
-                    version="1",
-                    content_sha256="0" * 64,
-                ),
-            ),
-            mcp_allowlist={"tools.search"},
+    with runtime_principal_context(
+        RuntimePrincipal(
+            subject=_MCP_API_CREATOR_SUBJECT,
+            role="admin",
+            scopes=frozenset({"*"}),
+            is_creator=True,
         )
-    )
+    ):
+        registry.register(
+            AgentDefinition(
+                agent_id="tool-admin",
+                owner_subject=_MCP_API_CREATOR_SUBJECT,
+                model_priority=("test-model",),
+                mcp_bindings=(
+                    ResourceBinding(
+                        resource_id="mcp.tools",
+                        resource_type="mcp",
+                        version="1",
+                        content_sha256="0" * 64,
+                    ),
+                ),
+                mcp_allowlist={"tools.search"},
+            )
+        )
     registry.register(
         AgentDefinition(
             agent_id="unbound-agent",

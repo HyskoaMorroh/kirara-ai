@@ -207,6 +207,9 @@ def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck
         "waiting": 0,
         "disconnected": 0,
         "stale": 0,
+        "initializing": 0,
+        "credential_rejected": 0,
+        "upstream_refused": 0,
     }
     for name in enabled:
         if not manager.is_adapter_running(name):
@@ -215,22 +218,43 @@ def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck
         adapter = manager.adapters.get(name)
         if isinstance(adapter, AdapterHealthProvider):
             snapshot = adapter.get_health_snapshot()
-            counts[snapshot.status] += 1
+            # An adapter is free to add a status this readiness check does not
+            # know yet; count it as not-connected rather than raising KeyError
+            # and taking the whole readiness endpoint down.
+            if snapshot.status in counts:
+                counts[snapshot.status] += 1
+            else:
+                counts["disconnected"] += 1
         else:
             counts["connected"] += 1
 
     available = counts["connected"]
     status: ReadinessStatus = "pass" if not enabled or available == len(enabled) else "warn"
+    # A rejected credential or refused handshake is not a "wait and it will
+    # settle" state, so say what to fix instead of pointing at the heartbeat.
+    blocked = counts["credential_rejected"] + counts["upstream_refused"]
+    if status == "pass":
+        summary = "IM 适配器已连接"
+        remediation = "无需处理"
+    elif blocked:
+        summary = "部分 IM 适配器的上游连接被拒绝"
+        remediation = "核对适配器访问令牌与上游反向连接配置，再查看连接原因码"
+    else:
+        summary = "部分 IM 适配器尚未建立连接"
+        remediation = "检查 IM 适配器运行状态、登录状态和连接心跳"
     return _check(
         CHECK_IDS[4], status,
-        "IM 适配器已连接" if status == "pass" else "部分 IM 适配器尚未建立连接",
-        "无需处理" if status == "pass" else "检查 IM 适配器运行状态、登录状态和连接心跳",
+        summary,
+        remediation,
         configured_count=len(enabled),
         available_count=available,
         connected_count=counts["connected"],
         waiting_count=counts["waiting"],
         disconnected_count=counts["disconnected"],
         stale_count=counts["stale"],
+        initializing_count=counts["initializing"],
+        credential_rejected_count=counts["credential_rejected"],
+        upstream_refused_count=counts["upstream_refused"],
     )
 
 

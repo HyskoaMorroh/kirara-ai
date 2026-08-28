@@ -44,11 +44,74 @@ class LLMBackendConfig(BaseModel):
     non_stream_timeout_seconds: float = Field(default=60.0, gt=0, description="非流式请求总超时")
     stream_first_byte_timeout_seconds: float = Field(default=15.0, gt=0, description="流式请求首字节超时")
     stream_idle_timeout_seconds: float = Field(default=30.0, gt=0, description="流式请求相邻字节最大静默时间")
+    stream_total_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="流式请求总超时；未显式配置时沿用 request_timeout_seconds",
+    )
     circuit_failure_threshold: int = Field(default=3, ge=1, description="连续失败多少次后打开熔断")
     circuit_error_rate_threshold: float = Field(default=0.5, ge=0, le=1, description="达到最小样本后的错误率阈值")
     circuit_min_requests: int = Field(default=10, ge=1, description="错误率熔断的最小请求数")
     circuit_recovery_timeout_seconds: float = Field(default=30.0, ge=0, description="熔断打开后进入半开探测的等待时间")
     circuit_recovery_success_threshold: int = Field(default=2, ge=1, le=100, description="半开状态连续成功多少次后恢复")
+
+    @model_validator(mode="after")
+    def validate_timeout_budget(self) -> "LLMBackendConfig":
+        """Reject budgets whose parts cannot fit inside the total they are bounded by.
+
+        Per-field ``gt=0`` never caught the cross-field case: a first-byte plus
+        idle allowance larger than the stream's own total deadline can never be
+        reached, and a retry backoff schedule longer than the non-stream total
+        guarantees the last retries are dropped at the deadline instead of run.
+        Both were silently accepted before and only showed up as "the timeout I
+        configured does nothing".
+
+        The check only applies to a total the user actually wrote. A total
+        inherited from the legacy ``request_timeout_seconds`` is left alone so an
+        existing configuration file never becomes unloadable after an upgrade;
+        the runtime already clamps activity waits to the deadline in that case.
+        """
+        if self.retry_backoff_max_seconds < self.retry_backoff_seconds:
+            raise ValueError(
+                "retry_backoff_max_seconds cannot be smaller than retry_backoff_seconds"
+            )
+
+        if "stream_total_timeout_seconds" in self.model_fields_set:
+            stream_activity = (
+                self.stream_first_byte_timeout_seconds + self.stream_idle_timeout_seconds
+            )
+            if stream_activity > self.stream_total_timeout_seconds:
+                raise ValueError(
+                    "stream_first_byte_timeout_seconds + stream_idle_timeout_seconds "
+                    f"({stream_activity}) exceeds stream_total_timeout_seconds "
+                    f"({self.stream_total_timeout_seconds})"
+                )
+
+        if self.max_retries and "non_stream_timeout_seconds" in self.model_fields_set:
+            # Backoff grows geometrically but is clamped by retry_backoff_max_seconds.
+            backoff_budget = 0.0
+            delay = self.retry_backoff_seconds
+            for _ in range(self.max_retries):
+                backoff_budget += min(delay, self.retry_backoff_max_seconds)
+                delay *= 2
+            if backoff_budget > self.non_stream_timeout_seconds:
+                raise ValueError(
+                    f"retry backoff budget ({backoff_budget}) exceeds "
+                    f"non_stream_timeout_seconds ({self.non_stream_timeout_seconds})"
+                )
+        return self
+
+    def effective_stream_total_timeout(self) -> float:
+        """Return the stream deadline, honoring the legacy key when the new one is unset."""
+        if "stream_total_timeout_seconds" in self.model_fields_set:
+            return self.stream_total_timeout_seconds
+        return self.request_timeout_seconds
+
+    def effective_non_stream_timeout(self) -> float:
+        """Return the non-stream deadline, honoring the legacy key when the new one is unset."""
+        if "non_stream_timeout_seconds" in self.model_fields_set:
+            return self.non_stream_timeout_seconds
+        return self.request_timeout_seconds
 
     @model_validator(mode='before')
     @classmethod
@@ -356,6 +419,15 @@ class AgentRuntimeConfig(BaseModel):
     debug_hooks_enabled: bool = Field(
         default=True,
         description="是否注册受控的 Agent 调试 Hook Handler",
+    )
+    reply_stream_mode: Literal["off", "aggregate"] = Field(
+        default="off",
+        description=(
+            "回复生成模式。off：非流式请求（默认，与既有行为一致）；"
+            "aggregate：以流式方式向上游取回内容再整段投递，"
+            "从而让流式首字节超时、静默超时与首字节前的故障转移真正生效。"
+            "IM 平台普遍不支持逐字编辑消息，因此这里不做逐字推送。"
+        ),
     )
 
 

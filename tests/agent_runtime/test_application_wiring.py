@@ -14,6 +14,7 @@ from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.im.message import IMMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
 from kirara_ai.llm.llm_manager import LLMManager
+from kirara_ai.llm.pricing import PriceCatalog
 from kirara_ai.mcp_module.manager import MCPServerManager
 from kirara_ai.media import MediaManager
 from kirara_ai.memory.memory_manager import MemoryManager
@@ -25,6 +26,19 @@ def test_config_path_is_inside_configured_data_path(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(entry, "DATA_PATH", str(tmp_path / "vps-data"))
 
     assert entry._config_path() == tmp_path / "vps-data" / "config.yaml"
+
+
+def test_init_pricing_system_uses_the_durable_data_path(tmp_path: Path, monkeypatch):
+    data_path = tmp_path / "vps-data"
+    monkeypatch.setattr(entry, "DATA_PATH", str(data_path))
+    container = DependencyContainer()
+
+    catalog = entry.init_pricing_system(container)
+
+    assert isinstance(catalog, PriceCatalog)
+    assert catalog.path == (data_path / "pricing" / "catalog.json").resolve()
+    assert container.resolve(PriceCatalog) is catalog
+    assert catalog.path.is_file()
 
 
 def test_init_storage_keeps_database_and_media_below_configured_data_path(

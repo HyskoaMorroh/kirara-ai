@@ -60,6 +60,12 @@ const router = createRouter({
           meta: { title: 'Agent 对话', requiresAuth: true }
         },
         {
+          path: '/llm/pricing',
+          name: 'llm-pricing',
+          component: () => import('@/views/llm/PricingView.vue'),
+          meta: { title: '成本定价', requiresAuth: true }
+        },
+        {
           path: '/workflow',
           name: 'workflow',
           component: () => import('@/views/workflow/WorkflowList.vue')

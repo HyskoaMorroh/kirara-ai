@@ -242,13 +242,21 @@ def test_default_heartbeat_timeout_tolerates_llonebot_sixty_second_interval():
 def test_health_snapshot_distinguishes_waiting_and_connected():
     adapter = make_adapter(config=OneBotConfig(heartbeat_interval=1))
 
-    assert adapter.get_health_snapshot().status == "disconnected"
+    # Before the first start there is nothing to be disconnected from; that case
+    # now has its own status so a fresh container does not look like a failure.
+    # See tests/plugins/im_onebot_adapter/test_connection_states.py.
+    assert adapter.get_health_snapshot().status == "initializing"
 
     adapter._started = True
     assert adapter.get_health_snapshot().status == "waiting"
 
     adapter.connections["100"] = {"last_heartbeat": 1.0}
     assert adapter.get_health_snapshot(now=1.0).status == "connected"
+
+    # A stop after a successful start is still reported as disconnected.
+    adapter.connections.clear()
+    adapter._started = False
+    assert adapter.get_health_snapshot(now=1.0).status == "disconnected"
 
 
 @pytest.mark.asyncio

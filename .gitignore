@@ -16,6 +16,8 @@ data/config.yaml.bak
 !tests/fixtures/a4-data/config.yaml
 logs/
 **/password.hash
+# 创建者身份决定谁能执行服务器侧操作，等同于凭据，绝不能进版本库。
+**/creator.subject
 dist/
 build/
 *.egg-info/
@@ -56,4 +58,10 @@ graphify-out/
 
 # CI 调试与构建留痕（本地审计用，不随项目分发）
 /work/
+/.qa-*/
+/.playwright-mcp/
+/.playwright-cli/
+/PATHFINDER-2026-08-21/
+# 本地探索期留下的授权说明草稿，不属于发布内容
+/.codex-red-host-authorization.txt
 .version-sync.lock

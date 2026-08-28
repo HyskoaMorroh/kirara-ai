@@ -757,6 +757,7 @@ async def call_tool(server_id: str):
             request_data.params,
             agent_allowlist=frozenset(agent.mcp_allowlist),
             agent_mcp_server_ids=bound_servers,
+            agent_owner_subject=agent.owner_subject,
             confirmed=confirmed,
         )
         if result is None:

@@ -41,10 +41,46 @@ export interface IMAdapter {
   health: IMAdapterHealth | null
 }
 
+/**
+ * 适配器连接健康。
+ *
+ * `status` 把重启周期里看起来一样、原因完全不同的几种情况分开：
+ * `initializing` 表示进程已起但适配器还没启动完，此时并没有出错；
+ * `waiting` 表示已挂载、上游实现尚未接入；
+ * `credential_rejected` 表示上游确实接进来了但凭据不对，重试无用；
+ * `upstream_refused` 表示上游握手不被接受（角色缺失或账号标识缺失）；
+ * `stale` 表示曾经连上但心跳停了；`disconnected` 表示适配器已停止。
+ *
+ * `last_disconnect_reason` 是固定的原因码，不含任何凭据或账号信息。
+ */
 export interface IMAdapterHealth {
-  status: 'connected' | 'waiting' | 'disconnected' | 'stale'
+  status:
+    | 'connected'
+    | 'waiting'
+    | 'disconnected'
+    | 'stale'
+    | 'initializing'
+    | 'credential_rejected'
+    | 'upstream_refused'
   connected_account_count: number
   last_heartbeat_age_seconds: number | null
+  adapter_started?: boolean | null
+  websocket_connected?: boolean | null
+  external_login_status?:
+    | 'unknown'
+    | 'upstream_reported_online'
+    | 'upstream_reported_offline'
+    | null
+  last_disconnect_reason?:
+    | 'access_token_missing'
+    | 'access_token_mismatch'
+    | 'invalid_client_role'
+    | 'missing_self_id'
+    | 'heartbeat_timeout'
+    | 'upstream_lifecycle_disconnect'
+    | 'adapter_stopped'
+    | null
+  outbox?: Record<string, number> | null
 }
 
 // 适配器类型枚举

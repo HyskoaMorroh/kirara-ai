@@ -34,8 +34,11 @@ class TestLLMRequestTrace(TracingTestBase):
         self.assertEqual(self.trace.trace_id, "test-trace-id")
         self.assertEqual(self.trace.model_id, "test-model")
         self.assertEqual(self.trace.backend_name, "test-backend")
+        self.assertEqual(self.trace.provider, "test-backend")
         self.assertEqual(self.trace.correlation_id, "turn-model-start")
         self.assertEqual(self.trace.status, "pending")
+        self.assertEqual(self.trace.usage_source, "unknown")
+        self.assertIsNone(self.trace.error_category)
         self.assertIsNotNone(self.trace.request)
 
     def test_complete_event_preserves_start_correlation_id_in_all_projections(self):
@@ -171,6 +174,8 @@ class TestLLMRequestTrace(TracingTestBase):
         payload = self.trace.to_dict()
 
         self.assertEqual(payload["usage_source"], "provider")
+        self.assertEqual(payload["provider"], "test-backend")
+        self.assertIsNone(payload["error_category"])
         self.assertEqual(payload["cache_write_tokens"], 1)
         self.assertEqual(payload["ttft_ms"], 250)
         self.assertEqual(payload["attempt_count"], 1)
@@ -195,6 +200,9 @@ class TestLLMRequestTrace(TracingTestBase):
 
         self.assertEqual(self.trace.status, "failed")
         self.assertEqual(self.trace.error, "Test error")
+        self.assertEqual(self.trace.provider, "test-backend")
+        self.assertEqual(self.trace.error_category, "unknown")
+        self.assertEqual(self.trace.usage_source, "unknown")
 
     def test_to_dict(self):
         """测试转换为字典"""

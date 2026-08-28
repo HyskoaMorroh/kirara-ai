@@ -1,6 +1,9 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from types import MappingProxyType
+from typing import Any, Dict, List, Literal, Mapping, Optional
 
 from kirara_ai.im.sender import ChatSender
 from kirara_ai.media import MediaManager, MediaType
@@ -11,6 +14,33 @@ MIMETYPE_MAPPING = {
     "video": MediaType.VIDEO,
     "file": MediaType.FILE,
 }
+
+
+@dataclass(frozen=True)
+class DeliveryStageEvent:
+    """One local, adapter-owned delivery stage timestamp."""
+
+    stage: str
+    timestamp: datetime
+    details: Mapping[str, Any]
+
+
+#: 一次回复从收到消息到发出为止的阶段顺序。
+#:
+#: 只有前四个阶段之外的部分是适配器自己的耗时；把「收到事件」「工作流开始」
+#: 「模型首字节」「模型完成」也记下来，才能把「QQ 慢」和「模型生成慢」分开——
+#: 此前只有格式化与发送四个阶段，问到「为什么等了 30 秒」时无从回答。
+DELIVERY_STAGES: tuple[str, ...] = (
+    "received_event",
+    "workflow_started",
+    "llm_first_byte",
+    "llm_completed",
+    "formatting_started",
+    "formatting_completed",
+    "send_started",
+    "send_succeeded",
+    "send_failed",
+)
 
 # 定义消息元素的基类
 class MessageElement(ABC):
@@ -418,6 +448,87 @@ class IMMessage:
         self.sender = sender
         self.message_elements = message_elements
         self.raw_message = raw_message
+        self._delivery_timeline: List[DeliveryStageEvent] = []
+
+    @property
+    def delivery_timeline(self) -> tuple[DeliveryStageEvent, ...]:
+        return tuple(self._delivery_timeline)
+
+    def record_delivery_stage(
+        self,
+        stage: str,
+        **details: Any,
+    ) -> DeliveryStageEvent:
+        return self.record_delivery_stage_at(
+            stage,
+            datetime.now(timezone.utc),
+            **details,
+        )
+
+    def record_delivery_stage_at(
+        self,
+        stage: str,
+        timestamp: datetime,
+        **details: Any,
+    ) -> DeliveryStageEvent:
+        """记录一个带显式时间戳的阶段。
+
+        时间戳必须带时区：两个阶段相减是这条链路唯一的耗时依据，
+        naive datetime 相减会静默给出错误的秒数。
+        """
+        if not stage:
+            raise ValueError("delivery stage cannot be empty")
+        if timestamp.tzinfo is None or timestamp.tzinfo.utcoffset(timestamp) is None:
+            raise ValueError("delivery stage timestamp must be timezone-aware")
+        event = DeliveryStageEvent(
+            stage=stage,
+            timestamp=timestamp,
+            details=MappingProxyType(dict(details)),
+        )
+        self._delivery_timeline.append(event)
+        return event
+
+    def delivery_durations(self) -> Dict[str, float]:
+        """把时间线折算成各阶段耗时（秒）。
+
+        只输出有证据的阶段：缺少模型阶段时不会给出 ``llm_*``，
+        因为「没测到」和「耗时为 0」是两回事，把前者写成 0 会直接误导排查。
+        """
+        timeline = {event.stage: event.timestamp for event in self._delivery_timeline}
+        if not timeline:
+            return {}
+
+        def gap(start: str, end: str) -> Optional[float]:
+            first = timeline.get(start)
+            last = timeline.get(end)
+            if first is None or last is None:
+                return None
+            return max(0.0, (last - first).total_seconds())
+
+        durations: Dict[str, float] = {}
+        measurements = {
+            "queue_seconds": gap("received_event", "workflow_started"),
+            "llm_first_byte_seconds": gap("workflow_started", "llm_first_byte"),
+            "llm_generation_seconds": gap("llm_first_byte", "llm_completed"),
+            "formatting_seconds": gap("formatting_started", "formatting_completed"),
+        }
+        send_start = timeline.get("send_started")
+        send_end = timeline.get("send_succeeded") or timeline.get("send_failed")
+        if send_start is not None and send_end is not None:
+            measurements["send_seconds"] = max(
+                0.0, (send_end - send_start).total_seconds()
+            )
+
+        first_stage = self._delivery_timeline[0].timestamp
+        last_stage = self._delivery_timeline[-1].timestamp
+        measurements["total_seconds"] = max(
+            0.0, (last_stage - first_stage).total_seconds()
+        )
+
+        for name, value in measurements.items():
+            if value is not None:
+                durations[name] = value
+        return durations
 
     def to_dict(self):
         return {
@@ -429,6 +540,17 @@ class IMMessage:
                 [element.to_plain() for element in self.message_elements]
             ),
             "raw_message": self.raw_message,
+            # 时间线此前被排除在序列化之外，于是它只活在内存里，
+            # 事后既进不了日志也进不了接口响应，无法回答「为什么慢」。
+            "delivery_timeline": [
+                {
+                    "stage": event.stage,
+                    "timestamp": event.timestamp.isoformat(),
+                    "details": dict(event.details),
+                }
+                for event in self._delivery_timeline
+            ],
+            "delivery_durations": self.delivery_durations(),
         }
 
 

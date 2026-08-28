@@ -108,3 +108,48 @@ async def test_trace_api_filters_searches_and_returns_correlation_id(tracing_api
     detail = await detail_response.get_json()
     assert detail["trace_id"] == matching_trace
     assert detail["correlation_id"] == "turn-api-Exact-123"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [[], None, "not-an-object", 1, True])
+async def test_trace_api_rejects_non_object_json_bodies(tracing_api, payload):
+    client, _ = tracing_api
+
+    response = await client.post(
+        "/api/tracing/llm/traces",
+        headers=_headers(),
+        json=payload,
+    )
+
+    assert response.status_code == 400
+    assert await response.get_json() == {"error": "Request body must be a JSON object"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page", [0, -1, 1.5, "1", True, None])
+async def test_trace_api_rejects_invalid_page_values(tracing_api, page):
+    client, _ = tracing_api
+
+    response = await client.post(
+        "/api/tracing/llm/traces",
+        headers=_headers(),
+        json={"page": page},
+    )
+
+    assert response.status_code == 400
+    assert await response.get_json() == {"error": "page must be an integer greater than or equal to 1"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page_size", [0, -1, 201, 1.5, "20", True, None])
+async def test_trace_api_rejects_invalid_page_size_values(tracing_api, page_size):
+    client, _ = tracing_api
+
+    response = await client.post(
+        "/api/tracing/llm/traces",
+        headers=_headers(),
+        json={"page_size": page_size},
+    )
+
+    assert response.status_code == 400
+    assert await response.get_json() == {"error": "page_size must be an integer between 1 and 200"}
