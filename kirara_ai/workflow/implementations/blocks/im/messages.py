@@ -70,6 +70,12 @@ class SendIMMessage(Block):
             asyncio.AbstractEventLoop
         )
 
+        # 把入站消息已经记录的阶段带到即将发出的回复上。Agent 路径由 dispatcher
+        # 负责这件事，而遗留工作流路径的回复对象是工作流自己构造的，dispatcher
+        # 看不到它——不在这里拼接，未迁移到 Agent 的部署就只有后半段耗时，
+        # 排队与模型生成这两段（用户实际抱怨的等待）完全不可见。
+        self._carry_inbound_timeline(src_msg, msg)
+
         if loop.is_running():
             try:
                 running_loop = asyncio.get_running_loop()
@@ -92,14 +98,58 @@ class SendIMMessage(Block):
                 raise TimeoutError(
                     f"IM message sending timed out after {self.SEND_TIMEOUT_SECONDS:g} seconds"
                 ) from exc
+            finally:
+                self._persist_delivery_timings(src_msg, msg)
         else:
-            asyncio.run(
-                asyncio.wait_for(
-                    adapter.send_message(msg, target or src_msg.sender),
-                    timeout=self.SEND_TIMEOUT_SECONDS,
+            try:
+                asyncio.run(
+                    asyncio.wait_for(
+                        adapter.send_message(msg, target or src_msg.sender),
+                        timeout=self.SEND_TIMEOUT_SECONDS,
+                    )
                 )
-            )
+            finally:
+                self._persist_delivery_timings(src_msg, msg)
         return {"ok": True}
+
+    @staticmethod
+    def _carry_inbound_timeline(src_msg: Any, reply: Any) -> None:
+        """Copy the inbound stages onto the reply, preserving their timestamps."""
+        events = getattr(src_msg, "delivery_timeline", ())
+        recorder = getattr(reply, "record_delivery_stage_at", None)
+        if not events or not callable(recorder) or reply is src_msg:
+            return
+        recorded = {event.stage for event in getattr(reply, "delivery_timeline", ())}
+        for event in events:
+            if event.stage in recorded:
+                continue
+            try:
+                recorder(event.stage, event.timestamp, **dict(event.details))
+            except Exception:  # noqa: BLE001 - 观测失败不得影响消息投递
+                return
+
+    def _persist_delivery_timings(self, src_msg: Any, reply: Any) -> None:
+        """Persist this reply's phase timings; never let observability break delivery.
+
+        走的是与 Agent 路径完全相同的 ``DeliveryTimingStore``，因此两条路径的
+        统计口径一致。发送失败也要落库：``send_failed`` 同样是需要回查的证据。
+        """
+        try:
+            from kirara_ai.workflow.core.dispatch.dispatcher import WorkflowDispatcher
+
+            dispatcher = self.container.resolve(WorkflowDispatcher)
+        except Exception:  # noqa: BLE001 - 未注册 dispatcher 时静默跳过
+            return
+        try:
+            adapter = (
+                self.container.resolve(IMAdapter)
+                if not self.im_name
+                else self.container.resolve(IMManager).get_adapter(self.im_name)
+            )
+            dispatcher._log_delivery_durations(reply)
+            dispatcher._persist_delivery_durations(adapter, src_msg, reply)
+        except Exception:  # noqa: BLE001 - 观测失败不得影响消息投递
+            return
 
 # IMMessage 转纯文本
 

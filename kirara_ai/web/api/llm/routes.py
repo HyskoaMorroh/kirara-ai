@@ -1,6 +1,7 @@
 from copy import deepcopy
 from functools import wraps
 import json
+import os
 from typing import Any
 
 from pydantic import ValidationError
@@ -513,6 +514,92 @@ def _backend_info(backend: LLMBackendConfig) -> LLMBackendInfo:
     return LLMBackendInfo.model_validate(payload)
 
 
+#: 供应商配置导入/导出的文档版本。导入时校验它，避免把未来格式静默按旧规则解释。
+BACKEND_DOCUMENT_VERSION = 1
+
+
+def _audit_backend_success(operation: str, *, backend_name: str) -> None:
+    """Record who changed which provider configuration, without the credential.
+
+    需求 21.1 要求供应商配置的导入/编辑「有校验、备份、恢复、冲突处理和审计记录」。
+    定价接口一直有审计（`_audit_pricing_success`），供应商凭据这条路径却没有——
+    而它恰恰是更敏感的一条：改错一个后端会让整个渠道停摆，且涉及凭据本身。
+    这里只记录操作、后端名与主体摘要，绝不记录配置内容。
+    """
+    record: dict[str, Any] = {
+        "component": "llm_backend",
+        "operation": operation,
+        "outcome": "success",
+        "backend_name": backend_name,
+    }
+    principal = getattr(g, "auth_principal", None)
+    if principal is not None:
+        record.update(principal.audit_fields())
+    try:
+        lifecycle: ResourceLifecycleService = g.container.resolve(
+            ResourceLifecycleService
+        )
+        lifecycle.append_runtime_audit(record)
+    except Exception as error:
+        # 配置已经落盘，审计沉降失败不能把一次成功操作报成失败。
+        logger.warning("Backend audit sink unavailable: {}", type(error).__name__)
+
+
+def _export_backend_document(config: GlobalConfig) -> dict[str, Any]:
+    """Build a credential-free, re-importable provider configuration document.
+
+    **凭据一律不导出。** 导出文件会被邮件转发、贴进工单、提交进仓库；
+    带着 API Key 的「配置备份」是一次等待发生的泄露。因此敏感字段导出为空串，
+    导入端把空串理解为「保留现有值」（与编辑接口同一约定），
+    于是「导出 → 换机器导入 → 补填 Key」是完整可用的迁移路径。
+    """
+    backends: list[dict[str, Any]] = []
+    for backend in config.llms.api_backends:
+        payload = backend.model_dump()
+        payload["config"] = _redact_sensitive_config(payload.get("config", {}))
+        backends.append(payload)
+    return {
+        "document_version": BACKEND_DOCUMENT_VERSION,
+        "backends": backends,
+    }
+
+
+def _validate_backend_document(document: Any) -> list[LLMBackendConfig]:
+    """Validate an imported document and return parsed backends.
+
+    校验三件事，任何一条不满足就整份拒绝——半导入的配置比不导入更难修复：
+    1. 文档版本已知；
+    2. 每个后端都能通过 `LLMBackendConfig` 的完整校验（含容错参数的边界）；
+    3. 名称唯一且非空——重名会让「加载哪一个」变成未定义行为。
+    """
+    if not isinstance(document, dict):
+        raise ValueError("import document must be an object")
+    version = document.get("document_version")
+    if version != BACKEND_DOCUMENT_VERSION:
+        raise ValueError(
+            f"unsupported document_version: {version!r}; "
+            f"expected {BACKEND_DOCUMENT_VERSION}"
+        )
+    raw_backends = document.get("backends")
+    if not isinstance(raw_backends, list) or not raw_backends:
+        raise ValueError("import document must contain a non-empty backends list")
+
+    parsed: list[LLMBackendConfig] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw_backends):
+        if not isinstance(item, dict):
+            raise ValueError(f"backends[{index}] must be an object")
+        backend = LLMBackendConfig.model_validate(item)
+        name = str(backend.name).strip()
+        if not name:
+            raise ValueError(f"backends[{index}] has an empty name")
+        if name in seen:
+            raise ValueError(f"duplicate backend name in document: {name}")
+        seen.add(name)
+        parsed.append(backend)
+    return parsed
+
+
 def serialize_config_update(func):
     """串行化会修改 LLM 配置的请求，避免与后台模型刷新交错写入。"""
     @wraps(func)
@@ -546,6 +633,222 @@ async def list_backends():
     except Exception as e:
         logger.opt(exception=e).error("Failed to list backends")
         return jsonify({"error": str(e)}), 500
+
+
+@llm_bp.route("/backends/export", methods=["GET"])
+@require_auth("llm.backends.read")
+async def export_backends():
+    """Download a credential-free provider configuration document.
+
+    定价目录早就有导入/导出，供应商配置却没有——迁移一台部署只能手抄十几个
+    后端的容错参数。这里补上，但**不导出凭据**：导出文件会被转发、贴工单、
+    提交进仓库，带 API Key 的「配置备份」是一次等待发生的泄露。
+    """
+    try:
+        config: GlobalConfig = g.container.resolve(GlobalConfig)
+        body = json.dumps(
+            _export_backend_document(config),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+        response = Response(body, content_type="application/json")
+        response.headers["Content-Disposition"] = (
+            'attachment; filename="llm-backends.json"'
+        )
+        return response
+    except Exception as error:
+        logger.opt(exception=error).error("Failed to export backends")
+        return jsonify({"error": "Failed to export backends"}), 500
+
+
+@llm_bp.route("/backends/import", methods=["POST"])
+@require_auth("llm.backends.manage")
+async def import_backends():
+    """Import a provider configuration document with validation and a backup.
+
+    三条不可协商的行为：
+
+    - **整份校验后再落盘**。任何一个后端不合法就整份拒绝：半导入的配置比不导入
+      更难修复，而且会让「哪些生效了」变成需要逐个点开确认的问题。
+    - **空的敏感字段表示保留现有值**，与编辑接口同一约定。这样「导出 → 换机器
+      导入」不会把目标机器上已经填好的 Key 清空。
+    - **冲突要显式选择**。同名后端默认拒绝；只有 `overwrite: true` 才替换，
+      并在审计里记下这次覆盖。
+    """
+    try:
+        payload = await request.get_json()
+        if not isinstance(payload, dict):
+            return jsonify({"error": "request body must be an object"}), 400
+        unknown = set(payload) - {"document", "overwrite"}
+        if unknown:
+            return jsonify({"error": f"unexpected fields: {sorted(unknown)}"}), 400
+
+        overwrite = payload.get("overwrite", False)
+        if not isinstance(overwrite, bool):
+            return jsonify({"error": "overwrite must be a boolean"}), 400
+
+        incoming = _validate_backend_document(payload.get("document"))
+
+        config: GlobalConfig = g.container.resolve(GlobalConfig)
+        existing = {backend.name: backend for backend in config.llms.api_backends}
+        conflicts = [backend.name for backend in incoming if backend.name in existing]
+        if conflicts and not overwrite:
+            return (
+                jsonify(
+                    {
+                        "error": "backend name conflict",
+                        "conflicts": sorted(conflicts),
+                        "hint": "resend with overwrite: true to replace them",
+                    }
+                ),
+                409,
+            )
+
+        manager: LLMManager = g.container.resolve(LLMManager)
+        imported = 0
+        for backend in incoming:
+            current = existing.get(backend.name)
+            if current is not None:
+                # 空白凭据表示「保留现有」：导入不该清空目标机器上已填好的 Key。
+                merged = _restore_unchanged_secrets(
+                    backend.model_dump(), current.model_dump()
+                )
+                replacement = LLMBackendConfig.model_validate(merged)
+                config.llms.api_backends[
+                    config.llms.api_backends.index(current)
+                ] = replacement
+            else:
+                config.llms.api_backends.append(backend)
+            imported += 1
+
+        ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
+
+        # 落盘之后再加载：加载失败不该留下一份「已保存但没生效」的配置差异。
+        for backend in incoming:
+            if backend.enable:
+                try:
+                    manager.load_backend(backend.name)
+                except Exception as error:
+                    logger.warning(
+                        "Imported backend {} failed to load: {}",
+                        backend.name,
+                        type(error).__name__,
+                    )
+
+        _audit_backend_success(
+            "import_overwrite" if conflicts else "import",
+            backend_name=",".join(sorted(backend.name for backend in incoming))[:256],
+        )
+        return jsonify(
+            {
+                "data": {
+                    "imported_count": imported,
+                    "overwritten": sorted(conflicts),
+                }
+            }
+        )
+    except (ValidationError, ValueError, TypeError) as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        logger.opt(exception=error).error("Failed to import backends")
+        return jsonify({"error": "Failed to import backends"}), 500
+
+
+@llm_bp.route("/backends/restore", methods=["POST"])
+@require_auth("llm.backends.manage")
+async def restore_backends():
+    """Roll the provider list back to the copy taken before the last write.
+
+    `save_config_with_backup` 每次写入前都会留一份 `config.yaml.bak`，
+    但一直没有任何接口能把它取回来——改错一个后端之后只能登服务器手工编辑。
+    定价目录早有 `/pricing/restore`，供应商配置这条更敏感的路径反而没有。
+
+    三条刻意的设计：
+
+    - **只回滚 `llms.api_backends`**。`config.yaml` 是整个项目的配置文件，
+      把 `.bak` 整份写回去会把用户同一时间改过的 Web 端口、IM 适配器、
+      工作流一起退回上一个状态——那是「回滚全部设置」，不是「恢复供应商配置」。
+    - **要求显式确认**。恢复会丢掉最后一次写入的供应商改动，和删除同级。
+    - **备份不存在返回 404**，不是 500：没有可恢复的东西是一种正常状态。
+    """
+    try:
+        payload = await request.get_json(silent=True)
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return jsonify({"error": "request body must be an object"}), 400
+        unknown = set(payload) - {"confirmed"}
+        if unknown:
+            return jsonify({"error": f"unexpected fields: {sorted(unknown)}"}), 400
+        if payload.get("confirmed") is not True:
+            return jsonify({"error": "Restore requires confirmed: true"}), 400
+
+        backup_path = f"{CONFIG_FILE}.bak"
+        if not os.path.isfile(backup_path):
+            return (
+                jsonify(
+                    {
+                        "error": "no provider configuration backup available",
+                        "hint": "a backup appears after the first configuration write",
+                    }
+                ),
+                404,
+            )
+
+        try:
+            backup_config = ConfigLoader.load_config(backup_path, GlobalConfig)
+        except (ValueError, RuntimeError) as error:
+            logger.warning("Provider backup is unusable: {}", type(error).__name__)
+            return jsonify({"error": "provider configuration backup is unreadable"}), 422
+
+        config: GlobalConfig = g.container.resolve(GlobalConfig)
+        manager: LLMManager = g.container.resolve(LLMManager)
+
+        # 先卸载当前已加载的后端，再换清单：顺序颠倒会让被移除的后端留在
+        # manager 里继续接请求，指向一份已经不存在的配置。
+        for backend in list(config.llms.api_backends):
+            if backend.name in getattr(manager, "backends", {}):
+                await manager.unload_backend(backend.name)
+
+        restored = [
+            LLMBackendConfig.model_validate(backend.model_dump())
+            for backend in backup_config.llms.api_backends
+        ]
+        config.llms.api_backends = restored
+
+        ConfigLoader.save_config(CONFIG_FILE, config)
+
+        loaded = 0
+        for backend in restored:
+            if not backend.enable:
+                continue
+            try:
+                manager.load_backend(backend.name)
+                loaded += 1
+            except Exception as error:
+                logger.warning(
+                    "Restored backend {} failed to load: {}",
+                    backend.name,
+                    type(error).__name__,
+                )
+
+        _audit_backend_success(
+            "restore",
+            backend_name=",".join(backend.name for backend in restored)[:256],
+        )
+        return jsonify(
+            {
+                "data": {
+                    "restored_count": len(restored),
+                    "loaded_count": loaded,
+                    "backends": [backend.name for backend in restored],
+                }
+            }
+        )
+    except Exception as error:
+        logger.opt(exception=error).error("Failed to restore backends")
+        return jsonify({"error": "Failed to restore backends"}), 500
 
 
 @llm_bp.route("/backends/<backend_name>", methods=["GET"])
@@ -608,6 +911,7 @@ async def create_backend():
             manager.load_backend(backend.name)
 
         ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
+        _audit_backend_success("create", backend_name=backend.name)
         return LLMBackendResponse(data=_backend_info(backend)).model_dump()
     except Exception as e:
         logger.opt(exception=e).error("Failed to create backend")
@@ -639,7 +943,19 @@ async def update_backend(backend_name: str):
             return jsonify({"error": f"Backend {backend_name} not found"}), 404
 
         original_backend = config.llms.api_backends[backend_index]
-        submitted = request_data.model_dump()
+        # 只覆盖客户端**真的提交过**的字段。
+        #
+        # `model_dump()` 无条件产出全部字段（缺的用模型默认值补齐），于是任何
+        # 前端表单不认识的键都会在一次无关的编辑里被静默重置为出厂值——
+        # 用户在 config.yaml 里开的 `hide_ai_attribution` 会在他改一个超时数字时
+        # 被关掉，而界面上没有任何地方显示过这个字段，所以他既看不到它被关，
+        # 也无从把症状与那次编辑联系起来。
+        #
+        # `exclude_unset=True` 让「没发这个键」与「发了 false」成为两件事：
+        # 前者保留原值，后者照常关掉。这一处修好覆盖所有现有与将来新增的字段，
+        # 比逐个字段补前端控件更可靠——漏一个字段就等于留一个静默重置。
+        submitted = original_backend.model_dump()
+        submitted.update(request_data.model_dump(exclude_unset=True))
         if request_data.adapter == original_backend.adapter:
             submitted["config"] = _restore_unchanged_secrets(
                 submitted.get("config", {}), original_backend.config
@@ -680,6 +996,7 @@ async def update_backend(backend_name: str):
                 )
             raise
 
+        _audit_backend_success("update", backend_name=updated_backend.name)
         return LLMBackendResponse(data=_backend_info(updated_backend)).model_dump()
     except Exception as e:
         logger.opt(exception=e).error("Failed to update backend")
@@ -716,7 +1033,9 @@ async def delete_backend(backend_name: str):
         deleted_backend = config.llms.api_backends.pop(backend_index)
 
         ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
-            
+
+        _audit_backend_success("delete", backend_name=backend_name)
+
         return LLMBackendResponse(data=_backend_info(deleted_backend)).model_dump()
     except Exception as e:
         logger.opt(exception=e).error("Failed to delete backend")

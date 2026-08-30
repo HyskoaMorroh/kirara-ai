@@ -13,6 +13,8 @@ import inspect
 import hashlib
 import json
 import secrets
+import threading
+import time
 import uuid
 from collections.abc import Mapping as ABCMapping
 from dataclasses import dataclass, field
@@ -20,7 +22,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
-from kirara_ai.im.message import IMMessage
+from kirara_ai.im.message import IMMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
 from kirara_ai.llm.format.message import (
     LLMChatContentPartType,
@@ -43,18 +45,29 @@ from kirara_ai.llm.resilience import (
 )
 from kirara_ai.memory.entry import MemoryEntry
 from kirara_ai.agent_runtime.core import (
+    DEFAULT_TEAMMATE_DEPTH,
+    TEAMMATE_TOOL_PREFIX,
     AgentDefinition,
     AgentRegistry,
     ChannelContext,
     ResourceSnapshot,
+    build_teammate_tools,
     principal_can_control_agent,
     resolve_mcp_tool_allowlist,
 )
 from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
+from kirara_ai.plugin_manager.system_dependencies import dependency_ids_for_resource
 from kirara_ai.web.auth.principal import get_runtime_principal
 
 from .session_store import SessionStore
 from .hooks import AgentHookRuntime, HookOutcome
+from .skills import (
+    SKILL_TOOL_PREFIX,
+    build_skill_tools,
+    skill_advertisement,
+    skill_catalog_section,
+    skill_readiness_note,
+)
 
 
 class RuntimeStatus(str, Enum):
@@ -76,6 +89,12 @@ class RuntimeResult:
     correlation_id: Optional[str] = None
     error: Optional[dict[str, str]] = None
     trace_ids: tuple[str, ...] = ()
+    #: 模型吐出第一个可见字节的挂钟时刻，仅流式请求可测。
+    #:
+    #: 非流式请求在 HTTP 响应到达前没有任何可观测的中间事件，因此这里保持
+    #: ``None``，而不是拿「请求返回时刻」冒充首字节——后者会把「模型思考了 20 秒」
+    #: 记成「首字节 20 秒、生成 0 秒」，与真实情况正好相反。
+    llm_first_byte_at: Optional[datetime] = None
 
 
 @dataclass
@@ -110,6 +129,7 @@ class AgentRuntimeExecutor:
         mcp_manager: Any,
         resource_loader: Optional[Callable[..., Any]] = None,
         resource_service: Optional[ResourceLifecycleService] = None,
+        dependency_service: Any = None,
         audit_sink: Optional[Callable[[dict[str, Any]], None]] = None,
         session_store: Optional[SessionStore] = None,
         memory_manager: Any = None,
@@ -117,6 +137,7 @@ class AgentRuntimeExecutor:
         context_char_threshold: Optional[int] = None,
         compactor: Optional[Callable[..., Any]] = None,
         reply_stream_mode: str = "off",
+        turn_deadline_seconds: float = 0.0,
     ) -> None:
         if context_char_threshold is not None:
             if isinstance(context_char_threshold, bool) or not isinstance(
@@ -127,10 +148,20 @@ class AgentRuntimeExecutor:
             raise TypeError("compactor must be callable")
         if reply_stream_mode not in {"off", "aggregate"}:
             raise ValueError("reply_stream_mode must be either off or aggregate")
+        if isinstance(turn_deadline_seconds, bool) or not isinstance(
+            turn_deadline_seconds, (int, float)
+        ) or turn_deadline_seconds < 0:
+            raise ValueError("turn_deadline_seconds must be a non-negative number")
+        self.turn_deadline_seconds = float(turn_deadline_seconds)
         self.agent_registry = agent_registry
         self.llm_manager = llm_manager
         self.mcp_manager = mcp_manager
         self.resource_service = resource_service
+        #: 服务器组件（CLI / 浏览器 / 运行时）的安装状态来源。
+        #:
+        #: 用来回答「这份技能里的命令在这台服务器上到底装了没有」。缺省 ``None``
+        #: 时不给任何就绪提示——「不知道」不能冒充「已就绪」，也不能冒充「缺失」。
+        self.dependency_service = dependency_service
         self.resource_loader = resource_loader or (
             resource_service.read_entry
             if resource_service is not None
@@ -161,13 +192,22 @@ class AgentRuntimeExecutor:
         session_mcp_allowlist: Optional[Iterable[str]] = None,
         workflow_mcp_allowlist: Optional[Iterable[str]] = None,
         history: Optional[Sequence[LLMChatMessage]] = None,
+        teammate_depth: Optional[int] = None,
     ) -> RuntimeResult:
-        """Execute one inbound message and never perform an unconfirmed tool."""
+        """Execute one inbound message and never perform an unconfirmed tool.
+
+        ``teammate_depth`` 是本轮还允许的委派层数（需求 8 的 Teammates 模式）。
+        默认取 ``DEFAULT_TEAMMATE_DEPTH``；队友被委派执行时由调用方递减，
+        因此 A→B→A 不会无限递归。
+        """
 
         correlation_id = uuid.uuid4().hex
         agent: Optional[AgentDefinition] = None
         snapshot: Optional[ResourceSnapshot] = None
         result: Optional[RuntimeResult] = None
+        depth = (
+            DEFAULT_TEAMMATE_DEPTH if teammate_depth is None else max(0, int(teammate_depth))
+        )
         try:
             agent = self._trusted_agent(self.agent_registry.resolve(context, session_agent_id))
             session_allowlist = self._optional_set(session_mcp_allowlist)
@@ -218,12 +258,38 @@ class AgentRuntimeExecutor:
                 payload={"text": message.content, "has_images": bool(message.images)},
                 correlation_id=correlation_id,
             )
-            messages = self._build_messages(agent, message, stored_history)
+            # 本轮技能载入一次，目录、工具与整篇注入共用同一份结果——
+            # 分头各载一次会让同一个 Skill 在一轮里被读两遍，
+            # 而两遍之间资源被更新时，目录说的是一件事、注入的正文是另一件事。
+            # 出参：`_build_messages` 在按绑定顺序载入技能时把可广告的追加进来。
+            # 这样每个技能整轮只被载入一次（`read_entry` 每次都要重新校验摘要），
+            # 且目录里写的版本与真正会被取回的正文必然同源。
+            skill_advertisements: list[dict[str, str]] = []
+            messages = self._build_messages(
+                agent, message, stored_history, skill_advertisements
+            )
             messages = self._inject_hook_context(
                 messages,
                 (session_hook, prompt_hook),
             )
             tools = self._build_tools(tool_entries, effective_tools) if agent.allow_tools else []
+            # 委派工具与 MCP 工具同一形态，因此模型侧不需要区分「这是队友还是工具」。
+            # 深度耗尽或未配置队友时列表为空，行为与此前一致。
+            teammate_tools = (
+                build_teammate_tools(
+                    agent, self.agent_registry.agents, depth_remaining=depth
+                )
+                if agent.allow_tools
+                else []
+            )
+            tools = [*tools, *teammate_tools]
+            teammate_names = frozenset(tool.name for tool in teammate_tools)
+            # 技能调用工具：与 MCP 工具、队友委派同一形态，模型侧不需要区分。
+            # 只为「已广告」的技能生成——没有前置元数据的技能已整篇注入，
+            # 再给一个工具会让同一份内容在上下文里出现两次。
+            skill_tools = build_skill_tools(skill_advertisements)
+            tools = [*tools, *skill_tools]
+            skill_names = frozenset(tool.name for tool in skill_tools)
             result = await self._run_loop(
                 context=context,
                 agent=agent,
@@ -237,6 +303,9 @@ class AgentRuntimeExecutor:
                 tool_iterations=0,
                 trace_ids=(),
                 correlation_id=correlation_id,
+                teammate_tool_names=teammate_names,
+                teammate_depth=depth,
+                skill_tool_names=skill_names,
             )
             if result.status is RuntimeStatus.COMPLETED:
                 self._persist_history(context.session_key, agent.agent_id, result)
@@ -513,12 +582,36 @@ class AgentRuntimeExecutor:
             messages = list(pending.messages)
             messages.append(self._assistant_tool_message(pending_call))
             messages.append(LLMChatMessage(role="tool", content=[tool_result]))
+            # 恢复这一轮必须重新带上技能与委派工具。
+            #
+            # `pending.messages` 里的 system 消息含技能目录（那是确认前构建的），
+            # 只重建 MCP 工具会让模型看到一份广告、却调不到被广告的工具，
+            # 得到「permission denied」——一个由我们自己制造的死路。
+            # 队友委派同理：不重建的话确认一次之后队友就凭空消失了。
+            resumed_skill_tools = (
+                build_skill_tools(self._skill_advertisements(current_agent))
+                if current_agent.allow_tools
+                else []
+            )
+            resumed_teammate_tools = (
+                build_teammate_tools(
+                    current_agent,
+                    self.agent_registry.agents,
+                    depth_remaining=DEFAULT_TEAMMATE_DEPTH,
+                )
+                if current_agent.allow_tools
+                else []
+            )
             response = await self._run_loop(
                 context=pending.context,
                 agent=current_agent,
                 snapshot=pending.snapshot,
                 messages=messages,
-                tools=self._build_tools(current_entries, current_effective),
+                tools=[
+                    *self._build_tools(current_entries, current_effective),
+                    *resumed_teammate_tools,
+                    *resumed_skill_tools,
+                ],
                 tool_names=current_effective,
                 session_allowlist=pending.session_allowlist,
                 workflow_allowlist=pending.workflow_allowlist,
@@ -526,6 +619,11 @@ class AgentRuntimeExecutor:
                 tool_iterations=pending.tool_iterations + 1,
                 trace_ids=pending.trace_ids,
                 correlation_id=pending.correlation_id,
+                teammate_tool_names=frozenset(
+                    tool.name for tool in resumed_teammate_tools
+                ),
+                teammate_depth=DEFAULT_TEAMMATE_DEPTH,
+                skill_tool_names=frozenset(tool.name for tool in resumed_skill_tools),
             )
             result = response
             if response.status is RuntimeStatus.COMPLETED and self.session_store is not None:
@@ -591,11 +689,36 @@ class AgentRuntimeExecutor:
         tool_iterations: int,
         trace_ids: tuple[str, ...],
         correlation_id: str,
+        teammate_tool_names: frozenset[str] = frozenset(),
+        teammate_depth: int = 0,
+        skill_tool_names: frozenset[str] = frozenset(),
     ) -> RuntimeResult:
         current_messages = list(messages)
         current_model = model_id
         current_traces = list(trace_ids)
         response: Optional[LLMChatResponse] = None
+        # 只有流式请求能测到首字节；多轮工具调用时保留**最后一次**模型请求的
+        # 首字节，因为它才是最终回复文本的起点。
+        model_timings: dict[str, Any] = {}
+        # 整轮共享一个取消信号与一个递减的总预算：工具轮次会多次调用模型，
+        # 每次都从头给满预算等于没有总预算。预算耗尽时下一次调用直接被拒，
+        # 正在等待的那次由取消信号中断。
+        turn_budget = self.turn_deadline_seconds
+        turn_cancellation: Optional[threading.Event] = (
+            threading.Event() if turn_budget > 0 else None
+        )
+        turn_started = time.monotonic() if turn_budget > 0 else 0.0
+
+        def remaining_budget() -> Optional[float]:
+            if turn_budget <= 0:
+                return None
+            left = turn_budget - (time.monotonic() - turn_started)
+            if left <= 0:
+                # 预算已耗尽：先置取消信号，让仍在等待的上游请求尽快松手。
+                if turn_cancellation is not None:
+                    turn_cancellation.set()
+                return 0.0
+            return left
 
         # One final model request is made with tool_choice=none after the
         # configured number of tool rounds, so a model cannot extend the loop.
@@ -621,6 +744,9 @@ class AgentRuntimeExecutor:
                 current_model,
                 provider_allowlist=agent.provider_allowlist,
                 correlation_id=correlation_id,
+                timings=model_timings,
+                cancellation_event=turn_cancellation,
+                deadline_seconds=remaining_budget(),
             )
             if trace_id:
                 current_traces.append(trace_id)
@@ -633,6 +759,7 @@ class AgentRuntimeExecutor:
                     response,
                     tuple(current_traces),
                     correlation_id,
+                    llm_first_byte_at=model_timings.get("llm_first_byte_at"),
                 )
 
             calls = list(response.message.tool_calls)
@@ -647,6 +774,35 @@ class AgentRuntimeExecutor:
                     )
                     continue
                 name = call.function.name
+                if name in teammate_tool_names:
+                    # 委派：跑队友的一次完整 turn，把它的回答作为 tool 结果带回。
+                    # 委派本身不动服务器，因此不需要人工确认；队友自身的高危工具
+                    # 仍走原有确认链路，委派不是绕过授权的旁路。
+                    delegated = await self._delegate_to_teammate(
+                        call,
+                        context=context,
+                        depth_remaining=teammate_depth,
+                        correlation_id=correlation_id,
+                    )
+                    current_messages.append(self._assistant_tool_message(call))
+                    current_messages.append(
+                        LLMChatMessage(role="tool", content=[delegated])
+                    )
+                    continue
+                if name in skill_tool_names:
+                    # 技能载入：把这篇技能的正文交给模型，让它据此作答。
+                    #
+                    # 不走 `_requires_confirmation`：这是一次**本地只读**，
+                    # 读的还是本轮快照已经固定的那个版本，不动服务器也不外呼。
+                    # 给它加人工确认，等于每次用技能都要人点一下同意。
+                    current_messages.append(self._assistant_tool_message(call))
+                    current_messages.append(
+                        LLMChatMessage(
+                            role="tool",
+                            content=[self._load_skill_body(call, agent)],
+                        )
+                    )
+                    continue
                 if name not in tool_names:
                     current_messages.append(self._assistant_tool_message(call))
                     current_messages.append(
@@ -834,6 +990,20 @@ class AgentRuntimeExecutor:
                 )
                 current_messages.append(self._assistant_tool_message(call))
                 current_messages.append(LLMChatMessage(role="tool", content=[tool_result]))
+                # 工具轮的 Hook 上下文必须进入**下一次**模型请求。
+                #
+                # `_inject_hook_context` 此前只在 SessionStart + UserPromptSubmit
+                # 之后调用一次，于是 PreToolUse / PostToolUse 返回的
+                # `additionalContext` / `systemMessage` 被解析、被审计成
+                # `status: ok`，然后丢掉——协议里有、解析通过、审计说成功，
+                # 唯独不起作用，Hook 作者只会怀疑自己的业务逻辑。
+                #
+                # 注入一次即可：注入的内容进入 `current_messages`，随后每轮都带着，
+                # 重复注入会让同一段文本在长对话里出现十几次。
+                current_messages = self._inject_hook_context(
+                    current_messages,
+                    (hook_outcome, post_tool_outcome),
+                )
 
         # The loop always returns from the final no-tools request.  This guard
         # protects the contract if the loop is changed in a future revision.
@@ -844,6 +1014,65 @@ class AgentRuntimeExecutor:
             snapshot=snapshot,
             correlation_id=correlation_id,
             error={"type": "RuntimeLoopError", "message": "runtime loop ended without a model response"},
+        )
+
+    async def _delegate_to_teammate(
+        self,
+        call: ToolCall,
+        *,
+        context: ChannelContext,
+        depth_remaining: int,
+        correlation_id: str,
+    ) -> LLMToolResultContent:
+        """Run one teammate turn and return its answer as a tool result.
+
+        队友用自己的模型链、提示词、技能与工具白名单执行，且**看不到**主 Agent 的
+        对话历史——因此工具描述里明确要求 ``task`` 自带完整背景。
+
+        失败一律作为 tool 结果返回而不是抛出：让模型看到「这条路不通」并改口，
+        比让整轮对话失败好——用户问的问题本身通常还是能答的。
+        """
+        name = call.function.name if call.function else ""
+        teammate_id = name.removeprefix(TEAMMATE_TOOL_PREFIX)
+        arguments = (call.function.arguments if call.function else None) or {}
+        task = arguments.get("task") if isinstance(arguments, dict) else None
+        if not isinstance(task, str) or not task.strip():
+            # 空任务不是有效委派：队友看不到主对话，凭空猜只会浪费一轮。
+            return self._error_result(call, "delegation requires a non-empty task")
+        try:
+            teammate = self.agent_registry.get(teammate_id)
+        except Exception:
+            return self._error_result(call, f"unknown teammate Agent: {teammate_id}")
+        if teammate is None or not teammate.enabled:
+            return self._error_result(call, f"unknown teammate Agent: {teammate_id}")
+
+        delegated_message = IMMessage(
+            sender=ChatSender.get_bot_sender(),
+            message_elements=[TextMessage(task.strip())],
+        )
+        try:
+            result = await self.run(
+                context,
+                delegated_message,
+                session_agent_id=teammate_id,
+                # 队友不继承主 Agent 的历史：它是一次独立的、自带背景的子任务。
+                history=(),
+                # 深度递减：A→B→A 不会无限递归。
+                teammate_depth=max(0, depth_remaining - 1),
+            )
+        except Exception as error:  # noqa: BLE001 - 委派失败不应终止整轮
+            return self._error_result(
+                call, f"teammate execution failed: {type(error).__name__}"
+            )
+        if result.status is not RuntimeStatus.COMPLETED or not (result.text or "").strip():
+            return self._error_result(
+                call, f"teammate {teammate_id} produced no answer"
+            )
+        return LLMToolResultContent(
+            id=call.id,
+            name=name,
+            content=result.text,
+            isError=False,
         )
 
     async def _maybe_compact_messages(
@@ -1146,8 +1375,23 @@ class AgentRuntimeExecutor:
         *,
         provider_allowlist: Iterable[str] = (),
         correlation_id: Optional[str] = None,
+        timings: Optional[dict[str, Any]] = None,
+        cancellation_event: Optional[threading.Event] = None,
+        deadline_seconds: Optional[float] = None,
     ) -> tuple[LLMChatResponse, str, str]:
+        """Run one model request, advancing the model chain on replayable errors.
+
+        ``timings`` 是可选的输出参数，用来带回只有流式请求才存在的观测点
+        （目前是 ``llm_first_byte_at``）。做成 out 参数而不是扩展返回值，是为了
+        不改动这个方法的元组形状——既有调用方与测试都按三元组解包。
+
+        ``cancellation_event`` / ``deadline_seconds`` 把取消与总截止时间下传到
+        ``LLMManager``。此前这两个参数在 manager 侧完整实现却**没有任何生产调用方**，
+        于是「取消传播」和「请求总截止时间」在真实部署里从未生效：一个卡住的上游
+        会一直占着线程与连接直到进程退出。
+        """
         candidates = list(dict.fromkeys([current_model, *model_priority]))
+
         last_error: Optional[BaseException] = None
         for model_id in candidates:
             if hasattr(request, "model_copy"):
@@ -1176,12 +1420,26 @@ class AgentRuntimeExecutor:
                         for parameter in parameters
                     ):
                         options["correlation_id"] = correlation_id
+                    # 取消信号与总截止时间同样按签名探测再传：既有第三方
+                    # LLMManager 实现可能没有这两个参数，硬传会 TypeError。
+                    accepts_kwargs = any(
+                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                        for parameter in parameters
+                    )
+                    if cancellation_event is not None and (
+                        "cancellation_event" in signature.parameters or accepts_kwargs
+                    ):
+                        options["cancellation_event"] = cancellation_event
+                    if deadline_seconds is not None and (
+                        "deadline_seconds" in signature.parameters or accepts_kwargs
+                    ):
+                        options["deadline_seconds"] = deadline_seconds
                 # 流式模式下走 execute_stream，让首字节超时、静默超时与
                 # 「首字节之前的故障转移」真正生效；结果聚合成一条响应返回，
                 # 调用方看到的形状与非流式完全一致。
                 if self._stream_chat_available() and not candidate_request.tools:
                     response, trace_id = await self._execute_model_streaming(
-                        candidate_request, model_id, options
+                        candidate_request, model_id, options, timings=timings
                     )
                     return response, model_id, trace_id
                 result = execute_chat(candidate_request, **options)
@@ -1212,6 +1470,8 @@ class AgentRuntimeExecutor:
         request: LLMChatRequest,
         model_id: str,
         options: dict[str, Any],
+        *,
+        timings: Optional[dict[str, Any]] = None,
     ) -> tuple[LLMChatResponse, str]:
         """Consume a stream and return it as one aggregated response.
 
@@ -1219,17 +1479,25 @@ class AgentRuntimeExecutor:
         逐字推送只会变成几十条碎片消息。这里取的是流式**请求**本身的收益——
         首字节超时、静默超时，以及「首字节之前可以安全切换 Provider」。
         工具调用不走这条路：工具轮次需要结构化的 tool_calls，聚合文本会丢掉它。
+
+        同时这里是整条链路上**唯一**能测到「模型首字节」的位置：拿到第一个非空
+        文本片段的时刻就是首字节时刻。测到后经 ``timings`` 带回，最终落到投递
+        时间线的 ``llm_first_byte`` 阶段；否则 ``llm_first_byte_seconds`` 与
+        ``llm_generation_seconds`` 两列在真实部署里永远是 NULL。
         """
         execution = self.llm_manager.execute_stream(request, **options)
         chunks: list[str] = []
         usage = None
         finish_reason = ""
+        first_byte_at: Optional[datetime] = None
         try:
             for chunk in execution:
                 message = getattr(chunk, "message", None)
                 for part in getattr(message, "content", None) or ():
                     text = getattr(part, "text", None)
                     if isinstance(text, str) and text:
+                        if first_byte_at is None:
+                            first_byte_at = datetime.now(timezone.utc)
                         chunks.append(text)
                 if getattr(chunk, "usage", None) is not None:
                     usage = chunk.usage
@@ -1241,6 +1509,9 @@ class AgentRuntimeExecutor:
             if callable(close):
                 close()
 
+        if timings is not None and first_byte_at is not None:
+            timings["llm_first_byte_at"] = first_byte_at
+
         aggregated = LLMChatResponse(
             model=model_id,
             usage=usage,
@@ -1250,6 +1521,19 @@ class AgentRuntimeExecutor:
                 finish_reason=finish_reason,
             ),
         )
+        # 供应商级的回复策略（目前是「隐藏 AI 署名」）必须在**聚合之后**执行：
+        # 一句署名很可能被切成两个分片，逐片判断两片都不像署名，整句就原样漏出去。
+        # 由 LLMManager 按真正成交的那家供应商的配置处理，与非流式同口径。
+        #
+        # 只接受 `LLMChatResponse` 返回值：聚合结果是已知良好的值，
+        # 策略返回别的东西属于编程错误，不该把它当成回复投递给用户。
+        policy = getattr(
+            self.llm_manager, "apply_response_policy_for_attempts", None
+        )
+        if callable(policy):
+            adjusted = policy(aggregated, getattr(execution, "attempts", ()) or ())
+            if isinstance(adjusted, LLMChatResponse):
+                aggregated = adjusted
         return aggregated, str(getattr(execution, "trace_id", "") or "")
 
     @staticmethod
@@ -1466,7 +1750,19 @@ class AgentRuntimeExecutor:
         agent: AgentDefinition,
         message: IMMessage,
         history: Optional[Sequence[LLMChatMessage]],
+        skill_advertisements: Optional[list[dict[str, str]]] = None,
     ) -> list[LLMChatMessage]:
+        """Assemble this turn's messages.
+
+        ``skill_advertisements`` 是一个**出参**：本方法在按绑定顺序载入资源时，
+        把可广告的技能追加进去，调用方据此生成 `skill_` 工具。
+
+        做成出参而不是让调用方先算一遍，是为了让一轮里每个 Skill 只被载入一次——
+        `read_entry` 每次都会重新校验清单与文件摘要，读两遍不只是慢，
+        还会让「本轮读到的内容前后一致」依赖运气：两遍之间资源被更新时，
+        目录说的是一件事、注入的正文是另一件事。同时保持原有的载入顺序
+        （prompt → skill → memory），资源载入顺序本身是有测试在断言的契约。
+        """
         sections: list[str] = []
         for binding in (
             *agent.prompt_bindings,
@@ -1481,8 +1777,29 @@ class AgentRuntimeExecutor:
             if content is None:
                 continue
             text = str(content).strip()
-            if text:
-                sections.append(f"[{binding.resource_type}:{binding.resource_id}]\n{text}")
+            if not text:
+                continue
+            if binding.resource_type == "skill" and agent.allow_tools:
+                # 渐进披露（需求 10，与 cc-switch / Claude Code 同一原理）：
+                # 能广告的技能只在系统提示词里留一行目录，正文由 `skill_` 工具
+                # 在模型真的要用时取回。整篇注入的代价是「技能数 × 请求数」，
+                # 而其中绝大部分与当轮问题无关。
+                #
+                # `allow_tools` 关闭时没有工具可调，一行目录就是一句模型无法兑现的
+                # 空头承诺，因此那时一律整篇注入——与本特性之前逐字节一致。
+                advertisement = skill_advertisement(
+                    binding.resource_id,
+                    text,
+                    readiness_note=self._skill_readiness_note(binding.resource_id),
+                )
+                if advertisement is not None:
+                    if skill_advertisements is not None:
+                        skill_advertisements.append(advertisement)
+                    continue
+            sections.append(f"[{binding.resource_type}:{binding.resource_id}]\n{text}")
+        catalog = skill_catalog_section(skill_advertisements or [])
+        if catalog:
+            sections.append(catalog)
         system = "\n\n".join(sections)
         messages = [
             LLMChatMessage(role="system", content=[LLMChatTextContent(text=system)]),
@@ -1494,6 +1811,93 @@ class AgentRuntimeExecutor:
         )
         messages.append(LLMChatMessage(role="user", content=user_content))
         return messages
+
+    def _skill_advertisements(self, agent: AgentDefinition) -> list[dict[str, str]]:
+        """只算技能广告，不组装消息。
+
+        供**恢复路径**使用：那里的 `messages` 来自确认前的快照（不重建），
+        但工具列表必须重建，否则模型会看到一份广告却调不到被广告的工具，
+        拿到一句我们自己制造的 "permission denied"。
+
+        正常一轮不走这里——那条路上 `_build_messages` 顺带产出广告，
+        以保证每个技能整轮只被载入一次。
+        """
+        advertisements: list[dict[str, str]] = []
+        if not agent.allow_tools:
+            return advertisements
+        for binding in agent.skill_bindings:
+            if not binding.enabled:
+                continue
+            content = self._load_resource(binding.resource_id, binding.version)
+            if inspect.isawaitable(content):
+                raise TypeError("resource_loader must be synchronous during snapshot creation")
+            if content is None:
+                continue
+            advertisement = skill_advertisement(
+                binding.resource_id,
+                str(content).strip(),
+                readiness_note=self._skill_readiness_note(binding.resource_id),
+            )
+            if advertisement is not None:
+                advertisements.append(advertisement)
+        return advertisements
+
+    def _skill_readiness_note(self, resource_id: str) -> str:
+        """这个技能依赖的服务器组件是否就绪；就绪或未知时返回空串。
+
+        没装 CLI 却照着技能写命令，最坏的表现不是报错而是**一个自信的假答案**：
+        模型无从得知 `agent-browser` 在服务器上并不存在，只能把「我已经打开了
+        浏览器」当成事实继续往下答，而用户看不出与真的执行成功有什么区别。
+
+        依赖 id 走 `dependency_ids_for_resource`：安装界面判「要不要提示去装」
+        和运行时判「能不能真的执行」必须是同一条规则，各写一份的话两边迟早
+        对不上，而对不上的那一刻没有任何症状。
+
+        任何异常都吞掉：这段代码在每一轮对话上运行，让一次正常提问因为读依赖
+        状态失败而失败，比少这一句提示糟得多。
+        """
+        if self.dependency_service is None or self.resource_service is None:
+            return ""
+        try:
+            resource = self.resource_service.get_resource(resource_id)
+            dependency_ids = dependency_ids_for_resource(resource)
+        except Exception:
+            return ""
+        return skill_readiness_note(dependency_ids, self.dependency_service)
+
+    def _load_skill_body(self, call: ToolCall, agent: AgentDefinition) -> LLMToolResultContent:
+        """把一个技能的正文作为 tool 结果返回。
+
+        版本取自**本轮快照里的绑定**而不是「当前版本」：一次对话中途被更新的技能
+        不该让前后两轮遵循不同的说明，那种不一致无法从对话记录里看出来。
+
+        失败一律作为 tool 结果返回而不是抛出：让模型看到「这条路不通」并改口，
+        比让整轮对话失败好——用户问的问题通常还是能答的。
+        """
+        name = call.function.name if call.function else ""
+        resource_id = name.removeprefix(SKILL_TOOL_PREFIX)
+        binding = next(
+            (
+                item
+                for item in agent.skill_bindings
+                if item.enabled and item.resource_id == resource_id
+            ),
+            None,
+        )
+        if binding is None:
+            return self._error_result(call, f"unknown skill: {resource_id}")
+        try:
+            content = self._load_resource(binding.resource_id, binding.version)
+        except Exception as error:  # noqa: BLE001 - 载入失败不该终止整轮
+            return self._error_result(
+                call, f"skill could not be loaded: {type(error).__name__}"
+            )
+        if inspect.isawaitable(content):
+            return self._error_result(call, "skill loader must be synchronous")
+        text = "" if content is None else str(content).strip()
+        if not text:
+            return self._error_result(call, f"skill is empty: {resource_id}")
+        return LLMToolResultContent(id=call.id, name=name, content=text)
 
     def _load_resource(self, resource_id: str, version: str) -> Any:
         """Load one resource at the version captured by this turn.
@@ -1659,6 +2063,9 @@ class AgentRuntimeExecutor:
             bindings,
             tuple(sorted(agent.mcp_allowlist)),
             agent.allow_tools,
+            # 队友集合变化必须让待确认操作失效：否则确认的是一件事、
+            # 执行的是另一件事。
+            tuple(agent.teammate_agent_ids),
         )
 
     def _tool_is_connected(self, entry: Any) -> bool:
@@ -1750,6 +2157,8 @@ class AgentRuntimeExecutor:
         response: LLMChatResponse,
         trace_ids: tuple[str, ...],
         correlation_id: str,
+        *,
+        llm_first_byte_at: Optional[datetime] = None,
     ) -> RuntimeResult:
         text = "".join(
             part.text
@@ -1766,6 +2175,7 @@ class AgentRuntimeExecutor:
             snapshot=snapshot,
             correlation_id=correlation_id,
             trace_ids=trace_ids,
+            llm_first_byte_at=llm_first_byte_at,
         )
 
     @staticmethod

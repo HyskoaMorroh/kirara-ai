@@ -78,7 +78,10 @@ def resource_api(tmp_path: Path):
     container = DependencyContainer()
     container.register(DependencyContainer, container)
     container.register(GlobalConfig, GlobalConfig())
-    container.register(AuthService, MockAuthService())
+    # 依赖安装/重试/取消是创建者专属操作（需求 10）：这个 fixture 必须模拟
+    # 创建者身份，否则那几条路由会返回 403。非创建者被拒的行为由
+    # tests/web/auth/test_creator_only_routes.py 单独覆盖。
+    container.register(AuthService, MockAuthService(creator=True))
     container.register(EventBus, EventBus())
     container.register(BlockRegistry, BlockRegistry())
     lifecycle = ResourceLifecycleService(

@@ -14,12 +14,20 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from telegramify_markdown import markdownify
 
 from kirara_ai.database import DatabaseManager
-from kirara_ai.im.adapter import BotProfileAdapter, EditStateAdapter, IMAdapter, UserProfileAdapter
+from kirara_ai.im.adapter import (
+    AdapterHealthProvider,
+    AdapterHealthSnapshot,
+    BotProfileAdapter,
+    EditStateAdapter,
+    IMAdapter,
+    UserProfileAdapter,
+)
 from kirara_ai.im.message import (FileElement, ImageMessage, IMMessage, MentionElement, MessageElement, TextMessage,
                                   VideoMessage, VoiceMessage)
 from kirara_ai.im.profile import UserProfile
 from kirara_ai.im.sender import ChatSender, ChatType
-from kirara_ai.im.text_render import convert_markdown_tables, split_structured_text
+from kirara_ai.im.text_render import (convert_markdown_tables, degrade_math,
+                                      paginate_with_truncation_notice)
 from kirara_ai.logger import get_logger
 from kirara_ai.workflow.core.dispatch import WorkflowDispatcher
 
@@ -136,12 +144,18 @@ def _split_telegram_message_legacy(text: str, max_length: int = TELEGRAM_MESSAGE
 
 
 def split_telegram_message(text: str, max_length: int = TELEGRAM_MESSAGE_LIMIT) -> List[str]:
-    """Split MarkdownV2 by Unicode character count with complete structures."""
-    return split_structured_text(
+    """Split MarkdownV2 by Unicode character count with complete structures.
+
+    超出页数上限时截断并追加提示，而不是抛 `ValueError`：异常会一路穿出
+    `send_message`，用户什么都收不到。四个渠道在这一点上必须一致
+    （需求 19.4「全部发送、内容不得丢失」）。
+    """
+    pages, _truncated = paginate_with_truncation_notice(
         text,
         max_length=max_length,
         max_total_bytes=None,
     )
+    return pages
 
 
 class TelegramConfig(BaseModel):
@@ -193,7 +207,13 @@ class _TelegramSendUnit:
     params: dict[str, Any]
 
 
-class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfileAdapter):
+class TelegramAdapter(
+    IMAdapter,
+    UserProfileAdapter,
+    EditStateAdapter,
+    BotProfileAdapter,
+    AdapterHealthProvider,
+):
     """
     Telegram Adapter，包含 Telegram Bot 的所有逻辑。
     """
@@ -217,6 +237,58 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
         self.logger = get_logger("Telegram-Adapter")
         self._outbox: Optional[TelegramOutboxService] = None
         self._recovery_task: Optional[asyncio.Task[Any]] = None
+        self._started = False
+        self._ever_started = False
+        self._last_disconnect_reason: Optional[str] = None
+
+    def get_health_snapshot(self) -> AdapterHealthSnapshot:
+        """Report Telegram connectivity instead of letting readiness assume health.
+
+        没有这个方法时 `readiness.py` 走的是「不实现该协议就按 connected 计数」
+        这条兜底分支——于是一个 Token 失效、根本没连上 Telegram 的适配器在就绪
+        检查里显示为健康。那是比没有状态更糟的情况：面板给出的是错误的安心。
+
+        判定依据是长轮询是否真的在跑（`updater.running`）加上 `get_me()` 是否
+        成功过（`self.me`）。Bot API 是主动轮询模型，没有「上游拨入」这个概念，
+        因此这里只有三态：跑起来且认证成功 = connected；启动了但还没拿到身份
+        = waiting；没启动 = initializing（从未启动过）或 disconnected（停过）。
+        """
+        updater = getattr(getattr(self, "application", None), "updater", None)
+        polling = bool(getattr(updater, "running", False))
+        authenticated = self.me is not None
+        if self._started:
+            self._ever_started = True
+
+        if not self._started:
+            status = "disconnected" if self._ever_started else "initializing"
+        elif polling and authenticated:
+            status = "connected"
+        else:
+            status = "waiting"
+
+        return AdapterHealthSnapshot(
+            status=status,
+            connected_account_count=1 if status == "connected" else 0,
+            adapter_started=self._started,
+            websocket_connected=polling,
+            last_disconnect_reason=(
+                None if status == "connected" else self._last_disconnect_reason
+            ),
+            outbox=self._outbox_counts(),
+        )
+
+    def _outbox_counts(self) -> Optional[dict[str, int]]:
+        """Pending/terminal delivery counts, or ``None`` when no outbox is wired."""
+        outbox = getattr(self, "_outbox", None)
+        if outbox is None:
+            return None
+        counts = getattr(outbox, "status_counts", None)
+        if not callable(counts):
+            return None
+        try:
+            return counts()
+        except Exception:  # noqa: BLE001 - 观测失败不得影响健康快照
+            return None
 
     def _ensure_outbox(self) -> TelegramOutboxService:
         outbox = getattr(self, "_outbox", None)
@@ -410,6 +482,17 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
             )
         raise ValueError(f"Unsupported chat type: {recipient.chat_type}")
 
+    @staticmethod
+    def render_text(text: str) -> str:
+        """Render one text element into Telegram MarkdownV2.
+
+        单独抽出来是因为这条管线的**顺序**本身就是约定：先做数学降级
+        （它会保护围栏代码块），再转表格，最后交给 markdownify 做 MarkdownV2
+        转义。顺序颠倒会让转义后的反斜杠被当成 LaTeX 命令重新处理。
+        抽成公开静态方法后，这个约定可以被直接断言，而不必构造整个适配器。
+        """
+        return markdownify(convert_markdown_tables(degrade_math(text), fenced=True))
+
     async def _render_send_units(
         self,
         message: IMMessage,
@@ -419,7 +502,8 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
         units: list[_TelegramSendUnit] = []
         for element in message.message_elements:
             if isinstance(element, TextMessage):
-                text = markdownify(convert_markdown_tables(element.text, fenced=True))
+                # 数学降级走共享实现，顺序约定见 `render_text`。
+                text = self.render_text(element.text)
                 for chunk in split_telegram_message(text):
                     units.append(
                         _TelegramSendUnit(
@@ -629,6 +713,9 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
         await self.application.initialize()
         await self.application.start()
         self.me = await self.bot.get_me()
+        self._started = True
+        self._ever_started = True
+        self._last_disconnect_reason = None
 
         if getattr(self, "database_manager", None) is not None:
             outbox = self._ensure_outbox()
@@ -647,6 +734,8 @@ class TelegramAdapter(IMAdapter, UserProfileAdapter, EditStateAdapter, BotProfil
 
     async def stop(self):
         """停止 Bot"""
+        self._started = False
+        self._last_disconnect_reason = "adapter_stopped"
         recovery_task = getattr(self, "_recovery_task", None)
         if recovery_task is not None and not recovery_task.done():
             recovery_task.cancel()

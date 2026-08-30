@@ -54,12 +54,15 @@ class LLMReRankResponse(BaseModel):
 
     Attributes:
         contents (list[ReRankerContent]): 返回的排序信息, 如果启用排序，默认降序排列。 Note: 当且仅当return_documents为True时才允许启用排序。
-        usage (Usage): token 使用情况, 一个pydantic.BaseModel的子类。
+        usage (Optional[Usage]): token 使用情况, 一个pydantic.BaseModel的子类。
+            上游没有回报用量时为 ``None``——「未知」不能写成 0，那是把断言冒充观测
+            （需求 22.1）；重排常用于记忆检索，一次调用可能处理上千条文档，
+            记成 0 会让「这条链路不花钱」这个错误结论看起来有数据支撑。
         sort (bool): 是否按照结果的相似度排序？将其设置为字段方便后续接口检查是否经过排序(方便debug)。其应该由request的sort字段赋值。
     """
 
     contents: list[ReRankerContent]
-    usage: Usage
+    usage: Optional[Usage] = None
     sort: bool
 
     @model_validator(mode="after") # 当mode为after时，其发生在class实例化完成后，所以其为实例方法

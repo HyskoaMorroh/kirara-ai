@@ -518,6 +518,14 @@ class AgentDefinition:
     mcp_allowlist: frozenset[str] = frozenset()
     allow_tools: bool = True
     max_tool_iterations: int = 8
+    #: 可被本 Agent 作为工具委派的队友 Agent。
+    #:
+    #: 对应需求 8 的「Teammates 模式」。cc-switch 那个开关配置的是 Claude Code
+    #: CLI 的多 agent 协作；本项目的等价物在 Agent 层而不是供应商层——供应商是
+    #: 「上游模型」，不是「协作单元」。打开后模型会额外获得
+    #: ``delegate_to_<agent_id>`` 工具，队友用自己的模型链、Prompt、Skill 与
+    #: MCP 白名单执行子任务。为空表示不启用，与此前行为一致。
+    teammate_agent_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         agent_id = _clean_identifier(self.agent_id, "agent")
@@ -538,6 +546,19 @@ class AgentDefinition:
         object.__setattr__(self, "provider_allowlist", _as_frozenset(self.provider_allowlist))
         object.__setattr__(self, "capabilities", _as_frozenset(self.capabilities))
         object.__setattr__(self, "mcp_allowlist", _as_frozenset(self.mcp_allowlist))
+        # 队友列表：去空白、去空串、去重并保持声明顺序（顺序影响工具在列表里的
+        # 呈现次序，因此必须稳定）。自委派是最短的无限递归，在定义期就拒绝。
+        teammates: list[str] = []
+        for candidate in self.teammate_agent_ids or ():
+            name = str(candidate).strip()
+            if not name or name in teammates:
+                continue
+            if name == agent_id:
+                raise ValueError(
+                    "teammate_agent_ids must not contain the Agent itself"
+                )
+            teammates.append(name)
+        object.__setattr__(self, "teammate_agent_ids", tuple(teammates))
         for field_name in (
             "prompt_bindings",
             "skill_bindings",
@@ -569,6 +590,64 @@ class AgentDefinition:
             model_priority=self.model_priority,
             provider_allowlist=sorted(self.provider_allowlist),
         )
+
+
+#: 委派工具的名称前缀。模型看到的是 ``delegate_to_<agent_id>``。
+TEAMMATE_TOOL_PREFIX = "delegate_to_"
+
+#: 委派递归的默认深度上限。
+#:
+#: 多 Agent 委派最危险的失败形态是无限递归：A 委派 B、B 委派 A，每一层都是一次
+#: 真实的模型调用，账单与时延同时爆炸。深度在每次委派时递减，到 0 就**不再暴露**
+#: 委派工具——不是暴露了再拒绝：暴露一个必定被拒的工具会让模型反复尝试，
+#: 白花一轮 token；不给它，模型自然会自己作答。
+DEFAULT_TEAMMATE_DEPTH = 2
+
+
+def build_teammate_tools(
+    agent: "AgentDefinition",
+    registry: Mapping[str, "AgentDefinition"],
+    *,
+    depth_remaining: int,
+) -> list[Any]:
+    """Build the delegation tools this Agent may offer to the model.
+
+    只为**存在且启用**的队友生成工具：在工具列表里放一个必定失败的工具，
+    等于让模型去撞墙一次再重试。深度耗尽时返回空列表。
+
+    返回的是 ``kirara_ai.llm.format.request.Tool``，与 MCP 工具同一形态，
+    因此模型侧不需要区分「这是队友还是工具」。
+    """
+    from kirara_ai.llm.format.request import Tool, ToolParameters
+
+    if depth_remaining <= 0:
+        return []
+    tools: list[Any] = []
+    for teammate_id in agent.teammate_agent_ids:
+        teammate = registry.get(teammate_id)
+        if teammate is None or not teammate.enabled:
+            continue
+        label = teammate.display_name or teammate_id
+        tools.append(
+            Tool(
+                name=f"{TEAMMATE_TOOL_PREFIX}{teammate_id}",
+                description=(
+                    f"把一个子任务委派给队友「{label}」（Agent: {teammate_id}）。"
+                    "队友使用它自己的模型链、提示词、技能与工具白名单，"
+                    "看不到本次对话历史，因此 task 必须自带完整背景。"
+                ),
+                parameters=ToolParameters(
+                    properties={
+                        "task": {
+                            "type": "string",
+                            "description": "要委派的完整任务描述，需自带背景信息",
+                        }
+                    },
+                    required=["task"],
+                ),
+            )
+        )
+    return tools
 
 
 class AgentRegistry:
@@ -1006,6 +1085,7 @@ class AgentRegistry:
             "mcp_allowlist": sorted(agent.mcp_allowlist),
             "allow_tools": agent.allow_tools,
             "max_tool_iterations": agent.max_tool_iterations,
+            "teammate_agent_ids": list(agent.teammate_agent_ids),
         }
 
     @classmethod
@@ -1054,6 +1134,9 @@ class AgentRegistry:
             raise ValueError("Agent definition is invalid")
         values = dict(payload)
         values.setdefault("owner_subject", None)
+        # 早于 Teammates 模式的注册表没有这个键；缺省为空即「不启用」，
+        # 既有部署升级后行为不变。
+        values.setdefault("teammate_agent_ids", ())
         for field_name, resource_type in (
             ("prompt_bindings", "prompt"),
             ("skill_bindings", "skill"),

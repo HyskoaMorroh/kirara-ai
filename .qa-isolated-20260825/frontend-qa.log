@@ -1,8 +1,0 @@
-yarn run v1.22.22
-$ E:\output\kirara-ai\kirara-ai3.3.0b8\webui\node_modules\.bin\vite --config vite.qa-isolated.config.ts --host 127.0.0.1 --port 15174
-
-  VITE v4.5.14  ready in 420 ms
-
-  ➜  Local:   http://127.0.0.1:15174/
-  ➜  press h to show help
-19:52:25 [vite] hmr update /src/views/llm/AgentView.vue

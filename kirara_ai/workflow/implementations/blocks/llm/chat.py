@@ -1,5 +1,6 @@
 import asyncio
 import re
+import threading
 import time
 from datetime import datetime
 from typing import Annotated, Any, Dict, List, Optional
@@ -51,13 +52,48 @@ def _execute_resilient_chat(
     *,
     max_attempts: Optional[int] = None,
     retry_delay: Optional[float] = None,
+    cancellation_event: Optional[threading.Event] = None,
+    deadline_seconds: Optional[float] = None,
 ) -> LLMChatResponse:
     options: Dict[str, Any] = {}
     if max_attempts is not None:
         options["max_retries"] = max(0, max_attempts - 1)
     if retry_delay is not None:
         options["retry_delay"] = retry_delay
+    # 取消信号与总截止时间同 Agent 路径一致地下传。遗留工作流路径此前完全不传，
+    # 于是一个卡住的上游在这条路径上同样会占着线程与连接直到进程退出。
+    if cancellation_event is not None:
+        options["cancellation_event"] = cancellation_event
+    if deadline_seconds is not None:
+        options["deadline_seconds"] = deadline_seconds
     return llm_manager.execute_chat(request, **options).response
+
+
+def _turn_budget(container: DependencyContainer) -> tuple[Optional[threading.Event], Optional[float]]:
+    """Resolve this turn's cancellation signal and remaining time budget.
+
+    与 Agent 路径共用同一个配置项 ``agent_runtime.turn_deadline_seconds``：
+    「一轮对话最多花多久」不该因为走的是遗留工作流而变成另一套语义。
+    未配置（0）时返回 ``(None, None)``，调用方就什么都不传，行为与从前一致。
+    """
+    try:
+        from kirara_ai.config.global_config import GlobalConfig
+
+        if not container.has(GlobalConfig):
+            return None, None
+        budget = float(
+            getattr(
+                getattr(container.resolve(GlobalConfig), "agent_runtime", None),
+                "turn_deadline_seconds",
+                0.0,
+            )
+            or 0.0
+        )
+    except Exception:  # noqa: BLE001 - 读配置失败时退回「无预算」，不影响回复
+        return None, None
+    if budget <= 0:
+        return None, None
+    return threading.Event(), budget
 
 
 def _can_fallback_to_next_model(error: FailoverExecutionError) -> bool:
@@ -340,6 +376,21 @@ class ChatCompletion(Block):
         # 尝试每个模型
         last_error = None
         use_resilient_queue = _uses_resilient_provider_queue(llm_manager)
+        # 整轮共享一个取消信号与一个递减预算：模型回退会多次调用上游，
+        # 每次都从头给满预算等于没有总预算。
+        turn_cancellation, turn_budget = _turn_budget(self.container)
+        turn_started = time.monotonic()
+
+        def remaining() -> Optional[float]:
+            if turn_budget is None:
+                return None
+            left = turn_budget - (time.monotonic() - turn_started)
+            if left <= 0:
+                if turn_cancellation is not None:
+                    turn_cancellation.set()
+                return 0.0
+            return left
+
         for model_index, model_id in enumerate(model_priority_list):
             self.logger.info(f"Attempting model [{model_index + 1}/{len(model_priority_list)}]: {model_id}")
 
@@ -354,6 +405,8 @@ class ChatCompletion(Block):
                         req,
                         max_attempts=self.max_retries,
                         retry_delay=self.retry_delay,
+                        cancellation_event=turn_cancellation,
+                        deadline_seconds=remaining(),
                     )
                     if model_index > 0:
                         self.logger.info(
@@ -562,6 +615,20 @@ class FunctionCalling(Block):
         # 尝试每个模型
         last_error = None
         use_resilient_queue = _uses_resilient_provider_queue(llm_manager)
+        # 与上面的对话节点同一套语义：整轮共享取消信号与递减预算。
+        turn_cancellation, turn_budget = _turn_budget(self.container)
+        turn_started = time.monotonic()
+
+        def remaining() -> Optional[float]:
+            if turn_budget is None:
+                return None
+            left = turn_budget - (time.monotonic() - turn_started)
+            if left <= 0:
+                if turn_cancellation is not None:
+                    turn_cancellation.set()
+                return 0.0
+            return left
+
         for model_index, model_id in enumerate(model_priority_list):
             self.logger.info(f"Attempting function calling with model [{model_index + 1}/{len(model_priority_list)}]: {model_id}")
 
@@ -573,6 +640,8 @@ class FunctionCalling(Block):
                         request_body,
                         max_attempts=self.max_retries,
                         retry_delay=self.retry_delay,
+                        cancellation_event=turn_cancellation,
+                        deadline_seconds=remaining(),
                     )
                     if model_index > 0:
                         self.logger.info(
@@ -724,6 +793,21 @@ class ChatCompletionWithTools(Block):
         iter_count = 0
         # 解析本次实际生效的采样温度（节点配置 > 调度规则 metadata > 不携带）
         temperature = resolve_temperature(self.container, self.temperature, self.logger)
+        # 多轮工具循环最容易把一轮对话拖到无限长：预算在整个 while 上共享，
+        # 而不是每次迭代重新给满。
+        loop_cancellation, loop_budget = _turn_budget(self.container)
+        loop_started = time.monotonic()
+
+        def loop_remaining() -> Optional[float]:
+            if loop_budget is None:
+                return None
+            left = loop_budget - (time.monotonic() - loop_started)
+            if left <= 0:
+                if loop_cancellation is not None:
+                    loop_cancellation.set()
+                return 0.0
+            return left
+
         while iter_count < self.max_iterations:
             # 在这里指定llm的model
             self.logger.debug(
@@ -742,7 +826,12 @@ class ChatCompletionWithTools(Block):
             tools_mapping = {t.name: t for t in tools}
 
             if use_resilient_queue:
-                response = _execute_resilient_chat(llm_manager, request_body)
+                response = _execute_resilient_chat(
+                    llm_manager,
+                    request_body,
+                    cancellation_event=loop_cancellation,
+                    deadline_seconds=loop_remaining(),
+                )
             else:
                 response = llm.chat(request_body)
             iter_count += 1

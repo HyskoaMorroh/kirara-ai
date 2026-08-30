@@ -59,7 +59,18 @@ vi.mock('naive-ui', () => ({
   NSpace: { template: '<div><slot /></div>' },
   NStep: { template: '<div><slot /></div>' },
   NSteps: { template: '<div><slot /></div>' },
-  NTooltip: { template: '<div><slot name="trigger" /><slot /></div>' }
+  NTooltip: { template: '<div><slot name="trigger" /><slot /></div>' },
+  // 就绪面板用到这两个组件；mock 缺一个就会让整个组件挂载失败，
+  // 而报错指向 naive-ui 而不是缺失的 mock 本身。
+  NAlert: { props: ['type'], template: '<div><slot /></div>' },
+  NTag: { props: ['type'], template: '<span><slot /></span>' }
+}))
+
+vi.mock('../src/api/system', () => ({
+  // 这个测试只关心引导卡片的隐藏/恢复，不关心就绪状态；
+  // 让它稳定地读不到，避免引入一份与本用例无关的假数据。
+  systemApi: { getReadiness: vi.fn().mockRejectedValue(new Error('not used here')) },
+  READINESS_CHECK_LABELS: {}
 }))
 
 const allStepsComplete = {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, computed, onMounted, onBeforeUnmount } from 'vue'
-import { useMessage, NModal, NCard } from 'naive-ui'
+import { useMessage, NModal, NCard, NAlert, NButton } from 'naive-ui'
 import { llmApi, resilienceDefaults } from '@/api/llm'
 import type { LLMBackend, ConfigSchema } from '@/api/llm'
 import type { ModelInfo } from '@/components/form/types'
@@ -377,6 +377,103 @@ onMounted(() => {
   void fetchAdapters()
 })
 
+/**
+ * 供应商配置的导出与导入。
+ *
+ * 后端 `GET /llm/backends/export` 与 `POST /llm/backends/import` 早已实现并鉴权
+ * （整份校验、空凭据保留现有值、同名冲突 409），但此前前端既无封装也无入口，
+ * 迁移一台部署只能手抄十几个后端的容错参数。
+ *
+ * 两条不可省的行为：
+ *
+ * - **导出不含凭据**，因此导出文件可以安全转发；这一点由后端保证，
+ *   前端只需在文案里说清楚，避免用户把它当成完整备份。
+ * - **同名冲突必须由用户拍板**。后端返回 409 与冲突名单，这里显示出来并
+ *   要求再次确认后才带 `overwrite: true` 重发——静默覆盖会冲掉目标机器上
+ *   已经填好的 Key 与容错参数。
+ */
+const importConflicts = ref<string[]>([])
+const pendingImportDocument = ref<unknown>(null)
+
+const backendExportFileName = (response: Response) => {
+  const header = response.headers.get('Content-Disposition') || ''
+  const match = header.match(/filename\*?=(?:UTF-8''|")?([^;"]+)/i)
+  const candidate = match?.[1]
+    ? decodeURIComponent(match[1].trim())
+    : 'llm-backends.json'
+  return candidate.replace(/[^a-zA-Z0-9._-]/g, '_') || 'llm-backends.json'
+}
+
+const handleExportBackends = async () => {
+  try {
+    const response = await llmApi.exportBackends()
+    if (!response.ok) throw new Error(`导出失败 (HTTP ${response.status})`)
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = backendExportFileName(response)
+    anchor.click()
+    URL.revokeObjectURL(url)
+    $message.success('已导出供应商配置（不含凭据）')
+  } catch (error) {
+    $message.error(error instanceof Error ? error.message : '供应商配置导出失败')
+  }
+}
+
+const sendImport = async (document: unknown, overwrite: boolean) => {
+  const response = await llmApi.importBackends({ document, overwrite })
+  importConflicts.value = []
+  pendingImportDocument.value = null
+  await fetchAdapters()
+  const overwritten = response.data.overwritten
+  $message.success(
+    overwritten.length
+      ? `已导入 ${response.data.imported_count} 个供应商，覆盖：${overwritten.join('、')}`
+      : `已导入 ${response.data.imported_count} 个供应商`
+  )
+}
+
+const handleImportBackends = async (event: Event) => {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  try {
+    const document = JSON.parse(await file.text())
+    await sendImport(document, false)
+  } catch (error) {
+    const text = error instanceof Error ? error.message : ''
+    // 409：后端拒绝了同名覆盖并给出冲突名单，交由用户确认。
+    if (text.includes('conflict') || text.includes('409')) {
+      try {
+        const parsed = JSON.parse(text.slice(text.indexOf('{')))
+        importConflicts.value = Array.isArray(parsed.conflicts) ? parsed.conflicts : []
+      } catch {
+        importConflicts.value = ['(名称未能解析，确认后将覆盖同名供应商)']
+      }
+      pendingImportDocument.value = JSON.parse(await file.text().catch(() => 'null'))
+      $message.warning('存在同名供应商，请确认是否覆盖')
+      return
+    }
+    $message.error(text || '供应商配置导入失败')
+  }
+}
+
+const confirmOverwriteImport = async () => {
+  if (pendingImportDocument.value === null) return
+  try {
+    await sendImport(pendingImportDocument.value, true)
+  } catch (error) {
+    $message.error(error instanceof Error ? error.message : '供应商配置导入失败')
+  }
+}
+
+const cancelOverwriteImport = () => {
+  importConflicts.value = []
+  pendingImportDocument.value = null
+}
+
 onBeforeUnmount(() => {
   adapterListRequests.cancel()
   schemaRequests.cancel()
@@ -397,21 +494,63 @@ onBeforeUnmount(() => {
 
     <!-- 主内容区域 -->
     <template v-if="currentAdapter">
-      <LLMAdapterConfig
-        :adapter="currentAdapter"
-        :adapterTypes="adapterTypes"
-        :configSchema="configSchema"
-        :loading="loading"
-        :isCreating="isCreating"
-        :isAutoDetectModelsSupported="isAutoDetectModelsSupported"
-        :modelAbilities="modelAbilities"
-        @update:adapter="currentAdapter = $event"
-        @save="handleSave"
-        @delete="handleDelete"
-        @add-model="handleAddModel"
-        @edit-model="handleEditModel"
-        @auto-detect-models="handleAutoDetectModels"
-      />
+      <div class="adapter-pane">
+        <!--
+          导入 / 导出放在配置区顶部而不是列表侧栏：它作用于「全部供应商」，
+          与列表里的单项选择不是一个层级，混在一起容易被误读成「导出选中项」。
+        -->
+        <div class="config-toolbar">
+          <span class="toolbar-hint">导出文件不含 API Key 等凭据，可安全转发</span>
+          <div class="toolbar-actions">
+            <n-button size="small" data-test="export-backends" @click="handleExportBackends">
+              导出配置
+            </n-button>
+            <label class="file-button" data-test="import-backends">
+              导入配置
+              <input
+                type="file"
+                accept="application/json,.json"
+                @change="handleImportBackends"
+              />
+            </label>
+          </div>
+        </div>
+
+        <n-alert
+          v-if="importConflicts.length"
+          type="warning"
+          class="conflict-alert"
+          data-test="import-conflict"
+          :show-icon="true"
+        >
+          以下供应商已存在，导入会用文件内容替换它们：{{ importConflicts.join('、') }}。
+          空白的凭据字段会保留现有值。
+          <template #action>
+            <n-button size="small" data-test="confirm-overwrite" @click="confirmOverwriteImport">
+              确认覆盖
+            </n-button>
+            <n-button size="small" data-test="cancel-overwrite" @click="cancelOverwriteImport">
+              取消
+            </n-button>
+          </template>
+        </n-alert>
+
+        <LLMAdapterConfig
+          :adapter="currentAdapter"
+          :adapterTypes="adapterTypes"
+          :configSchema="configSchema"
+          :loading="loading"
+          :isCreating="isCreating"
+          :isAutoDetectModelsSupported="isAutoDetectModelsSupported"
+          :modelAbilities="modelAbilities"
+          @update:adapter="currentAdapter = $event"
+          @save="handleSave"
+          @delete="handleDelete"
+          @add-model="handleAddModel"
+          @edit-model="handleEditModel"
+          @auto-detect-models="handleAutoDetectModels"
+        />
+      </div>
     </template>
     <template v-else>
       <LLMEmptyState :adapterTypes="adapterTypes" @create="handleCreateAdapter" />
@@ -475,6 +614,69 @@ onBeforeUnmount(() => {
   /* 模态内的卡片就是模态自身的表面，与 .n-modal 同为大型表面档 */
   border-radius: var(--radius-lg);
   box-shadow: var(--box-shadow);
+}
+
+/*
+  配置区包裹层：工具条与冲突提示需要与配置卡片纵向排列，
+  而 .llm-container 是两列栅格，直接把三个兄弟塞进去会破坏列结构。
+*/
+.adapter-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.config-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3, 12px);
+  padding: var(--space-2, 8px) var(--space-4, 16px);
+  border-bottom: 1px solid var(--border-color, rgba(0, 0, 0, 0.06));
+  flex-wrap: wrap;
+}
+
+.toolbar-hint {
+  font-size: var(--font-size-sm, 12px);
+  color: var(--text-color-tertiary, #888);
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+}
+
+/*
+  文件选择按钮：原生 input[type=file] 无法与 n-button 统一外观，
+  因此用 label 包住并隐藏 input——与成本定价页同一处理。
+*/
+.file-button {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 12px;
+  height: 28px;
+  font-size: var(--font-size-sm, 13px);
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.12));
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  color: var(--text-color, #333);
+  background: var(--card-color, transparent);
+}
+
+.file-button:hover {
+  border-color: var(--primary-color, #4080ff);
+  color: var(--primary-color, #4080ff);
+}
+
+.file-button input {
+  display: none;
+}
+
+.conflict-alert {
+  margin: var(--space-3, 12px) var(--space-4, 16px) 0;
 }
 
 /* 响应式调整 */

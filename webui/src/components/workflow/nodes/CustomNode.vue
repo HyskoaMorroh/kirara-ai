@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { computed, inject, type ComputedRef } from 'vue'
-import { Handle, Position, useVueFlow, type Connection } from '@vue-flow/core'
+import { Handle, Position, type Connection } from '@vue-flow/core'
 import { getTypeColor } from '@/utils/node-colors'
 import { NODE_MAX_WIDTH, NODE_MIN_WIDTH } from '../useLayout'
 
 const props = defineProps(['id', 'data', 'isValidConnection'])
-const { getHandleConnections } = useVueFlow()
 
 /** 画布下发的问题汇总；未在画布内使用（如节点列表预览）时为空 */
 type NodeIssue = { count: number; severity: 'error' | 'warning'; text: string }
@@ -119,17 +118,10 @@ const configTitle = (config: { label?: string; name: string; description?: strin
     : label
 }
 
+// 「一个输入只允许一条边」这条规则**不在这里**判定，理由同 CodeNode：
+// Handle 判定 invalid 时 vue-flow 不触发 `onConnect`，在这里 `return false`
+// 会让这条拒绝永远静默，现象与类型不兼容无法区分。现在交给画布统一判定。
 const isValidConnection = (connection: Connection) => {
-  // one input can only have one connection
-  const incomers = getHandleConnections({
-    id: connection.targetHandle,
-    nodeId: connection.target,
-    type: 'target'
-  })
-  if (incomers.length > 0) {
-    return false
-  }
-
   if (props.isValidConnection) {
     return props.isValidConnection(connection)
   }

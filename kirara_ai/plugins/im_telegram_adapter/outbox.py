@@ -24,6 +24,7 @@ from sqlalchemy import (
 )
 
 from kirara_ai.database import Base, DatabaseManager
+from kirara_ai.im.outbox_backoff import retry_backoff_seconds
 
 
 TERMINAL_STATUSES = frozenset({"accepted", "ambiguous", "dead_letter"})
@@ -478,35 +479,73 @@ class TelegramOutboxService:
                 return result
 
     async def _deliver_one(self, delivery_id: str) -> TelegramDeliveryResult:
+        """Send one unit, retrying only what Telegram explicitly asked us to retry.
+
+        `max_attempts` / `retry_delay_seconds` 此前只被赋值、从不被读取：
+        `RetryAfter`（Telegram 明确说「稍后再试」）被直接判为 dead letter，
+        一次都不重试。字段在、文档在、界面能填，改它却什么都不会发生——
+        比「没有这个配置」更糟，后者至少不会让人以为已经配好了。
+
+        三条边界必须区分开：
+
+        - `TelegramRetryableError`（来自 `RetryAfter`）：上游明确要求稍后再试，
+          按配置的次数与共享退避计划重试。
+        - 其他异常：确定失败，重试只是把同一个错误重复犯几遍。
+        - 结果未知（超时 / 网络中断）：**绝不重试**。可能已经发出去了，
+          重发就是重复消息。`ambiguous` 与 `dead_letter` 在「都失败了」这一层
+          看起来像，但一个是「不知道有没有发」、另一个是「确定没发」，
+          处置完全相反。
+        """
+        while True:
+            with self.database.get_session() as session:
+                item = session.execute(
+                    select(TelegramDelivery).where(
+                        TelegramDelivery.delivery_id == delivery_id
+                    )
+                ).scalar_one()
+                if item.status in TERMINAL_STATUSES:
+                    return self._snapshot(item)
+                item.status = "sending"
+                item.attempt_count += 1
+                item.updated_at = _utcnow()
+                attempt_count = int(item.attempt_count)
+                params = json.loads(str(item.params_json))
+                session.commit()
+            try:
+                response = self.sender(params)
+                if inspect.isawaitable(response):
+                    response = await response
+                if response is None:
+                    raise asyncio.TimeoutError("Telegram API returned no result")
+            except asyncio.CancelledError:
+                self._mark_ambiguous(delivery_id, "delivery cancelled during Telegram send")
+                raise
+            except (asyncio.TimeoutError, ConnectionError, OSError) as exc:
+                return self._mark_ambiguous(delivery_id, str(exc), exc)
+            except TelegramRetryableError as exc:
+                if attempt_count >= self.max_attempts:
+                    return self._mark_dead_letter(delivery_id, str(exc), exc)
+                delay = retry_backoff_seconds(self.retry_delay_seconds, attempt_count)
+                self._mark_retry_wait(delivery_id, str(exc))
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                continue
+            except BaseException as exc:
+                return self._mark_dead_letter(delivery_id, str(exc), exc)
+            return self._mark_accepted(delivery_id, response)
+
+    def _mark_retry_wait(self, delivery_id: str, error: str) -> None:
+        """Record why the unit is waiting, without making it terminal."""
         with self.database.get_session() as session:
             item = session.execute(
                 select(TelegramDelivery).where(
                     TelegramDelivery.delivery_id == delivery_id
                 )
             ).scalar_one()
-            if item.status in TERMINAL_STATUSES:
-                return self._snapshot(item)
-            item.status = "sending"
-            item.attempt_count += 1
+            item.status = "retry_wait"
+            item.last_error = (error or "Telegram delivery rejected")[:2000]
             item.updated_at = _utcnow()
-            params = json.loads(str(item.params_json))
             session.commit()
-        try:
-            response = self.sender(params)
-            if inspect.isawaitable(response):
-                response = await response
-            if response is None:
-                raise asyncio.TimeoutError("Telegram API returned no result")
-        except asyncio.CancelledError:
-            self._mark_ambiguous(delivery_id, "delivery cancelled during Telegram send")
-            raise
-        except (asyncio.TimeoutError, ConnectionError, OSError) as exc:
-            return self._mark_ambiguous(delivery_id, str(exc), exc)
-        except TelegramRetryableError as exc:
-            return self._mark_dead_letter(delivery_id, str(exc), exc)
-        except BaseException as exc:
-            return self._mark_dead_letter(delivery_id, str(exc), exc)
-        return self._mark_accepted(delivery_id, response)
 
     def _mark_accepted(self, delivery_id: str, response: Any) -> TelegramDeliveryResult:
         with self.database.get_session() as session:

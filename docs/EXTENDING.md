@@ -1225,7 +1225,7 @@ print(seen)
 
 预期 `[('started', 'ApplicationStarted()'), ('stopping', 'ApplicationStopping()')]`。
 
-在真实插件里验证：`on_load()` 注册一个监听 `ApplicationStarted` 的方法，里面 `logger.info(...)`，启动应用后在「控制台」页或 `logs/` 里搜那条日志。收不到就检查两点——监听器是不是 `async def`（不支持），事件类型是不是写成了父类（`register` 用 `type(event)` 精确匹配，注册 `IMEvent` 收不到 `IMAdapterStarted`）。
+在真实插件里验证：`on_load()` 注册一个监听 `ApplicationStarted` 的方法，里面 `logger.info(...)`，启动应用后在「控制台」页或 `<DATA_PATH>/logs/`（默认 `data/logs/`）里搜那条日志。收不到就检查两点——监听器是不是 `async def`（不支持），事件类型是不是写成了父类（`register` 用 `type(event)` 精确匹配，注册 `IMEvent` 收不到 `IMAdapterStarted`）。
 
 ---
 
@@ -1384,6 +1384,193 @@ cd webui && npx vue-tsc --noEmit
 | `tests/test_model_catalog.py` | `normalize_detected_models` / `model_catalogs_equal` |
 
 新增随包预设或改动区块端口时，`tests/test_workflow_presets.py` 是最容易被打破的一个——它会把每个预设都过一遍 `validate_workflow_definition()`，端口改名会直接让它红。
+
+---
+
+## 九、供应商级请求策略：哪些开关有真实语义，哪些没有
+
+需求里点名了 cc-switch 的四个供应商开关。它们在 cc-switch 里配置的是
+**Claude Code CLI 进程**（commit 署名、实验性 agent teams、tool search、
+CLI 自动更新器），不是「向某个模型上游发请求时的参数」。把字段名照抄过来只会
+得到永远没人读的死配置——本项目已经吃过这个亏：`UsageSource.ESTIMATED` 曾经
+有定义、有测试、主链路零调用，最终表现为一批「0 token、0 成本」的假免费请求。
+
+因此四个开关**全部按语义落地**，每一个都有真实执行链路：
+
+| cc-switch 开关 | 它在 cc-switch 里改的东西 | 本项目的落点 | 生效位置 |
+| --- | --- | --- | --- |
+| Tool Search 最大强度思考 | `env.CLAUDE_CODE_EFFORT_LEVEL="max"`、`env.ENABLE_TOOL_SEARCH` | `LLMBackendConfig.reasoning_effort`（四档） | 各适配器翻译成自家字段后发出 |
+| 禁用自动升级 | `env.DISABLE_AUTOUPDATER="1"`（CLI 自更新器） | `update.disable_auto_check` | 启动时与每次打开 WebUI 时都不再探测 PyPI / npm；手动检查照常 |
+| 隐藏 AI 署名 | `attribution.commit=""`、`attribution.pr=""`（不写 `Co-Authored-By`） | `LLMBackendConfig.hide_ai_attribution` | 在**投递给用户的回复文本**上移除 AI 自我署名 |
+| Teammates 模式 | `env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS="1"`（CLI 多 agent 协作） | `AgentDefinition.teammate_agent_ids` | 模型获得 `delegate_to_<id>` 工具，可把子任务交给队友 |
+| 整流器 | `thinking_rectifier.rs` / `thinking_budget_rectifier.rs` + `RectifierConfig` 四开关 | `LLMBackendConfig.rectifier_enabled` 等四项 → `LLMChatRequest.rectifier` | 上游拒绝时按白名单改一处并重试一次，见 9.4 |
+
+后两项**不是同名字段的照搬，而是同一用户意图在本项目里的确切落点**：
+
+* 本项目不代写 git commit，所以「不写 `Co-Authored-By`」没有对应物；但同一个
+  意图在聊天场景里是确切的——模型经常在回复里自报身份（「作为一个 AI 助手，
+  我……」「本回复由 AI 生成」），QQ / 企业微信这类面向真人的渠道里这类句子
+  既占篇幅又暴露实现细节。
+* 多 Agent 协作在本项目属于 **Agent 层**而不是供应商层：供应商是「上游模型」，
+  不是「协作单元」。因此开关挂在 `AgentDefinition` 上而不是 `LLMBackendConfig`。
+
+### 9.1 `reasoning_effort` 的翻译表
+
+四个档位与厂商无关；字段名与取值形态各家都不同，因此在适配器里翻译而不是透传：
+
+| 上游 | 字段 | `low` | `medium` | `high` | `max` |
+| --- | --- | --- | --- | --- | --- |
+| OpenAI 兼容 | `reasoning_effort`（字符串） | `low` | `medium` | `high` | `max` |
+| Claude | `thinking.budget_tokens`（整数） | 25% | 50% | 70% | 80% |
+| Gemini | `generationConfig.thinkingConfig.thinkingBudget`（整数） | 1024 | 4096 | 12288 | `-1`（动态思考） |
+| Ollama | 无对应字段 | — | — | — | — |
+
+三条约束：
+
+- **留空表示「不指定」，并且这是一个必须可表达的状态。** 不支持扩展思考的模型
+  收到 `thinking` / `thinkingConfig` 会直接报错，因此前端的下拉是 clearable，
+  该字段也**不进** `resilienceDefaults()`——那张表的用途是「新建时带齐字段」，
+  替用户填一个具体档位就把「不指定」抹掉了。
+- **Claude 的预算必须小于 `max_tokens`。** 它要一个具体 token 数而不是档位名，
+  且预算吃满 `max_tokens` 会让整个请求被拒、正文一个字都出不来。实现把预算夹在
+  `[1024, max_tokens - 1024]`，区间为空时干脆不开启，而不是硬塞一个会被拒的值。
+- **配置生效在每个供应商上，且不改写调用方的请求对象。** 队列里 P1 是高强度
+  推理网关、P2 是不支持思考的兼容接口时，两者各自按自己的配置发请求；就地改写
+  会让 P1 的设置泄漏到 P2，而 P2 收到未知字段可能直接 400——一次本可成功的
+  故障转移变成两连败。调用方在请求上显式给出的档位优先于供应商默认值。
+
+覆盖测试：`tests/llm/test_reasoning_effort.py`（各家翻译与未配置时不出现该键）、
+`tests/llm/test_provider_reasoning_effort.py`（逐供应商生效、请求对象不被改写）、
+`webui/tests/llm-reasoning-effort-control.test.ts`（「不指定」可表达）。
+
+### 9.2 `hide_ai_attribution`：只删署名，不删答案
+
+供应商级开关，默认关闭。打开后在该供应商返回的**文本片段**上移除 AI 自我署名。
+判定锚点是**第一人称自指**（「我是一个 AI 语言模型」）或**出处声明**
+（「本回复由 AI 生成」），不是「出现了 AI 这个词」——
+「这个项目用 AI 做摘要」是答案的一部分，不能删。
+
+五条约束：
+
+- **默认关闭。** 这是会改写模型输出的开关，默认改写等于替用户做决定。
+- **前缀形态保留后半句。** 「作为一个 AI 助手，我建议你先备份」里
+  「我建议你先备份」是答案；整句删掉就是丢答案。分界在那个逗号上。
+- **不进围栏代码块。** 代码里的 `AI` 字样是内容，改它等于改坏用户要执行的东西。
+- **不动工具调用参数与用量。** 工具参数是给程序读的；署名是上游已经生成并计费
+  的 token，把它从展示里去掉不等于没花那笔钱，改写 usage 会让账单对不上。
+- **流式在聚合之后清理，不逐分片。** 一句署名很可能被切成
+  `本回复由 ` / `AI 生成。` 两片，逐片判断两片都不像署名，整句就原样漏出去——
+  结果取决于上游怎么切分片，这是最难复现的一类缺陷。
+  `LLMManager.apply_response_policy_for_attempts()` 按**真正成交的那家**供应商
+  的配置执行一次；没有成功尝试时原样返回，不猜供应商。
+
+实现：`kirara_ai/llm/attribution.py`。覆盖测试：
+`tests/llm/test_ai_attribution.py`（文本层边界）、
+`tests/llm/test_provider_hide_attribution.py`（执行链路、逐供应商、不动用量）、
+`tests/llm/test_stream_hide_attribution.py`（分片不被改写、聚合后清理）。
+
+### 9.3 Teammates：把其他 Agent 作为工具委派
+
+`AgentDefinition.teammate_agent_ids` 非空时，模型会额外获得
+`delegate_to_<agent_id>` 工具（与 MCP 工具同一形态，模型侧不需要区分）。
+队友用**自己的**模型链、提示词、技能与工具白名单执行子任务。
+
+多 Agent 委派最危险的失败形态是**无限递归**：A 委派 B、B 委派 A，
+每一层都是一次真实的模型调用，账单与时延同时爆炸。因此：
+
+- **深度上限 `DEFAULT_TEAMMATE_DEPTH = 2`**，每次委派递减；到 0 就
+  **不再暴露**委派工具——不是暴露了再拒绝：暴露一个必定被拒的工具会让模型
+  反复尝试，白花一轮 token。
+- **自委派在定义期就被拒**（`AgentDefinition.__post_init__`），前端也先拦一道
+  以给出可读的原因。
+- **只为存在且启用的队友生成工具。** 在工具列表里放一个必定失败的工具，
+  等于让模型去撞墙一次再重试。
+- **队友看不到主 Agent 的对话历史**，因此工具描述明确要求 `task` 自带完整背景；
+  空任务作为工具错误返回而不是发起一次注定无效的委派。
+- **委派不是绕过授权的旁路。** 委派本身不动服务器所以不需要人工确认，
+  但队友自身的高危工具仍走原有的 `PermissionRequest` 与创建者校验链路。
+- **队友集合进入 `_agent_policy_signature`**：集合变化会让待确认操作失效，
+  否则确认的是一件事、执行的是另一件事。
+
+配置位置：WebUI「模型与 Agent → Agent」的「队友（Teammates）」区块，
+下拉只列出已启用且不是自己的 Agent。持久化在 `data/agents/registry.json`；
+早于本特性的注册表没有该键，读到时缺省为空（不启用），升级不会宕机。
+
+覆盖测试：`tests/agent_runtime/test_teammates.py`（工具生成与递归预算）、
+`tests/agent_runtime/test_teammate_delegation.py`（真实执行链路与深度递减）、
+`tests/agent_runtime/test_teammate_persistence.py`（落盘、旧格式兼容、API 契约）、
+`webui/tests/agent-teammates.test.ts`（界面契约）。
+
+### 9.4 `disable_auto_check`：「不自动查」与「不能查」是两件事
+
+配置位置：WebUI「系统设置 → 下载源 → 禁用自动检查更新」。默认关闭——
+静默停掉版本检查会让部署长期停在旧版本而无人知道，那不该是出厂状态。
+
+打开后被挡掉的是**自动发起**的那些探测，两处都挡：
+
+1. 启动时的 `entry.py::check_update`；
+2. 每次打开 WebUI 时 `StatusBar.vue` 在 `onMounted` 里发的
+   `GET /system/check-update`。
+
+只挡第一处是不够的，而这正是修好之前的状态：离线部署每打开一次页面仍然要等
+PyPI 与 npm 两次超时。开关承诺的是「不去外网」，那么每一条自动外呼路径都得算进来。
+
+**手动检查不受影响。** 「下载源」页的「立即检查更新」按钮带 `?manual=1`，
+后端只挡不带这个参数的调用。这条区分是必要的：如果手动点击也被一起挡掉，
+「禁用自动检查」就悄悄变成了「禁用检查」，而用户读到的说明并没有这么写。
+
+响应体里的 `checked` 用来区分**没查**与**查了没更新**——两者都让
+`backend_update_available` 为 `false`，但只有后者可以对用户说「已是最新版本」。
+缺这个字段时界面只能在两种说法里挑一个谎报，而「已是最新」是其中危害更大的那个。
+
+覆盖测试：`tests/web/api/system/test_update_auto_check_config.py`
+（读写路径、缺键保留原值、自动不外呼、手动照常外呼）、
+`webui/tests/update-auto-check-control.test.ts`（表单字段、开关、按钮与文案契约）。
+
+### 9.5 整流器：上游拒绝之后改一处再重试一次
+
+配置位置：WebUI「模型与 Agent → 模型 → 编辑供应商」，四个开关
+（`请求整流` 总开关 + `修正思考签名` / `修正思考预算` / `图片降级`）。默认全开。
+
+它修的不是「我们猜错了参数」，而是**同一个 API 在不同模型上约束不同**这一类
+必然失败：
+
+| 情形 | 上游报什么 | 改哪一处 |
+| --- | --- | --- |
+| 思考预算与最大输出长度关系不对 | `budget_tokens` 相关约束 | 预算设为 32000，必要时把 `max_tokens` 提到 64000 |
+| 多轮对话回传的思考签名已失效（换了模型或供应商） | `Invalid 'signature' in 'thinking' block` | 移除思考块与残留 `signature` 字段，正文不动 |
+| 模型不支持图片 | `does not support image` 一类措辞 | 图片块换成可见占位文本 `[Unsupported Image]` |
+
+三者的共同点是**改一处就能成功，不改就必然失败**，而原因既不在错误里说清，
+也不是用户能自己改的。没有整流器时的表现是一次硬失败：用户看到「请求失败」，
+无从判断是模型不行、网络不行，还是一个参数关系不对。
+
+**三条边界，缺一条就会变成「模糊自动改写」**：
+
+1. **事实驱动。** 只有上游**真的返回了拒绝**才动，不做发送前预判。
+   预判会在模型能力变化时把本可成功的请求改坏，而那种失败没有任何线索。
+2. **白名单匹配。** 错误文本必须命中该类整流的特征串，且要求多个特征同时出现。
+   只看 `signature` 会把鉴权签名错误也当成思考签名问题，然后去删一堆与失败
+   无关的字段——真正的原因（密钥不对）反而被掩盖。
+3. **每类只改一次。** 改完重试仍失败就抛原始错误。反复整流会把「参数错」
+   变成「一直在转」，而后者更难查：日志里全是重试，没有一条说明原因。
+
+改了什么会记进日志（`RectifyRecord`）。静默改写请求是最难排查的一类行为——
+用户发出的与上游收到的不是同一个请求，而没有任何地方说明这件事。
+
+`图片降级`是唯一**会改变模型看到的内容**的一项，因此可以单独关闭。
+换成占位文本而不是静默删除：用户问「这张图里是什么」时，模型至少能说
+「我没有收到图片」，而不是对着空内容编一个答案。
+
+整流开关是**每供应商**的，随请求下发（`LLMChatRequest.rectifier`）。理由与
+`reasoning_effort` 相同：队列里 P1 是自建 Anthropic 网关、P2 是不支持思考的
+兼容接口时，两者必须各按自己的配置走；就地改写请求对象会让 P1 的设置泄漏到
+P2，一次本可成功的故障转移变成两连败。
+
+覆盖测试：`tests/llm/test_rectifier.py`（判定与改写，含「命中错误但无可改之处
+不算整流」）、`tests/llm/test_rectifier_config.py`（配置到运行时的映射、
+per-provider 下发）、`tests/llm/test_rectifier_integration.py`
+（适配器层真的重试，非流式与流式两条路径都覆盖）。
 
 ---
 

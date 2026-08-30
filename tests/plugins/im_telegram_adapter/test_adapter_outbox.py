@@ -284,3 +284,17 @@ def test_split_telegram_message_bounds_long_code_line_and_keeps_fences():
     assert len(pages) > 1
     assert all(len(page) <= 180 for page in pages)
     assert all(page.count("```") == 2 for page in pages)
+
+
+def test_split_telegram_message_truncates_instead_of_raising_past_page_cap():
+    """超过页数上限必须截断并提示，不能让整条回复丢失。
+
+    `split_structured_text` 在超过 100 页时抛 `ValueError`，而
+    `_render_send_units` 不捕获它——异常一路穿出 `send_message`，用户
+    什么都收不到。这与 OneBot / QQBot 的语义必须一致（需求 19.4）。
+    """
+    pages = split_telegram_message("行内容\n" * 12000, max_length=180)
+
+    assert 0 < len(pages) <= 100
+    assert all(len(page) <= 180 for page in pages)
+    assert "已截断" in pages[-1]

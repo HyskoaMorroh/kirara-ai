@@ -55,7 +55,14 @@ const emptyStats = {
     cost_currency: null,
     unpriced_requests: 0
   },
-  latency: { avg_ttft_ms: null, max_ttft_ms: null, avg_duration: null, avg_attempt_count: null },
+  latency: {
+    avg_ttft_ms: null,
+    max_ttft_ms: null,
+    avg_duration: null,
+    avg_attempt_count: null,
+    avg_retry_count: null,
+    avg_failover_count: null
+  },
   daily_stats: [],
   hourly_stats: [],
   models: [],

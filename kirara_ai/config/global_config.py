@@ -1,9 +1,14 @@
 import shlex
-from typing import Any, Dict, List, Literal, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kirara_ai.llm.model_types import LLMAbility, ModelType
+
+if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
+    # 运行时不导入：`kirara_ai.llm.rectifier` 不该成为配置模块的启动期依赖，
+    # 而 `build_rectifier_config` 里的局部导入已经够用。
+    from kirara_ai.llm.rectifier import RectifierConfig
 
 
 class IMConfig(BaseModel):
@@ -54,6 +59,71 @@ class LLMBackendConfig(BaseModel):
     circuit_min_requests: int = Field(default=10, ge=1, description="错误率熔断的最小请求数")
     circuit_recovery_timeout_seconds: float = Field(default=30.0, ge=0, description="熔断打开后进入半开探测的等待时间")
     circuit_recovery_success_threshold: int = Field(default=2, ge=1, le=100, description="半开状态连续成功多少次后恢复")
+    reasoning_effort: Optional[Literal["low", "medium", "high", "max"]] = Field(
+        default=None,
+        description=(
+            "推理强度档位；留空表示沿用上游默认。"
+            "各家字段不同（OpenAI reasoning_effort / Claude thinking.budget_tokens / "
+            "Gemini thinkingConfig.thinkingBudget），由适配器各自翻译"
+        ),
+    )
+    hide_ai_attribution: bool = Field(
+        default=False,
+        description=(
+            "移除该供应商回复里的 AI 自我署名（如「作为一个 AI 助手」"
+            "「本回复由 AI 生成」）。默认关闭：这是会改写模型输出的开关。"
+            "只删署名句，不动答案、代码块、工具参数与用量统计"
+        ),
+    )
+    rectifier_enabled: bool = Field(
+        default=True,
+        description=(
+            "请求整流器总开关。上游因参数约束拒绝时，按白名单改一处再重试一次。"
+            "默认开启：这几类错误不修就必然失败，而原因（思考预算与 max_tokens "
+            "的关系、换模型后失效的思考签名、不支持图片的模型收到图片）"
+            "既不在错误里说清，也不是用户能自己改的"
+        ),
+    )
+    rectify_thinking_signature: bool = Field(
+        default=True,
+        description=(
+            "整流：移除失效的思考签名后重试。"
+            "多轮对话回传上一轮 thinking block 时带签名，换模型或换供应商后签名失效。"
+            "只删 thinking / redacted_thinking 块与残留 signature 字段，不动正文"
+        ),
+    )
+    rectify_thinking_budget: bool = Field(
+        default=True,
+        description=(
+            "整流：修正思考预算与 max_tokens 的关系后重试。"
+            "`adaptive` 类型不改——那是让上游自行决定预算"
+        ),
+    )
+    rectify_media_fallback: bool = Field(
+        default=True,
+        description=(
+            "整流：上游拒绝图片输入时，把图片块降级为可见占位文本后重试。"
+            "这一项**会改变模型看到的内容**，因此可以单独关闭；"
+            "换成占位而不是静默删除，是为了让模型能说「我没收到图片」"
+            "而不是对着空内容编一个答案"
+        ),
+    )
+
+    def build_rectifier_config(self) -> "RectifierConfig":
+        """把配置映射成运行时那份 `RectifierConfig`。
+
+        由这里统一转换，而不是让适配器各自读四个字段：开关名在两处各写一份时，
+        迟早会出现「界面关了但运行时还在改」，而那种不一致没有任何症状，
+        只表现为请求被静默改写。
+        """
+        from kirara_ai.llm.rectifier import RectifierConfig
+
+        return RectifierConfig(
+            enabled=self.rectifier_enabled,
+            request_thinking_signature=self.rectify_thinking_signature,
+            request_thinking_budget=self.rectify_thinking_budget,
+            request_media_fallback=self.rectify_media_fallback,
+        )
 
     @model_validator(mode="after")
     def validate_timeout_budget(self) -> "LLMBackendConfig":
@@ -378,6 +448,14 @@ class PluginConfig(BaseModel):
 class UpdateConfig(BaseModel):
     pypi_registry: str = Field(default="https://pypi.org/simple", description="PyPI 服务器 URL")
     npm_registry: str = Field(default="https://registry.npmjs.org", description="npm 服务器 URL")
+    disable_auto_check: bool = Field(
+        default=False,
+        description=(
+            "禁用启动时的自动版本检查。"
+            "离线或内网部署既查不到注册表又要等超时；关闭后完全不发起请求，"
+            "WebUI 的「检查更新」按钮仍然可用"
+        ),
+    )
 
 
 class FrpcConfig(BaseModel):
@@ -408,6 +486,70 @@ class MediaConfig(BaseModel):
     last_cleanup_time: int = Field(default=0, description="上次清理时间")
 
 
+class CreatorChannelIdentity(BaseModel):
+    """一个被声明为「项目创建者本人」的 IM 渠道身份。
+
+    需求 10 要求只有创建者能通过插件改服务器内容，其他人收到这类指令一律忽视
+    但仍得到正常回复。后半句一直成立；前半句在 IM 渠道上此前**无法成立**——
+    `principal_can_control_agent` 是唯一门禁，而 principal 只由 HTTP Bearer
+    中间件注入，IM 入站链路全程没有它。结果不是「非创建者不行」，
+    而是「所有人都不行」，包括创建者本人：MCP 工具列表恒为空、command Hook 恒被拒。
+
+    这份声明就是那座桥。三条刻意的设计：
+
+    - **默认空表**。不声明任何身份时行为与此前逐字节一致，
+      不存在「升级之后聊天里突然能动服务器」这种事。
+    - **渠道与发送者一起比**。QQ 号和 Telegram 用户 ID 可能撞号，
+      只比一个等于把另一个渠道的同号用户也放进来。
+    - **群聊默认不生效**。群里所有人都看得到创建者发的指令并照抄；
+      虽然照抄的人 `sender_scope` 不同因而拿不到身份，但把宿主操作暴露在
+      多人可见的会话里是另一回事，要开必须显式写 `allow_group_chat`。
+    """
+
+    channel_type: str = Field(
+        description="渠道类型：webui / onebot / qqbot / telegram / wecom",
+    )
+    sender_scope: str = Field(
+        description="该渠道上创建者的用户标识（QQ 号、Telegram 用户 ID 等）",
+    )
+    account_scope: Optional[str] = Field(
+        default=None,
+        description=(
+            "可选。限定只有经由这个机器人账号收到的消息才算创建者，"
+            "留空表示该渠道下的任意账号。"
+        ),
+    )
+    adapter_instance: Optional[str] = Field(
+        default=None,
+        description="可选。限定适配器实例名，留空表示任意实例。",
+    )
+    allow_group_chat: bool = Field(
+        default=False,
+        description=(
+            "是否允许在群聊里生效。默认关闭：群聊对所有成员可见，"
+            "把宿主操作暴露在那里的风险与私聊完全不同。"
+        ),
+    )
+
+    @field_validator("channel_type", "sender_scope")
+    @classmethod
+    def _require_non_empty(cls, value: str) -> str:
+        text = str(value).strip()
+        if not text:
+            # 空的 sender_scope 会匹配到 ChannelContext 的兜底值
+            # （`unknown-sender`），等于对所有取不到用户 ID 的消息放开。
+            raise ValueError("channel_type 与 sender_scope 不能为空")
+        return text
+
+    @field_validator("account_scope", "adapter_instance")
+    @classmethod
+    def _normalize_optional(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+
 class AgentRuntimeConfig(BaseModel):
     """统一 Agent 运行时配置。"""
 
@@ -427,6 +569,28 @@ class AgentRuntimeConfig(BaseModel):
             "aggregate：以流式方式向上游取回内容再整段投递，"
             "从而让流式首字节超时、静默超时与首字节前的故障转移真正生效。"
             "IM 平台普遍不支持逐字编辑消息，因此这里不做逐字推送。"
+        ),
+    )
+    turn_deadline_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        le=3600,
+        description=(
+            "单轮对话的总时间预算（秒），0 表示不设总预算。"
+            "设置后会作为 deadline 与取消信号一并下传给模型调用："
+            "超时后正在等待的上游请求会被取消，而不是让这一轮无限悬挂。"
+            "注意它约束的是整轮（含多次工具调用），"
+            "单次请求的超时仍由各 Provider 自己的 timeout 字段决定。"
+        ),
+    )
+    creator_channel_identities: List[CreatorChannelIdentity] = Field(
+        default_factory=list,
+        description=(
+            "声明哪些 IM 渠道身份属于项目创建者。"
+            "默认为空：不声明时聊天侧拿不到任何身份，"
+            "MCP 工具与 command Hook 在 IM 渠道上一律不可用（与旧行为一致）。"
+            "声明后，来自这些身份的消息会带上创建者 principal，"
+            "从而能像 WebUI 一样使用受保护的插件能力。"
         ),
     )
 

@@ -9,6 +9,7 @@ from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.plugin_manager.plugin_loader import PluginLoader
 from kirara_ai.web.app import WebServer
+from kirara_ai.web.api.system.utils import ArtifactDigest
 from kirara_ai.workflow.core.workflow import WorkflowRegistry
 from tests.utils.auth_test_utils import auth_headers, setup_auth_service  # noqa
 
@@ -227,15 +228,21 @@ class TestSystemUpdate:
         trusted_url = "https://files.pythonhosted.org/kirara_ai-3.3.0b8.whl"
         download = AsyncMock(return_value=("trusted.whl", "sha256"))
 
+        # 安装路径改走带摘要的 `resolve_pypi_release`（需求 16：装之前比对
+        # registry 声明的哈希）。这里把校验本身替掉，因为本用例断言的是
+        # 「可信 URL 覆盖客户端传入的 URL」，不是校验逻辑——后者有
+        # `test_update_integrity.py` 专门覆盖。
         with patch(
             "kirara_ai.web.api.system.routes.get_installed_version",
             return_value="3.3.0b7",
         ), patch(
-            "kirara_ai.web.api.system.routes.get_latest_pypi_version",
-            AsyncMock(return_value=("3.3.0b8", trusted_url)),
+            "kirara_ai.web.api.system.routes.resolve_pypi_release",
+            AsyncMock(return_value=("3.3.0b8", trusted_url, ArtifactDigest(sha256="x" * 64))),
         ) as lookup, patch(
             "kirara_ai.web.api.system.routes.download_file", download
-        ), patch("kirara_ai.web.api.system.routes.subprocess.run") as install:
+        ), patch(
+            "kirara_ai.web.api.system.routes.verify_artifact_digest"
+        ) as verify, patch("kirara_ai.web.api.system.routes.subprocess.run") as install:
             response = test_client.post(
                 "/backend-api/api/system/update",
                 headers=auth_headers,
@@ -253,6 +260,9 @@ class TestSystemUpdate:
             "kirara-ai",
             "https://pypi.org/simple",
         )
+        # 校验必须真的被调用过，且用的是 registry 给的摘要。
+        verify.assert_called_once()
+        assert verify.call_args.args[1].sha256 == "x" * 64
         install.assert_called_once()
 
     def test_backend_update_rejects_same_or_older_version_before_download(
@@ -299,8 +309,8 @@ class TestSystemUpdate:
             return_value="3.3.0-b8",
             create=True,
         ), patch(
-            "kirara_ai.web.api.system.routes.get_latest_npm_version",
-            AsyncMock(return_value=("3.3.0-b7", trusted_url)),
+            "kirara_ai.web.api.system.routes.resolve_npm_release",
+            AsyncMock(return_value=("3.3.0-b7", trusted_url, ArtifactDigest())),
         ) as lookup, patch(
             "kirara_ai.web.api.system.routes.download_file", download
         ):

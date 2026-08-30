@@ -18,7 +18,7 @@ from kirara_ai.logger import get_logger
 from kirara_ai.mcp_module import MCPConnectionState, MCPServer, MCPServerManager
 from kirara_ai.mcp_module.compat import normalize_mcp_server_entry
 
-from ...auth.middleware import require_auth
+from ...auth.middleware import require_auth, require_creator
 from .models import (
     REDACTED_SECRET,
     MCPPromptInfo,
@@ -463,7 +463,9 @@ async def check_server_id(server_id: str):
 
 
 @mcp_bp.route("/servers", methods=["POST"])
-@require_auth("mcp.manage")
+# 新增 MCP 服务器会写入 config.yaml，并让一个可执行命令进入可启动状态；
+# 与资源侧的 mcp 资源启用同一性质，必须限创建者（需求 10）。
+@require_creator("mcp.manage")
 async def create_server():
     """创建新的MCP服务器"""
     try:
@@ -506,7 +508,8 @@ async def create_server():
 
 
 @mcp_bp.route("/servers/<server_id>", methods=["PUT"])
-@require_auth("mcp.manage")
+# 修改传输配置等于改写将要执行的命令与参数。
+@require_creator("mcp.manage")
 async def update_server(server_id: str):
     """更新MCP服务器配置"""
     try:
@@ -577,7 +580,8 @@ async def update_server(server_id: str):
 
 
 @mcp_bp.route("/servers/<server_id>", methods=["DELETE"])
-@require_auth("mcp.manage")
+# 删除会从 config.yaml 移除条目，且不可逆。
+@require_creator("mcp.manage")
 async def delete_server(server_id: str):
     """删除MCP服务器"""
     try:
@@ -616,7 +620,11 @@ async def delete_server(server_id: str):
 
 
 @mcp_bp.route("/servers/<server_id>/start", methods=["POST"])
-@require_auth("mcp.manage")
+# `start` 会真的在服务器上拉起一个 stdio 子进程（见 mcp_module/server.py），
+# 这是最直接的「在 VPS 中执行文件操作」，必须限创建者。
+# 「停止」不收紧：它只让扩展不再生效，不引入新的服务器副作用——
+# 与资源侧 disable 保持同一判断。
+@require_creator("mcp.manage")
 async def start_server(server_id: str):
     """连接 MCP 服务器"""
     try:

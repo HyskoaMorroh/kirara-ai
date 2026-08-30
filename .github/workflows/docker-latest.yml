@@ -39,6 +39,12 @@ jobs:
           ref: ${{ needs.verify.outputs.release_commit }}
           fetch-depth: 0
       -
+        name: Set up Python 3.11
+        # 版本推导需要 tomllib（3.11+），并与其他 job 保持同一解释器版本。
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      -
         name: Verify publish eligibility
         id: release
         env:
@@ -53,15 +59,16 @@ jobs:
             echo "Checkout commit $source_commit does not match the preflight commit $RELEASE_COMMIT."
             exit 1
           fi
-          python3 scripts/version.py verify-tag \
+          python scripts/version.py verify-tag \
             --tag "$RELEASE_TAG" \
             --expected-commit "$source_commit" \
             --expect-head \
             --remote origin
-          EXPECTED_TAG="$(python3 scripts/version.py tag)"
-          PROJECT_VERSION="$(python3 scripts/version.py get)"
+          EXPECTED_TAG="$(python scripts/version.py tag)"
+          PROJECT_VERSION="$(python scripts/version.py get)"
           echo "tag=$EXPECTED_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$PROJECT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
 
           if [ "$RELEASE_IS_DRAFT" = "true" ]; then
             echo "publish=false" >> $GITHUB_OUTPUT
@@ -152,6 +159,15 @@ jobs:
           push: true
           platforms: 'linux/amd64,linux/arm64'
           tags: ${{ steps.tags.outputs.tags }}
+          # 记录源提交，让「Tag 与提交绑定」在发布之后仍然可查。
+          #
+          # `verify-tag` 只检查当下的自洽，没有历史记录：把 Tag 移到另一个提交后
+          # 重建同名镜像，全程校验都能通过，而镜像内容已经换了一份。
+          # revision 取上一步已与 preflight 提交比对过的值，不用 `github.sha`。
+          labels: |
+            org.opencontainers.image.revision=${{ steps.release.outputs.source_commit }}
+            org.opencontainers.image.version=${{ steps.release.outputs.tag }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           build-args: |
             VITE_APP_VERSION=${{ steps.release.outputs.tag }}
           cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache

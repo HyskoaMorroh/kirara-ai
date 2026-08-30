@@ -524,7 +524,7 @@ class TestLLMBackend:
             mock_save.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_update_backend(self, test_client, auth_headers):
+    async def test_update_backend(self, test_client, auth_headers, monkeypatch):
         """测试更新后端"""
         updated_secrets = {
             **SENSITIVE_CONFIG,
@@ -540,8 +540,13 @@ class TestLLMBackend:
             **RESILIENCE_SETTINGS,
         )
 
-        # Mock 配置文件保存
-        ConfigLoader.save_config_with_backup = MagicMock()
+        # Mock 配置文件保存。
+        #
+        # 用 `monkeypatch.setattr` 而不是直接赋值：`ConfigLoader` 是类对象，
+        # 直接赋值会把这个 MagicMock 永久留在类上，后续任何真的需要落盘的用例
+        # 都会静默地什么都不写——症状出现在别的测试文件里，且只在按目录整体跑时
+        # 才出现，是最难定位的一类测试污染。
+        monkeypatch.setattr(ConfigLoader, "save_config_with_backup", MagicMock())
         response = test_client.put(
             f"/backend-api/api/llm/backends/{TEST_BACKEND_NAME}",
             headers=auth_headers,
@@ -568,6 +573,106 @@ class TestLLMBackend:
 
         # 验证配置保存
         ConfigLoader.save_config_with_backup.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_update_backend_keeps_fields_the_client_never_sent(
+        self, app, test_client, auth_headers
+    ):
+        """PUT 里没出现的字段必须保留原值，而不是被重置为模型默认。
+
+        `LLMBackendUpdateRequest` 继承 `LLMBackendConfig`，因此**任何**没被前端
+        表单声明的字段都会被 pydantic 用默认值补齐，然后原样写回磁盘。
+        于是「在 config.yaml 里开了某个开关，之后在 WebUI 改任意一项」
+        会把那个开关静默关掉——用户改的是 A，被改掉的是 B，
+        而界面上没有任何地方提示 B 变了。
+
+        这不是某一个字段的疏漏：它对每一个前端还没做控件的字段都成立，
+        也对将来新增的每一个字段成立。因此修在合并逻辑上，而不是逐字段补控件。
+        """
+        config = app.state.container.resolve(GlobalConfig)
+        current = next(
+            backend
+            for backend in config.llms.api_backends
+            if backend.name == TEST_BACKEND_NAME
+        )
+        # 这两项后端有真实消费点，但前端表单里没有控件（`webui/src` 零命中）。
+        current.hide_ai_attribution = True
+        current.priority = 7
+
+        # 一个「只改启用状态」的最小 payload——真实前端提交也不会带上它不认识的键。
+        update = {
+            "name": TEST_BACKEND_NAME,
+            "adapter": current.adapter,
+            "config": current.config,
+            "enable": current.enable,
+            "models": [
+                item.model_dump() if hasattr(item, "model_dump") else item
+                for item in current.models
+            ],
+        }
+
+        with patch.object(ConfigLoader, "save_config_with_backup"):
+            response = test_client.put(
+                f"/backend-api/api/llm/backends/{TEST_BACKEND_NAME}",
+                headers=auth_headers,
+                json=update,
+            )
+
+        assert response.status_code == 200
+        saved = next(
+            backend
+            for backend in config.llms.api_backends
+            if backend.name == TEST_BACKEND_NAME
+        )
+        assert saved.hide_ai_attribution is True, (
+            "客户端没提交 hide_ai_attribution，它被重置成了默认值 False"
+        )
+        assert saved.priority == 7, "客户端没提交 priority，它被重置成了默认值"
+
+    @pytest.mark.asyncio
+    async def test_update_backend_can_still_turn_a_flag_off(
+        self, app, test_client, auth_headers
+    ):
+        """显式提交 `false` 与「没提交」必须区分开。
+
+        只保留「没提交的字段」是不够的：如果把 `false` 也当成「没提交」，
+        开关就变成了单向的——只能开、不能关。那比被静默重置更糟，
+        因为用户会反复点一个不起作用的控件。
+        """
+        config = app.state.container.resolve(GlobalConfig)
+        current = next(
+            backend
+            for backend in config.llms.api_backends
+            if backend.name == TEST_BACKEND_NAME
+        )
+        current.hide_ai_attribution = True
+
+        update = {
+            "name": TEST_BACKEND_NAME,
+            "adapter": current.adapter,
+            "config": current.config,
+            "enable": current.enable,
+            "models": [
+                item.model_dump() if hasattr(item, "model_dump") else item
+                for item in current.models
+            ],
+            "hide_ai_attribution": False,
+        }
+
+        with patch.object(ConfigLoader, "save_config_with_backup"):
+            response = test_client.put(
+                f"/backend-api/api/llm/backends/{TEST_BACKEND_NAME}",
+                headers=auth_headers,
+                json=update,
+            )
+
+        assert response.status_code == 200
+        saved = next(
+            backend
+            for backend in config.llms.api_backends
+            if backend.name == TEST_BACKEND_NAME
+        )
+        assert saved.hide_ai_attribution is False
 
     @pytest.mark.asyncio
     async def test_update_backend_blank_secret_placeholders_keep_existing_values(
@@ -649,9 +754,10 @@ class TestLLMBackend:
         assert load_attempts == 2
 
     @pytest.mark.asyncio
-    async def test_delete_backend(self, test_client, auth_headers):
+    async def test_delete_backend(self, test_client, auth_headers, monkeypatch):
         """测试删除后端"""
-        ConfigLoader.save_config_with_backup = MagicMock()
+        save_mock = MagicMock()
+        monkeypatch.setattr(ConfigLoader, "save_config_with_backup", save_mock)
         response = test_client.delete(
             f"/backend-api/api/llm/backends/{TEST_BACKEND_NAME}", headers=auth_headers
         )
@@ -663,7 +769,7 @@ class TestLLMBackend:
         assert backend.get("name") == TEST_BACKEND_NAME
         assert_backend_secrets_redacted(backend)
         assert_resilience_settings(backend)
-        ConfigLoader.save_config_with_backup.assert_called_once()
+        save_mock.assert_called_once()
 
         # 验证后端已被删除
         response = test_client.get(

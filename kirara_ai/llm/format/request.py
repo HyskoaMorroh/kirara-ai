@@ -3,6 +3,7 @@ from typing import Any, List, Literal, Optional, Union
 from pydantic import BaseModel
 
 from kirara_ai.llm.format.message import LLMChatMessage
+from kirara_ai.llm.rectifier import RectifierConfig
 from .tool import Tool as ExecutableTool
 
 class ToolParameters(BaseModel):
@@ -41,6 +42,16 @@ class Tool(BaseModel):
 class ResponseFormat(BaseModel):
     type: Optional[str] = None
 
+
+#: 受支持的推理强度档位。
+#:
+#: 各家 API 的字段名与取值都不同（OpenAI 是 `reasoning_effort` 字符串枚举，
+#: Claude 是 `thinking.budget_tokens` 整数，Gemini 是
+#: `thinkingConfig.thinkingBudget` 整数），因此这里只定义一个与厂商无关的档位，
+#: 由各适配器翻译成自家字段。直接把某一家的字段名当通用参数透传，
+#: 会让另外两家的请求被上游拒绝。
+ReasoningEffort = Literal["low", "medium", "high", "max"]
+
 class LLMChatRequest(BaseModel):
     """
     Attributes:
@@ -72,3 +83,13 @@ class LLMChatRequest(BaseModel):
     tool_choice: Optional[Any] = None
     logprobs: Optional[bool] = None
     top_logprobs: Optional[Any] = None
+    #: 推理强度。`None` 表示不指定，保持上游默认——新增字段不得改变既有行为。
+    #: 由各适配器翻译成自家字段，见 `ReasoningEffort` 的说明。
+    reasoning_effort: Optional[ReasoningEffort] = None
+    #: 请求整流开关（需求 8）。`None` 表示按适配器默认（全开）处理。
+    #:
+    #: 之所以挂在请求上而不是让适配器读供应商配置：适配器只拿到凭据配置
+    #: （例如 `ClaudeConfig`），读不到 `LLMBackendConfig`。而整流开关是
+    #: **每供应商**的——队列里 P1 是自建 Anthropic 网关、P2 是不支持思考的
+    #: 兼容接口时，两者必须各按自己的配置走。与 `reasoning_effort` 同一条通道。
+    rectifier: Optional[RectifierConfig] = None

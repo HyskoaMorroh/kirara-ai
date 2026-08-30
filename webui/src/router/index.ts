@@ -66,6 +66,12 @@ const router = createRouter({
           meta: { title: '成本定价', requiresAuth: true }
         },
         {
+          path: '/llm/resilience',
+          name: 'llm-resilience',
+          component: () => import('@/views/llm/ResilienceView.vue'),
+          meta: { title: '容错状态', requiresAuth: true }
+        },
+        {
           path: '/workflow',
           name: 'workflow',
           component: () => import('@/views/workflow/WorkflowList.vue')
@@ -161,8 +167,17 @@ const router = createRouter({
           children: [
             {
               path: '',
-              redirect: '/tracing/llm',
+              redirect: '/tracing/statistics',
               name: 'tracing-index'
+            },
+            {
+              path: 'statistics',
+              name: 'usage-statistics',
+              component: () => import('@/views/tracing/UsageStatisticsView.vue'),
+              meta: {
+                title: '使用统计',
+                requiresAuth: true
+              }
             },
             {
               path: 'llm',
@@ -179,6 +194,15 @@ const router = createRouter({
               component: () => import('@/views/tracing/llm/LLMTraceDetail.vue'),
               meta: {
                 title: 'LLM请求详情',
+                requiresAuth: true
+              }
+            },
+            {
+              path: 'delivery',
+              name: 'delivery-timeline',
+              component: () => import('@/views/tracing/DeliveryTimelineView.vue'),
+              meta: {
+                title: '投递时间线',
                 requiresAuth: true
               }
             }

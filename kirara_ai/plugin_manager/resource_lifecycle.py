@@ -587,6 +587,11 @@ class ResourceLifecycleService:
             "resource_id",
             "resource_version",
             "resource_sha256",
+            # 供应商配置的审计对象是「哪个后端」。没有它，一条
+            # `llm_backend / update` 记录只能证明「有人改过某个上游」，
+            # 回答不了「改的是哪一个」——那等于没有留痕。
+            # 后端名是用户自取的配置标签，不是凭据；凭据本身永远不进这里。
+            "backend_name",
             "snapshot_sha256",
             "agent_id",
             "model_id",

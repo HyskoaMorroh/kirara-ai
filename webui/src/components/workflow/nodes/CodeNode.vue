@@ -1,12 +1,53 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { Handle, Position, useVueFlow, type Connection } from '@vue-flow/core'
+import { computed, inject, type ComputedRef } from 'vue'
+import { Handle, Position, type Connection } from '@vue-flow/core'
 import { getTypeColor } from '@/utils/node-colors'
 import { CodeOutline } from '@vicons/ionicons5'
 import { NIcon } from 'naive-ui'
+import { CODE_NODE_MAX_WIDTH, CODE_NODE_MIN_WIDTH } from '../useLayout'
 
 const props = defineProps(['id', 'data', 'isValidConnection'])
-const { getHandleConnections } = useVueFlow()
+
+/** 画布下发的问题汇总；未在画布内使用（如节点列表预览）时为空 */
+type NodeIssue = { count: number; severity: 'error' | 'warning'; text: string }
+const nodeIssues = inject<ComputedRef<Map<string, NodeIssue>> | null>('workflowNodeIssues', null)
+
+/**
+ * 本节点的问题角标。
+ *
+ * 与 CustomNode 同一套：脚本节点的 `code_node_without_ports` 警告此前只出现在
+ * 工具栏的问题列表里，节点本身没有任何提示，于是一个零端口的脚本节点看起来
+ * 就是「一个连不上线的坏框」。角标解决「哪个节点有问题」。
+ */
+const nodeIssue = computed<NodeIssue | null>(() => {
+  if (!nodeIssues?.value || !props.id) return null
+  return nodeIssues.value.get(props.id) || null
+})
+
+/**
+ * 两侧端口都为空。
+ *
+ * 脚本节点的端口是按实例动态声明的（后端 `internal:code` 的类级 inputs/outputs
+ * 为空，实例在 `__init__` 里按配置构建），所以刚拖进来的节点确实一个端口都没有。
+ * 这是有意的边界而不是故障，但必须说出来，并给出下一步动作。
+ */
+const hasNoPorts = computed(
+  () =>
+    (props.data?.inputs?.length ?? 0) === 0 &&
+    (props.data?.outputs?.length ?? 0) === 0
+)
+
+/**
+ * 节点宽度上下限由 useLayout.ts 统一定义并在这里内联绑定。
+ *
+ * 与 CustomNode 同一处理：CSS 里写死 200/300px 而布局估算另有一套常量时，
+ * 两边一旦不同步，dagre 就会按错误的宽度留空隙。CustomNode 已经收敛到常量，
+ * 代码节点此前没跟上，是同一个缺陷的残留。
+ */
+const nodeWidthStyle = computed(() => ({
+  minWidth: `${CODE_NODE_MIN_WIDTH}px`,
+  maxWidth: `${CODE_NODE_MAX_WIDTH}px`
+}))
 
 // 获取短ID
 const shortId = computed(() => {
@@ -40,17 +81,12 @@ const portTitle = (port: { label?: string; name: string; type?: string; descript
 }
 
 // 连接验证
+//
+// 「一个输入只允许一条边」这条规则**不在这里**判定：它原先在这里
+// `return false` 了事，而 vue-flow 在 Handle 判定 invalid 时不会触发
+// `onConnect`，于是这条拒绝永远静默——现象与类型不兼容一模一样（线弹回来），
+// 用户无从判断该删掉已有的线还是该换端口。现在交给画布统一判定并给出文案。
 const isValidConnection = (connection: Connection) => {
-  // 一个输入只能有一个连接
-  const incomers = getHandleConnections({
-    id: connection.targetHandle,
-    nodeId: connection.target,
-    type: 'target'
-  })
-  if (incomers.length > 0) {
-    return false
-  }
-
   if (props.isValidConnection) {
     return props.isValidConnection(connection)
   }
@@ -67,7 +103,16 @@ const codePreview = computed(() => {
 </script>
 
 <template>
-  <div class="code-node">
+  <div class="code-node" :style="nodeWidthStyle">
+    <!-- 问题角标：错误红、警告黄，鼠标悬停显示全部问题文字（与 CustomNode 同一套） -->
+    <div
+      v-if="nodeIssue"
+      class="node-issue-badge"
+      :class="nodeIssue.severity === 'error' ? 'node-issue-error' : 'node-issue-warning'"
+      :title="nodeIssue.text"
+    >
+      {{ nodeIssue.count }}
+    </div>
     <div class="code-node-header">
       <div class="header-content">
         <span class="node-label">{{ data.label }}</span>
@@ -75,8 +120,17 @@ const codePreview = computed(() => {
       </div>
     </div>
 
+    <!--
+      零端口空态。
+      脚本节点的端口按实例动态声明，刚拖进来时两侧确实都是空的——这是有意的
+      边界，不是故障。直接说出来并指向配置面板，比留一个连不上线的空框好得多。
+    -->
+    <div v-if="hasNoPorts" class="ports-empty-state">
+      尚未定义端口，暂时无法连线；请在右侧配置面板添加输入或输出端口。
+    </div>
+
     <!-- 端口双列布局 -->
-    <div class="ports-container">
+    <div v-else class="ports-container">
       <!-- 左侧输入端口 -->
       <div class="port-column input-ports">
         <div v-for="input in data.inputs" :key="input.name" class="port-container">
@@ -137,11 +191,57 @@ const codePreview = computed(() => {
   );
   border-radius: var(--radius-sm);
   box-shadow: var(--box-shadow-sm, var(--box-shadow, 0 3px 10px rgba(0, 0, 0, 0.15)));
+  /* min-width / max-width 由 useLayout.ts 的常量内联注入，见 nodeWidthStyle；
+     这里只保留回退值，防止内联样式因故缺失时节点塌成一条。
+     两处数值必须与 CODE_NODE_MIN_WIDTH / CODE_NODE_MAX_WIDTH 一致，
+     由 webui/tests/workflow-node-width-source.test.ts 校验。 */
   min-width: 200px;
   max-width: 300px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   border: 1px solid var(--node-border-color, rgba(0, 0, 0, 0.06));
   color: var(--text-color, #333);
+  /* 问题角标绝对定位在右上角，需要节点自身作为定位上下文 */
+  position: relative;
+}
+
+/* 问题角标：不占据版式空间，所以不会影响 useLayout 的尺寸估算 */
+.node-issue-badge {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-xs, 11px);
+  line-height: 18px;
+  text-align: center;
+  font-weight: 600;
+  color: #ffffff;
+  box-shadow: var(--box-shadow-sm, 0 2px 6px rgba(0, 0, 0, 0.2));
+  z-index: 5;
+  cursor: help;
+}
+
+.node-issue-error {
+  background-color: var(--error-color, #d03050);
+}
+
+.node-issue-warning {
+  background-color: var(--warning-color, #f0a020);
+}
+
+/*
+  零端口空态：占位高度与端口列相近，避免添加第一个端口时节点高度突然跳变，
+  从而触发一次不必要的重叠检测。
+*/
+.ports-empty-state {
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  background-color: var(--node-muted-bg, rgba(0, 0, 0, 0.01));
+  border-bottom: 1px dashed var(--node-border-color, rgba(0, 0, 0, 0.08));
+  font-size: var(--font-size-sm, 12px);
+  line-height: 1.5;
+  color: var(--text-color-tertiary, #666);
 }
 
 .code-node-header {

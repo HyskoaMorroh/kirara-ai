@@ -164,7 +164,7 @@ Kirara 不承担外部 QQ 登录器职责，但必须可靠管理自己到 OneBo
 - 原始项目约束：`docs/superpowers/plans/2026-08-17-kirara-ai-excellence-overhaul.md`
 - 当前现场：`docs/superpowers/plans/2026-08-23-handoff.md`
 - 用户验收附件：桌面 `1.txt`，第 17.1 至 24.5 条
-- 本地参考：`C:/Users/devin/OneDrive/Desktop/cc-switch-main` 与 `ccs截图`
+- 本地参考：操作者本机桌面的 `cc-switch-main` 与 `ccs截图`
 - 同类项目：`n8n-io/n8n`、`langgenius/dify`、`BerriAI/litellm`、
   `open-webui/open-webui` 的公开仓库与文档
 - Vue 组件行为依据：Vue 3 官方文档的 props/watch 生命周期说明；本次实现仍遵循

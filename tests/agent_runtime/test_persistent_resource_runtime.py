@@ -633,9 +633,21 @@ async def test_real_downloaded_agent_browser_skill_enters_persistent_runtime(tmp
             "qa-fallback",
         ]
         system = llm.requests[1].messages[0].content[0].text
-        assert downloaded_skill in system
+        # 渐进披露（需求 10，与 cc-switch / Claude Code 同一原理）：真实下载的这份
+        # SKILL.md 带前置元数据，因此系统提示词里只有一行目录，正文由
+        # `skill_<id>` 工具在模型真的要用时取回——而不是每一轮都整篇塞进上下文。
+        #
+        # 这里断言的是「模型真的拿得到这份技能」这件事没变，变的只是拿法：
+        # 目录里有它的名字与用途，工具列表里有对应的可调用工具。
+        skill_tool_name = f"skill_{installed['resource_id']}"
+        assert "agent-browser" in system
+        assert skill_tool_name in system
+        # 正文不在系统提示词里——这正是这次改动省下的那部分成本。
+        assert "agent-browser skills get core" not in system
         assert "我是上班族" in system
-        assert "resolve-library-id" in {tool.name for tool in llm.requests[1].tools}
+        offered_tools = {tool.name for tool in llm.requests[1].tools}
+        assert "resolve-library-id" in offered_tools
+        assert skill_tool_name in offered_tools
         assert result.snapshot is not None
         skill_binding = next(
             item
@@ -668,3 +680,123 @@ async def test_real_downloaded_agent_browser_skill_enters_persistent_runtime(tmp
         }
     finally:
         await mcp.stop_server("context7")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
+async def test_calling_the_real_skill_tool_returns_the_downloaded_body(tmp_path: Path):
+    """模型调用 `skill_<id>` 时，拿回的必须是**真实下载的那份正文**。
+
+    上一个用例证明了广告与工具都在，但那还不足以说明技能真的能被用上——
+    渐进披露只有在「调用之后正文确实到达模型」时才成立。少了这一跳，
+    我们就只是把整篇注入换成了一句谁也兑现不了的目录，
+    而那比整篇注入更糟：界面上技能显示已启用，实际效果是零。
+
+    这里用真实下载的 agent-browser SKILL.md（不是测试桩），
+    并断言第二轮请求的 tool 消息里出现了正文中的具体命令。
+    """
+
+    repo_root = Path(__file__).resolve().parents[2]
+    downloaded_root = (
+        repo_root
+        / ".qa-real-agent-browser-20260827"
+        / "resources"
+        / "installed"
+        / "skill.c914025169da0bca"
+        / "1.0.0"
+    )
+    assert (downloaded_root / "SKILL.md").is_file()
+    downloaded_skill = (downloaded_root / "SKILL.md").read_text(encoding="utf-8")
+
+    lifecycle = ResourceLifecycleService(tmp_path / "vps-data")
+    catalog = ResourceCatalogService(lifecycle)
+    _ensure_builtins_after_legacy_prompt(lifecycle, catalog)
+    lifecycle.enable("prompt.office-research", confirmed=True)
+    installed = _install_downloaded_skill(lifecycle, downloaded_root)
+    lifecycle.enable(installed["resource_id"], confirmed=True)
+    resource_id = installed["resource_id"]
+    skill_tool_name = f"skill_{resource_id}"
+
+    def binding(rid, resource_type):
+        return lifecycle.resolve_binding(
+            rid,
+            resource_type,
+            version=lifecycle.get_resource(rid)["current_version"],
+            enabled=True,
+        )
+
+    agent = AgentDefinition(
+        agent_id="skill-tool-agent",
+        model_priority=("qa-fallback",),
+        capabilities=frozenset({"research"}),
+        prompt_bindings=(binding("prompt.office-research", "prompt"),),
+        skill_bindings=(binding(resource_id, "skill"),),
+        max_tool_iterations=2,
+    )
+    registry = AgentRegistry(tmp_path / "vps-data")
+    registry.register(agent)
+    registry.set_default(agent.agent_id)
+
+    llm = ControlledLLM(
+        {
+            "qa-fallback": [
+                LLMChatResponse(
+                    model="qa-fallback",
+                    message=Message(
+                        role="assistant",
+                        content=[],
+                        tool_calls=[
+                            ToolCall(
+                                id="skill-call",
+                                type="function",
+                                function=Function(name=skill_tool_name, arguments={}),
+                            )
+                        ],
+                    ),
+                ),
+                LLMChatResponse(
+                    model="qa-fallback",
+                    message=Message(
+                        role="assistant",
+                        content=[LLMChatTextContent(text="browser automation planned")],
+                    ),
+                ),
+            ]
+        }
+    )
+    executor = AgentRuntimeExecutor(
+        agent_registry=registry,
+        llm_manager=llm,
+        mcp_manager=_EmptyMCPManager(),
+        resource_service=ResourceLifecycleService(tmp_path / "vps-data"),
+    )
+
+    result = await executor.run(_context(), _message("open a browser and read the page"))
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert result.text == "browser automation planned"
+    # 两轮：第一轮模型要技能，第二轮带着技能正文作答。
+    assert len(llm.requests) == 2
+    tool_messages = [
+        part
+        for message in llm.requests[1].messages
+        if message.role == "tool"
+        for part in message.content
+    ]
+    assert tool_messages, "第二轮请求里没有 tool 消息，技能正文没有到达模型"
+    body = "\n".join(str(getattr(part, "content", "")) for part in tool_messages)
+    # 正文里的具体命令必须出现：这是「真的读到了那份文件」的证据，
+    # 而不是返回了一句占位说明。
+    assert "agent-browser skills get core" in body
+    assert body.strip() in downloaded_skill
+    # 没有任何一个 tool 结果是错误——空技能、未知技能都会以 isError 返回。
+    assert not any(getattr(part, "isError", False) for part in tool_messages)
+
+
+class _EmptyMCPManager:
+    """没有 MCP 服务器的运行时：本用例只关心技能这一条链路。"""
+
+    servers: dict = {}
+
+    def get_tools(self):
+        return {}

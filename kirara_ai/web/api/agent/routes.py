@@ -85,6 +85,7 @@ def _agent_payload(agent: AgentDefinition, registry: AgentRegistry) -> dict[str,
         "mcp_allowlist": sorted(agent.mcp_allowlist),
         "allow_tools": agent.allow_tools,
         "max_tool_iterations": agent.max_tool_iterations,
+        "teammate_agent_ids": list(agent.teammate_agent_ids),
         "relations": registry.relation_summary(agent.agent_id),
     }
 
@@ -153,6 +154,7 @@ def _agent_from_payload(payload: dict[str, Any], existing: AgentDefinition | Non
         "mcp_allowlist": existing.mcp_allowlist if existing else frozenset(),
         "allow_tools": existing.allow_tools if existing else True,
         "max_tool_iterations": existing.max_tool_iterations if existing else 8,
+        "teammate_agent_ids": existing.teammate_agent_ids if existing else (),
     }
     for name in (
         "display_name",
@@ -163,7 +165,15 @@ def _agent_from_payload(payload: dict[str, Any], existing: AgentDefinition | Non
     ):
         if name in payload:
             base[name] = payload[name]
-    for name in ("model_priority", "provider_allowlist", "capabilities", "mcp_allowlist"):
+    for name in (
+        "model_priority",
+        "provider_allowlist",
+        "capabilities",
+        "mcp_allowlist",
+        # 队友列表与其他标识列表同一校验：非空字符串组成的数组。
+        # 自委派与未知 Agent 分别由 AgentDefinition 与注册表拒绝。
+        "teammate_agent_ids",
+    ):
         if name in payload:
             base[name] = _string_list(payload, name)
     for name, resource_type in (

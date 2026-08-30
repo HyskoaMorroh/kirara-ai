@@ -76,7 +76,14 @@ class FakeWebServer:
 
 def make_adapter(*, config=None, web_server=None, dispatcher=None):
     container = DependencyContainer()
-    config = config or OneBotConfig()
+    # 默认关掉发送节流。
+    #
+    # 节流是**产品默认开启**的防风控行为（页与页之间真的 sleep），
+    # 但在测试里它只是把分页用例拖成几十秒——一条 3000 字的消息分十几页，
+    # 每页等 1–2 秒。默认值本身有 `test_send_pacing.py` 专门守着，
+    # 这里关掉不会掩盖「默认应当开启」这条约束。
+    # 需要验证节流行为的用例显式传 config。
+    config = config or OneBotConfig(send_pacing_enabled=False)
     container.register(OneBotConfig, config)
     if web_server is not None:
         container.register(WebServer, web_server)
@@ -376,6 +383,10 @@ async def test_onebot_management_actions_reject_negative_durations():
 @pytest.mark.asyncio
 async def test_send_message_keeps_reply_and_mention_on_first_page():
     adapter = object.__new__(OneBotAdapter)
+    # 这条用例发一条会被切成十几页的长消息；节流默认开启（防 QQ 风控），
+    # 逐页真等会把它拖到二十多秒。这里断言的是「回复与 @ 只出现在第一页」，
+    # 与节流无关，所以显式关掉。
+    adapter.config = OneBotConfig(send_pacing_enabled=False)
     adapter.bot = SimpleNamespace(call_action=AsyncMock(return_value={"message_id": 1}))
     message = IMMessage(
         sender=ChatSender.get_bot_sender(),
@@ -883,3 +894,53 @@ async def test_messages_to_different_recipients_are_not_globally_serialized():
     )
 
     assert entered == 2
+
+
+@pytest.mark.asyncio
+async def test_single_account_actions_route_through_the_resolved_self_id():
+    """管理动作必须真的接住 `_action_self_id()` 的结果。
+
+    这三处曾写成 `self._action_self_id()` 而不赋值：返回值被丢掉，`self_id` 仍是
+    None。今天等价（无 recipient 时该函数只会抛错或返回 None），但那行读起来像
+    「解析了目标账号」而实际没有——一旦该函数学会解析单账号，丢弃就变成静默
+    路由到错误账号。这条用例把「结果被使用」钉住，而不是只钉当前的取值。
+    """
+    adapter = make_adapter()
+    adapter.connections = {"10001": {"last_heartbeat": 1.0}}
+    adapter.bot.call_action = AsyncMock(return_value={"status": "ok"})
+
+    resolved: list[object] = []
+
+    def resolve(recipient=None):
+        resolved.append(recipient)
+        return "10001"
+
+    adapter._action_self_id = resolve  # type: ignore[method-assign]
+
+    await adapter.recall_message("42")
+    await adapter.mute_user("200", "100", 60)
+    await adapter.kick_user("200", "100")
+
+    assert len(resolved) == 3, "三个动作都应向 `_action_self_id` 询问目标账号"
+    assert [call.kwargs["self_id"] for call in adapter.bot.call_action.await_args_list] == [
+        "10001",
+        "10001",
+        "10001",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_self_id_skips_resolution_entirely():
+    """显式传入 self_id 时不该再去解析：调用方已经指定了账号。"""
+    adapter = make_adapter()
+    adapter.connections = {"10001": {"last_heartbeat": 1.0}}
+    adapter.bot.call_action = AsyncMock(return_value={"status": "ok"})
+
+    def explode(recipient=None):  # pragma: no cover - 不应被调用
+        raise AssertionError("显式 self_id 时不应解析目标账号")
+
+    adapter._action_self_id = explode  # type: ignore[method-assign]
+
+    await adapter.recall_message("42", self_id="10002")
+
+    assert adapter.bot.call_action.await_args_list[0].kwargs["self_id"] == "10002"

@@ -28,6 +28,12 @@ data/frpc/
 data/db
 .venv/
 .env
+# 运行期 SQLite 数据库不属于源码：`data/mcp/audit.db` 与
+# `data/mcp/confirmations.db` 曾被误提交，里面是本机的 MCP 工具调用审计记录
+# 和一条待确认令牌摘要。`.dockerignore:31-33` 早已排除 `*.db`，Git 侧需要同样的规则。
+*.db
+*.sqlite
+*.sqlite3
 # uv.lock 必须随仓库分发：CI 与镜像构建都用 `uv sync --frozen` 按锁文件里记录的
 # sha256 校验安装，缺少它会直接失败（error: Unable to find lockfile at `uv.lock`）。
 .mypy_cache/
@@ -62,6 +68,21 @@ graphify-out/
 /.playwright-mcp/
 /.playwright-cli/
 /PATHFINDER-2026-08-21/
+# Superpowers 与 MemSearch 的本机工作目录：会话状态与 pid，不是项目源码。
+# 二者曾被误提交（a2bc1be、77ce6c7），.gitignore 无法反跟踪已入索引的文件，
+# 因此规则与一次 `git update-index --force-remove` 必须成对存在。
+/.superpowers/
+/.memsearch/
+# 本轮排查留下的一次性分析笔记，随任务失效，不属于可复现的产品内容。
+/findings.md
+/progress.md
+/task_plan.md
 # 本地探索期留下的授权说明草稿，不属于发布内容
 /.codex-red-host-authorization.txt
 .version-sync.lock
+# 与本项目无关的本机脚本（借款合同 DOCX 工具）。它们此前既未被跟踪也未被
+# 忽略，处在「一次 `git add .` 就会进仓库」的状态；这三个文件生成的文档
+# 含个人身份字段，绝不能随项目分发。
+/create_concise_loan_contract.js
+/update_loan_identity.py
+/update_loan_rate.py

@@ -40,6 +40,14 @@ RETRYABLE_ERROR_CATEGORIES = frozenset(
     }
 )
 
+#: 每个熔断器保留的状态迁移条数。
+#:
+#: 需求 21.3 要求熔断「记录触发与恢复证据」。快照只能回答「现在是什么状态」，
+#: 回答不了「什么时候、因为什么变成这个状态」——而后者才是复盘一次隔离所需的。
+#: 上界是刻意的：这份历史活在每个 Provider 的内存里，无界增长会让一个持续抖动的
+#: 上游把内存吃掉。64 条足够覆盖一次完整的 open → half-open → closed 反复。
+CIRCUIT_TRANSITION_HISTORY = 64
+
 
 def _status_code(error: BaseException) -> Optional[int]:
     for value in (
@@ -120,12 +128,59 @@ class CircuitBreaker:
         self.recovery_success_threshold = max(1, recovery_success_threshold)
         self._clock = clock
         self._lock = threading.RLock()
-        self._outcomes: Deque[bool] = deque(maxlen=max(1, history_size))
+        # 样本窗口至少要能容纳 min_requests 条结果：_should_open 的错误率分支
+        # 判断 len(outcomes) >= min_requests，窗口比它小的话该条件永假，
+        # 配置里的错误率阈值就被静默关掉，只剩连续失败阈值起作用。
+        # history_size 仍是下界，用来保证「窗口不至于太短」这一原本意图。
+        self._outcomes: Deque[bool] = deque(
+            maxlen=max(1, history_size, self.min_requests)
+        )
+
         self._consecutive_failures = 0
         self._state = CircuitState.CLOSED
         self._opened_at: Optional[float] = None
         self._half_open_probe_in_flight = False
         self._recovery_successes = 0
+        self._transitions: Deque[dict[str, Any]] = deque(
+            maxlen=CIRCUIT_TRANSITION_HISTORY
+        )
+
+    def _current_error_rate(self) -> float:
+        requests = len(self._outcomes)
+        if not requests:
+            return 0.0
+        return 1 - (sum(self._outcomes) / requests)
+
+    def _record_transition(
+        self,
+        previous: CircuitState,
+        current: CircuitState,
+        reason: str,
+        now: float,
+    ) -> None:
+        """Append one bounded, secret-free state-transition record.
+
+        字段是固定的六个，全部是数字或枚举字符串：这份历史会经
+        ``/llm/resilience/status`` 出到运维面板，不能带上游报文或凭据。
+        同状态到同状态不记录——那不是迁移，记下来只会淹没真正的变化。
+        """
+        if previous == current:
+            return
+        self._transitions.append(
+            {
+                "from_state": previous.value,
+                "to_state": current.value,
+                "reason": reason,
+                "at": now,
+                "failure_count": self._consecutive_failures,
+                "error_rate": self._current_error_rate(),
+            }
+        )
+
+    def transitions(self) -> tuple[dict[str, Any], ...]:
+        """Return the recent state transitions, oldest first."""
+        with self._lock:
+            return tuple(dict(item) for item in self._transitions)
 
     def _now(self, now: Optional[float]) -> float:
         return self._clock() if now is None else now
@@ -133,6 +188,14 @@ class CircuitBreaker:
     def _refresh_state(self, now: float) -> CircuitState:
         if self._state == CircuitState.OPEN and self._opened_at is not None:
             if now - self._opened_at >= self.recovery_timeout_seconds:
+                # open → half-open 由时间驱动，不由任何一次调用驱动。
+                # 因此它只能在这里记录：没有调用方会「知道」这一刻发生了迁移。
+                self._record_transition(
+                    CircuitState.OPEN,
+                    CircuitState.HALF_OPEN,
+                    "recovery_timeout",
+                    now,
+                )
                 self._state = CircuitState.HALF_OPEN
                 self._half_open_probe_in_flight = False
         return self._state
@@ -177,17 +240,34 @@ class CircuitBreaker:
             self._consecutive_failures = 0
             self._opened_at = None
             self._half_open_probe_in_flight = False
+            if current != CircuitState.CLOSED:
+                # 探测成功攒够阈值后真正闭合。这一条是「上游恢复了」的证据，
+                # 与「还在探测中」必须分开——后者不改变状态，也就没有迁移。
+                self._record_transition(
+                    current,
+                    CircuitState.CLOSED,
+                    "recovery_success",
+                    timestamp,
+                )
             self._state = CircuitState.CLOSED
             self._refresh_state(timestamp)
 
     def record_failure(self, now: Optional[float] = None) -> None:
         with self._lock:
             timestamp = self._now(now)
+            previous = self._state
             self._outcomes.append(False)
             self._consecutive_failures += 1
             self._half_open_probe_in_flight = False
             self._recovery_successes = 0
-            if self._state == CircuitState.HALF_OPEN or self._should_open():
+            if previous == CircuitState.HALF_OPEN or self._should_open():
+                if previous == CircuitState.HALF_OPEN:
+                    reason = "half_open_probe_failed"
+                elif self._consecutive_failures >= self.failure_threshold:
+                    reason = "failure_threshold"
+                else:
+                    reason = "error_rate"
+                self._record_transition(previous, CircuitState.OPEN, reason, timestamp)
                 self._state = CircuitState.OPEN
                 self._opened_at = timestamp
 

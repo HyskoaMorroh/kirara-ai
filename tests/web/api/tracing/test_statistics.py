@@ -273,6 +273,19 @@ async def test_statistics_groups_daily_trend_in_the_requested_timezone(
             "tokens": 30,
             "success": 1,
             "failed": 1,
+            # 四类拆分（需求 22.1）：这里的夹具只写了 `total_tokens`，
+            # 所以四项都是 0——而这本身是要断言的一件事：分桶不能因为
+            # 某几列是 NULL 就漏键，前端图表会读到 undefined 并画出空洞。
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            # 成本趋势（需求 22.2「统计页面要支持趋势」）：夹具没写价格快照，
+            # 所以这两条都是未定价。`cost_currency` 为 `None` 而不是编一个币种。
+            "unpriced_requests": 2,
+            "cost": "0",
+            "cost_currency": None,
+            "cost_by_currency": {},
         }
     ]
     assert {"overview", "daily_stats", "hourly_stats", "models", "backends"} <= payload.keys()

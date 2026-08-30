@@ -1,16 +1,96 @@
+# 三服务参考拓扑：两个 LLOneBot（各带一个 QQ 账号）+ 一个 Kirara。
+#
+# 复制为 docker-compose.yml 后使用，并把 .env.example 复制为 .env 填入实际值。
+# LLOneBot 侧的实际端口以参考镜像 llonebot.nix 的 Expose 为准：
+# 3000(OneBot HTTP) / 3001(OneBot WS) / 5600(Satori) / 3080(WebUI) / 13000(PMHQ)。
+# 该镜像**不**暴露 VNC 端口，因此这里不映射 5900/6080。
+#
+# 按需裁剪：
+# - 只跑一个 QQ 账号：删掉 llonebot2 服务，并把 .env 里的 LLONEBOT2_* 留空。
+# - QQ 走外部已有的 OneBot 实现：删掉两个 llonebot 服务，只留 kirara-agent。
+# Compose 只对实际启动的服务求值 `:?`，所以未使用的变量留空不会报错。
+
+networks:
+  # 显式共享网络：LLOneBot 需要用容器名解析到 Kirara 的反向 WebSocket 地址。
+  # 默认 bridge 下容器名不可解析，这是「配置看起来对但连不上」的最常见原因。
+  kirara-net:
+    driver: bridge
+
 services:
+  llonebot:
+    image: initialencounter/llonebot:latest
+    container_name: llonebot
+    restart: always
+    networks:
+      - kirara-net
+    environment:
+      # AUTH_TOKEN 由 .env 提供，会被传给 PMHQ 的 --auth-token。
+      # 留空等于开放一个无鉴权的本地控制端口，因此用 `:?` 强制必填。
+      - AUTH_TOKEN=${LLONEBOT1_AUTH_TOKEN:?Set LLONEBOT1_AUTH_TOKEN in .env}
+      - QUICK_LOGIN_QQ=${LLONEBOT1_QQ:?Set LLONEBOT1_QQ in .env}
+    volumes:
+      # 这两个挂载决定「重启后是否免扫码」：QQ 登录态与设备身份都在里面。
+      # `docker compose down` 删容器但不删这些宿主目录。
+      - ./QQ:/root/.config/QQ
+      - ./llonebot:/root/llonebot
+    ports:
+      - "3007:3000"               # OneBot HTTP
+      - "3004:3001"               # OneBot WebSocket
+      - "5600:5600"               # Satori（Kirara 不使用，按需保留）
+      - "8888:3080"               # LLOneBot WebUI：首次登录在这里扫码
+      - "127.0.0.1:13000:13000"   # PMHQ：可直接操作 QQ 客户端，只绑本机
+    privileged: true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 第二个 QQ 账号。**每个账号必须有自己的数据卷**：两个实例共用 ./QQ 会互相
+  # 覆盖登录态与设备标识，表现为「登录一个就把另一个挤下线」。
+  # 端口也必须整组错开，否则第二个容器起不来。
+  llonebot2:
+    image: initialencounter/llonebot:latest
+    container_name: llonebot2
+    restart: always
+    networks:
+      - kirara-net
+    environment:
+      - AUTH_TOKEN=${LLONEBOT2_AUTH_TOKEN:?Set LLONEBOT2_AUTH_TOKEN in .env}
+      - QUICK_LOGIN_QQ=${LLONEBOT2_QQ:?Set LLONEBOT2_QQ in .env}
+    volumes:
+      - ./QQ2:/root/.config/QQ
+      - ./llonebot2:/root/llonebot
+    ports:
+      - "3008:3000"               # OneBot HTTP
+      - "3006:3001"               # OneBot WebSocket
+      - "5601:5600"               # Satori
+      - "8889:3080"               # LLOneBot WebUI：第二个账号在这里扫码
+      - "127.0.0.1:13001:13000"   # PMHQ：同样只绑本机
+    privileged: true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   kirara-agent:
     image: ${DOCKERHUB_IMAGE:?Set DOCKERHUB_IMAGE in the server .env file}
     container_name: kirara-agent
     restart: always
+    networks:
+      - kirara-net
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
+      # 所有持久化状态都在 DATA_PATH 之下；只挂载这一个目录即可。
+      DATA_PATH: /app/data
     volumes:
       - ./data:/app/data
     ports:
       - "8759:8080"
+    # 匿名 HTTP liveness；认证后的 readiness 由发布门禁单独验证。
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1', 8080), 2); s.close()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3).read(1)"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -20,3 +100,27 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+# 两个 QQ 账号如何接到同一个 Kirara：
+#
+# 在 Kirara 的「IM 适配器」里为**每个账号各建一个 OneBot 适配器实例**，
+# 各自会生成一个独立的反向 WebSocket 地址：
+#
+#     ws://kirara-agent:8080/im/websocket/onebot/<第一个实例生成的段>/ws
+#     ws://kirara-agent:8080/im/websocket/onebot/<第二个实例生成的段>/ws
+#
+# 然后分别填到 8888（账号一）与 8889（账号二）的 LLOneBot WebUI 里。
+#
+# - `<...生成的段>` 是随机段，由适配器自动生成并在界面展示，不要手写；
+#   写错会得到 404，而不是一条「连接失败」提示。
+# - 用容器名 `kirara-agent` 而不是 127.0.0.1：每个容器有自己的 loopback。
+#   这也是上面必须有 `networks:` 的原因。
+# - Token 分别填 .env 里的 LLONEBOT1_AUTH_TOKEN / LLONEBOT2_AUTH_TOKEN。
+#   两个账号用同一个 Token 也能连通，但事故排查时无法区分来源，不建议。
+#
+# 也可以让两个账号复用**同一个**适配器实例（OneBot 允许多账号共享一条反向连接，
+# Kirara 按事件里的 self_id 区分）。代价是两个账号的连接状态与失败原因在健康面板上
+# 合并成一条，出问题时分不清是哪个账号。除非确有理由，建议一个账号一个实例。
+#
+# 启动顺序不影响结果：Kirara 先起就等待接入；LLOneBot 先起就按自身间隔重连
+# 直到 Kirara 就绪。

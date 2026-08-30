@@ -33,6 +33,39 @@ export interface LLMBackend {
   circuit_min_requests?: number
   circuit_recovery_timeout_seconds?: number
   circuit_recovery_success_threshold?: number
+  /**
+   * 推理强度档位；留空表示沿用上游默认。
+   *
+   * 与上面那批容错字段不同，这一项**不进** `resilienceDefaults()`：
+   * 后端默认值是 `None`（不指定），如果前端替它填一个具体档位，
+   * 就等于让「不指定」这个状态无法表达，而不支持思考的模型收到该字段会报错。
+   */
+  reasoning_effort?: 'low' | 'medium' | 'high' | 'max' | null
+  /**
+   * 移除该供应商回复里的 AI 自我署名。
+   *
+   * 与 `reasoning_effort` 同理不进 `resilienceDefaults()`：后端默认 `false`，
+   * 而这是一个**会改写模型输出**的开关，默认值只能是「不改写」。
+   * 声明在这里的作用是让编辑表单把它一起提交——类型里没有这个键时，
+   * payload 里也不会有它。
+   */
+  hide_ai_attribution?: boolean
+  /**
+   * 请求整流开关（需求 8）。
+   *
+   * 与 `hide_ai_attribution` 同理不进 `resilienceDefaults()`：后端默认全开，
+   * 前端补一份 `true` 会让用户在 config.yaml 里关掉的那次被一次无关的编辑
+   * 重新打开。后端的 `exclude_unset=True` 只能救「没发这个键」，
+   * 救不了「前端补发了一个值」。
+   *
+   * 语义见 `kirara_ai/llm/rectifier.py`：只有上游**真的拒绝**且错误命中
+   * 白名单时才改一处并重试一次。
+   */
+  rectifier_enabled?: boolean
+  rectify_thinking_signature?: boolean
+  rectify_thinking_budget?: boolean
+  /** 会改变模型看到的内容（图片被换成占位文本），因此单列一项可关。 */
+  rectify_media_fallback?: boolean
 }
 
 /**
@@ -80,32 +113,114 @@ export const resilienceDefaults = (): Required<
   circuit_recovery_success_threshold: 2
 })
 
-/** 单个 Provider 的熔断与最近尝试快照，来自 `GET /llm/resilience/status`。 */
-export interface ProviderResilienceStatus {
+/**
+ * 单个 Provider 的熔断与最近尝试快照，来自 `GET /llm/resilience/status`。
+ *
+ * **字段形状以后端 `LLMManager.get_resilience_status()` 为准**：熔断快照是
+ * `**breaker.snapshot()` 平铺进来的，不是嵌在 `circuit` 对象里。此前这里声明成
+ * 嵌套形状且带了后端并不返回的 `error_summary` / `ttft_seconds`——因为这个类型
+ * 从来没有调用点，类型与实际响应不符的问题一直没被发现。有了调用点之后，
+ * 这类偏差会在 `type-check` 阶段暴露，而不是等到运行时读到 undefined。
+ */
+export interface ProviderResilienceAttempt {
+  trace_id: string
   provider: string
-  priority: number
-  enable: boolean
-  participate_in_failover: boolean
-  circuit: {
-    state: 'closed' | 'open' | 'half-open'
-    failure_count: number
-    error_rate: number
-    requests: number
-    recovery_successes: number
-    recovery_success_threshold: number
-    next_recovery_time: number | null
-  }
-  recent_attempts: {
-    model: string
-    attempt: number
-    retry_index: number
-    success: boolean
-    error_category: string | null
-    error_summary: string | null
-    ttft_seconds: number | null
-    partial_output: boolean
-  }[]
+  model: string
+  attempt: number
+  retry_index: number
+  success: boolean
+  error_category: string | null
+  started_at: number
+  completed_at: number | null
+  first_byte_at: number | null
+  /** 已向用户产出过内容：此时不得静默切换供应商并拼接重复回复。 */
+  partial_output: boolean
 }
+
+/**
+ * 一次熔断状态迁移。
+ *
+ * 与 `ProviderResilienceRow` 的当前快照分属两件事：快照回答「现在是什么状态」，
+ * 这里回答「什么时候、因为什么变成这个状态」。只有后者能复盘一次隔离——
+ * 轮询间隔内发生的 open → half-open → closed 在快照里完全不可见。
+ */
+export interface ProviderCircuitTransition {
+  from_state: 'closed' | 'open' | 'half-open'
+  to_state: 'closed' | 'open' | 'half-open'
+  /**
+   * `failure_threshold` 连续失败达标；`error_rate` 错误率达标（处置不同：
+   * 前者调阈值，后者查上游稳定性）；`recovery_timeout` 等待期走完转半开；
+   * `recovery_success` 探测成功攒够阈值后闭合；`half_open_probe_failed`
+   * 半开探测又失败、重新打开。
+   */
+  reason:
+    | 'failure_threshold'
+    | 'error_rate'
+    | 'recovery_timeout'
+    | 'recovery_success'
+    | 'half_open_probe_failed'
+  /** 单调时钟秒，与 `next_recovery_time` 同一时基。 */
+  at: number
+  failure_count: number
+  error_rate: number
+}
+
+/**
+ * 上游在响应头里报告的限额余量。
+ *
+ * 每一项都可以是 `null`——那表示**上游没报这一项**，与「这一项是 0」是两件不同
+ * 的事，且只有后者要报警。很多兼容端点根本不返回限额头，把「没上报」显示成 0
+ * 会造出一个不存在的紧急情况。
+ *
+ * 请求数与 Token 两组余量分开：它们会分别见底，且处置相反——请求数见底要降频，
+ * Token 见底要缩短上下文。
+ */
+export interface RateLimitHeadroom {
+  limit_requests: number | null
+  remaining_requests: number | null
+  limit_tokens: number | null
+  remaining_tokens: number | null
+  reset_requests_seconds: number | null
+  reset_tokens_seconds: number | null
+  /** 上游明确要求的等待秒数（`retry-after`），通常只在 429 时出现。 */
+  retry_after_seconds: number | null
+  /** 余量比例 0–1。缺 limit 或 remaining 任一半时为 `null`，不反推。 */
+  request_headroom: number | null
+  token_headroom: number | null
+}
+
+export interface ProviderResilienceRow {
+  model: string
+  provider: string
+  /** 数字越小越优先；队列即按它排序。 */
+  priority: number
+  state: 'closed' | 'open' | 'half-open'
+  failure_count: number
+  error_rate: number
+  requests: number
+  recovery_successes: number
+  recovery_success_threshold: number
+  /** 熔断打开时的预计恢复时刻（单调时钟秒），closed/half-open 为 null。 */
+  next_recovery_time: number | null
+  recent_error_category: string | null
+  recent_attempts: ProviderResilienceAttempt[]
+  /** 最近 10 次状态迁移，最早在前。 */
+  recent_transitions: ProviderCircuitTransition[]
+  /**
+   * 上游报告的限额余量；上游从不报这些头时为 `null`。
+   *
+   * 与熔断状态同行，因为两者回答同一个问题的两面：「这家现在能不能用」。
+   * 熔断说的是「它已经坏了」，余量说的是「它还剩多少、多久后会坏」——
+   * 后者是唯一能在撞上限之前给出信号的东西。
+   */
+  rate_limit: RateLimitHeadroom | null
+}
+
+/**
+ * 兼容别名：早期声明使用了这个名字。保留导出以免外部引用断裂，
+ * 但字段已按后端真实响应更正。
+ */
+export type ProviderResilienceStatus = ProviderResilienceRow
 
 export interface ConfigSchema {
   title: string
@@ -246,6 +361,17 @@ export const llmApi = {
     return http.get<PricingCatalogResponse>('/llm/pricing')
   },
 
+  /**
+   * 供应商容错状态：优先级队列、熔断三态与最近尝试记录。
+   *
+   * 后端一直提供这个接口（`GET /llm/resilience/status`），但前端从未调用——
+   * 「故障转移队列可查」在产品上等于只能 curl。这里补上调用点，
+   * 由模型管理页的容错状态面板消费。
+   */
+  getResilienceStatus(signal?: AbortSignal) {
+    return http.get<{ data: ProviderResilienceRow[] }>('/llm/resilience/status', { signal })
+  },
+
   createPricing(payload: { expected_revision: number; version: PricingVersion }) {
     return http.post<{ data: { revision: number; version: PricingVersion } }>('/llm/pricing', payload)
   },
@@ -280,5 +406,32 @@ export const llmApi = {
 
   exportPricing() {
     return http.fetch('/llm/pricing/export', { method: 'GET' })
+  },
+
+  /**
+   * 导出供应商配置文档（**不含凭据**）。
+   *
+   * 走 `http.fetch` 而不是 `http.get`：后端带 `Content-Disposition`，
+   * 需要拿到原始 `Response` 才能按它命名下载文件；`http.get` 会把响应体
+   * 当 JSON 解析，头信息就丢了。
+   */
+  exportBackends() {
+    return http.fetch('/llm/backends/export', { method: 'GET' })
+  },
+
+  /**
+   * 导入供应商配置文档。
+   *
+   * `overwrite` 默认 `false`：同名后端由后端返回 409 并列出冲突名单，
+   * 由用户确认后再重发 `overwrite: true`。静默覆盖会让目标机器上已填好的
+   * 凭据与容错参数被一份导出文件冲掉。
+   *
+   * body 只允许 `document` 与 `overwrite`——后端对未知字段直接 400。
+   */
+  importBackends(payload: { document: unknown; overwrite?: boolean }) {
+    return http.post<{ data: { imported_count: number; overwritten: string[] } }>(
+      '/llm/backends/import',
+      { document: payload.document, overwrite: payload.overwrite ?? false }
+    )
   }
 }

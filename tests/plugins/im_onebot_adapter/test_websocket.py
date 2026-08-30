@@ -55,6 +55,32 @@ def test_reverse_websocket_accepts_event_roles_and_updates_health(role: str):
         assert adapter.self_id == "10001"
 
 
+@pytest.mark.parametrize("role", ["Universal", "EVENT", "Api"])
+def test_reverse_websocket_accepts_client_role_regardless_of_case(role: str):
+    """`x-client-role` 的**值**必须大小写不敏感。
+
+    LLOneBot / LuckyLilliaBot 发送的是首字母大写的 `'Universal'`
+    （`src/onebot11/connect/ws.ts`），而 aiocqhttp 自己是 `.lower()` 之后再比
+    （`aiocqhttp/__init__.py:506`）。我们在它前面加的这道预检只 casefold 了
+    **头名**、没有 casefold **头值**，于是最常见的 OneBot 实现会被我们以
+    4400 拒掉，而被我们包装的库本来是接受的——预检比被包装者更严格，
+    等于把可用的上游挡在门外，且对方每 3 秒重连一次，形成死循环。
+    """
+    adapter, client, websocket_path = make_client()
+
+    with client, client.websocket_connect(
+        websocket_path,
+        headers={
+            "Authorization": "Bearer onebot-secret",
+            "X-Client-Role": role,
+            "X-Self-ID": "10001",
+        },
+    ):
+        pass
+
+    assert adapter.get_health_snapshot().last_disconnect_reason != "invalid_client_role"
+
+
 def test_reverse_websocket_accepts_api_role():
     _, client, websocket_path = make_client()
 

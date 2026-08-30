@@ -43,6 +43,24 @@ llms:
       models:                    # 支持的模型列表
         - "gpt-4"
         - "gpt-4-turbo"
+      # 推理强度：low / medium / high / max，留空（或整行删除）表示不指定，
+      # 沿用上游默认。各家字段不同，由适配器翻译：OpenAI 系为 reasoning_effort，
+      # Claude 为 thinking 预算，Gemini 为 thinkingConfig。
+      # 注意：不支持扩展思考的模型收到该字段会报错，所以「不指定」是默认行为。
+      # reasoning_effort: max
+      # 移除该供应商回复里的 AI 自我署名（如「作为一个 AI 助手」「本回复由 AI 生成」）。
+      # 默认 false：这是会改写模型输出的开关。只删署名句，不动答案、代码块、
+      # 工具参数与用量统计；细节见 docs/EXTENDING.md 第 9.2 节。
+      # hide_ai_attribution: false
+      # 故障转移队列优先级，数字越小越优先；完整的重试/超时/熔断参数见
+      # docs/OBSERVABILITY.md 与 WebUI 的「自动故障转移」卡片。
+      # priority: 100
+
+# 版本更新检查
+update:
+  # 禁用启动时的自动版本检查。离线或内网部署既查不到 PyPI 又要等超时；
+  # 打开后完全不发起请求，WebUI 的「检查更新」按钮仍然可用。
+  disable_auto_check: false
 
 # 默认配置
 defaults:
@@ -65,3 +83,22 @@ memory:
 agent_runtime:
   context_char_threshold: 0  # 上下文压缩阈值，0 表示保持默认行为
   debug_hooks_enabled: true  # 注册受控的 Agent 调试 Hook Handler
+  # 声明哪些 IM 渠道身份属于项目创建者。
+  #
+  # 默认为空。不声明时聊天侧拿不到任何身份，因此 MCP 工具与 command 型 Hook
+  # 在 IM 渠道上一律不可用（这是升级前的行为）。声明之后，来自这些身份的消息
+  # 会带上创建者 principal，从而能像在 WebUI 里一样使用受保护的插件能力。
+  #
+  # 三点务必看清：
+  #   1. 渠道与发送者一起比。QQ 号和 Telegram 用户 ID 可能撞号。
+  #   2. 群聊默认不生效。群里所有人都看得到你发的指令并照抄；照抄的人拿不到
+  #      身份，但把宿主操作暴露在多人可见的会话里是另一回事。
+  #      要开必须显式写 allow_group_chat: true。
+  #   3. 这里填的是**你自己**在该渠道上的用户标识，不是机器人的。
+  creator_channel_identities: []
+  # creator_channel_identities:
+  #   - channel_type: onebot        # webui / onebot / qqbot / telegram / wecom
+  #     sender_scope: "10001"       # 你自己的 QQ 号
+  #     # account_scope: "20002"    # 可选：只认经由这个机器人账号收到的消息
+  #     # adapter_instance: onebot-main  # 可选：限定适配器实例
+  #     # allow_group_chat: false   # 群聊里是否生效，默认关闭

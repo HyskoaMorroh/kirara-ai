@@ -210,7 +210,12 @@ def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck
         "initializing": 0,
         "credential_rejected": 0,
         "upstream_refused": 0,
+        "storage_unavailable": 0,
     }
+    # 上游自身的扫码登录状态。与 counts 分开统计：`waiting` 说的是「Kirara 还没
+    # 被连上」，`qr_waiting_scan` 说的是「上游连上了、但 QQ 还没登录」。
+    # 前者要查地址与 Token，后者要去扫码——混成一个数字会把处置指向错误方向。
+    qr_states: dict[str, int] = {}
     for name in enabled:
         if not manager.is_adapter_running(name):
             counts["disconnected"] += 1
@@ -225,6 +230,10 @@ def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck
                 counts[snapshot.status] += 1
             else:
                 counts["disconnected"] += 1
+            qr_login = getattr(snapshot, "qr_login", None)
+            if qr_login is not None:
+                key = f"qr_{qr_login.state}"
+                qr_states[key] = qr_states.get(key, 0) + 1
         else:
             counts["connected"] += 1
 
@@ -233,12 +242,26 @@ def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck
     # A rejected credential or refused handshake is not a "wait and it will
     # settle" state, so say what to fix instead of pointing at the heartbeat.
     blocked = counts["credential_rejected"] + counts["upstream_refused"]
+    # 上游连上了但 QQ 尚未登录，处置是「去扫码」而不是「查连接」。
+    # 不给出这条区分，操作者会在一个其实只差扫码的实例上反复检查地址与 Token。
+    awaiting_scan = qr_states.get("qr_waiting_scan", 0) + qr_states.get(
+        "qr_expired", 0
+    ) + qr_states.get("qr_scanned", 0)
+    # 存储故障排在最前：链路可能完全正常，但每一条要落库的投递都在失败。
+    # 处置是查挂载与磁盘，与「查 Token」「去扫码」完全是两个方向。
+    storage_broken = counts["storage_unavailable"]
     if status == "pass":
         summary = "IM 适配器已连接"
         remediation = "无需处理"
+    elif storage_broken:
+        summary = "部分 IM 适配器的持久化目录不可写"
+        remediation = "检查数据卷是否被只读重挂或磁盘写满，恢复写权限后无需重启适配器"
     elif blocked:
         summary = "部分 IM 适配器的上游连接被拒绝"
         remediation = "核对适配器访问令牌与上游反向连接配置，再查看连接原因码"
+    elif awaiting_scan:
+        summary = "部分 IM 适配器的上游仍在等待扫码登录"
+        remediation = "取最新二维码路径完成扫码登录；不要扫已过期的旧二维码"
     else:
         summary = "部分 IM 适配器尚未建立连接"
         remediation = "检查 IM 适配器运行状态、登录状态和连接心跳"
@@ -255,6 +278,8 @@ def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck
         initializing_count=counts["initializing"],
         credential_rejected_count=counts["credential_rejected"],
         upstream_refused_count=counts["upstream_refused"],
+        storage_unavailable_count=counts["storage_unavailable"],
+        **qr_states,
     )
 
 

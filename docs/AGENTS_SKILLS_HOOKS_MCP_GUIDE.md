@@ -7,7 +7,7 @@
 | 名称 | 当前实现 | 不代表什么 |
 | --- | --- | --- |
 | Agent | 一个既有 Workflow，加模型、工具、记忆和调度策略元数据 | 没有独立 Agent 循环、规划器或绕过 Block 校验的执行器 |
-| Skill | `catalog.json` 中对版本化工作流模板的名称、前置条件、能力和触发示例描述；以及从仓库/目录安装的版本化资源 | 没有单独的 Skill 运行时或任意脚本下载器 |
+| Skill | `catalog.json` 中对版本化工作流模板的名称、前置条件、能力和触发示例描述；以及从仓库/目录安装的版本化资源。绑定到 Agent 后按**渐进披露**参与对话：有前置元数据的技能在系统提示词里只占一行目录，正文由模型调用 `skill_<资源 ID>` 工具时才载入（第 3.1 节） | 不是任意脚本下载器，也不执行技能正文里的命令——正文是给模型读的指令文本，命令要落地仍需对应的系统依赖（第 8 节）|
 | Hook | 插件 manifest 声明的生命周期回调（第 4 节），以及 Agent 运行时的事件 Hook（第 6 节） | 不是 Python sandbox，也不是每个请求/Block 的通用拦截器 |
 | MCP | 服务器、工具、prompt、resource 的发现和调用，以及工作流工具 provider | 没有跨工具的通用审批队列；prompt/resource 当前没有工作流 Block |
 
@@ -45,6 +45,71 @@ Agent 的实际执行仍由 WorkflowExecutor 完成；禁用对应规则或删�
 非 GitHub 来源（catalog、skills.sh、本地导入）也会出现在结果里，
 带 `update_channel_supported: false` 并说明应如何获取新版本——
 此前这些来源被直接跳过，界面上看不到任何行，等于被当成「无更新」。
+
+### 「已启用」不等于「生效」
+
+装好并启用一个 Skill 之后，资源列表显示「已启用」。但它只有在被**绑定到某个
+Agent** 之后才会进入 LLM 请求——`executor._build_messages` 遍历的是
+`agent.prompt_bindings` / `skill_bindings` / `memory_bindings`，不是「所有已启用
+的资源」。没有绑定时状态是「已启用」而实际效果是零。
+
+这曾经是一个无法自查的状态：界面上没有任何地方在说「它还差一步」，
+于是用户看到「已启用」、得到「什么都没变」，然后去怀疑模型或提示词。
+
+现在资源响应带两个字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `bound_agent_ids` | 绑定了这个资源的 Agent。即使绑定当前被停用也会列出——它解释了「为什么改这个 Agent 会影响这个资源」 |
+| `in_effect` | 这个资源当前是否真的进入 LLM 请求（资源已启用 **且** 有启用的 Agent 用启用的绑定引用它） |
+
+界面在「已启用但 `in_effect` 为 false」时额外标一个**未生效**，并给出下一步。
+
+**字段缺失表示「不知道」**，与 `false`（确定未生效）是两件事：读不到 Agent
+注册表的部署里两个字段都不出现。把「不知道」显示成「未生效」等于给出一个
+我们没有依据的论断，而那会让人去解决一个不存在的问题。
+
+## 3.1 技能的渐进披露：模型「选用」而不是被灌满
+
+绑定的技能不再整篇塞进每一次请求。机制与 cc-switch / Claude Code 一致：
+
+| 技能形态 | 系统提示词里 | 正文什么时候载入 |
+| --- | --- | --- |
+| 有前置元数据（`name` + `description`） | 一行目录：名字、用途、对应的工具名 | 模型调用 `skill_<资源 ID>` 时 |
+| 没有前置元数据（纯文本、旧资源） | 整篇注入 | 不适用 |
+
+判据是**能不能广告**，不是一个新开关。没有 `description` 的技能无法用一行话
+说明自己能做什么，广告它等于让模型去猜正文内容；那类技能仍整篇注入，
+行为与本特性之前逐字节一致，升级不会让既有部署的技能突然「消失」。
+
+`allow_tools` 关闭的 Agent 也一律整篇注入：没有工具可调时，一行目录是一句
+模型无法兑现的空头承诺。
+
+为什么不全部整篇注入：成本随「技能数 × 请求数」线性增长，而其中绝大部分与
+当轮问题无关。十个技能各 2000 token，就是每一轮固定多付 20000 token。
+更关键的是模型**无法选用**一个技能——没有可调用的东西，就没有「决定用它」
+这个动作，而那正是 Skill 机制的核心。
+
+正文由 `skill_<资源 ID>` 工具返回，版本取自**本轮快照里的绑定**而不是
+「当前版本」：一次对话中途被更新的技能不该让前后两轮遵循不同的说明，
+那种不一致无法从对话记录里看出来。
+
+### 依赖缺失会写进技能广告
+
+技能正文里的命令能不能真的执行，取决于对应的系统依赖装没装（第 8 节）。
+运行时读依赖状态，并在广告与工具描述里加一句就绪提示：
+
+| 依赖状态 | 广告里 |
+| --- | --- |
+| 已就绪 | 什么都不加 |
+| 确认缺失（`ready` 为 `false`） | 点名缺失的组件，并要求模型不要假装执行过 |
+| 未知（未探测、依赖服务不可用、id 未登记） | 什么都不加 |
+
+「未知」不冒充「缺失」：那会劝退一个本来能用的技能。反过来更要紧——
+没装 `agent-browser` 却照着技能写命令时，最坏的表现不是报错，而是模型把
+「我已经打开了浏览器」当成事实继续往下答，而用户看不出与真的执行成功有什么
+区别。就绪提示进的是**工具描述**（不只是目录行）：那是模型决定要不要调用时
+唯一会读的地方。
 
 ## 4. 权限化 lifecycle Hook
 
@@ -148,8 +213,26 @@ MCP 的 prompt/resource 可通过 `/backend-api/api/mcp/servers/<server_id>/prom
 跳过原因区分 `binding_disabled`、`event_not_declared`、`matcher_not_matched`，
 可用 `GET /backend-api/api/resources/audit?component=agent_hook` 查询。
 
-### 上线前预演：不执行也能看清会不会触发
+### Hook 返回的上下文会进到哪里
 
+`systemMessage` 与 `hookSpecificOutput.additionalContext` 会作为一条 system 消息
+插入**下一次**模型请求：
+
+| 事件 | 上下文是否进入模型 |
+| --- | --- |
+| `SessionStart`、`UserPromptSubmit` | 是，进入本轮第一次请求 |
+| `PreToolUse`、`PostToolUse` | 是，进入工具轮之后的那次请求 |
+| `Stop`、`SessionEnd` | 否——之后已经没有模型调用，无处可去 |
+| 其余事件 | 否 |
+
+`PreToolUse` / `PostToolUse` 这一条曾经是缺的：字段被解析、审计记为
+`status: ok`，然后丢掉。一个想告诉模型「这个结果的单位是分而不是元」的 Hook
+写得完全正确、看起来也成功了，而模型永远看不到那句话——Hook 作者只能怀疑
+自己的业务逻辑。**注入只做一次**：内容进入消息序列后每轮都带着，
+重复注入会让同一段文本在长对话里出现十几次，白花 token 还会被模型
+当成被反复强调的重点。
+
+### 上线前预演：不执行也能看清会不会触发
 Hook 此前只能「装上再看它会不会跑」：事件名写错、matcher 写成非法正则、
 把 `command` 写进不该写的位置，都只能在真实请求里暴露——而那时它已经在
 生产路径上了。两个只读接口解决这件事：
@@ -190,7 +273,153 @@ Agent 运行时的会话历史与待确认操作持久化在 `data/sessions/`。
 WebUI 在「Agent 管理」页底部提供对应的只读列表与清空/删除动作。
 需要重置某个会话的上下文时清空历史即可，Agent 绑定关系不受影响。
 
-## 8. 上线检查
+## 7.1 队友（Teammates）：Agent 之间的委派
+
+`AgentDefinition.teammate_agent_ids` 非空时，模型会额外获得
+`delegate_to_<agent_id>` 工具。它与 MCP 工具同一形态，因此模型侧不需要区分
+「这是队友还是工具」。队友用**自己的**模型链、提示词、技能与工具白名单执行子任务。
+
+在 WebUI「模型与 Agent → Agent」的「队友（Teammates）」区块配置，
+下拉只列出已启用且不是自己的 Agent。
+
+这条能力真正的风险不是「功能不够」，而是**无限递归**：A 委派 B、B 委派 A，
+每一层都是一次真实的模型调用，账单与时延同时爆炸。因此有五道约束：
+
+| 约束 | 为什么 |
+| --- | --- |
+| 深度上限 2，每次委派递减 | 递归的硬性天花板 |
+| 深度耗尽时**不再暴露**委派工具 | 暴露一个必定被拒的工具会让模型反复撞墙，白花一轮 token |
+| 自委派在定义期就被拒 | 最短的无限递归 |
+| 只为**存在且启用**的队友生成工具 | 同上：不让模型调用一个注定失败的工具 |
+| 空 `task` 作为工具错误返回 | 队友看不到主对话，凭空猜只会浪费一轮 |
+
+两点授权边界：
+
+- **委派不是绕过授权的旁路。** 委派本身不动服务器，所以不需要人工确认；
+  但队友自身的高危工具仍走原有的 `PermissionRequest` 与创建者校验链路
+  （见第 6 节）。非创建者拿不到工具，因此也无法借委派提权。
+- **队友集合变化会让待确认操作失效。** 它进入 `_agent_policy_signature`；
+  否则「确认的是一件事、执行的是另一件事」。
+
+持久化在 `data/agents/registry.json`。早于本特性的注册表没有该键，
+读到时缺省为空（不启用），升级不会宕机。
+
+## 8. 系统依赖：装什么、装到哪、谁能装
+
+Skill 包和它依赖的可执行程序是**两件事**。装上 `agent-browser` 这个 Skill 不等于
+服务器上有 `agent-browser` 命令；反之亦然。依赖目录把这条边界显式化：
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /backend-api/api/resources/dependencies` | 列出全部依赖及其就绪状态、版本、被谁需要 |
+| `POST /backend-api/api/resources/dependencies/<id>/probe` | 只探测，不安装 |
+| `POST /backend-api/api/resources/dependencies/<id>/install` | 受控安装（需要确认，且只跑服务器登记的固定命令） |
+| `GET /backend-api/api/resources/dependency-tasks` | 安装任务列表与日志 |
+
+当前目录中的条目：
+
+| 依赖 ID | 类型 | 能否服务器侧安装 | 说明 |
+| --- | --- | --- | --- |
+| `node-runtime` | runtime | 否（运维安装） | Node.js / npm / npx |
+| `python-tooling` | runtime | 否（运维安装） | `uv` |
+| `agent-browser-cli` | cli | 是 | `npm install -g agent-browser` |
+| `agent-browser-browser` | browser-runtime | 是 | `agent-browser install`（拉 Chromium，超时 900s） |
+| `context7-runtime` | mcp-runtime | 否 | Context7 由 npx 启动，修 Node 即可 |
+| `graphify-cli` | cli | 是 | `uv tool install --upgrade graphifyy` |
+| `rtk-cli` | cli | 是 | 终端输出压缩；**与同名的 Rust Type Kit 不是同一个工具**，以 `rtk gain` 是否可用为准 |
+| `memsearch-cli` | cli | 是 | `uv tool install --upgrade memsearch` |
+| `context-mode-plugin` | claude-plugin | **否** | Claude Code 插件 |
+| `caveman-plugin` | claude-plugin | **否** | Claude Code 插件 |
+
+三条边界必须讲清楚：
+
+- **Claude Code 插件装在操作者自己的 Claude 配置里，不是服务器运行时组件。**
+  因此它们的 `install_supported` 为 `false`，接口会拒绝安装请求并返回运维指引。
+  给它们编一条安装命令只会把命令跑到错误的目标上。
+- **安装命令是服务器登记的固定值**，请求方不能传入命令或参数；
+  这是「只有创建者能改 VPS」这条约束在依赖安装上的落地方式。
+- **探测一个不存在的可执行文件是「未安装」，不是接口错误。** 探测接口在这种情况下
+  返回 `missing` 状态而不是 5xx，因此前端可以正常展示「未安装」并给出下一步。
+
+### 依赖状态会进到对话里
+
+这份状态不只给安装界面看。绑定了技能的 Agent 在组装每一轮请求时会读它，
+并在该技能的目录行与 `skill_` 工具描述里加一句就绪提示：
+
+| 依赖状态 | 对话里的表现 |
+| --- | --- |
+| 全部就绪 | **一个字都不加**。就绪是常态，每句多余的话都是每轮都要付费的噪音 |
+| 确认缺失（`ready` 为 `false`） | 点名缺哪个组件，并要求模型不要假装执行过其中的命令 |
+| 未知（未探测、依赖服务不可用、探测抛错、目录里没登记） | **同样什么都不说** |
+
+「未知」不能冒充「缺失」：那会劝退一个本来能用的技能，而这个损失完全来自我们的猜测。
+
+这一跳存在的理由是，缺少它时的失败形态是**没有报错的假答案**：模型读到
+`agent-browser open ...`，照着写下去，命令在服务器上并不存在，而模型无从得知，
+只能把「我已经打开了浏览器」当成事实继续答。用户看不出与真的执行成功有什么区别，
+因为语气一模一样。覆盖测试见 `tests/agent_runtime/test_skill_dependency_readiness.py`
+（含一条端到端用例，断言警告真的出现在发给模型的请求里）。
+
+### 谁能调这些接口
+
+| 接口 | 需要的身份 | 为什么 |
+| --- | --- | --- |
+| `GET /resources/dependencies`、`GET /resources/dependency-tasks` | 登录 + `resources.read` | 只读状态属于正常使用 |
+| `POST /resources/dependencies/<id>/probe` | **创建者** | 探测会在服务器上**执行**登记的 argv（`agent-browser doctor`、`rtk --version`）。「不安装」不等于「不执行」 |
+| `POST /resources/dependencies/<id>/install`、任务 retry / cancel | **创建者** | 在服务器上执行安装命令 |
+| `POST /resources/repositories`、`.../enabled` | **创建者** | 写 `registry.json`，改变「哪些外部来源可被安装」 |
+| MCP `POST /mcp/servers`、`PUT`、`DELETE`、`.../start` | **创建者** | 写 `config.yaml`；`start` 真的在服务器上拉起 stdio 子进程 |
+| MCP `.../stop`、所有 `GET` | 登录 + `mcp.read` / `mcp.manage` | 停止只让扩展不再生效，不引入新的服务器副作用——与资源侧 `disable` 同一判断 |
+
+> 曾经的自相矛盾：启用一个 **mcp 资源**要创建者身份，而直接
+> `POST /mcp/servers` + `start` 达到同样效果却只要 scope。默认签发的 token 带
+> `["*"]`，于是任何登录用户都能在 VPS 上起进程。源码级契约测试
+> `tests/web/auth/test_creator_only_routes.py` 现在同时覆盖资源与 MCP 两个
+> blueprint，新增一条只加 scope 的写操作路由会直接让它红。
+
+### 从 IM 渠道使用受保护能力：声明创建者身份
+
+上面那张表说的是 HTTP 接口。**聊天侧此前有一个被忽略的边界**：
+`principal_can_control_agent` 是唯一门禁，而身份（principal）只由 HTTP Bearer
+中间件注入。OneBot / QQ / Telegram / WeCom 的入站链路全程没有它，于是这些渠道上
+
+- MCP 工具列表恒为空；
+- command 型 Hook 恒被拒（含内置 `hook:ai-debug` 的八个事件）；
+- 需确认的宿主操作走不到确认那一步。
+
+注意这**不是**「非创建者不行」——设计是那样，实现成了「所有人都不行」，
+包括创建者本人。缺的是一座桥：把「这个 QQ 号就是创建者」这件事声明出来。
+
+```yaml
+agent_runtime:
+  creator_channel_identities:
+    - channel_type: onebot        # webui / onebot / qqbot / telegram / wecom
+      sender_scope: "10001"       # 你自己在该渠道上的用户标识，不是机器人的
+      # account_scope: "20002"    # 可选：只认经由这个机器人账号收到的消息
+      # adapter_instance: onebot-main  # 可选：限定适配器实例
+      # allow_group_chat: false   # 群聊里是否生效，默认关闭
+```
+
+四条刻意的设计：
+
+- **默认空表。** 不声明时行为与升级前逐字节一致，不存在「升级之后聊天里突然
+  能动服务器」这种事。
+- **渠道与发送者一起比。** QQ 号和 Telegram 用户 ID 可能撞号，只比一个等于
+  把另一个渠道的同号用户也放了进来。填 `*` 不是通配，它只是一个匹配不到
+  任何真实用户的普通字符串。
+- **群聊默认不生效。** 群里所有人都看得到你发的指令并照抄；照抄的人
+  `sender_scope` 不同因而拿不到身份，但把宿主操作暴露在多人可见的会话里是
+  另一回事——一条误发的消息会被所有人看到并模仿尝试。要开必须显式声明。
+- **主体取自 `AuthService` 的创建者身份本身**，因此它与 Agent 的
+  `owner_subject`、与 WebUI 登录后的身份是同一个值。拿不到那个身份时
+  返回「无身份」而不是编一个：一个匹配不上任何 Agent owner 的 subject
+  只会让门禁静默失败，比没有更糟。
+
+未声明的发送者仍然得到**正常的 AI 回复**——工具列表被清空而不是请求被拒，
+这一点与需求「其他使用者收到涉及修改 VPS 的命令一律忽视，但仍会正常回复」一致，
+并由 `tests/agent_runtime/test_host_authorization.py` 钉住。
+
+## 9. 上线检查
 
 1. manifest 只声明实际需要的 capability 与 lifecycle。
 2. 工作流通过 `POST /backend-api/api/workflow/validate`，规则通过 `POST /backend-api/api/dispatch/preview` 和 `/backend-api/api/dispatch/reachability`。

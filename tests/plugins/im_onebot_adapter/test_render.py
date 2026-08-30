@@ -4,6 +4,7 @@ import pytest
 
 from kirara_ai.plugins.im_onebot_adapter.render import (
     paginate_onebot_text,
+    paginate_onebot_text_or_truncate,
     render_onebot_text,
 )
 
@@ -170,3 +171,29 @@ def test_paginate_rejects_more_than_configured_page_limit():
             max_pages=2,
             max_total_bytes=10_000,
         )
+
+
+def test_over_budget_reply_is_truncated_instead_of_lost():
+    """OneBot 发送路径遇到超预算内容必须截断，不能抛错丢掉整条回复。
+
+    `paginate_onebot_text` 仍保留严格语义（抛错）供需要它的调用方使用；
+    发送路径改用 `paginate_onebot_text_or_truncate`。
+    """
+    pages, truncated = paginate_onebot_text_or_truncate(
+        "内容" * 5000, max_bytes=200, max_pages=3
+    )
+
+    assert truncated is True
+    assert 0 < len(pages) <= 3
+    assert "已截断" in pages[-1]
+
+
+def test_normal_reply_is_not_truncated_by_the_new_path():
+    """预算内的回复必须与严格路径给出完全相同的结果。"""
+    text = "普通回复内容。" * 20
+
+    strict = paginate_onebot_text(text)
+    lenient, truncated = paginate_onebot_text_or_truncate(text)
+
+    assert truncated is False
+    assert lenient == strict

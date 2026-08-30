@@ -1,4 +1,5 @@
 import re
+from typing import Optional
 
 from kirara_ai.im.adapter import IMAdapter
 from kirara_ai.im.delivery_timing_store import DeliveryTimingStore
@@ -11,6 +12,11 @@ from kirara_ai.agent_runtime import (
     AgentRuntimeExecutor,
     ChannelContext,
     RuntimeStatus,
+)
+from kirara_ai.web.auth.principal import (
+    RuntimePrincipal,
+    get_runtime_principal,
+    runtime_principal_context,
 )
 from kirara_ai.workflow.core.dispatch.models.dispatch_rules import CombinedDispatchRule
 from kirara_ai.workflow.core.dispatch.registry import DispatchRuleRegistry
@@ -38,6 +44,90 @@ class WorkflowDispatcher:
         # 从容器获取注册表
         self.workflow_registry = container.resolve(WorkflowRegistry)
         self.dispatch_registry = container.resolve(DispatchRuleRegistry)
+
+    def _creator_principal(self, context: ChannelContext) -> Optional[RuntimePrincipal]:
+        """Return the creator principal when this channel identity is declared as one.
+
+        需求 10 要求创建者能通过插件改服务器内容、其他人不能。
+        `principal_can_control_agent` 是唯一门禁，而 principal 此前只由 HTTP
+        Bearer 中间件注入——IM 入站链路全程没有它，于是这些渠道上
+        **所有人**（包括创建者本人）都拿不到 MCP 工具、跑不了 command Hook。
+        设计是「非创建者不行」，实现成了「谁都不行」。
+
+        这里按 `agent_runtime.creator_channel_identities` 做显式匹配。
+        默认空表，不声明就返回 ``None``——行为与此前逐字节一致。
+        """
+        config = self._global_config()
+        if config is None:
+            return None
+        identities = getattr(
+            getattr(config, "agent_runtime", None),
+            "creator_channel_identities",
+            None,
+        )
+        if not identities:
+            return None
+        # 群聊消息的 conversation_scope 形如 `group:<id>`，私聊是 `c2c:<sender>`。
+        is_group = str(context.conversation_scope).startswith("group:")
+        for identity in identities:
+            if not self._identity_matches(identity, context, is_group=is_group):
+                continue
+            subject = self._creator_subject()
+            if subject is None:
+                # 拿不到创建者身份就不能编一个出来：一个不匹配任何
+                # Agent owner 的 subject 只会让门禁静默失败，比没有更糟。
+                return None
+            return RuntimePrincipal(
+                subject=subject,
+                role="admin",
+                scopes=frozenset({"*"}),
+                is_creator=True,
+            )
+        return None
+
+    @staticmethod
+    def _identity_matches(
+        identity,
+        context: ChannelContext,
+        *,
+        is_group: bool,
+    ) -> bool:
+        if is_group and not getattr(identity, "allow_group_chat", False):
+            return False
+        if str(getattr(identity, "channel_type", "")).strip().lower() != context.channel_type:
+            return False
+        if str(getattr(identity, "sender_scope", "")).strip() != context.sender_scope:
+            return False
+        account = getattr(identity, "account_scope", None)
+        if account is not None and str(account).strip() != context.account_scope:
+            return False
+        instance = getattr(identity, "adapter_instance", None)
+        if instance is not None and str(instance).strip() != context.adapter_instance:
+            return False
+        return True
+
+    def _global_config(self):
+        try:
+            from kirara_ai.config.global_config import GlobalConfig
+
+            if not self.container.has(GlobalConfig):
+                return None
+            return self.container.resolve(GlobalConfig)
+        except Exception:  # noqa: BLE001 - 身份解析失败只应失去授权，不应中断消息
+            return None
+
+    def _creator_subject(self) -> Optional[str]:
+        try:
+            from kirara_ai.web.auth.services import AuthService
+
+            if not self.container.has(AuthService):
+                return None
+            subject = getattr(self.container.resolve(AuthService), "creator_subject", None)
+        except Exception:  # noqa: BLE001 - 同上
+            return None
+        if not isinstance(subject, str) or not subject.strip():
+            return None
+        return subject
 
     def register_rule(self, rule: CombinedDispatchRule):
         """注册一个调度规则"""
@@ -72,6 +162,43 @@ class WorkflowDispatcher:
         统一对话入口）。这类入口不能在 Agent 未配置时静默降级到旧工作流；
         传统 IM 适配器保持默认的兼容行为。
         """
+        # 渠道身份到创建者 principal 的桥。
+        #
+        # **只在当前没有身份时才建立**：WebUI 走 HTTP 中间件，身份在进入这里之前
+        # 就已经设好了。无条件 `runtime_principal_context(...)` 会用 `None`
+        # 把它清掉——那不是「IM 侧多一条路」，那是「HTTP 侧少一条路」，
+        # WebUI 的插件能力会整体失效。
+        #
+        # 建立时必须包住**整条**派发链路（工作流、Agent 运行时、Hook、MCP 都在
+        # 里面读它），并在退出时自动还原：principal 是 ContextVar，
+        # 泄漏出去会让后续任务凭空获得授权。
+        if get_runtime_principal() is not None:
+            return await self._dispatch_within_principal(
+                source,
+                message,
+                require_agent=require_agent,
+            )
+        principal = self._creator_principal(ChannelContext.from_message(source, message))
+        if principal is None:
+            return await self._dispatch_within_principal(
+                source,
+                message,
+                require_agent=require_agent,
+            )
+        with runtime_principal_context(principal):
+            return await self._dispatch_within_principal(
+                source,
+                message,
+                require_agent=require_agent,
+            )
+
+    async def _dispatch_within_principal(
+        self,
+        source: IMAdapter,
+        message: IMMessage,
+        *,
+        require_agent: bool = False,
+    ):
         with self.container.scoped() as scoped_container:
             scoped_container.register(IMAdapter, source)
             scoped_container.register(IMMessage, message)
@@ -119,6 +246,11 @@ class WorkflowDispatcher:
                         scoped_container.register(Workflow, workflow)
                         executor = WorkflowExecutor(scoped_container)
                         scoped_container.register(WorkflowExecutor, executor)
+                        # 遗留工作流分支同样要记「工作流开始」：否则未迁移到 Agent
+                        # 的部署缺掉排队耗时这一段，「QQ 慢」在这些部署上无法拆开定位。
+                        # 后半段（格式化 / 发送）由 SendIMMessage 在真正发出的回复
+                        # 对象上补齐并落库——那里才拿得到适配器写入的阶段。
+                        self._record_stage(message, "workflow_started", workflow=rule.name)
                         return await executor.run()
                     except WorkflowExecutionTimeoutException as e:
                         self.logger.error(f"Workflow execution timed out: {e}")
@@ -258,6 +390,16 @@ class WorkflowDispatcher:
         trace_ids = getattr(result, "trace_ids", ())
         if trace_ids:
             details["trace_id"] = trace_ids[-1]
+        # 首字节必须先记：时间线按记录顺序保存，llm_first_byte 晚于 llm_completed
+        # 入列会让「按阶段顺序读」的消费者看到一条倒序链路。
+        first_byte_at = getattr(result, "llm_first_byte_at", None)
+        if first_byte_at is not None:
+            recorder = getattr(message, "record_delivery_stage_at", None)
+            if callable(recorder):
+                try:
+                    recorder("llm_first_byte", first_byte_at, **details)
+                except Exception:  # noqa: BLE001 - 观测失败不得影响消息投递
+                    pass
         self._record_stage(message, "llm_completed", **details)
 
     def _carry_timeline(self, source_message: IMMessage, reply: IMMessage) -> None:

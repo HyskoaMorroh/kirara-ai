@@ -5,8 +5,10 @@ import re
 
 from wechatpy.messages import BaseMessage
 
-from kirara_ai.im.text_render import (display_width, is_table_row, is_table_separator,
-                                      parse_table_row, render_box_table, split_structured_text)
+from kirara_ai.im.text_render import (degrade_math, display_width, is_table_row,
+                                      is_table_separator,
+                                      paginate_with_truncation_notice,
+                                      parse_table_row, render_table)
 from kirara_ai.logger import get_logger
 
 if TYPE_CHECKING:
@@ -21,12 +23,15 @@ def _display_width(text: str) -> int:
     return display_width(text)
 
 
-def _render_table(rows: list[list[str]]) -> list[str]:
+def _render_table(rows: list[list[str]], has_header: bool = True) -> list[str]:
     """
     将表格数据渲染为带完整边框线的等宽文本表格。
     第一行视为表头，使用 ├─┼─┤ 分隔，保证结构清晰可读。
+
+    走共享的 ``render_table``：宽表会自动降级成纵向字段布局。企业微信同样
+    没有可靠的等宽字体，一张 8 列中文表的框线在手机端一定错位。
     """
-    return render_box_table(rows)
+    return render_table(rows, has_header=has_header)
 
 
 def markdown_to_plain_text(text: str) -> str:
@@ -51,6 +56,12 @@ def markdown_to_plain_text(text: str) -> str:
 
     text = re.sub(r'```([\w+-]*)\n(.*?)```', _stash_code_block, text, flags=re.DOTALL)
 
+    # 数学降级走共享实现。此前 WeCom 路径完全跳过这一步，于是同一段模型回复
+    # 在 QQ 上是 `T → 0`、在企业微信上是原始的 `$T \to 0$`——平台差异应该只在
+    # 渲染层，不该表现为「有的平台处理了、有的没有」。
+    # 代码块此时已被占位符替换，因此不会被波及。
+    text = degrade_math(text)
+
     # 标题转换：## 标题 → ━━ 标题 ━━
     text = re.sub(r'^### (.+)$', r'▸ \1', text, flags=re.MULTILINE)
     text = re.sub(r'^## (.+)$', r'\n━━ \1 ━━', text, flags=re.MULTILINE)
@@ -73,18 +84,24 @@ def markdown_to_plain_text(text: str) -> str:
     lines = text.split('\n')
     result: list[str] = []
     table_rows: list[list[str]] = []
+    # 是否见过 `---` 分隔行：没有它就不能断言第一行是表头，
+    # 宽表降级时也就不能拿它当字段名。
+    saw_separator = False
 
     def flush_table():
+        nonlocal saw_separator
         if table_rows:
             result.append('')  # 表格前空行
-            result.extend(_render_table(table_rows))
+            result.extend(_render_table(table_rows, has_header=saw_separator))
             result.append('')  # 表格后空行
             table_rows.clear()
+        saw_separator = False
 
     for line in lines:
         stripped = line.strip()
         # 分隔行（|---|---|）只用于标记表头，不参与渲染
         if is_table_separator(stripped):
+            saw_separator = True
             continue
         # 检测表格行（含 | 且不是代码占位）
         if is_table_row(stripped) and '\x00CODE' not in stripped:
@@ -197,13 +214,17 @@ def split_long_message(text: str, max_length: int = 1800) -> list[str]:
     「第 N 页 / 共 M 页」不一致——同一个机器人在不同 APP 上给出两种页码写法。
     现在统一走共享实现，页码格式随之统一；WeCom 独有的部分只剩
     ``code_style="wecom"``（``［代码］`` 围栏）这一个渲染差异。
+
+    超出页数上限时截断并追加提示，而不是抛 ``ValueError``：异常会一路穿出
+    发送路径，用户什么都收不到（需求 19.4「全部发送、内容不得丢失」）。
     """
-    return split_structured_text(
+    pages, _truncated = paginate_with_truncation_notice(
         text,
         max_bytes=max_length,
         max_total_bytes=None,
         code_style="wecom",
     )
+    return pages
 
 class WechatApiDelegate(ABC):
     """微信API代理接口，用于处理不同类型的微信API调用"""

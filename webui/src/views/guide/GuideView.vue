@@ -17,7 +17,9 @@ import {
   NPopconfirm,
   NRow,
   NCol,
-  NDivider
+  NDivider,
+  NAlert,
+  NTag
 } from 'naive-ui'
 import { useAppStore } from '@/stores/app'
 import {
@@ -36,6 +38,12 @@ import {
 import LLMStatistics from '@/components/LLMStatistics.vue'
 import { getBrowserLocalStorage, readJsonRecord, writeStorageItem } from '@/utils/safe-storage'
 import {
+  READINESS_CHECK_LABELS,
+  systemApi,
+  type ReadinessCheck,
+  type ReadinessResponse
+} from '@/api/system'
+import {
   hideQuickStartGuide,
   isQuickStartGuideVisible,
   resetQuickStartGuideProgress,
@@ -51,6 +59,64 @@ const message = useMessage()
 const getGuideStorage = () => getBrowserLocalStorage()
 const showGuide = ref(isQuickStartGuideVisible(getGuideStorage()))
 const completedGuideSteps = ref(readJsonRecord(getGuideStorage(), 'completedSteps'))
+
+/**
+ * 就绪状态。
+ *
+ * `null` 表示**还没拿到**（正在读或读失败），与「没就绪」是两件事：
+ * 把前者显示成后者会让人去修一个不存在的问题，而真正的问题只是这一个
+ * 诊断接口没响应。因此所有判断都必须先区分「不知道」。
+ */
+const readiness = ref<ReadinessResponse | null>(null)
+const readinessUnavailable = ref(false)
+
+/** 需要用户动手的检查：`pass` 与 `skip` 不出现在这里。 */
+const readinessActions = computed<ReadinessCheck[]>(() => {
+  const checks = readiness.value?.checks || []
+  // fail 排在 warn 前面：前者阻塞可用性，后者只是没达到最佳状态。
+  const weight = (status: string) => (status === 'fail' ? 0 : 1)
+  return checks
+    .filter((item) => item.status === 'fail' || item.status === 'warn')
+    .sort((left, right) => weight(left.status) - weight(right.status))
+})
+
+const readinessLabel = (id: string) => READINESS_CHECK_LABELS[id] || id
+
+const loadReadiness = async () => {
+  try {
+    readiness.value = await systemApi.getReadiness()
+    readinessUnavailable.value = false
+  } catch {
+    // 读不到就绪状态不等于「没就绪」。保持 null 并单独说明。
+    readiness.value = null
+    readinessUnavailable.value = true
+  }
+}
+
+/**
+ * 从真实就绪状态推导的步骤完成情况。
+ *
+ * 步骤完成此前是**纯前端点击痕迹**：点一下就写 localStorage，不校验是否真配了
+ * IM/LLM。于是换个浏览器全部归零、配好了也不打勾——一个勾选状态与事实无关的
+ * 清单比没有清单更糟，它会让人以为自己配完了。
+ *
+ * 拿不到就绪状态时这里返回空表：不能凭点击痕迹断言「已完成」。
+ */
+const verifiedSteps = computed<Record<string, boolean>>(() => {
+  const checks = readiness.value?.checks
+  if (!checks) return {}
+  const byId = new Map(checks.map((item) => [item.id, item.status]))
+  const verified: Record<string, boolean> = {}
+  const mark = (key: string, checkId: string) => {
+    const status = byId.get(checkId)
+    if (status !== undefined) verified[key] = status === 'pass'
+  }
+  mark('im', 'im_available')
+  mark('llm', 'llm_available')
+  mark('workflow', 'workflows_valid')
+  mark('dispatch', 'dispatch_targets_exist')
+  return verified
+})
 
 // 关闭引导卡片
 const hideGuide = () => {
@@ -70,40 +136,59 @@ const resetGuideProgress = () => {
   message.success('快速开始进度已重置')
 }
 
-// 计算每个步骤的完成状态
+/**
+ * 计算每个步骤的完成状态。
+ *
+ * `completed` 有两个来源，优先级不同：
+ *
+ * - `verified`（来自就绪检查）是**事实**：配好了就是配好了，哪怕从没点过这一步；
+ *   没配好就是没配好，哪怕点过十次。
+ * - 点击痕迹只用于就绪检查覆盖不到的步骤（浏览插件市场没有对应的服务端事实），
+ *   以及拿不到就绪状态时的退化行为。
+ *
+ * 此前只有点击痕迹：换个浏览器全部归零、配好了也不打勾。一个勾选状态与事实
+ * 无关的清单比没有清单更糟——它会让人以为自己配完了。
+ */
 const stepsStatus = computed(() => {
+  const verified = verifiedSteps.value
   const steps = [
     {
       key: 'plugins',
+      // 「浏览插件市场」没有对应的服务端事实，只能用点击痕迹。
       completed: completedGuideSteps.value.plugins,
+      verified: false,
       title: '浏览插件市场',
       description: '发现并安装适合您需求的插件',
       path: '/plugins/market'
     },
     {
       key: 'im',
-      completed: completedGuideSteps.value.im,
+      completed: verified.im ?? completedGuideSteps.value.im,
+      verified: verified.im === true,
       title: '添加 IM',
       description: '连接您常用的聊天平台',
       path: '/im'
     },
     {
       key: 'llm',
-      completed: completedGuideSteps.value.llm,
+      completed: verified.llm ?? completedGuideSteps.value.llm,
+      verified: verified.llm === true,
       title: '添加 LLM',
       description: '连接 AI 模型服务',
       path: '/llm'
     },
     {
       key: 'dispatch',
-      completed: completedGuideSteps.value.dispatch,
+      completed: verified.dispatch ?? completedGuideSteps.value.dispatch,
+      verified: verified.dispatch === true,
       title: '了解调度规则',
       description: '学习如何召唤和使用 Bot',
       path: '/workflow/dispatch-rules'
     },
     {
       key: 'workflow',
-      completed: completedGuideSteps.value.workflow,
+      completed: verified.workflow ?? completedGuideSteps.value.workflow,
+      verified: verified.workflow === true,
       title: '自定义工作流',
       description: '打造专属于您的 AI 助手',
       path: '/workflow'
@@ -210,6 +295,10 @@ onMounted(() => {
   timer.value = setInterval(() => {
     currentTime.value = Date.now()
   }, 1000)
+  // 就绪状态在进入页面时读一次。不做轮询：它是一份「你还缺什么」的清单，
+  // 用户按提示改完配置后会自己回到这一页，而每秒刷新只会给一个诊断接口
+  // 制造持续负载。
+  void loadReadiness()
 })
 
 onUnmounted(() => {
@@ -278,6 +367,17 @@ watch(
             <template #default>
               <div class="step-content">
                 <div class="step-description">{{ step.description }}</div>
+                <!--
+                  「已核实」只在就绪检查确认配好时出现，与「点过这一步」区分开。
+                  没有它的话，一个只是被点过的步骤和一个真的配好了的步骤长得一样。
+                -->
+                <span
+                  v-if="step.verified"
+                  class="step-verified"
+                  :data-test="`step-${step.key}-verified`"
+                >
+                  已核实
+                </span>
                 <n-button
                   text
                   type="primary"
@@ -325,6 +425,63 @@ watch(
       </n-card>
 
       <!-- 系统状态概览卡片 -->
+      <!--
+        就绪面板：新部署第一次打开时唯一能回答「我还缺什么」的地方。
+        后端的 remediation 就是「下一步做什么」，这里原样呈现，不另写一套说法——
+        两处说法一旦不一致，用户就得先判断该信哪个。
+      -->
+      <n-card
+        v-if="readinessActions.length > 0"
+        data-test="readiness-panel"
+        :bordered="false"
+        title="还需要处理"
+        class="readiness-card"
+      >
+        <n-space vertical :size="10">
+          <div
+            v-for="item in readinessActions"
+            :key="item.id"
+            class="readiness-row"
+            :data-test="`readiness-${item.id}`"
+          >
+            <n-tag :type="item.status === 'fail' ? 'error' : 'warning'" size="small">
+              {{ item.status === 'fail' ? '阻塞' : '注意' }}
+            </n-tag>
+            <div class="readiness-text">
+              <div class="readiness-title">{{ readinessLabel(item.id) }} · {{ item.summary }}</div>
+              <!-- remediation 是这块面板存在的全部理由 -->
+              <div class="readiness-remediation">{{ item.remediation }}</div>
+            </div>
+          </div>
+        </n-space>
+      </n-card>
+
+      <n-card
+        v-else-if="readiness && !readinessUnavailable"
+        data-test="readiness-all-clear"
+        :bordered="false"
+        class="readiness-card"
+      >
+        <!-- 全绿时不逐项列「无需处理」：那是噪声，不是信息。 -->
+        <n-alert type="success">所有就绪检查都已通过。</n-alert>
+      </n-card>
+
+      <n-card
+        v-else-if="readinessUnavailable"
+        data-test="readiness-unknown"
+        :bordered="false"
+        class="readiness-card"
+      >
+        <!--
+          「读不到」与「没就绪」是两件事。把前者显示成后者会让人去修一个
+          不存在的问题，而真正的问题只是这一个诊断接口没响应。
+        -->
+        <n-alert type="warning">
+          暂时读不到自检结果（诊断接口未响应），下面的步骤只反映本机的点击记录。
+          这不代表部署有问题，稍后刷新即可重试。
+        </n-alert>
+      </n-card>
+
       <n-card :bordered="false" class="status-overview-card">
         <n-grid
           cols="1 s:2 m:4"
@@ -507,9 +664,24 @@ watch(
         </n-gi>
       </n-grid>
 
-      <!-- LLM 统计 -->
+      <!--
+        LLM 统计概览。
+        完整的统计页在「系统记录 → 使用统计」（/tracing/statistics），
+        那里带 Provider / 模型 / 时间范围 / 时区筛选与导出。这里只做一个
+        无筛选的概览入口，避免首页承担对账职责。
+      -->
       <div class="llm-stats-container">
-        <div class="llm-stats-title">LLM 统计</div>
+        <div class="llm-stats-header">
+          <div class="llm-stats-title">LLM 统计</div>
+          <n-button
+            text
+            type="primary"
+            data-test="open-usage-statistics"
+            @click="router.push('/tracing/statistics')"
+          >
+            打开完整统计 →
+          </n-button>
+        </div>
         <LLMStatistics />
       </div>
     </n-space>
@@ -807,6 +979,23 @@ watch(
 }
 
 /* LLM 统计样式 */
+/*
+  标题与「打开完整统计」并排：标题原先自带 margin-bottom，
+  改为由容器统一控制间距，避免两侧基线不齐。
+*/
+.llm-stats-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.llm-stats-header .llm-stats-title {
+  margin-bottom: 0;
+}
+
 .llm-stats-title {
   font-size: 1.2rem;
   font-weight: 600;

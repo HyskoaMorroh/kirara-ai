@@ -1,8 +1,10 @@
+import base64
 import hashlib
 import os
 import platform
 import subprocess
 import sys
+from dataclasses import dataclass
 from functools import lru_cache
 from urllib.parse import urljoin, urlparse
 
@@ -73,6 +75,52 @@ def get_installed_version() -> str:
         return "0.0.0"  # 如果所有方法都失败，返回默认版本号
 
 
+@dataclass(frozen=True)
+class ArtifactDigest:
+    """registry 声明的升级包摘要。
+
+    三种来源各给不同算法：PyPI 的 PEP 691 给 `hashes.sha256`；
+    npm 给 `dist.shasum`（SHA-1）与 `dist.integrity`（SRI，通常是 sha512）。
+    全都可能缺失，因此这个对象可以是空的——**空不等于通过**，
+    调用方必须把空当作拒绝理由（见 `verify_artifact_digest`）。
+    """
+
+    sha256: str = ""
+    sha1: str = ""
+    integrity: str = ""
+
+    def __bool__(self) -> bool:
+        return bool(self.sha256 or self.sha1 or self.integrity)
+
+    @staticmethod
+    def from_pypi(file_info: object) -> "ArtifactDigest":
+        """从 PEP 691 的文件条目里取摘要。
+
+        返回空对象而不是 `None`：`None` 会诱使调用方写成
+        `if digest: verify(...)`，于是「registry 没声明哈希」这条最该拒绝的路径
+        反而跳过了校验。
+        """
+        if not isinstance(file_info, dict):
+            return ArtifactDigest()
+        hashes = file_info.get("hashes")
+        if not isinstance(hashes, dict):
+            return ArtifactDigest()
+        sha256 = hashes.get("sha256")
+        return ArtifactDigest(sha256=sha256 if isinstance(sha256, str) else "")
+
+    @staticmethod
+    def from_npm(dist: object) -> "ArtifactDigest":
+        """从 npm 的 `dist` 里取 `shasum` 与 `integrity`。"""
+        if not isinstance(dist, dict):
+            return ArtifactDigest()
+        shasum = dist.get("shasum")
+        integrity = dist.get("integrity")
+        return ArtifactDigest(
+            sha1=shasum if isinstance(shasum, str) else "",
+            integrity=integrity if isinstance(integrity, str) else "",
+        )
+
+
 PYPI_SIMPLE_JSON = "application/vnd.pypi.simple.v1+json"
 
 
@@ -132,10 +180,16 @@ def _pypi_artifact(
         return None
 
 
-async def get_latest_pypi_version(
+async def resolve_pypi_release(
     package_name: str, registry: str = "https://pypi.org/simple"
-) -> tuple[str, str]:
-    """Return the newest installable release exposed by a PEP 691 index."""
+) -> tuple[str, str, ArtifactDigest]:
+    """Resolve the newest installable release **with** the digest the index declares.
+
+    与 `get_latest_pypi_version` 分成两个函数，而不是把后者改成返回三元组：
+    后者有多个既有调用点（启动期检查、检查更新接口）与多处测试替身都按二元组
+    解包，改 arity 会把一次安全加固变成一次连带破坏。安装路径用这个带摘要的版本，
+    只读的「有没有新版本」继续用原来那个——它不下载任何东西，不需要摘要。
+    """
     try:
         project_url = _pypi_simple_url(package_name, registry)
         async with aiohttp.ClientSession() as session:
@@ -146,31 +200,41 @@ async def get_latest_pypi_version(
                 response.raise_for_status()
                 data = await response.json()
         compatible_tags = set(sys_tags())
-        candidates = [
-            artifact
-            for file_info in data.get("files", [])
-            if (
-                artifact := _pypi_artifact(
-                    package_name,
-                    file_info,
-                    compatible_tags,
-                )
+        candidates: list[tuple[Version, int, str, ArtifactDigest]] = []
+        for file_info in data.get("files", []):
+            artifact = _pypi_artifact(package_name, file_info, compatible_tags)
+            if not artifact:
+                continue
+            release, kind, download_url = artifact
+            candidates.append(
+                (release, kind, download_url, ArtifactDigest.from_pypi(file_info))
             )
-        ]
         if not candidates:
-            return "0.0.0", ""
-        release, _, download_url = max(candidates, key=lambda item: item[:2])
-        return str(release), urljoin(project_url, download_url)
+            return "0.0.0", "", ArtifactDigest()
+        release, _, download_url, digest = max(candidates, key=lambda item: item[:2])
+        return str(release), urljoin(project_url, download_url), digest
     except Exception:
-        return "0.0.0", ""
-    
+        return "0.0.0", "", ArtifactDigest()
 
-async def get_latest_npm_version(
+
+async def get_latest_pypi_version(
+    package_name: str, registry: str = "https://pypi.org/simple"
+) -> tuple[str, str]:
+    """Return the newest installable release exposed by a PEP 691 index.
+
+    只回答「最新版本是什么、从哪下」。需要校验摘要的安装路径走
+    `resolve_pypi_release`。
+    """
+    version, url, _ = await resolve_pypi_release(package_name, registry)
+    return version, url
+
+
+async def resolve_npm_release(
     package_name: str,
     registry: str = "https://registry.npmjs.org",
     dist_tag: str = "latest",
-) -> tuple[str, str]:
-    """获取NPM包指定 dist-tag 的版本和下载URL
+) -> tuple[str, str, ArtifactDigest]:
+    """获取NPM包指定 dist-tag 的版本、下载URL与 registry 声明的摘要
 
     Args:
         package_name: npm 包名
@@ -182,7 +246,9 @@ async def get_latest_npm_version(
             指定的 dist-tag 不存在时自动回退到 latest，避免上游撤销标签后无法安装。
 
     Returns:
-        (版本号, tarball 下载地址)，失败时返回 ("0.0.0", "")
+        (版本号, tarball 下载地址, registry 声明的摘要)，失败时返回
+        ("0.0.0", "", 空摘要)。空摘要**不等于校验通过**——
+        `verify_artifact_digest` 会把它当作拒绝安装的理由。
     """
     try:
         async with aiohttp.ClientSession() as session:
@@ -198,15 +264,108 @@ async def get_latest_npm_version(
                 )
                 if not latest_version:
                     return "0.0.0", ""
-                tarball_url = versions[latest_version]["dist"]["tarball"]
-        return latest_version, tarball_url
+                dist = versions[latest_version].get("dist", {})
+                tarball_url = dist["tarball"]
+                digest = ArtifactDigest.from_npm(dist)
+        return latest_version, tarball_url, digest
     except Exception:
-        return "0.0.0", ""
+        return "0.0.0", "", ArtifactDigest()
+
+
+async def get_latest_npm_version(
+    package_name: str,
+    registry: str = "https://registry.npmjs.org",
+    dist_tag: str = "latest",
+) -> tuple[str, str]:
+    """Return the newest version and tarball URL for a dist-tag.
+
+    只回答「最新版本是什么、从哪下」。需要校验摘要的安装路径走
+    `resolve_npm_release`——拆成两个函数而不是改这个函数的 arity，
+    是因为它有多个既有调用点与测试替身都按二元组解包。
+    """
+    version, url, _ = await resolve_npm_release(package_name, registry, dist_tag)
+    return version, url
     
 
 
+def _file_digest(path: str, algorithm: str) -> str:
+    digest = hashlib.new(algorithm)
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_artifact_digest(path: str, expected: "ArtifactDigest | None") -> None:
+    """校验下载的升级包，不通过就抛 `ValueError` 并删掉文件。
+
+    此前 `download_file` 算了 SHA-256 并返回，却**没有任何调用点比对它**。
+    算了不比对是最坏的一种形态：代码看起来做了校验（有 `hashlib`、有摘要返回值），
+    审阅时容易认为已经校验过了。
+
+    实际后果是**镜像源成了任意代码执行的入口**：镜像地址是用户可配的
+    （`config.update.pypi_registry` / `npm_registry`），一个被投毒或被中间人替换
+    的镜像可以返回任意 wheel，而升级流程会直接 `pip install` 它。TLS 只能证明
+    「确实来自这个镜像」，证明不了「这个镜像给的东西没被换过」。
+
+    **摘要缺失时拒绝安装。** 「没人告诉我该是什么」不等于「它是对的」；
+    把缺失当通过等于留一个「只要别声明哈希」的绕过口，而投毒者正好可以自己
+    决定不声明。
+
+    **有多个摘要时逐个都要过。** 不能因为弱的那个（SHA-1）通过就放行 SHA-256
+    不匹配的包。
+    """
+    if not expected:
+        raise ValueError(
+            "升级包校验失败：registry 未声明文件摘要，无法确认下载内容未被替换。"
+            "请更换为提供哈希的镜像源后重试"
+        )
+    if not path or not os.path.isfile(path):
+        raise ValueError("升级包校验失败：下载文件不存在")
+
+    def _fail(reason: str) -> None:
+        # 删掉已知有问题的包：留着它，下一次「重试升级」可能直接拿它。
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise ValueError(f"升级包校验失败：{reason}")
+
+    checks: list[tuple[str, str, str]] = []
+    if expected.sha256:
+        checks.append(("sha256", expected.sha256, "SHA-256"))
+    if expected.sha1:
+        # SHA-1 弱，但有比没有强得多：它仍然挡得住「镜像返回了完全不同的另一个包」
+        # 这个主要威胁。
+        checks.append(("sha1", expected.sha1, "SHA-1"))
+
+    for algorithm, raw_expected, label in checks:
+        actual = _file_digest(path, algorithm)
+        if actual.lower() != raw_expected.strip().lower():
+            _fail(f"{label} 与 registry 声明不一致")
+
+    if expected.integrity:
+        raw = expected.integrity.strip()
+        algorithm, separator, encoded = raw.partition("-")
+        if not separator or algorithm not in {"sha256", "sha384", "sha512"}:
+            # 看不懂的 integrity 既不能当「没声明」放行，也不能当通过——
+            # 两种都会让一次投毒安静地成功。
+            _fail(f"无法解析 registry 的 integrity 声明（{raw[:32]}）")
+        try:
+            expected_bytes = base64.b64decode(encoded, validate=True)
+        except Exception:  # noqa: BLE001
+            _fail("registry 的 integrity 声明不是合法的 base64")
+        else:
+            if hashlib.new(algorithm, open(path, "rb").read()).digest() != expected_bytes:
+                _fail(f"{algorithm} (SRI) 与 registry 声明不一致")
+
+    if not checks and not expected.integrity:
+        raise ValueError(
+            "升级包校验失败：registry 未声明可用的文件摘要，无法确认下载内容"
+        )
+
+
 async def download_file(url: str, temp_dir: str) -> tuple[str, str]:
-    """下载文件并返回文件路径和SHA256"""
     local_filename = os.path.join(temp_dir, url.split('/')[-1])
     sha256_hash = hashlib.sha256()
     

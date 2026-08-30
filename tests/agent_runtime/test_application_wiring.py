@@ -20,6 +20,7 @@ from kirara_ai.media import MediaManager
 from kirara_ai.memory.memory_manager import MemoryManager
 from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
 from kirara_ai.plugin_manager.resource_catalog import ResourceCatalogService
+from kirara_ai.plugin_manager.system_dependencies import SystemDependencyService
 
 
 def test_config_path_is_inside_configured_data_path(tmp_path: Path, monkeypatch):
@@ -255,3 +256,40 @@ def test_data_path_is_not_replaced_by_legacy_relative_data_directory(
     monkeypatch.setattr(entry, "DATA_PATH", data_path)
 
     assert entry._config_path() == Path(data_path) / "config.yaml"
+
+
+def test_init_agent_runtime_passes_the_dependency_service(tmp_path: Path, monkeypatch):
+    """技能就绪提示只有拿到依赖服务才成立（需求 10）。
+
+    `AgentRuntimeExecutor` 接受 `dependency_service`，但如果 `init_agent_runtime`
+    不把容器里那份传进去，整个特性在生产里是死的——单元测试全绿、真实部署零效果。
+    这正是本轮反复在修的那类缺陷，所以在装配这一跳上单独立一个断言。
+    """
+    monkeypatch.setattr(entry, "DATA_PATH", str(tmp_path / "vps-data"))
+    container = DependencyContainer()
+    dependency_service = MagicMock(spec=SystemDependencyService)
+    container.register(ResourceLifecycleService, MagicMock(spec=ResourceLifecycleService))
+    container.register(LLMManager, MagicMock(spec=LLMManager))
+    container.register(MCPServerManager, MagicMock(spec=MCPServerManager))
+    container.register(SystemDependencyService, dependency_service)
+
+    runtime = entry.init_agent_runtime(container)
+
+    assert runtime.dependency_service is dependency_service
+
+
+def test_init_agent_runtime_works_without_a_dependency_service(tmp_path: Path, monkeypatch):
+    """容器里没有依赖服务时不能启动失败。
+
+    嵌入式用法与既有测试的容器都不注册它；缺它的后果只是少一句就绪提示，
+    而那远好于让整个 Agent 运行时装配不起来。
+    """
+    monkeypatch.setattr(entry, "DATA_PATH", str(tmp_path / "vps-data"))
+    container = DependencyContainer()
+    container.register(ResourceLifecycleService, MagicMock(spec=ResourceLifecycleService))
+    container.register(LLMManager, MagicMock(spec=LLMManager))
+    container.register(MCPServerManager, MagicMock(spec=MCPServerManager))
+
+    runtime = entry.init_agent_runtime(container)
+
+    assert runtime.dependency_service is None

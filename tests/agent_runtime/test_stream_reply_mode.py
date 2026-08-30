@@ -207,3 +207,71 @@ async def test_an_empty_stream_yields_an_empty_reply_not_a_crash(tmp_path):
         if isinstance(part, LLMChatTextContent)
     )
     assert text == ""
+
+
+@pytest.mark.asyncio
+async def test_the_first_visible_chunk_produces_a_first_byte_timestamp(tmp_path):
+    """流式聚合必须带回首字节时刻，这是链路上唯一能测到它的地方。
+
+    非流式请求在 HTTP 响应到达前没有任何中间事件；只有流式才知道「模型什么时候
+    开始吐字」。测不到就必须留空，而不是拿请求返回时刻冒充——后者会把
+    「思考 20 秒、吐字 1 秒」记成「首字节 21 秒、生成 0 秒」，正好反过来。
+    """
+    from datetime import datetime, timezone
+
+    stream = FakeStream([chunk(""), chunk("第一个可见片段"), chunk("后续")])
+    executor, _ = make_executor("aggregate", stream=stream, tmp_path=tmp_path)
+
+    timings: dict[str, object] = {}
+    before = datetime.now(timezone.utc)
+    await executor._execute_model(
+        request(), ("model-a",), "model-a", timings=timings
+    )
+    after = datetime.now(timezone.utc)
+
+    first_byte_at = timings.get("llm_first_byte_at")
+    assert first_byte_at is not None, "流式路径必须报告首字节时刻"
+    assert first_byte_at.tzinfo is not None, "时间戳必须带时区，否则相减得到错误秒数"
+    assert before <= first_byte_at <= after
+
+
+@pytest.mark.asyncio
+async def test_an_empty_stream_reports_no_first_byte(tmp_path):
+    """一个字都没吐出来时不得伪造首字节。"""
+    stream = FakeStream([chunk(""), chunk("")])
+    executor, _ = make_executor("aggregate", stream=stream, tmp_path=tmp_path)
+
+    timings: dict[str, object] = {}
+    await executor._execute_model(
+        request(), ("model-a",), "model-a", timings=timings
+    )
+
+    assert "llm_first_byte_at" not in timings
+
+
+@pytest.mark.asyncio
+async def test_the_non_stream_path_reports_no_first_byte(tmp_path):
+    """非流式请求没有可测首字节，timings 必须保持为空。"""
+    executor, _ = make_executor("off", stream=FakeStream([chunk("x")]), tmp_path=tmp_path)
+
+    timings: dict[str, object] = {}
+    await executor._execute_model(
+        request(), ("model-a",), "model-a", timings=timings
+    )
+
+    assert timings == {}
+
+
+@pytest.mark.asyncio
+async def test_execute_model_still_works_without_a_timings_argument(tmp_path):
+    """既有调用方按三元组解包且不传 timings，签名扩展不得破坏它们。"""
+    stream = FakeStream([chunk("compat")])
+    executor, _ = make_executor("aggregate", stream=stream, tmp_path=tmp_path)
+
+    response, model_id, trace_id = await executor._execute_model(
+        request(), ("model-a",), "model-a"
+    )
+
+    assert response.message.content[0].text == "compat"
+    assert model_id == "model-a"
+    assert trace_id == "trace-stream"

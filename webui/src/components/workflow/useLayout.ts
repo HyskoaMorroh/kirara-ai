@@ -51,6 +51,20 @@ const EDGE_SEPARATION = 24
 /** 拖放/复制节点时的对齐网格，与画布 Background 的 gap 一致 */
 export const LAYOUT_GRID_SIZE = 20
 
+/**
+ * 触发「超大图受控降级」的节点数阈值（需求 20.2）。
+ *
+ * `computeWorkflowLayout` 在主线程同步跑 dagre 加一次去重叠扫描，后者的收敛
+ * 守卫是 `placed.length * 2 + 2`，随节点数增长。节点很多时整段会把标签页卡住
+ * 数秒，期间用户以为界面死了，反复点「自动排布」只会排更多次。
+ *
+ * 阈值的取法：内置预设与常见用户工作流都在几十个节点以内，所以 200 不会在日常
+ * 操作里冒出来；而到了这个量级，一次整理已经明显能感知到停顿，此时先说明代价、
+ * 让用户决定，比默默锁住浏览器好。**降级是「先问」而不是「不做」**——
+ * 直接拒绝等于把功能拿掉。
+ */
+export const LARGE_GRAPH_NODE_THRESHOLD = 200
+
 /** 全宽（CJK、全角标点、韩文等）字符集合，这类字符的字宽约等于 font-size */
 const FULL_WIDTH_PATTERN =
   /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/
@@ -347,11 +361,22 @@ export function computeWorkflowLayout(
     ranksep: options.rankSeparation ?? RANK_SEPARATION,
     edgesep: options.edgeSeparation ?? EDGE_SEPARATION,
     // 让 dagre 在层内做重心排序，减少连线交叉
-    ranker: 'network-simplex'
+    ranker: 'network-simplex',
+    // 显式启用打破环。工作流允许回边（重试、循环审阅），而 dagre 默认**不**破环：
+    // `ranker` 只决定分层算法。此前这里没有 acyclicer，而下面的注释却写着
+    // 「依赖 greedy-FAS 的插入顺序」——注释描述了一个从未被启用的机制。
+    // 环图当前之所以没出事，靠的是 `resolveNodeOverlaps` 的兜底，
+    // 那是在错误版式之后补救，不是分层本身正确。
+    acyclicer: 'greedy'
   })
 
   const sizes = new Map<string, { width: number; height: number }>()
-  for (const block of blocks) {
+  // dagre 的 greedy-FAS（打破环）与层内重心排序都依赖插入顺序，因此必须先按
+  // id 排序再喂进去：否则同一张图在「撤销后恢复」「删掉一个节点再排布」
+  // 「导入」这些数组顺序变化的场合会排出不同的版式——用户看到的是
+  //「同样的图排出来不一样」。`layoutMissingNodes` 早就这样做了，这里补齐。
+  const orderedBlocks = [...blocks].sort((left, right) => left.id.localeCompare(right.id))
+  for (const block of orderedBlocks) {
     const size =
       block.size && block.size.width > 0 && block.size.height > 0
         ? { width: block.size.width, height: block.size.height }
@@ -360,7 +385,11 @@ export function computeWorkflowLayout(
     dagreGraph.setNode(block.id, { ...size })
   }
 
-  for (const edge of edges) {
+  const orderedEdges = [...edges].sort(
+    (left, right) =>
+      left.source.localeCompare(right.source) || left.target.localeCompare(right.target)
+  )
+  for (const edge of orderedEdges) {
     if (sizes.has(edge.source) && sizes.has(edge.target)) {
       dagreGraph.setEdge(edge.source, edge.target)
     }
@@ -370,7 +399,7 @@ export function computeWorkflowLayout(
 
   // dagre 的坐标是节点中心，vue-flow 用的是左上角，需要按各节点自身尺寸换算
   const boxes = new Map<string, LayoutBox>()
-  for (const block of blocks) {
+  for (const block of orderedBlocks) {
     const size = sizes.get(block.id)!
     const laidOut = dagreGraph.node(block.id)
     boxes.set(block.id, {

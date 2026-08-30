@@ -243,6 +243,19 @@ const circuitFields: ResilienceField[] = [
   }
 ]
 
+/**
+ * 推理强度档位。
+ *
+ * 刻意**不含**「默认」这一项：留空（clearable）就是「不指定」，
+ * 把它做成一个可选项会让人以为默认也是一档具体强度。
+ */
+const reasoningEffortOptions = [
+  { label: '低', value: 'low' },
+  { label: '中', value: 'medium' },
+  { label: '高', value: 'high' },
+  { label: '最大', value: 'max' }
+]
+
 const resilienceValue = (key: keyof LLMBackend): number => {
   const current = props.adapter?.[key]
   if (typeof current === 'number') return current
@@ -259,6 +272,9 @@ const updateResilience = (key: keyof LLMBackend, value: number | null) => {
 const resetResilience = () => {
   updateAdapter((nextAdapter) => {
     Object.assign(nextAdapter, resilienceDefaults())
+    // 「恢复默认」必须把推理强度也恢复成「不指定」，否则点了恢复默认之后
+    // 仍然留着上一次选的档位，与按钮的字面意思不符。
+    delete nextAdapter.reasoning_effort
   })
 }
 </script>
@@ -398,6 +414,135 @@ const resetResilience = () => {
               />
               <span class="resilience-inline-help">
                 关闭后该供应商仍可被直接选用，但不会出现在自动故障转移队列里
+              </span>
+            </n-form-item>
+
+            <!--
+              推理强度：可清空。留空表示「不指定」，沿用上游默认——这不是
+              「等于某个档位」，而是一个必须能表达的独立状态：不支持思考的模型
+              收到该字段会直接报错，因此不能替用户填一个默认档位。
+            -->
+            <n-form-item label="推理强度">
+              <n-select
+                :value="adapter.reasoning_effort ?? null"
+                :options="reasoningEffortOptions"
+                clearable
+                placeholder="沿用上游默认（不指定）"
+                class="resilience-input"
+                data-test="reasoning-effort"
+                @update:value="
+                  (value) =>
+                    updateAdapter((nextAdapter) => {
+                      if (value) {
+                        nextAdapter.reasoning_effort = value
+                      } else {
+                        delete nextAdapter.reasoning_effort
+                      }
+                    })
+                "
+              />
+              <span class="resilience-inline-help">
+                各家字段不同，由适配器翻译：OpenAI 系为 reasoning_effort，
+                Claude 为 thinking 预算，Gemini 为 thinkingConfig；「最大」在
+                Gemini 上等于交给模型自行决定预算
+              </span>
+            </n-form-item>
+
+            <!--
+              隐藏 AI 署名：会改写模型输出，因此默认关闭，且必须显式提交。
+              放在这里而不是全局设置：不同上游的自报身份习惯差别很大，
+              一个只在某家模型上出现的毛病不该由全局开关来治。
+            -->
+            <n-form-item label="隐藏 AI 署名">
+              <n-switch
+                :value="adapter.hide_ai_attribution === true"
+                data-test="hide-ai-attribution"
+                @update:value="
+                  (value) =>
+                    updateAdapter((nextAdapter) => {
+                      nextAdapter.hide_ai_attribution = value
+                    })
+                "
+              />
+              <span class="resilience-inline-help">
+                删掉「作为一个 AI 助手」「本回复由 AI 生成」这类自报身份的句子。
+                只删署名，不动答案本身——「作为一个 AI 助手，我建议你先备份」里
+                后半句是答案；也不动代码块、工具参数与用量统计
+              </span>
+            </n-form-item>
+
+            <!--
+              请求整流器（需求 8）。
+              四个开关，而不是一个：三类整流的风险不同，图片降级最该能单独关掉。
+            -->
+            <n-form-item label="请求整流">
+              <n-switch
+                :value="adapter.rectifier_enabled !== false"
+                data-test="rectifier-enabled"
+                @update:value="
+                  (value) =>
+                    updateAdapter((nextAdapter) => {
+                      nextAdapter.rectifier_enabled = value
+                    })
+                "
+              />
+              <span class="resilience-inline-help">
+                上游因参数约束<strong>拒绝</strong>这次请求时，按白名单改一处再重试一次。
+                只在上游真的失败、且错误命中已知约束时才动，每类最多改一次；
+                改完仍失败就把原始错误抛出来。不做模糊改写——那会掩盖真正的参数错误
+              </span>
+            </n-form-item>
+
+            <n-form-item label="修正思考签名" v-if="adapter.rectifier_enabled !== false">
+              <n-switch
+                :value="adapter.rectify_thinking_signature !== false"
+                data-test="rectify-thinking-signature"
+                @update:value="
+                  (value) =>
+                    updateAdapter((nextAdapter) => {
+                      nextAdapter.rectify_thinking_signature = value
+                    })
+                "
+              />
+              <span class="resilience-inline-help">
+                多轮对话回传上一轮思考块时带签名，换模型或换供应商后该签名失效。
+                只移除思考块与残留签名字段，正文、代码块与工具调用原样保留
+              </span>
+            </n-form-item>
+
+            <n-form-item label="修正思考预算" v-if="adapter.rectifier_enabled !== false">
+              <n-switch
+                :value="adapter.rectify_thinking_budget !== false"
+                data-test="rectify-thinking-budget"
+                @update:value="
+                  (value) =>
+                    updateAdapter((nextAdapter) => {
+                      nextAdapter.rectify_thinking_budget = value
+                    })
+                "
+              />
+              <span class="resilience-inline-help">
+                思考预算有下限，且必须小于最大输出长度；两者关系不对时整个请求被拒，
+                正文一个字都出不来。<code>adaptive</code> 类型不改——那是让上游自行决定预算
+              </span>
+            </n-form-item>
+
+            <n-form-item label="图片降级" v-if="adapter.rectifier_enabled !== false">
+              <n-switch
+                :value="adapter.rectify_media_fallback !== false"
+                data-test="rectify-media-fallback"
+                @update:value="
+                  (value) =>
+                    updateAdapter((nextAdapter) => {
+                      nextAdapter.rectify_media_fallback = value
+                    })
+                "
+              />
+              <span class="resilience-inline-help">
+                这一项<strong>会改变模型看到的内容</strong>：上游拒收图片时，
+                把图片替换为可见占位文本后重试，让对话不中断。
+                替换而不是静默删除——否则模型会对着空内容编一个答案，
+                而用户以为它真的看过那张图
               </span>
             </n-form-item>
           </n-form>

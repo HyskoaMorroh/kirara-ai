@@ -262,6 +262,14 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
                 query = query.filter(LLMRequestTrace.request_time >= value)  # type: ignore
             elif field == "end_time":
                 query = query.filter(LLMRequestTrace.request_time < value)  # type: ignore
+            elif field.endswith("__is_null"):
+                # 「未标注」维度：显式筛选该列为 NULL 的记录。用一个独立后缀而不是
+                # 空串，因为空串在参数解析层被当成「没填」丢掉——那会让
+                # 「只看未标注」静默变成「看全部」。
+                column_name = field.removesuffix("__is_null")
+                column = getattr(LLMRequestTrace, column_name, None)
+                if column is not None:
+                    query = query.filter(column.is_(None))
             elif hasattr(LLMRequestTrace, field):
                 query = query.filter(getattr(LLMRequestTrace, field) == value)
         return query
@@ -270,49 +278,92 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
     def _group_statistics(query, column, key: str) -> list[Dict[str, Any]]:
         """按维度聚合请求数、Token、平均耗时与成本。
 
-        成本存在 ``cost_snapshot_json`` 里——历史请求必须沿用当时的定价快照，
-        不能拿现价重算——所以无法用 SQL 的 ``SUM`` 完成，这里改为取出该维度所需的
-        原始列后在 Python 侧聚合。排序仍保持「按请求数降序、维度键升序」。
+        成本沿用请求当时的定价快照（不能拿现价重算历史账单），但快照里的总成本
+        在写入时已投影到 ``total_cost`` 列，因此这里整段由 SQL 完成。
+        此前是把该维度所需的原始列全部取回 Python 再聚合——数据量一大，
+        统计页的每一个分组都要物化一次结果集，索引帮不上忙。
+        排序仍保持「按请求数降序、维度键升序」。
         """
         rows = query.with_entities(
             column,
-            LLMRequestTrace.total_tokens,
-            LLMRequestTrace.duration,
-            LLMRequestTrace.cost_snapshot_json,
-        ).all()
-        grouped: dict[Any, dict[str, Any]] = {}
-        for value, tokens, duration, snapshot_json in rows:
-            bucket = grouped.setdefault(
-                value,
-                {
-                    key: value,
-                    "count": 0,
-                    "tokens": 0,
-                    "avg_duration": 0.0,
-                    "_duration_total": 0.0,
-                    "_duration_samples": 0,
-                    "cost": Decimal("0"),
-                    "unpriced_requests": 0,
-                },
-            )
-            bucket["count"] += 1
-            bucket["tokens"] += int(tokens or 0)
-            if duration is not None:
-                bucket["_duration_total"] += float(duration)
-                bucket["_duration_samples"] += 1
-            cost = LLMTracer._snapshot_cost(snapshot_json)
-            if cost is None:
-                bucket["unpriced_requests"] += 1
-            else:
-                bucket["cost"] += cost
+            func.count(LLMRequestTrace.id),
+            func.sum(LLMRequestTrace.total_tokens),
+            func.avg(LLMRequestTrace.duration),
+            func.sum(LLMRequestTrace.total_cost),
+            # 未定价条数 = 总数 - 有成本的条数。用 SUM(CASE ...) 而不是
+            # COUNT(total_cost)，因为后者在不同数据库对 NULL 的处理上不完全一致。
+            func.sum(case((LLMRequestTrace.total_cost.is_(None), 1), else_=0)),  # type: ignore
+            # 分组也要给四类拆分：同样的 100 总量，一家几乎全是输入、
+            # 另一家几乎全是输出，处置完全不同（前者查上下文与历史长度，
+            # 后者查 prompt 与 max_tokens）。只给一个 `tokens` 就把该查什么
+            # 留给读者猜。
+            func.sum(LLMRequestTrace.prompt_tokens),
+            func.sum(LLMRequestTrace.completion_tokens),
+            func.sum(LLMRequestTrace.cached_tokens),
+            func.sum(LLMRequestTrace.cache_write_tokens),
+            func.count(LLMRequestTrace.cached_tokens),
+            func.count(LLMRequestTrace.cache_write_tokens),
+            # 成功率所需的三态计数。
+            #
+            # `error_categories` 回答「在失败什么」，回答不了「谁在失败」——
+            # 一个 timeout 分组里可能混着三家供应商。而故障转移队列该把谁排后面，
+            # 依据正是各家的成功率；没有它只能翻请求日志人工计数。
+            #
+            # `pending` 单列且不进分母：还在跑的请求既不是成功也不是失败，
+            # 把它算作失败会让正在进行的长请求把成功率压下去。
+            func.sum(case((LLMRequestTrace.status == "success", 1), else_=0)),  # type: ignore
+            func.sum(case((LLMRequestTrace.status == "failed", 1), else_=0)),  # type: ignore
+            func.sum(case((LLMRequestTrace.status == "pending", 1), else_=0)),  # type: ignore
+        ).group_by(column).all()
 
         results = []
-        for bucket in grouped.values():
-            samples = bucket.pop("_duration_samples")
-            total = bucket.pop("_duration_total")
-            bucket["avg_duration"] = total / samples if samples else 0.0
-            bucket["cost"] = str(bucket["cost"])
-            results.append(bucket)
+        for (
+            value,
+            counted,
+            tokens,
+            avg_duration,
+            summed_cost,
+            unpriced,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+            cache_write_tokens,
+            cached_reported,
+            cache_write_reported,
+            success_requests,
+            failed_requests,
+            pending_requests,
+        ) in rows:
+            succeeded = int(success_requests or 0)
+            failed = int(failed_requests or 0)
+            concluded = succeeded + failed
+            results.append(
+                {
+                    key: value,
+                    "count": int(counted or 0),
+                    "tokens": int(tokens or 0),
+                    "avg_duration": float(avg_duration) if avg_duration is not None else 0.0,
+                    "cost": str(Decimal(str(summed_cost or 0))),
+                    "unpriced_requests": int(unpriced or 0),
+                    "prompt_tokens": int(prompt_tokens or 0),
+                    "completion_tokens": int(completion_tokens or 0),
+                    # `None` 表示这一组里没有任何上游报过缓存，与「报了 0」不同。
+                    "cached_tokens": (
+                        int(cached_tokens or 0) if int(cached_reported or 0) > 0 else None
+                    ),
+                    "cache_write_tokens": (
+                        int(cache_write_tokens or 0)
+                        if int(cache_write_reported or 0) > 0
+                        else None
+                    ),
+                    "success_requests": succeeded,
+                    "failed_requests": failed,
+                    "pending_requests": int(pending_requests or 0),
+                    # 一条都没跑完时是「未知」而不是 0%：报 0% 会让一家刚配好、
+                    # 只有一条在途请求的供应商看起来是最差的那一个。
+                    "success_rate": (succeeded / concluded) if concluded else None,
+                }
+            )
         results.sort(key=lambda row: (-row["count"], str(row[key] or "")))
         return results
 
@@ -350,20 +401,120 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
 
     @staticmethod
     def _time_buckets(rows, storage_timezone: ZoneInfo, output_timezone: ZoneInfo):
-        daily = defaultdict(lambda: {"requests": 0, "tokens": 0, "success": 0, "failed": 0})
-        hourly = defaultdict(lambda: {"requests": 0, "tokens": 0})
-        for request_time, total_tokens, status in rows:
+        """按本地日期与小时分桶，带四类 Token 拆分与成本。
+
+        只给一个 `tokens` 的趋势线看得出「涨了」，看不出涨的是输入还是输出——
+        而两者的处置相反（输入涨查上下文与历史长度，输出涨查 prompt 与
+        max_tokens）。`tokens` 键保持原义不动，前端既有图表继续读它。
+
+        成本进分桶是为了回答「这个月贵了三倍，是哪天开始的」。只有一个 30 天
+        合计时，这个问题只能靠手工二分时间范围反复重查，而账单异常恰恰最需要
+        快速定位到某一天（换了模型、上了新流量、缓存失效）。
+
+        缓存两列在分桶里按 0 累加而不是 `None`：趋势是逐时间累加的折线，
+        中间出现 `None` 会把线断开，而「这个小时没有上游报缓存」在趋势图上
+        与「报了 0」并无不同处置。需要区分未知与零的是 `overview.cache_hit_rate`，
+        那里保留了 `None`。
+        """
+        def _empty_daily():
+            return {
+                "requests": 0,
+                "tokens": 0,
+                "success": 0,
+                "failed": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cached_tokens": 0,
+                "cache_write_tokens": 0,
+                "unpriced_requests": 0,
+            }
+
+        def _empty_hourly():
+            return {
+                "requests": 0,
+                "tokens": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cached_tokens": 0,
+                "cache_write_tokens": 0,
+                "unpriced_requests": 0,
+            }
+
+        daily = defaultdict(_empty_daily)
+        hourly = defaultdict(_empty_hourly)
+        # 币种分开累计，最后再投影成 `cost` / `cost_currency` / `cost_by_currency`。
+        # 与 `overview` 同一口径：两种货币加进同一个数字得到的是一个没有单位的数，
+        # 而那不会报错。
+        daily_costs: dict[str, dict[str, Decimal]] = defaultdict(
+            lambda: defaultdict(Decimal)
+        )
+        hourly_costs: dict[str, dict[str, Decimal]] = defaultdict(
+            lambda: defaultdict(Decimal)
+        )
+        for row in rows:
+            (
+                request_time,
+                total_tokens,
+                status,
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                cache_write_tokens,
+                total_cost,
+                cost_currency,
+            ) = row
             localized = request_time.replace(tzinfo=storage_timezone).astimezone(output_timezone)
             date_key = localized.strftime("%Y-%m-%d")
             hour_key = localized.strftime("%Y-%m-%d %H:00:00")
             daily[date_key]["requests"] += 1
             daily[date_key]["tokens"] += total_tokens or 0
+            daily[date_key]["prompt_tokens"] += prompt_tokens or 0
+            daily[date_key]["completion_tokens"] += completion_tokens or 0
+            daily[date_key]["cached_tokens"] += cached_tokens or 0
+            daily[date_key]["cache_write_tokens"] += cache_write_tokens or 0
             if status == "success":
                 daily[date_key]["success"] += 1
             elif status == "failed":
                 daily[date_key]["failed"] += 1
             hourly[hour_key]["requests"] += 1
             hourly[hour_key]["tokens"] += total_tokens or 0
+            hourly[hour_key]["prompt_tokens"] += prompt_tokens or 0
+            hourly[hour_key]["completion_tokens"] += completion_tokens or 0
+            hourly[hour_key]["cached_tokens"] += cached_tokens or 0
+            hourly[hour_key]["cache_write_tokens"] += cache_write_tokens or 0
+            if total_cost is None:
+                # 未定价请求单列。按 0 元并入当天合计，会把「有请求没匹配到
+                # 价格版本」显示成「这天便宜」——两个完全不同的结论。
+                daily[date_key]["unpriced_requests"] += 1
+                hourly[hour_key]["unpriced_requests"] += 1
+            else:
+                amount = Decimal(str(total_cost))
+                currency = str(cost_currency or "")
+                daily_costs[date_key][currency] += amount
+                hourly_costs[hour_key][currency] += amount
+
+        def _project_costs(bucket: dict, by_currency: dict[str, Decimal]) -> None:
+            """把按币种的累计投影成 `cost` / `cost_currency` / `cost_by_currency`。
+
+            主币种取金额最大者，与 `overview` 完全同一规则；其余币种逐一列出而不是
+            加进同一个数字。没有任何定价证据时 `cost` 是 `"0"`、币种是 `None`——
+            不编一个币种出来。
+            """
+            bucket["cost_by_currency"] = {
+                key: str(value) for key, value in by_currency.items()
+            }
+            if not by_currency:
+                bucket["cost"] = "0"
+                bucket["cost_currency"] = None
+                return
+            primary, amount = max(by_currency.items(), key=lambda item: item[1])
+            bucket["cost"] = str(amount)
+            bucket["cost_currency"] = primary or None
+
+        for key, bucket in daily.items():
+            _project_costs(bucket, daily_costs.get(key, {}))
+        for key, bucket in hourly.items():
+            _project_costs(bucket, hourly_costs.get(key, {}))
         return daily, hourly
 
     def get_statistics(
@@ -389,29 +540,93 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
                 func.sum(case((LLMRequestTrace.status == "failed", 1), else_=0)),  # type: ignore
                 func.sum(case((LLMRequestTrace.status == "pending", 1), else_=0)),  # type: ignore
                 func.sum(LLMRequestTrace.total_tokens),
+                # 需求 22.1 点名「输入/输出/缓存 Token」。四列每行都记着，
+                # 但此前聚合只 SUM 了 total_tokens，把四类合成一个数——
+                # 于是缓存命中率算不出来，而输入 Token 通常是缓存读取的 5~10 倍：
+                # 「总量没变、命中率从 80% 掉到 0%」时账单会翻几倍，
+                # 而统计页在这两种情况下显示的数字完全一样。
+                func.sum(LLMRequestTrace.prompt_tokens),
+                func.sum(LLMRequestTrace.completion_tokens),
+                func.sum(LLMRequestTrace.cached_tokens),
+                func.sum(LLMRequestTrace.cache_write_tokens),
+                # COUNT 只数非 NULL：用来区分「上游没报缓存」与「报了、是 0」。
+                # SUM 对两者都给 0（或 NULL），单靠它分不开，而这两件事的处置
+                # 相反——前者要去查上游是否返回 usage，后者才是真的没命中。
+                func.count(LLMRequestTrace.cached_tokens),
+                func.count(LLMRequestTrace.cache_write_tokens),
             ).one()
+            total_prompt_tokens = int(overview[5] or 0)
+            total_completion_tokens = int(overview[6] or 0)
+            cache_read_reported = int(overview[9] or 0) > 0
+            cache_write_reported = int(overview[10] or 0) > 0
+            total_cached_tokens = int(overview[7] or 0) if cache_read_reported else None
+            total_cache_write_tokens = (
+                int(overview[8] or 0) if cache_write_reported else None
+            )
+            # 命中率 = 缓存读取 /（输入 + 缓存写入 + 缓存读取），与上游计价口径一致：
+            # 三者相加才是这次请求真正付费的输入侧总量。
+            #
+            # 没有任何上游报过缓存时是 `None`（未知）而不是 0%——报 0% 会让运维
+            # 去查一个并不存在的缓存失效问题。分母为 0 时同理。
+            cache_hit_rate: Optional[float] = None
+            if cache_read_reported or cache_write_reported:
+                denominator = (
+                    total_prompt_tokens
+                    + int(overview[8] or 0)
+                    + int(overview[7] or 0)
+                )
+                if denominator > 0:
+                    cache_hit_rate = int(overview[7] or 0) / denominator
 
             # 成本必须按请求当时的价格快照累加，不能拿现价重算历史账单。
-            cost_rows = base_query.with_entities(
-                LLMRequestTrace.cost_snapshot_json
-            ).all()
+            # 快照里的总成本在写入时已投影到 `total_cost` / `cost_currency`
+            # 两列（见 `LLMRequestTrace.apply_cost_projection`），因此这里用
+            # SUM 完成，而不是把筛选后的每一行都取回来逐条解析 JSON——
+            # 后者会让统计页在数据量大时变成一次全表物化，索引完全帮不上忙。
+            #
+            # 按币种分组求和：把两种货币直接相加是错的，哪怕只有一种也要
+            # 走同一条路径，否则「什么时候会分组」取决于数据碰巧长什么样。
+            cost_rows = (
+                base_query.with_entities(
+                    LLMRequestTrace.cost_currency,
+                    func.sum(LLMRequestTrace.total_cost),
+                    func.count(LLMRequestTrace.id),
+                )
+                .filter(LLMRequestTrace.total_cost.isnot(None))
+                .group_by(LLMRequestTrace.cost_currency)
+                .all()
+            )
+            priced_requests = 0
             total_cost = Decimal("0")
-            unpriced_requests = 0
             cost_currency: Optional[str] = None
-            for (snapshot_json,) in cost_rows:
-                cost = self._snapshot_cost(snapshot_json)
-                if cost is None:
-                    unpriced_requests += 1
-                    continue
-                total_cost += cost
+            # 币种按金额降序取主币种：一份混币账单里「总额」只能有一个单位，
+            # 取金额最大的那个并保留其余在 `cost_by_currency` 里，
+            # 而不是让它取决于行的物理顺序。
+            for currency, summed, counted in sorted(
+                cost_rows,
+                key=lambda row: Decimal(str(row[1] or 0)),
+                reverse=True,
+            ):
+                priced_requests += int(counted or 0)
+                amount = Decimal(str(summed or 0))
                 if cost_currency is None:
-                    cost_currency = self._snapshot_currency(snapshot_json)
+                    cost_currency = currency
+                    total_cost = amount
+            cost_by_currency = {
+                str(currency or ""): str(Decimal(str(summed or 0)))
+                for currency, summed, _ in cost_rows
+            }
+            unpriced_requests = max(0, int(overview[0] or 0) - priced_requests)
 
             latency = base_query.with_entities(
                 func.avg(LLMRequestTrace.ttft_ms),
                 func.max(LLMRequestTrace.ttft_ms),
                 func.avg(LLMRequestTrace.duration),
                 func.avg(LLMRequestTrace.attempt_count),
+                # 重试与故障转移分开统计：平均 3 次尝试可能是「一家重试两次」
+                # 也可能是「换了两家」，两者的处置相反（调超时 vs 查供应商健康）。
+                func.avg(LLMRequestTrace.retry_count),
+                func.avg(LLMRequestTrace.failover_count),
             ).one()
 
             recent_query = base_query
@@ -424,17 +639,25 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
                     LLMRequestTrace.request_time >= now - timedelta(hours=24)  # type: ignore
                 )
 
-            daily_rows = recent_query.with_entities(
+            # 四类 Token 一并取回：分桶要能回答「涨的是输入还是输出」。
+            # 仍然只取分桶用得到的这几列，不取整行——请求/响应正文在这张表里，
+            # 取整行会把统计页变成一次全表物化。
+            bucket_columns = (
                 LLMRequestTrace.request_time,
                 LLMRequestTrace.total_tokens,
                 LLMRequestTrace.status,
-            ).all()
+                LLMRequestTrace.prompt_tokens,
+                LLMRequestTrace.completion_tokens,
+                LLMRequestTrace.cached_tokens,
+                LLMRequestTrace.cache_write_tokens,
+                # 成本进趋势：回答「贵了三倍是哪天开始的」。取的是写入时冻结的
+                # 快照投影列，不是现价——历史账单不能被后来的改价改写。
+                LLMRequestTrace.total_cost,
+                LLMRequestTrace.cost_currency,
+            )
+            daily_rows = recent_query.with_entities(*bucket_columns).all()
             _, hourly_buckets = self._time_buckets(
-                hourly_query.with_entities(
-                    LLMRequestTrace.request_time,
-                    LLMRequestTrace.total_tokens,
-                    LLMRequestTrace.status,
-                ).all(),
+                hourly_query.with_entities(*bucket_columns).all(),
                 storage_timezone,
                 output_timezone,
             )
@@ -452,8 +675,19 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
                     "failed_requests": overview[2] or 0,
                     "pending_requests": overview[3] or 0,
                     "total_tokens": overview[4] or 0,
+                    # 四类拆分与总数并列给出，总数的含义不变——否则历史看板
+                    # 会在同一个字段上前后不一致。
+                    "total_prompt_tokens": total_prompt_tokens,
+                    "total_completion_tokens": total_completion_tokens,
+                    # `None` = 没有上游报过缓存（未知）；`0` = 报了、确实没命中。
+                    "total_cached_tokens": total_cached_tokens,
+                    "total_cache_write_tokens": total_cache_write_tokens,
+                    "cache_hit_rate": cache_hit_rate,
                     "total_cost": str(total_cost),
                     "cost_currency": cost_currency,
+                    # 混币账单里「总额」只能有一个单位，其余币种在这里逐一列出，
+                    # 而不是被悄悄加进同一个数字。单币种部署下只有一个键。
+                    "cost_by_currency": cost_by_currency,
                     "unpriced_requests": unpriced_requests,
                 },
                 "latency": {
@@ -462,6 +696,10 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
                     "max_ttft_ms": int(latency[1]) if latency[1] is not None else None,
                     "avg_duration": float(latency[2]) if latency[2] is not None else None,
                     "avg_attempt_count": float(latency[3]) if latency[3] is not None else None,
+                    # 两者分别给出；`None` 表示这批请求里没有 attempt 数据，
+                    # 与 0（确实一次成功）不同。
+                    "avg_retry_count": float(latency[4]) if latency[4] is not None else None,
+                    "avg_failover_count": float(latency[5]) if latency[5] is not None else None,
                 },
                 "daily_stats": [
                     {"date": key, **daily_buckets[key]}

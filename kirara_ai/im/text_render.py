@@ -98,6 +98,14 @@ def parse_table_row(line: str) -> List[str]:
     ]
 
 
+#: 框线表格允许的最大显示宽度（以等宽字符计）。
+#:
+#: 超过这个宽度的表格在 QQ 这类没有等宽字体、也不能横向滚动的客户端上
+#: 会按窗口宽度随机折行：框线错位之后，读者根本分不清哪个值属于哪一列。
+#: 60 是常见移动端聊天气泡一行能容纳的中文字符数（30 个汉字）的两倍显示宽度。
+MAX_TABLE_DISPLAY_WIDTH = 60
+
+
 def render_box_table(rows: List[List[str]]) -> List[str]:
     """
     将表格数据渲染为带完整边框线的等宽文本表格。
@@ -130,6 +138,58 @@ def render_box_table(rows: List[List[str]]) -> List[str]:
     return lines
 
 
+def box_table_display_width(rows: List[List[str]]) -> int:
+    """Predict the widest line `render_box_table` would emit for these rows."""
+    if not rows:
+        return 0
+    column_count = max(len(row) for row in rows)
+    normalized = [row + [""] * (column_count - len(row)) for row in rows]
+    widths = [
+        max(display_width(row[index]) for row in normalized)
+        for index in range(column_count)
+    ]
+    # 每列占「内容 + 左右各一个空格」，列之间与两端各有一根竖线。
+    return sum(width + 2 for width in widths) + column_count + 1
+
+
+def render_field_table(rows: List[List[str]], has_header: bool) -> List[str]:
+    """Render a table as per-row `字段：值` groups instead of a box.
+
+    这是宽表的降级形态。横向排不下时，纵向逐字段列出至少能保证
+    「哪个值属于哪一列」不丢失——而错位的框线连这一点都做不到。
+    有表头时用表头名作字段名；没有表头（缺少 `---` 分隔行）时只能逐值列出，
+    但绝不丢内容。
+    """
+    if not rows:
+        return []
+
+    column_count = max(len(row) for row in rows)
+    normalized = [row + [""] * (column_count - len(row)) for row in rows]
+    header = normalized[0] if has_header else None
+    body = normalized[1:] if has_header else normalized
+
+    lines: List[str] = []
+    for index, row in enumerate(body):
+        if index:
+            lines.append("")
+        for column, value in enumerate(row):
+            if header is not None:
+                name = header[column] or f"第 {column + 1} 列"
+                lines.append(f"{name}：{value}")
+            else:
+                lines.append(f"· {value}")
+    return lines
+
+
+def render_table(rows: List[List[str]], has_header: bool = True) -> List[str]:
+    """Render a table with the layout its width can actually support."""
+    if not rows:
+        return []
+    if box_table_display_width(rows) <= MAX_TABLE_DISPLAY_WIDTH:
+        return render_box_table(rows)
+    return render_field_table(rows, has_header)
+
+
 def convert_markdown_tables(text: str, fenced: bool = False) -> str:
     """
     将文本中的 Markdown 表格替换为等宽框线表格。
@@ -143,13 +203,19 @@ def convert_markdown_tables(text: str, fenced: bool = False) -> str:
     lines = text.split("\n")
     result: List[str] = []
     buffer: List[List[str]] = []
+    # 是否见过 `---` 分隔行。没有它就无法断言第一行是表头，
+    # 降级时也就不能拿它当字段名。
+    saw_separator = False
     in_code_fence = False
 
     def flush():
+        nonlocal saw_separator
         if not buffer:
+            saw_separator = False
             return
-        rendered = render_box_table(buffer)
+        rendered = render_table(buffer, has_header=saw_separator)
         buffer.clear()
+        saw_separator = False
         result.append("")
         if fenced:
             result.append("```")
@@ -170,6 +236,7 @@ def convert_markdown_tables(text: str, fenced: bool = False) -> str:
             result.append(line)
             continue
         if is_table_separator(line):
+            saw_separator = True
             continue
         if is_table_row(line):
             buffer.append(parse_table_row(line))
@@ -433,22 +500,62 @@ _LATEX_COMMANDS = {
     "sigma": "σ",
     "omega": "ω",
     "Omega": "Ω",
+    "theta": "θ",
+    "Theta": "Θ",
+    "phi": "φ",
+    "Phi": "Φ",
+    "psi": "ψ",
+    "rho": "ρ",
+    "tau": "τ",
+    "nabla": "∇",
+    "partial": "∂",
     "to": "→",
     "rightarrow": "→",
     "leftarrow": "←",
+    "Rightarrow": "⇒",
+    "Leftarrow": "⇐",
     "le": "≤",
     "leq": "≤",
     "ge": "≥",
     "geq": "≥",
     "neq": "≠",
     "approx": "≈",
+    "equiv": "≡",
+    "propto": "∝",
+    "sim": "∼",
     "times": "×",
+    "div": "÷",
     "cdot": "·",
     "pm": "±",
+    "mp": "∓",
     "infty": "∞",
+    "int": "∫",
+    "iint": "∬",
+    "oint": "∮",
+    "in": "∈",
+    "notin": "∉",
+    "subset": "⊂",
+    "subseteq": "⊆",
+    "cup": "∪",
+    "cap": "∩",
+    "emptyset": "∅",
+    "forall": "∀",
+    "exists": "∃",
+    "land": "∧",
+    "lor": "∨",
+    "neg": "¬",
+    "angle": "∠",
+    "perp": "⊥",
+    "parallel": "∥",
+    "degree": "°",
+    "ldots": "…",
+    "cdots": "⋯",
     "exp": "exp",
     "ln": "ln",
     "log": "log",
+    "lim": "lim",
+    "max": "max",
+    "min": "min",
     "sin": "sin",
     "cos": "cos",
     "tan": "tan",
@@ -457,19 +564,53 @@ _LATEX_COMMANDS = {
 }
 _COMMAND_PATTERN = re.compile(r"\\([A-Za-z]+)")
 _BRACED_PATTERN = re.compile(
-    r"\\(?:text|mathrm|mathbf|mathit|operatorname|boxed)\{([^{}]*)\}"
+    r"\\(?:text|mathrm|mathbf|mathit|mathbb|mathcal|operatorname|boxed)\{([^{}]*)\}"
 )
 _SPACE_COMMAND_PATTERN = re.compile(r"\\(?:,|;|:|!|quad|qquad)")
+#: `\begin{env}` / `\end{env}` 只是排版容器。整段丢掉环境名比留下 `begincases`
+#: 这种拼接词好：后者既不是数学也不是中文，纯属噪声。
+_ENVIRONMENT_PATTERN = re.compile(r"\\(?:begin|end)\{[^{}]*\}")
+#: `\left(` / `\right]` 只影响定界符大小，去掉命令保留符号本身即可。
+#: `(?![A-Za-z])` 不可省：否则 `\right` 会吃掉 `\rightarrow` 的前缀，
+#: 把箭头变成 `arrow`；`\left` 对 `\leftarrow` 同理。
+_SIZED_DELIMITER_PATTERN = re.compile(
+    r"\\(?:left|right|big|Big|bigg|Bigg)(?![A-Za-z])\s*"
+)
+
+#: LaTeX 的换行命令。保留为字面 `\\` 会被当成转义残片，正是 19.2 禁止的形态。
+_LINE_BREAK_PATTERN = re.compile(r"\\\\")
+
+#: 一段 `$...$` 只有在内容确实带 LaTeX 特征时才按公式处理。
+#:
+#: 旧规则只看 `$` 是否配对，于是 "price $5 and $7" 里两个货币符号恰好配对，
+#: 中间内容被当作公式剥离——金额的单位被静默删掉，只剩数字。判据改成内容里
+#: 必须出现反斜杠命令、上下标或分式，货币写法（`$5`、`$1,200`）不会命中。
+_MATH_EVIDENCE_PATTERN = re.compile(r"\\[A-Za-z]|\\\\|[\^_]|\{|\}")
 _MATH_PATTERN = re.compile(r"(?<!\\)(\${1,2})(.+?)(?<!\\)\1", re.DOTALL)
 _PAREN_MATH_PATTERN = re.compile(r"\\\((.+?)\\\)", re.DOTALL)
 _BRACKET_MATH_PATTERN = re.compile(r"\\\[(.+?)\\\]", re.DOTALL)
 
 
+def _looks_like_math(expression: str) -> bool:
+    """Whether a `$...$` span really carries LaTeX rather than currency amounts."""
+    return bool(_MATH_EVIDENCE_PATTERN.search(expression))
+
+
+
 def _clean_math_expression(text: str) -> str:
-    text = re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"(\1)/(\2)", text)
+    # 嵌套分式要反复求解，否则 \frac{\frac{a}{b}}{c} 只有内层被处理，
+    # 外层残留成 frac(...)。内层没有花括号时正则不再匹配，循环必然终止。
+    for _ in range(4):
+        replaced = re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"(\1)/(\2)", text)
+        if replaced == text:
+            break
+        text = replaced
     text = re.sub(r"\\sqrt\{([^{}]*)\}", r"√(\1)", text)
     text = re.sub(r"\\overline\{([^{}]*)\}", r"\1̄", text)
     text = _BRACED_PATTERN.sub(r"\1", text)
+    text = _ENVIRONMENT_PATTERN.sub(" ", text)
+    text = _LINE_BREAK_PATTERN.sub("\n", text)
+    text = _SIZED_DELIMITER_PATTERN.sub("", text)
     text = _SPACE_COMMAND_PATTERN.sub(" ", text)
     text = _COMMAND_PATTERN.sub(
         lambda match: _LATEX_COMMANDS.get(match.group(1), match.group(1)), text
@@ -483,17 +624,44 @@ def _clean_math_expression(text: str) -> str:
     )
 
 
+#: LaTeX 里对字面量的转义。留着反斜杠就是 19.2 点名禁止的「转义残片」：
+#: 用户看到的是 `\$5`、`file\_name`，而那两个反斜杠不传达任何信息。
+_ESCAPED_LITERAL_PATTERN = re.compile(r"\\([$_{}%&#~])")
+
+
 def _clean_latex(text: str) -> str:
+    def _math_span(match: "re.Match[str]", group: int) -> str:
+        expression = match.group(group)
+        # 货币金额也能凑出配对的 `$`；没有 LaTeX 特征就原样保留整段，
+        # 包括定界符本身，否则 "$5" 会变成 "5"。
+        if not _looks_like_math(expression):
+            return match.group(0)
+        return _clean_math_expression(expression)
+
     for pattern, group in (
         (_MATH_PATTERN, 2),
         (_PAREN_MATH_PATTERN, 1),
         (_BRACKET_MATH_PATTERN, 1),
     ):
         text = pattern.sub(
-            lambda match, group=group: _clean_math_expression(match.group(group)),
+            lambda match, group=group: _math_span(match, group),
             text,
         )
-    return text.replace(r"\$", "$")
+    # 定界符之外的裸命令同样要降级：模型经常直接写 `\to`、`\times`，
+    # 只处理定界符内部会让这些命令原样出现在 QQ 里。
+    text = _ENVIRONMENT_PATTERN.sub(" ", text)
+    text = _SIZED_DELIMITER_PATTERN.sub("", text)
+    # 未收录的命令**去掉反斜杠、保留命令名**。
+    #
+    # 此前这里保留 `match.group(0)`，于是 `\foo` 原样送到 QQ——那正是
+    # 19.2 点名禁止的「转义残片」。命令名不一定准确表达原意，但它是一个可读的
+    # 单词；残片什么信息都不传达，还会让人以为回复被截断或编码坏了。
+    # 刻意不猜未知命令的语义：`\foo` 该显示成什么无法可靠推断。
+    text = _COMMAND_PATTERN.sub(
+        lambda match: _LATEX_COMMANDS.get(match.group(1), match.group(1)), text
+    )
+    text = _ESCAPED_LITERAL_PATTERN.sub(r"\1", text)
+    return text
 
 
 def _split_fenced_sections(text: str) -> Iterable[tuple[bool, str]]:
@@ -516,6 +684,64 @@ def _split_fenced_sections(text: str) -> Iterable[tuple[bool, str]]:
         yield in_fence, "".join(buffer)
 
 
+def _drop_unpaired_backticks(text: str) -> str:
+    """Remove a trailing, unmatched single-backtick inline-code marker.
+
+    需求 19.2 点名禁止「未闭合反引号」。已有的两处防守（未闭合围栏不当代码、
+    分页不劈开行内代码）解决的都是「我们不要弄坏它」，不解决「模型输出本身就
+    少一个」。一个落单的 `` ` `` 在 QQ 里是可见的垃圾字符，更糟的是它会让
+    后面一大段正文呈现为「行内代码待闭合」的观感。
+
+    刻意收窄到**单个**反引号：
+    - 只删最后一段落单的，前面配对的行内代码一个都不动——删多了是丢格式，
+      而不是清噪声。
+    - 长度 ≥2 的反引号串（```` `` ````、`` ```` ``）不处理。它们在 Markdown 里
+      有合法用途（在行内代码里包含反引号本身），落单时到底是噪声还是有意写法
+      无法可靠判断，猜错就是改内容。
+
+    围栏行由调用方在分段时排除，不会进到这里。
+    """
+    runs = [match for match in re.finditer(r"`+", text)]
+    if not runs:
+        return text
+    single_runs = [match for match in runs if len(match.group(0)) == 1]
+    # 只有单反引号参与配对判断：多反引号串各自成对或本就不是行内代码标记。
+    if not single_runs or len(single_runs) % 2 == 0:
+        return text
+    last = single_runs[-1]
+    return text[: last.start()] + text[last.end() :]
+
+
+def degrade_math(text: str) -> str:
+    """Degrade LaTeX to readable plain text, leaving fenced code untouched.
+
+    这是 ``render_plain_text`` 的数学降级那一半，单独导出供**已经**自带
+    Markdown 处理流程的适配器复用（WeCom 有一套自己的标题/强调/表格规则，
+    它需要的只是这一步）。此前 WeCom 路径完全不做数学降级，于是同一个模型的
+    同一段回复，QQ 上是 `T → 0`、WeCom 上是原始的 `$T \\to 0$`——
+    平台差异应该只体现在渲染层，不该表现为「有的平台处理了、有的没有」。
+    """
+    rendered: list[str] = []
+    non_fence_indexes: list[int] = []
+    for is_fence, section in _split_fenced_sections(text):
+        if is_fence:
+            rendered.append(section)
+        else:
+            non_fence_indexes.append(len(rendered))
+            rendered.append(_clean_latex(section))
+    # 落单反引号只在**围栏之外**清理，且按整段（而非逐个片段）判断配对：
+    # 一段行内代码不会跨越围栏，但完全可能跨越 `_split_fenced_sections`
+    # 切出的相邻片段，逐片判断会把配对的两半各自当成落单的。
+    if non_fence_indexes:
+        joined = "".join(rendered[index] for index in non_fence_indexes)
+        cleaned = _drop_unpaired_backticks(joined)
+        if cleaned != joined:
+            # 只有真的删掉了才重排：这条路径罕见，不该在常见情况下改变结构。
+            for position, index in enumerate(non_fence_indexes):
+                rendered[index] = cleaned if position == 0 else ""
+    return "".join(rendered)
+
+
 def render_plain_text(
     document: Union[TextDocument, str],
     *,
@@ -523,10 +749,7 @@ def render_plain_text(
 ) -> str:
     """Degrade unsupported formulas and tables without altering fenced code."""
     source = document.source if isinstance(document, TextDocument) else document
-    rendered: list[str] = []
-    for is_fence, section in _split_fenced_sections(source):
-        rendered.append(section if is_fence else _clean_latex(section))
-    return convert_markdown_tables("".join(rendered), fenced=fenced_tables)
+    return convert_markdown_tables(degrade_math(source), fenced=fenced_tables)
 
 
 Measure = Callable[[str], int]
@@ -536,7 +759,52 @@ def _utf8_length(text: str) -> int:
     return len(text.encode("utf-8"))
 
 
+#: 不可在中间切断的行内片段。
+#:
+#: 把 `*强调*`、`` `代码` `` 或一条链接劈成两页，得到的是两个都不成立的残片：
+#: 第一页尾巴上挂着一个没有闭合的标记，第二页开头是一个凭空出现的标记。
+#: 1.txt 19.4 明确禁止拆坏 Markdown 标记。链接单独用 `_LINK_PATTERN`
+#: 处理（它还要参与 alt/文本提取），这里补上其余成对标记。
+_ATOMIC_SPAN_PATTERNS: tuple["re.Pattern[str]", ...] = (
+    _LINK_PATTERN,
+    re.compile(r"\*\*\*[^*\n]+\*\*\*"),
+    re.compile(r"\*\*[^*\n]+\*\*"),
+    re.compile(r"(?<!\*)\*[^*\n]+\*(?!\*)"),
+    re.compile(r"___[^_\n]+___"),
+    re.compile(r"__[^_\n]+__"),
+    re.compile(r"~~[^~\n]+~~"),
+    re.compile(r"``[^`\n]+``"),
+    re.compile(r"(?<!`)`[^`\n]+`(?!`)"),
+)
+
+#: 优先作为分页边界的行首结构。
+#:
+#: 只按段落与句号切分会把标题、列表项、表格行从中间劈开——读者在下一页看到的是
+#: 一段没有标题的正文，或半个列表项。这些模式让切点落在结构的起始处。
+_STRUCTURAL_LINE_PATTERN = re.compile(
+    r"^(?:#{1,6} |[-*+] |\d+[.)] |> |\|)",
+    re.MULTILINE,
+)
+
+
+def _cut_inside_atomic_span(
+    text: str, cut: int, limit: int, measure: Measure
+) -> int:
+    """Move a cut point out of any atomic inline span it lands inside.
+
+    片段整体放得下时把切点推到它前面（让它整块进下一页）；放不下时只能退到
+    它后面——否则这一页永远装不进任何内容，分页会不收敛。
+    """
+    for pattern in _ATOMIC_SPAN_PATTERNS:
+        for match in pattern.finditer(text):
+            if match.start() < cut < match.end():
+                if measure(match.group(0)) <= limit:
+                    return match.start() if match.start() else match.end()
+    return cut
+
+
 def _cut_inside_atomic_link(text: str, cut: int, limit: int, measure: Measure) -> int:
+    """Backwards-compatible alias kept for callers that only cared about links."""
     for match in _LINK_PATTERN.finditer(text):
         if match.start() < cut < match.end() and measure(match.group(0)) <= limit:
             return match.start() if match.start() else match.end()
@@ -565,17 +833,27 @@ def _split_text_preserving(text: str, limit: int, measure: Measure) -> list[str]
         if hard_cut == 0:
             raise ValueError("消息上限太小，无法容纳一个完整字符")
 
-        cut = _cut_inside_atomic_link(remaining, hard_cut, limit, measure)
+        cut = _cut_inside_atomic_span(remaining, hard_cut, limit, measure)
         if cut == hard_cut:
             boundaries: list[int] = []
-            for marker in ("\n\n", "\n", "。", "！", "？", ". ", " "):
-                position = remaining.rfind(marker, 0, hard_cut)
-                if position >= 0:
-                    candidate = position + len(marker)
-                    if _cut_inside_atomic_link(
-                        remaining, candidate, limit, measure
-                    ) == candidate:
-                        boundaries.append(candidate)
+            # 结构行的起点优先：标题、列表项、引用与表格行都应整块进入下一页。
+            for match in _STRUCTURAL_LINE_PATTERN.finditer(remaining, 0, hard_cut):
+                candidate = match.start()
+                if candidate <= 0:
+                    continue
+                if _cut_inside_atomic_span(
+                    remaining, candidate, limit, measure
+                ) == candidate:
+                    boundaries.append(candidate)
+            if not boundaries:
+                for marker in ("\n\n", "\n", "。", "！", "？", ". ", " "):
+                    position = remaining.rfind(marker, 0, hard_cut)
+                    if position >= 0:
+                        candidate = position + len(marker)
+                        if _cut_inside_atomic_span(
+                            remaining, candidate, limit, measure
+                        ) == candidate:
+                            boundaries.append(candidate)
             if boundaries:
                 cut = max(boundaries)
         if cut <= 0:
@@ -722,6 +1000,75 @@ PAGE_LABEL_PATTERN = re.compile(r"^第 \d+ 页 / 共 \d+ 页\n?", re.MULTILINE)
 
 def _page_label(page: int, total: int) -> str:
     return f"第 {page} 页 / 共 {total} 页\n"
+
+
+#: 内容被截断时追加的提示。
+#:
+#: 超出页数或总字节预算时，旧行为是让 ``ValueError`` 一路穿出 ``send_message``，
+#: 于是用户**什么都收不到**。收到前 N 页并被明确告知「已截断」远好过静默失败：
+#: 前者能读到大部分内容并知道还有更多，后者只看到机器人没反应。
+TRUNCATION_NOTICE = "\n\n（内容过长，已截断；请缩小提问范围或分次获取剩余部分。）"
+
+
+def paginate_with_truncation_notice(
+    text: str,
+    *,
+    max_bytes: Optional[int] = None,
+    max_length: Optional[int] = None,
+    max_pages: int = 100,
+    max_total_bytes: Optional[int] = 1_000_000,
+    code_style: str = "markdown",
+) -> tuple[list[str], bool]:
+    """Paginate, falling back to a truncated reply instead of raising.
+
+    返回 ``(页面列表, 是否发生截断)``。参数校验类错误（上限本身非法、上限太小
+    连一个字符都放不下）仍然抛出——那是调用方的配置错误，不该悄悄降级。
+    只有「内容超出预算」这一类才截断。
+    """
+    def _paginate(source: str) -> list[str]:
+        return split_structured_text(
+            source,
+            max_bytes,
+            max_length=max_length,
+            max_pages=max_pages,
+            max_total_bytes=max_total_bytes,
+            code_style=code_style,
+        )
+
+    try:
+        return _paginate(text), False
+    except ValueError as error:
+        if "上限" not in str(error) or "太小" in str(error):
+            raise
+        if "必须" in str(error):
+            raise
+
+    measure: Measure = _utf8_length if max_bytes is not None else len
+    limit = max_bytes if max_bytes is not None else max_length
+    assert limit is not None
+
+    # 逐步收缩到预算之内。二分比线性收缩快，且每一步都是一次真实分页，
+    # 因此最终结果一定满足页数与字节两个上限。
+    low, high = 0, len(text)
+    best: Optional[list[str]] = None
+    while low < high:
+        middle = (low + high + 1) // 2
+        candidate = text[:middle] + TRUNCATION_NOTICE
+        try:
+            pages = _paginate(candidate)
+        except ValueError:
+            high = middle - 1
+            continue
+        best = pages
+        low = middle
+    if best is not None:
+        return best, True
+
+    # 连一条只有提示语的消息都放不下：只能给出被硬切到上限的提示本身。
+    notice = TRUNCATION_NOTICE.strip()
+    while notice and measure(notice) > limit:
+        notice = notice[:-1]
+    return ([notice] if notice else []), True
 
 
 def split_structured_text(

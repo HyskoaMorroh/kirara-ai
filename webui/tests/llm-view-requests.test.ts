@@ -29,9 +29,12 @@ const { messageError, llmApi } = vi.hoisted(() => ({
 }))
 
 vi.mock('naive-ui', () => ({
-  useMessage: () => ({ error: messageError, success: vi.fn() }),
+  useMessage: () => ({ error: messageError, success: vi.fn(), warning: vi.fn() }),
   NModal: { template: '<div><slot /></div>' },
-  NCard: { template: '<div><slot /></div>' }
+  NCard: { template: '<div><slot /></div>' },
+  // 供应商配置导入 / 导出的工具条与冲突提示也用到这两个组件。
+  NAlert: { template: '<div><slot /><slot name="action" /></div>' },
+  NButton: { template: '<button><slot /></button>' }
 }))
 
 vi.mock('../src/api/llm', async () => {

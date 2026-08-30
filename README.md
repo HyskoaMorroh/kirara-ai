@@ -70,8 +70,9 @@
 
 | 文档 | 用途 |
 |---|---|
+| [`docs/PRACTICAL_PLAN_AND_TUTORIAL.md`](docs/PRACTICAL_PLAN_AND_TUTORIAL.md) | **从这里开始**：一条从空服务器到「渠道身份 → Agent → 上游模型/备用链 → Prompt/Skill/Memory/MCP」全链路打通的落地路线，每一步都带可验证的验收点，并逐条写明哪些结论**不能**从界面推出来 |
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | 首次部署走一遍：首次登录设定密码、内置模板与规则的释放、配置 LLM 后端与手动选模型、确认调度规则、发出第一条可验证的回复 |
-| [`docs/QQ_ONEBOT_OPERATIONS.md`](docs/QQ_ONEBOT_OPERATIONS.md) | QQ / OneBot 专项：连接方向、七种连接状态与原因码、数据目录清单、Compose 参考与验收矩阵、二维码与登录、回复慢的分段定位 |
+| [`docs/QQ_ONEBOT_OPERATIONS.md`](docs/QQ_ONEBOT_OPERATIONS.md) | QQ / OneBot 专项：连接方向、八种连接状态与原因码、数据目录清单、Compose 参考与验收矩阵、二维码与登录、回复慢的分段定位 |
 | [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | 怎么看清系统在干什么：日志去向、LLM 请求追踪、投递时间线、成本统计、工作流结构预检与全部 issue code、调度规则试运行与静态可达性分析，以及明确不存在的观测能力 |
 | [`docs/EXTENDING.md`](docs/EXTENDING.md) | 扩展开发：自定义 Block、插件、MCP 接入、预设 YAML、调度规则、事件总线、定时任务，并逐条写明当前**没有**的扩展点 |
 | [`docs/WORKFLOW_OPERATIONS_GUIDE.md`](docs/WORKFLOW_OPERATIONS_GUIDE.md) | 从部署到首条回复：模板选型、手动选模型、自动探测边界、默认规则、画布操作、排错顺序与扩展边界 |
@@ -160,22 +161,75 @@ WebUI 内置 6 套配色方案，每套都有独立的浅色与深色取值：
 ### 可靠性与可观测性
 
 * [x] **内置 OneBot V11 / QQ 适配器**：反向 WebSocket、多账号 `self_id` 路由、
-  七种连接状态与固定原因码（区分「等待接入」「凭据被拒」「握手被拒」「心跳超时」），
+  八种连接状态与固定原因码（区分「等待接入」「凭据被拒」「握手被拒」「心跳超时」
+  「存储不可写」），
   详见 [`docs/QQ_ONEBOT_OPERATIONS.md`](docs/QQ_ONEBOT_OPERATIONS.md)
 * [x] **持久化投递队列**：长回复按页独立投递，结果未知的投递被隔离而**不会重发**，
-  明确失败按「指数退避 + 抖动 + 上限」有限重试
+  明确失败按「指数退避 + 抖动 + 上限」有限重试。QQ / OneBot / Telegram 三家共用
+  同一份退避计划，各自的 `outbox_max_attempts` 都真的生效
+* [x] **入站去重**：同一条上游消息只会触发一次工作流。上游重连后重投是它唯一安全的
+  选择，去重由本侧的收据表完成，避免重复计费与重复回复
 * [x] **统一排版管线**：QQ / Telegram / WeCom 共用一套结构化渲染，
   表格转规整框线表、代码保持原始缩进、常见 LaTeX 降级为可读符号、
-  长回复统一标注「第 N 页 / 共 M 页」
+  长回复统一标注「第 N 页 / 共 M 页」。**不留转义残片**：未收录的 LaTeX 命令
+  去掉反斜杠只留命令名（`\foo` 而不是残片），落单的行内代码反引号被清掉，
+  而围栏代码里的反引号是内容、一个都不动
 * [x] **代码可复制**：QQ 无可用按钮，改为让代码单独成条，长按即可整段复制
 * [x] **端到端投递时间线**：从收到事件、工作流开始、模型首字节、模型完成、
-  排版、发送到结果，逐段计时，把「模型慢」和「QQ 慢」分开
+  排版、发送到结果，逐段计时并落库，可按时间范围回查「慢在哪一段」；
+  未测到的阶段保持空值，不会用 0 冒充
 * [x] **多 Provider 故障转移**：优先级队列、可重试错误分类（认证/参数/内容策略不重试）、
-  流式首字节与静默超时、总截止时间与取消传播、三态熔断器
-* [x] **真实成本统计**：按请求当时的价格快照计费，区分供应商用量与未定价请求，
-  支持按 Provider / 模型 / 失败类型聚合与 CSV 导出
+  流式首字节与静默超时、总截止时间与取消传播、三态熔断器（状态跨重启保留）
+* [x] **流式与非流式回复模式**：`reply_stream_mode` 可选；流式模式让首字节超时、
+  静默超时与首字节前的故障转移真正生效
+* [x] **真实成本统计**：按请求当时的价格快照计费，区分供应商用量、本地估算与未定价请求，
+  支持按 Provider / 模型 / 失败类型聚合与 CSV 导出；WebUI 的
+  「系统记录 → 使用统计」把趋势、Provider / 模型分布与成本汇总放在一页，
+  并链接到请求日志与成本定价
 * [x] **受控扩展**：Skill / Hook / MCP / Prompt 带 manifest、版本、来源、权限边界与审计，
-  Hook 支持按工具名匹配与按事件启停
+  Hook 支持按工具名匹配、按事件启停与上线前预演
+* [x] **创建者身份可延伸到 IM 渠道**：受保护的插件能力（MCP 工具、command 型 Hook、
+  需确认的宿主操作）此前只在 WebUI 可用——身份只由 HTTP 中间件注入，聊天侧
+  **所有人**都拿不到，包括创建者本人。现可在 `agent_runtime.creator_channel_identities`
+  里声明「哪个 QQ 号 / Telegram 用户就是我」，默认空表且群聊默认不生效；
+  未声明的发送者照常得到正常回复，只是拿不到工具
+* [x] **供应商级请求策略**：推理强度四档（各家字段由适配器翻译）、
+  移除回复里的 AI 自我署名（只删署名不删答案，不进代码块、不动用量）、
+  禁用启动时与每次打开 WebUI 时的版本探测（手动「检查更新」照常可用）——
+  逐供应商生效，且不改写调用方的请求对象
+* [x] **请求整流器**：上游因参数约束**拒绝**时改一处再重试一次，而不是把一次
+  必然失败原样抛给用户。修三类「不改就一定失败、原因又不在错误里」的情形：
+  思考预算与最大输出长度关系不对、换模型后失效的思考签名、不支持图片的模型
+  收到图片。三条边界写进实现——只在上游真的拒绝后动（不做发送前预判）、
+  错误必须命中白名单（多个特征同时出现，避免把鉴权签名错误当成思考签名问题）、
+  每类只改一次（改完仍失败抛原始错误，不把「参数错」变成「一直在转」）。
+  图片降级是唯一会改变模型看到内容的一项，可单独关闭；图片换成可见占位而非
+  静默删除，否则模型会对着空内容编一个答案。非流式与流式两条路径都覆盖
+* [x] **上游限额余量可见**：从每个响应的限额头（`x-ratelimit-*` /
+  `anthropic-ratelimit-*` / `retry-after`）读出「离上限还有多远」，随
+  `GET /llm/resilience/status` 与熔断状态同行展示。熔断说「它已经坏了」，
+  余量说「它还剩多少」——后者是唯一能在撞上限**之前**给出信号的东西。
+  上游不报这些头时显示「未上报」而不是 0：0 表示余量用尽，是最该报警的状态
+* [x] **Teammates：Agent 之间可委派**：模型获得 `delegate_to_<id>` 工具，
+  队友用自己的模型链、提示词、技能与工具白名单执行子任务；
+  委派深度有上限且逐层递减，自委派在定义期即被拒——防的是「A 委派 B、B 委派 A」
+  这种每层都真实花钱的无限递归
+* [x] **依赖可见可控**：Skill 包与它依赖的可执行程序是两件事；依赖目录列出
+  Node / uv / agent-browser / graphify / rtk / memsearch 等的就绪状态，
+  有真实安装器的可受控安装（只跑服务器登记的固定命令），
+  Claude Code 插件明确标为「装在操作者自己的配置里」而非服务器组件
+* [x] **扫码登录生命周期可查**：二维码由 LLOneBot / PMHQ 在自己的容器里生成，
+  但只要把那份日志挂到可读位置，就能把「这张码还能扫吗」变成一个可回答的问题：
+  9 种状态、4 个稳定失败原因码，以及有效期、生成时间、刷新次数与最新二维码路径；
+  **过期由时钟判定而不等上游日志**，因此不会把已死的码继续显示成有效
+* [x] **通知与请求事件不再静默丢弃**：被踢出群、被禁言这类会直接导致
+  「机器人不回话」的事件按类型记录（影响本账号可用性的升为 warning）；
+  好友申请与入群邀请也会记录（含处置所需的 `flag`），但**不自动同意**——
+  那是部署者的安全决定；适配器提供 approve / reject 方法让部署者自己决定，
+  多账号下不指定目标账号会被拒绝而不是路由到任意一个
+* [x] **四家上游都实现流式**：OpenAI 兼容、Claude、Gemini、Ollama 各自解析
+  自家帧格式（Claude 是分类型 SSE、Gemini 是 `alt=sse`、Ollama 是按行 JSON），
+  上游没给用量就保持未知而不在适配器里补 0
 * [x] **会话可管理**：列出持久化会话与待确认队列、清空单个会话历史（不含对话正文出网）
 
 # **🤖 聊天平台**  
@@ -326,6 +380,17 @@ $commit = (git rev-parse HEAD).Trim()
 
 正式发布还必须把 Tag、源码提交和所有产物锁定为同一个不可变身份：`check` 负责版本载体同步，`verify-tag` 负责确认当前源码的 Git Tag、HEAD、期望 commit 以及远端 Tag 对象一致。它必须在创建 GitHub Release、构建 Docker 镜像或生成 Windows 快速启动包前通过；GitHub Actions 的发布入口会把验证出的 commit 传给所有后续 job，避免 Tag、分支最新提交和构建产物互相漂移。
 
+`verify-tag` 检查的是**当下**的自洽，它没有历史记录。因此推出的镜像还会把源提交写进
+`org.opencontainers.image.revision`（另有 `.version` 与 `.source`）：Tag 在发布之后被
+移到另一个提交、再重建同名镜像时，这条标签是唯一能把两份镜像区分开的东西——
+「线上这个版本标签究竟是哪个提交构建的」由此变成一条 `docker inspect` 就能回答的问题。
+`revision` 取的是已经与 preflight 提交比对过的那个值，不是 `github.sha`。
+
+自动升级会在安装前比对 registry 声明的文件摘要（PyPI 的 `hashes.sha256`、npm 的
+`dist.shasum` / `dist.integrity`）。镜像源是用户可配的，TLS 只能证明「来自这个镜像」，
+证明不了「这个镜像给的东西没被换过」；摘要缺失时**拒绝安装**而不是放行——
+否则等于留一个「只要别声明哈希」的绕过口。
+
 `yarn install --frozen-lockfile` 需要能访问 `registry.npmjs.org`；`webui/yarn.lock` 里的下载地址已全部指向官方源，并有测试守卫防止再混入镜像地址。
 
 ### CI 门禁
@@ -369,6 +434,8 @@ $commit = (git rev-parse HEAD).Trim()
 - Variable `DOCKERHUB_IMAGE`：可选，完整镜像名，例如 `your-dockerhub-username/kirara-agent-framework`；不填写时使用用户名加默认仓库名。
 
 服务器部署时，将 `.env.example` 复制为仅保存在服务器的 `.env`，填写 `DOCKERHUB_IMAGE=your-dockerhub-username/kirara-agent-framework:latest`，然后执行 `docker compose pull` 和 `docker compose up -d --force-recreate`。Compose 不再回退到第三方镜像；未配置镜像名会直接报错，避免误部署旧版本。
+
+需要同时跑 QQ（LLOneBot）时，用 `docker-compose.yml.example` 而不是自己拼：它包含 QQ 容器、共享网络与登录态挂载，并受 `tests/test_docker_compose_resource_storage.py` 契约测试约束。`.env` 里还需填 `LLONEBOT1_AUTH_TOKEN` 与 `LLONEBOT1_QQ`（两者以 `:?` 声明，缺失时 Compose 会直接失败而不是静默起一个无鉴权端点）。反向 WebSocket 地址的填法、数据目录清单（含宿主机路径与权限）和重启恢复验收矩阵见 [`docs/QQ_ONEBOT_OPERATIONS.md`](docs/QQ_ONEBOT_OPERATIONS.md)。
 
 发布身份也分为两种标签：GitHub Tag 使用 `scripts/version.py tag` 生成的 `vX.Y.Z...`，Docker Hub 版本镜像使用 `scripts/version.py get` 生成的 `X.Y.Z...`，不把带 `v` 的 Git Tag 直接当作镜像标签。完整流程见 [`docs/UPGRADING.md`](docs/UPGRADING.md)。
 
@@ -473,6 +540,39 @@ $commit = (git rev-parse HEAD).Trim()
     "image": ["data:image/png;base64,...", "data:image/png;base64,..."]
 }
 ```
+</details>
+
+<details>
+    <summary>管理接口：容错状态、投递耗时、会话与 Hook（均需 Bearer 鉴权）</summary>
+
+以下接口挂在 `/backend-api/api` 下，用于运维排查，全部需要登录令牌。
+返回值都经过裁剪：**不含凭据、不含对话正文、不含工具参数**。
+
+| 接口 | 用途 |
+|---|---|
+| `GET /system/readiness` | 数据目录、配置、工作流、调度目标、IM 与 LLM 可用性的分项就绪检查 |
+| `GET /llm/resilience/status` | 各 Provider 的熔断状态（closed / open / half-open）与最近尝试快照 |
+| `GET /llm/backends/export` | 导出供应商配置文档（**不含 API Key 等凭据**，可安全转发） |
+| `POST /llm/backends/import` | 导入供应商配置：整份校验后落盘，空凭据字段保留现有值，同名冲突返回 409 与名单 |
+| `GET /tracing/llm/statistics` | 请求量、Token、成本、首字节与尝试次数，按 Provider / 模型 / 失败类型 / 用量来源聚合 |
+| `POST /tracing/llm/export` | 按当前筛选导出请求日志（`json` 或 `csv`，含成本快照） |
+| `GET /tracing/delivery/summary` | 回复各阶段耗时的按渠道聚合；每个阶段带样本数 |
+| `GET /tracing/delivery/recent` | 最近若干条逐条投递耗时 |
+| `GET /agents/sessions` | 持久化会话列表（条数与时间戳，无对话正文） |
+| `DELETE /agents/sessions/<id>/history` | 清空单个会话历史，保留绑定关系 |
+| `GET /agents/confirmations` | 仍在等待人工决定的确认队列 |
+| `GET /agents/hooks` | 每个 Hook 声明的事件、限定工具与所需权限 |
+| `POST /agents/hooks/<id>/preview` | 预演：这个 Hook 会不会因为某个工具而触发（不执行） |
+| `GET /resources/dependencies` | Node / uv / agent-browser / graphify / rtk / memsearch 等依赖的就绪状态 |
+| `POST /resources/dependencies/<id>/install` | 受控安装（需确认，只跑服务器登记的固定命令） |
+
+```bash
+# 上周二 QQ 慢在哪一段
+curl -H "Authorization: Bearer <token>" \
+  "http://127.0.0.1:8080/backend-api/api/tracing/delivery/summary?channel=onebot"
+```
+
+字段含义与精度边界见 [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md)。
 </details>
 
 ## 🦊 加载预设

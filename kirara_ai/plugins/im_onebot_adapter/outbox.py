@@ -36,6 +36,55 @@ class OneBotRetryableError(RuntimeError):
     """The upstream explicitly rejected an action before completing it."""
 
 
+#: 明确表示「现在不行，稍后可以」的 OneBot retcode。
+#:
+#: ``ActionFailed`` 覆盖了三类完全不同的失败：参数错误、权限不足这类重试一万次
+#: 也不会变的；限流、上游忙这类等一会儿就好的；以及**结果未知**的。全部直接
+#: dead_letter 会把第二类也判死，一次群内限流就丢掉一页回复。
+#:
+#: 429 与 503 是 HTTP 语义被透传到 retcode 的情况，一定发生在动作处理器开始
+#: 之前，因此重试不会产生重复消息。范围之外一律按永久失败或结果未知处理——
+#: 猜测性重试会把「明确拒绝」变成「反复打扰上游」，更糟的是可能重复发送。
+RETRYABLE_ACTION_RETCODES = frozenset({429, 503})
+
+#: 动作处理器已经开始执行然后抛错的 retcode，语义是**结果未知**。
+#:
+#: 证据来自 LLOneBot / LuckyLilliaBot 的 ``BaseAction.websocketHandle``：
+#: payload 校验失败返回 1400（还没开始做），``_handle`` 抛错返回 1200
+#: （已经在做了）。把 1200 当成「稍后可以」去重试，等于在一条**可能已经发出去**
+#: 的消息上再发一次。需求的硬约束是「不会重复发送」，而丢一页有
+#: ambiguous 记录可查，重复发送则直接呈现给用户——风险不对称时选择保守。
+AMBIGUOUS_ACTION_RETCODES = frozenset({1200})
+
+
+def _action_retcode(error: BaseException) -> int | None:
+    """Read ``ActionFailed.retcode`` defensively.
+
+    ``ActionFailed.retcode`` 是一个读 ``result['retcode']`` 的 property，缺键时会
+    抛 ``KeyError``；因此这里必须包住取值，不能只靠 ``getattr`` 的默认值。
+    """
+    try:
+        retcode = getattr(error, "retcode", None)
+    except Exception:  # noqa: BLE001 - 取不到返回码就按永久失败处理
+        return None
+    try:
+        return int(retcode)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_retryable_action_failure(error: BaseException) -> bool:
+    """Whether an ``ActionFailed`` is a transient refusal worth retrying."""
+    retcode = _action_retcode(error)
+    return retcode is not None and retcode in RETRYABLE_ACTION_RETCODES
+
+
+def _is_ambiguous_action_failure(error: BaseException) -> bool:
+    """Whether an ``ActionFailed`` left the delivery outcome unknown."""
+    retcode = _action_retcode(error)
+    return retcode is not None and retcode in AMBIGUOUS_ACTION_RETCODES
+
+
 class OneBotDelivery(Base):
     """One independently recoverable OneBot action, usually one message page."""
 
@@ -92,6 +141,9 @@ class OneBotDeliveryResult:
     client_received: Optional[bool]
     error_message: Optional[str]
     error: Optional[BaseException] = None
+    #: 上游动作的原始响应。`message_id` 从这里取——它一直被落库到
+    #: `response_json`，却没有出口，于是「发出去的消息撤不掉」。
+    response: Optional[Any] = None
 
 
 @dataclass
@@ -134,6 +186,13 @@ class OneBotOutboxService:
         delivery: OneBotDelivery,
         error: Optional[BaseException] = None,
     ) -> OneBotDeliveryResult:
+        response: Optional[Any] = None
+        if delivery.response_json:
+            try:
+                response = json.loads(delivery.response_json)
+            except (TypeError, ValueError):
+                # 响应不可解析只应损失 `message_id`，不该让整次投递报错。
+                response = None
         return OneBotDeliveryResult(
             id=int(delivery.id),
             delivery_id=str(delivery.delivery_id),
@@ -148,6 +207,7 @@ class OneBotOutboxService:
             client_received=delivery.client_received,
             error_message=delivery.last_error,
             error=error,
+            response=response,
         )
 
     def enqueue(
@@ -389,6 +449,17 @@ class OneBotOutboxService:
                 self._mark_retry_wait(delivery_id, str(exc), attempt_count)
                 continue
             except ActionFailed as exc:
+                # 限流类拒绝是「稍后可以」，与参数错误不同：全部判死会让一次
+                # 群内限流直接丢掉一页回复。仍然受 max_attempts 与退避上限约束。
+                if _is_retryable_action_failure(exc):
+                    if attempt_count >= self.max_attempts:
+                        return self._mark_dead_letter(delivery_id, str(exc), exc)
+                    self._mark_retry_wait(delivery_id, str(exc), attempt_count)
+                    continue
+                # 处理器已经开始执行才抛错：消息可能已经发出去了，重发会造成
+                # 重复。标记为结果未知，既不重发也不假装成功。
+                if _is_ambiguous_action_failure(exc):
+                    return self._mark_ambiguous(delivery_id, str(exc), exc)
                 return self._mark_dead_letter(delivery_id, str(exc), exc)
             except BaseException as exc:
                 return self._mark_dead_letter(delivery_id, str(exc), exc)

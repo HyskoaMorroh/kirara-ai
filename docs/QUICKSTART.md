@@ -126,9 +126,53 @@ OneBot 实现（LLOneBot / NapCat 等）主动连过来。因此保存适配器�
 - **首字节之前**的故障转移是安全的（还没有任何内容发给用户）；一旦已经产出内容，
   系统不会切换并拼接，避免用户看到两段重复回复。
 
-前提是所用适配器实现了流式接口。OpenAI 兼容适配器已实现；未实现的适配器会自动
-回退到非流式路径，不会报错。工具调用轮次始终走非流式——工具轮需要结构化的
-`tool_calls`，聚合文本会把它丢掉。
+前提是所用适配器实现了流式接口。**OpenAI 兼容、Claude、Gemini、Ollama 均已实现**
+（OpenAI 兼容那一族包含 DeepSeek、Moonshot、Mistral、OpenRouter、SiliconFlow、
+硅基/火山/阿里云等预设）；未实现的适配器会自动回退到非流式路径，不会报错。
+工具调用轮次始终走非流式——工具轮需要结构化的 `tool_calls`，聚合文本会把它丢掉。
+
+### 单轮总时间预算：`turn_deadline_seconds`
+
+`agent_runtime.turn_deadline_seconds` 默认 `0`（不设总预算，与既有行为一致）。
+设成正数后，这一轮对话共享**一个**递减的时间预算与**一个**取消信号：
+
+- 预算作为 `deadline_seconds` 下传给模型调用，超时不再等待；
+- 预算耗尽会置位取消信号，并**真的断开在途的上游 HTTP 连接**（四家预置适配器的
+  流式与非流式路径都已接入）。这一点很重要：只让本进程停止等待、不断开连接的话，
+  上游会把整段内容生成完并照旧计费——日志里写着已取消，账单上一分不少；
+- 多轮工具调用**共享**同一份预算，不会每轮重新给满——否则「总预算」名不副实。
+
+它约束的是整轮。单次请求的超时仍由各 Provider 自己的
+`non_stream_timeout_seconds` / `stream_*_timeout_seconds` 决定，两者是不同层级：
+Provider 超时决定「这一次上游调用等多久」，`turn_deadline_seconds` 决定
+「这一整轮（含工具往返）最多花多久」。
+
+建议值：交互式聊天 60–120 秒。设得太小会在工具轮较多的 Agent 上提前截断，
+因此默认不开启，由部署者按自己的 Agent 复杂度决定。
+
+### 想在 QQ 里用 MCP 工具或 command Hook：声明你自己的渠道身份
+
+受保护的插件能力（MCP 工具、command 型 Hook、需要确认的宿主操作）由
+「调用者是不是这个 Agent 的创建者」把关，而这个身份此前只由 WebUI 的登录态提供。
+IM 入站链路没有它，因此**聊天侧所有人都拿不到工具，包括你本人**。
+
+在 `data/config.yaml` 里声明你自己：
+
+```yaml
+agent_runtime:
+  creator_channel_identities:
+    - channel_type: onebot        # webui / onebot / qqbot / telegram / wecom
+      sender_scope: "10001"       # 你自己的 QQ 号，不是机器人的
+      # allow_group_chat: false   # 群聊里是否生效，默认关闭
+```
+
+默认为空表，不声明就是升级前的行为。两点值得留意：
+
+- **群聊默认不生效。** 群里所有人都看得到你发的指令并照抄；照抄的人身份不同
+  因而拿不到工具，但把宿主操作暴露在多人可见的会话里是另一回事。
+- **未声明的人照常得到正常回复**，只是工具列表为空——不是报错，也不是拒绝服务。
+
+完整边界见 `docs/AGENTS_SKILLS_HOOKS_MCP_GUIDE.md` 第 8 节。
 
 ---
 
@@ -168,7 +212,7 @@ curl -X POST http://127.0.0.1:8080/v1/chat \
 
 没有回复时按这个顺序查：
 
-1. 「控制台」页看实时日志，或直接看 `logs/log_YYYY-MM-DD.log`
+1. 「控制台」页看实时日志，或直接看 `<DATA_PATH>/logs/log_YYYY-MM-DD.log`（默认 `data/logs/`）
 2. 「LLM 追踪」页看这次请求有没有发出去、报了什么错
 3. 用 `POST /backend-api/api/dispatch/preview` 确认消息到底命中了哪条规则
 

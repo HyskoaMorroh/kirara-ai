@@ -20,7 +20,7 @@ from wechatpy.replies import create_reply
 
 from kirara_ai.config import DATA_PATH
 from kirara_ai.database import DatabaseManager
-from kirara_ai.im.adapter import IMAdapter
+from kirara_ai.im.adapter import AdapterHealthProvider, AdapterHealthSnapshot, IMAdapter
 from kirara_ai.im.message import (FileElement, ImageMessage, IMMessage, MessageElement, TextMessage, VideoElement,
                                   VoiceMessage)
 from kirara_ai.im.sender import ChatSender
@@ -134,7 +134,7 @@ class _WecomSendUnit:
     params: dict[str, Any]
 
 
-class WecomAdapter(IMAdapter):
+class WecomAdapter(IMAdapter, AdapterHealthProvider):
     """企业微信适配器"""
 
     dispatcher: WorkflowDispatcher
@@ -163,6 +163,58 @@ class WecomAdapter(IMAdapter):
         self.reply_tasks: dict[str, asyncio.Future[Any]] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._outbox: Optional[WecomOutboxService] = None
+        self._ever_started = False
+        self._last_disconnect_reason: Optional[str] = None
+
+    def get_health_snapshot(self) -> AdapterHealthSnapshot:
+        """Report WeCom readiness instead of letting readiness assume health.
+
+        没有这个方法时 `readiness.py` 会走「不实现该协议就按 connected 计数」
+        的兜底分支——一个凭据无效、`access_token` 根本换不出来的适配器在就绪检查
+        里显示为健康。面板给出错误的安心，比不给状态更糟。
+
+        企业微信是**回调**模型：我们提供 webhook 地址，由企业微信在有消息时才
+        推过来。因此没有「链路已连通」这种可持续观测的信号，能确认的只有
+        「路由已挂载且 API 凭据可用」。这里把这一点显式表达出来，而不是假装
+        它等价于 OneBot 的 `connected`：
+        - `connected`：已启动且 API 代理就绪（能换取 access_token）；
+        - `waiting`：已启动但 API 代理还没就绪，通常是凭据错误或网络不通；
+        - `initializing` / `disconnected`：从未启动 / 曾启动后停止。
+        """
+        started = bool(getattr(self, "is_running", False))
+        if started:
+            self._ever_started = True
+        api_ready = getattr(self, "api_delegate", None) is not None
+
+        if not started:
+            status = "disconnected" if self._ever_started else "initializing"
+        elif api_ready:
+            status = "connected"
+        else:
+            status = "waiting"
+
+        return AdapterHealthSnapshot(
+            status=status,
+            connected_account_count=1 if status == "connected" else 0,
+            adapter_started=started,
+            last_disconnect_reason=(
+                None if status == "connected" else self._last_disconnect_reason
+            ),
+            outbox=self._outbox_counts(),
+        )
+
+    def _outbox_counts(self) -> Optional[dict[str, int]]:
+        """Pending/terminal delivery counts, or ``None`` when no outbox is wired."""
+        outbox = getattr(self, "_outbox", None)
+        if outbox is None:
+            return None
+        counts = getattr(outbox, "status_counts", None)
+        if not callable(counts):
+            return None
+        try:
+            return counts()
+        except Exception:  # noqa: BLE001 - 观测失败不得影响健康快照
+            return None
 
         # 根据配置选择合适的API代理
         self.setup_wechat_api()
@@ -771,6 +823,8 @@ class WecomAdapter(IMAdapter):
             await self._start_standalone_server()
         self.setup_routes()
         self.is_running = True
+        self._ever_started = True
+        self._last_disconnect_reason = None
         if getattr(self, "database_manager", None) is not None:
             self._track_background(self._resume_outbox())
         self.logger.info("Wecom-Adapter 启动成功")
@@ -786,4 +840,5 @@ class WecomAdapter(IMAdapter):
         if self.config.host:
             await self._stop_standalone_server()
         self.is_running = False
+        self._last_disconnect_reason = "adapter_stopped"
         self.logger.info("Wecom-Adapter 停止成功")

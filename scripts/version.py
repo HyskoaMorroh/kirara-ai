@@ -37,9 +37,13 @@ RELEASE_KINDS = frozenset(
 )
 RELEASE_STAGE_RANK = {"a": 0, "b": 1, "rc": 2, None: 3}
 ANY_RELEASE_TOKEN_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])v?(?P<release>\d+\.\d+\.\d+)"
+    # 左界加上 `.`、右界加上 `(?!\.\d)`：四段数字永远不是发布版本号。
+    # 没有这两条时 `127.0.0.1` 会被截成 `127.0.0`，于是 `docs/EXTENDING.md`
+    # 里每一处 curl 示例都往 artifact index 里塞一个假 token。那不是误报
+    # （检查仍然通过），而是**掩盖**：真正的版本漂移混在固定噪声里不再显眼。
+    r"(?<![A-Za-z0-9.])v?(?P<release>\d+\.\d+\.\d+)"
     r"(?P<separator>-?)(?P<stage>a|b|rc|alpha|beta)?(?P<number>\d+)?"
-    r"(?![A-Za-z0-9])"
+    r"(?![A-Za-z0-9])(?!\.\d)"
 )
 TEXT_VERSION_SUFFIXES = frozenset(
     {
@@ -297,12 +301,29 @@ def _candidate_after_highest(
     highest: ReleaseVersion,
     kind: str | None,
 ) -> ReleaseVersion:
-    """Move a candidate beyond the published timeline without changing policy."""
+    """Move a candidate beyond the published timeline without changing policy.
+
+    这里只负责「越过已发布时间线」，不改变 ``_candidate_for_kind`` 决定的渠道
+    语义。两条容易被跳过的情况必须显式处理，否则整条发布线会被作废：
+
+    * **同渠道、同发布线继续往下发**：别人在 ``3.3.1b4`` 上开了 beta 线而本机
+      还停在 ``3.3.0b10`` 时，``3.3.1b5`` 空着且高于全部已发布 tag，应当用它，
+      而不是跳到 ``3.3.2b1``。需求要求的是「跳过被占用的号」，不是「跳过一整条线」。
+    * **为别人开的预发布线收尾**：``3.4.0b1`` 已发布时请求 stable 应当得到
+      ``3.4.0``（预发布小于同号正式版，且该号未被占用），而不是 ``3.4.1``；
+      否则同一处判断会与 ``--kind minor`` 自相矛盾。
+
+    调用方在 while 循环里反复调用本函数，因此「候选被占用」这一情况仍由循环
+    继续推进，本函数只需保证每次返回的候选严格高于 ``highest``。
+    """
     if kind == "minor":
         return ReleaseVersion(highest.major, highest.minor + 1, 0, None, 0)
     if kind == "major":
         return ReleaseVersion(highest.major + 1, 0, 0, None, 0)
     if candidate.stage is None:
+        # 正式版可以给同号预发布线收尾：3.4.0b1 已发布时 3.4.0 仍然更高且空着。
+        if highest.stage is not None:
+            return ReleaseVersion(highest.major, highest.minor, highest.patch, None, 0)
         return _increment_patch(highest)
     if (
         candidate.major,
@@ -316,6 +337,15 @@ def _candidate_after_highest(
         highest.stage,
     ):
         return candidate._replace(number=highest.number + 1)
+    # 请求的渠道与最高已发布号同渠道时，继续那一条线而不是另开 patch 线。
+    if candidate.stage == highest.stage:
+        return ReleaseVersion(
+            highest.major,
+            highest.minor,
+            highest.patch,
+            candidate.stage,
+            highest.number + 1,
+        )
     return _first_candidate_after(highest, candidate.stage)
 
 

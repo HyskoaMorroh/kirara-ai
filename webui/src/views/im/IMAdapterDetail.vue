@@ -57,13 +57,61 @@ const DISCONNECT_REASON_TEXT: Record<string, string> = {
   missing_self_id: '上游握手缺少账号标识',
   heartbeat_timeout: '曾经连上但心跳超时',
   upstream_lifecycle_disconnect: '上游主动上报断开',
-  adapter_stopped: '适配器已停止'
+  adapter_stopped: '适配器已停止',
+  data_directory_unwritable: '持久化目录不可写：检查数据卷是否被只读重挂或磁盘写满'
 }
 
 const disconnectReasonText = (adapter: IMAdapter): string | null => {
   const reason = adapter.health?.last_disconnect_reason
   if (!reason) return null
   return DISCONNECT_REASON_TEXT[reason] || null
+}
+
+/**
+ * 上游扫码登录状态的展示文案。
+ *
+ * 与连接状态严格分开：`waiting` 说的是「上游还没接进来」，扫码状态说的是
+ * 「上游接进来了，但它自己还没登录 QQ」。两者的处置一个是查地址与 Token，
+ * 一个是去扫码——放在同一个标签里会让用户查错方向。
+ */
+const QR_STATE_TEXT: Record<string, { label: string; type: StatusTagType }> = {
+  pending: { label: '等待二维码', type: 'default' },
+  waiting_scan: { label: '待扫码', type: 'warning' },
+  scanned: { label: '已扫码待确认', type: 'info' },
+  expired: { label: '二维码已过期', type: 'error' },
+  succeeded: { label: 'QQ 已登录', type: 'success' },
+  failed: { label: '登录失败', type: 'error' },
+  unavailable: { label: '二维码暂不可用', type: 'default' },
+  quick_login: { label: '免扫码登录', type: 'success' }
+}
+
+const qrLoginTag = (
+  adapter: IMAdapter
+): { label: string; type: StatusTagType; title: string } | null => {
+  const qr = adapter.health?.qr_login
+  // 未配置上游日志路径时后端返回 null，此时不该显示任何扫码信息——
+  // 显示「未知」会让用户以为出了问题。
+  if (!qr || qr.state === 'unknown') return null
+  const preset = QR_STATE_TEXT[qr.state]
+  if (!preset) return null
+
+  // 剩余时间只在还能扫的时候有意义，且必须是「还剩多久」而不是绝对时刻：
+  // 用户要判断的是「现在扫还来不来得及」。
+  const remaining =
+    qr.state === 'waiting_scan' && typeof qr.remaining_seconds === 'number'
+      ? `（剩 ${Math.max(0, Math.round(qr.remaining_seconds))} 秒）`
+      : ''
+
+  const details: string[] = []
+  if (qr.remediation) details.push(qr.remediation)
+  if (qr.latest_qr_path) details.push(`最新二维码：${qr.latest_qr_path}`)
+  if (qr.refresh_count > 0) details.push(`已刷新 ${qr.refresh_count} 次`)
+
+  return {
+    label: `${preset.label}${remaining}`,
+    type: preset.type,
+    title: details.join('\n')
+  }
 }
 
 const adapterStatus = (
@@ -89,6 +137,10 @@ const adapterStatus = (
       return { label: '凭据被拒', type: 'error', className: 'credential-rejected' }
     case 'upstream_refused':
       return { label: '握手被拒', type: 'error', className: 'upstream-refused' }
+    // 链路是通的，坏的是磁盘。标签必须说「存储」而不是「断开」，
+    // 否则操作者会去查网络与 Token，而要修的是数据卷。
+    case 'storage_unavailable':
+      return { label: '存储不可写', type: 'error', className: 'storage-unavailable' }
     case 'disconnected':
       return { label: '已断开', type: 'error', className: 'disconnected' }
     case 'stale':
@@ -373,19 +425,39 @@ defineExpose({
                       </n-avatar>
                     </template>
                     <template #header-extra>
-                      <n-tag
-                        :type="adapterStatus(adapter).type"
-                        :class="['status-tag', adapterStatus(adapter).className]"
-                        :title="disconnectReasonText(adapter) || undefined"
-                      >
-                        {{ adapterStatus(adapter).label }}
-                      </n-tag>
+                      <n-space :size="6" align="center">
+                        <n-tag
+                          :type="adapterStatus(adapter).type"
+                          :class="['status-tag', adapterStatus(adapter).className]"
+                          :title="disconnectReasonText(adapter) || undefined"
+                        >
+                          {{ adapterStatus(adapter).label }}
+                        </n-tag>
+                        <!-- 上游 QQ 登录状态单独一枚标签：它与「适配器连接状态」
+                             是两件事，合并显示会让「只差扫码」被误读成「连不上」。 -->
+                        <n-tag
+                          v-if="qrLoginTag(adapter)"
+                          :type="qrLoginTag(adapter)!.type"
+                          class="status-tag qr-login"
+                          :title="qrLoginTag(adapter)!.title || undefined"
+                        >
+                          {{ qrLoginTag(adapter)!.label }}
+                        </n-tag>
+                      </n-space>
                     </template>
                     <template #description>
                       <!-- 原因码在这里落地成一行可读文案：QQ 未连接时，
                            这是用户不进服务器就能拿到的唯一线索。 -->
                       <span v-if="disconnectReasonText(adapter)" class="disconnect-reason">
                         {{ disconnectReasonText(adapter) }}
+                      </span>
+                      <!-- 扫码处置建议同样直接落地：告诉用户下一步做什么，
+                           而不是让他自己去猜「待扫码」意味着要干什么。 -->
+                      <span
+                        v-if="qrLoginTag(adapter)?.title"
+                        class="disconnect-reason qr-login-hint"
+                      >
+                        {{ adapter.health?.qr_login?.remediation }}
                       </span>
                     </template>
                     <template #action>
@@ -646,6 +718,7 @@ defineExpose({
 .status-tag.disconnected,
 .status-tag.credential-rejected,
 .status-tag.upstream-refused,
+.status-tag.storage-unavailable,
 .status-tag.stale {
   background-color: var(--error-color);
   color: white;
@@ -663,6 +736,18 @@ defineExpose({
   color: var(--text-color-secondary);
   font-size: 0.8rem;
   line-height: var(--line-height-normal, 1.5);
+}
+
+/* 扫码标签配色由 n-tag 的 type 决定，这里只保留与连接状态一致的字重与圆角，
+   让两枚标签并排时看起来属于同一套语言，而不是两种控件。 */
+.status-tag.qr-login {
+  font-weight: 500;
+}
+
+/* 处置建议比原因码更弱一档：原因是「发生了什么」，建议是「接下来做什么」，
+   两行并排时需要能一眼分出主次。 */
+.qr-login-hint {
+  color: var(--text-color-tertiary);
 }
 
 .status-tag.disabled {

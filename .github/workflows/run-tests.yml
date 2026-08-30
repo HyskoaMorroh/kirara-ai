@@ -72,6 +72,14 @@ jobs:
           ref: ${{ inputs.release_commit || inputs.release_tag || github.sha }}
           fetch-depth: 0
 
+      - name: Set up Python 3.11
+        # `scripts/version.py` 需要 tomllib（3.11+）。不显式装 Python 时它依赖
+        # runner 镜像预装的解释器版本，一旦镜像换成 3.10 这道门禁会以
+        # ModuleNotFoundError 失败，而失败原因看起来像是版本不同步。
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
       - name: Verify synchronized versions
         run: python scripts/version.py check
 
@@ -237,6 +245,12 @@ jobs:
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
+
+      - name: Set up Python 3.11
+        # 镜像标签由 `scripts/version.py tag` 决定，它需要 tomllib（3.11+）。
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
 
       - name: Resolve project release identity
         id: version

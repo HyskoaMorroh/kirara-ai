@@ -8,6 +8,7 @@ import {
   NFormItem,
   NInput,
   useMessage,
+  useDialog,
   NSpin,
   NSpace,
   NIcon,
@@ -83,13 +84,17 @@ import {
   findFreeNodePosition,
   findOverlappingNodes,
   layoutMissingNodes,
-  snapToGrid
+  snapToGrid,
+  LAYOUT_GRID_SIZE,
+  LARGE_GRAPH_NODE_THRESHOLD
 } from './useLayout'
 import {
+  connectionRejectionMessage,
   connectionToWorkflowWire,
   createWorkflowConnectionPortIndex,
   createWorkflowEdgeId,
   filterWiresForBlocks,
+  findWorkflowConnectionRejection,
   getCanvasBlockPorts,
   getCanvasBlockType,
   getUnknownBlockTypes,
@@ -99,7 +104,8 @@ import {
   parseWorkflowTransferPayload,
   validateWorkflowConnection,
   workflowWireToConnection,
-  WORKFLOW_TRANSFER_SCHEMA_VERSION
+  WORKFLOW_TRANSFER_SCHEMA_VERSION,
+  type WorkflowConnectionRejectionReason
 } from './workflow-data'
 import { createUniqueNodeName } from './workflow-node-utils'
 import {
@@ -181,6 +187,8 @@ const serverValidationIssues = ref<CanvasValidationIssue[]>([])
 // 设置对话框相关状态
 const showSettingsModal = ref(false)
 const message = useMessage()
+// 超大图整理前的确认对话框（见 handleTidyLayout）。
+const dialog = useDialog()
 const loadingBar = useLoadingBar()
 
 const formRef = ref()
@@ -300,21 +308,74 @@ watch([connectionTypeIndex, typeCompatibility, typeCompatibilityReady], () => {
   connectionCheckCache = new Map()
 })
 
+/**
+ * 本次拖动中最后一次被拒绝的原因。
+ *
+ * 这个变量存在的原因是 vue-flow 的行为：Handle 判定 invalid 时**不会**触发
+ * `onConnect`，因此 `handleConnect` 里的提示根本不可达——所有拒绝都是静默的，
+ * 用户看到的只是「线拉过去又弹回来」，与「画布卡了」无法区分。
+ * 提示只能在拖动结束时给出，而那时唯一还知道原因的地方就是这里。
+ */
+let lastConnectionRejection: WorkflowConnectionRejectionReason | null = null
+/** 本次拖动是否真的建立了连线；建立了就不该再提示拒绝原因。 */
+let connectionEstablished = false
+
+/** 判断某个输入端口是否已经有连线——「一个输入只允许一条边」由节点组件执行。 */
+const inputAlreadyConnected = (connection: Connection): boolean =>
+  edges.value.some(
+    (edge) => edge.target === connection.target && edge.targetHandle === connection.targetHandle
+  )
+
 // 连接验证功能
 const isValidConnection = (connection: Connection) => {
   const cacheKey = `${connection.source}::${connection.sourceHandle}::${connection.target}::${connection.targetHandle}`
   const cached = connectionCheckCache.get(cacheKey)
-  if (cached !== undefined) return cached
-
-  const result = validateWorkflowConnection(
+  const validation = validateWorkflowConnection(
     connection,
     [],
     props.blockTypes,
     typeCompatibilityReady.value ? typeCompatibility.value : undefined,
     connectionTypeIndex.value
-  ).valid
-  connectionCheckCache.set(cacheKey, result)
-  return result
+  )
+  // 「一个输入只允许一条边」这条规则在这里判定，而不是留给节点组件。
+  // 节点组件原先自己 early-return false，于是这条最容易被误读成类型问题的拒绝
+  // 永远到不了这里，也就永远没有文案。
+  const alreadyConnected = inputAlreadyConnected(connection)
+  const rejection = findWorkflowConnectionRejection(connection, {
+    inputAlreadyConnected: alreadyConnected,
+    validation
+  })
+  if (rejection) {
+    // 拒绝原因不进缓存：它描述的是「这一次拖动」，而缓存跨拖动复用。
+    lastConnectionRejection = rejection
+  }
+  // 已占用的输入不进缓存：删掉那条已有的线之后同一个端口就该重新可连，
+  // 而缓存会让它一直显示为不可连。
+  if (alreadyConnected) return false
+  if (cached !== undefined) return cached
+  connectionCheckCache.set(cacheKey, validation.valid)
+  return validation.valid
+}
+
+/** 一次拖动开始：清掉上一次的原因，否则会提示一个早已过期的拒绝。 */
+const handleConnectStart = () => {
+  lastConnectionRejection = null
+  connectionEstablished = false
+}
+
+/**
+ * 一次拖动结束。连上了就什么都不说；没连上且我们知道原因，就把原因说出来。
+ *
+ * 松手在空白处也会走到这里，但那时 `lastConnectionRejection` 为 null——
+ * 「用户改主意了」不是错误，不该提示。
+ */
+const handleConnectEnd = () => {
+  if (connectionEstablished || !lastConnectionRejection) {
+    lastConnectionRejection = null
+    return
+  }
+  message.warning(connectionRejectionMessage(lastConnectionRejection))
+  lastConnectionRejection = null
 }
 
 // 修改 onConnect 函数
@@ -331,14 +392,30 @@ const handleConnect = (params: Connection) => {
   if (isValidConnection(params)) {
     const edge = buildEdge(params)
     if (edge) {
+      connectionEstablished = true
       recordHistoryBeforeCanvasMutation()
       addEdges([edge])
       updateWires()
       updateBlocks()
+      return
     }
-  } else {
-    message.error('类型不兼容，无法连接')
+    // buildEdge 返回 null 时此前是完全静默的：端点缺失或端口类型解析不出来都会
+    // 走到这里，而用户看到的只是「线没连上」。把它归到「端口未知」并说出来。
+    lastConnectionRejection = lastConnectionRejection || 'unknown_source_port'
+    return
   }
+  lastConnectionRejection =
+    lastConnectionRejection ||
+    findWorkflowConnectionRejection(params, {
+      inputAlreadyConnected: inputAlreadyConnected(params),
+      validation: validateWorkflowConnection(
+        params,
+        [],
+        props.blockTypes,
+        typeCompatibilityReady.value ? typeCompatibility.value : undefined,
+        connectionTypeIndex.value
+      )
+    })
 }
 
 const handleEdgeUpdate = ({ edge, connection }: EdgeUpdateEvent) => {
@@ -352,16 +429,38 @@ const handleEdgeUpdate = ({ edge, connection }: EdgeUpdateEvent) => {
     // 删除旧的线，建立新的线
     const newEdge = buildEdge(connection)
     if (newEdge) {
+      connectionEstablished = true
       recordHistoryBeforeCanvasMutation()
       removeEdges([edge])
       if (edges.value.find((e) => e.id === newEdge.id) === undefined) {
         addEdges([newEdge])
       }
       updateWires()
+      return
     }
-  } else {
-    message.error('类型不兼容，无法连接')
+    lastConnectionRejection = lastConnectionRejection || 'unknown_source_port'
+    return
   }
+  // 与 handleConnect 同一口径：说清楚是哪一种拒绝，而不是一律归给类型。
+  // 改接一条已有连线时 `inputAlreadyConnected` 要排除**正在被替换**的那条，
+  // 否则「把线从 A 挪到 B 再挪回来」会被误判为「输入已被占用」。
+  lastConnectionRejection =
+    lastConnectionRejection ||
+    findWorkflowConnectionRejection(connection, {
+      inputAlreadyConnected: edges.value.some(
+        (item) =>
+          item.id !== edge.id &&
+          item.target === connection.target &&
+          item.targetHandle === connection.targetHandle
+      ),
+      validation: validateWorkflowConnection(
+        connection,
+        [],
+        props.blockTypes,
+        typeCompatibilityReady.value ? typeCompatibility.value : undefined,
+        connectionTypeIndex.value
+      )
+    })
 }
 
 const buildEdge = (
@@ -645,6 +744,18 @@ const restoreGraph = () => {
       intent.updateBlocks(positionedBlocks)
       lastEmittedBlocks = positionedBlocks
       emit('update:blocks', positionedBlocks)
+      // 补位会把工作流置为「未保存」——因为坐标确实变了、确实还没落盘。
+      // 但用户只是打开了一个旧工作流，什么都没动，离开时却被拦下来问是否放弃修改。
+      // 那个确认框在不解释原因时看起来像一个 bug：改动是我们做的，不是他做的。
+      // 所以必须说出来：改了什么、为什么、下一步是什么。
+      const repositionedCount = positionedNodes.filter((node) =>
+        nodesWithoutPosition.has(node.id)
+      ).length
+      if (repositionedCount > 0) {
+        message.info(
+          `有 ${repositionedCount} 个节点没有保存过坐标，已自动补上位置；保存后即固定下来。`
+        )
+      }
     }
   } finally {
     restoringGraph = false
@@ -733,12 +844,13 @@ const handleViewportMoveEnd = () => {
  *
  * 与首次加载时的自动布局共用同一套 dagre 逻辑，但由用户主动触发，
  * 用于修正手工拖拽后互相压叠的节点。会写入历史，可以撤销。
+ *
+ * 超过 `LARGE_GRAPH_NODE_THRESHOLD` 时先弹确认：这条路径在主线程同步跑
+ * dagre 加去重叠扫描，节点很多时会把标签页卡住数秒，用户会以为界面死了并
+ * 反复点击——那只会排更多次。**降级是「先说明代价再让用户决定」，不是拒绝执行**；
+ * 直接拒绝等于把功能从大图上拿掉，而大图恰恰最需要它。
  */
-const handleTidyLayout = () => {
-  if (nodes.value.length === 0) {
-    message.info('画布上还没有节点')
-    return
-  }
+const runTidyLayout = () => {
   tidying.value = true
   try {
     // 整理会一次性移动全部节点：作为一个批次写历史，一次 Ctrl+Z 即可完整退回。
@@ -753,6 +865,29 @@ const handleTidyLayout = () => {
   } finally {
     tidying.value = false
   }
+}
+
+const handleTidyLayout = () => {
+  const total = nodes.value.length
+  if (total === 0) {
+    message.info('画布上还没有节点')
+    return
+  }
+  if (total >= LARGE_GRAPH_NODE_THRESHOLD) {
+    dialog.warning({
+      title: '节点较多，整理会占用一些时间',
+      content:
+        `当前有 ${total} 个节点。重新排布需要在浏览器里一次性计算全部位置，` +
+        '期间页面会短暂无响应（通常几秒）。这一步可以用 Ctrl+Z 完整撤销。',
+      positiveText: '继续整理',
+      negativeText: '取消',
+      onPositiveClick: () => {
+        runTidyLayout()
+      }
+    })
+    return
+  }
+  runTidyLayout()
 }
 
 /** 缩放至适应全部节点 */
@@ -1758,11 +1893,14 @@ const onDrop = (event: DragEvent) => {
       @edges-change="handleEdgesChange"
       @edge-update="handleEdgeUpdate"
       @connect="handleConnect"
+      @connect-start="handleConnectStart"
+      @connect-end="handleConnectEnd"
       @move-end="handleViewportMoveEnd"
       :default-zoom="1"
       :min-zoom="CANVAS_MIN_ZOOM"
       :max-zoom="CANVAS_MAX_ZOOM"
       :snap-to-grid="true"
+      :snap-grid="[LAYOUT_GRID_SIZE, LAYOUT_GRID_SIZE]"
       class="vue-flow-canvas"
       @drop="onDrop"
       @dragover.prevent
@@ -1773,7 +1911,7 @@ const onDrop = (event: DragEvent) => {
       <template #node-code="codeNdoeProps">
         <CodeNode v-bind="codeNdoeProps" :isValidConnection="isValidConnection" />
       </template>
-      <Background :pattern-color="canvasDotColor" :gap="20" />
+      <Background :pattern-color="canvasDotColor" :gap="LAYOUT_GRID_SIZE" />
       <!--
         在 vue-flow 自带控件里再挂两个按钮：
         「自动排布」原先只有 Ctrl+L 和顶部工具栏图标，放在这里是因为缩放控件

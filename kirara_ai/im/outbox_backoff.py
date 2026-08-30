@@ -4,11 +4,16 @@ Each adapter's outbox grew its own delay formula. OneBot and QQBot used a raw
 ``retry_delay_seconds * 2 ** (attempt - 1)`` with no cap: with the configuration
 surface's own maximums (``outbox_max_attempts`` 10, ``outbox_retry_delay_seconds``
 60) the last wait was about 8.5 hours, which is indistinguishable from a stuck
-queue. Telegram had no exponential term at all, so the same explicit rejection
-was retried on a flat interval. Neither had jitter, so every page of a split
-reply retried in lockstep and hit a rate-limited upstream at the same instant.
+queue. Telegram was worse than "no exponential term": it read neither setting —
+``max_attempts`` and ``retry_delay_seconds`` were assigned and never used, so an
+explicit ``RetryAfter`` went straight to the dead-letter path and the documented,
+editable configuration changed nothing at all. Neither had jitter, so every page
+of a split reply retried in lockstep and hit a rate-limited upstream at the same
+instant.
 
-This module owns the one formula so the three adapters cannot drift again.
+This module owns the one formula so the adapters cannot drift again. It is used
+by the OneBot, QQBot and Telegram outboxes; WeCom has no retry path at all
+(every failure there is either accepted or quarantined as unknown).
 """
 
 from __future__ import annotations

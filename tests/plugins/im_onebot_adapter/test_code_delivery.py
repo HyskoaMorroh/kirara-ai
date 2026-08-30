@@ -123,3 +123,70 @@ async def test_a_long_code_block_is_still_paginated_with_complete_fences():
     assert len(code_pages) > 1
     for page in code_pages:
         assert page.count("```") == 2
+
+
+@pytest.mark.asyncio
+async def test_media_elements_become_their_own_batches_around_paginated_text():
+    """需求 19.4 点名要验证「图片/文件」在分段中的行为。
+
+    图片、语音、视频、文件不能与文本挤进同一条消息：QQ 的一条消息里混排大段
+    文字和媒体时，客户端的展示顺序不再可预测；而分页又会把文本切成多条。
+    这里断言媒体各自独立成条，且文本页与媒体的**相对顺序**保持原样——
+    顺序错乱会让「这张图说明的是上面那段话」这个关系失效。
+    """
+    from kirara_ai.im.message import ImageMessage, VoiceMessage
+
+    png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00"
+        b"\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    adapter = make_adapter()
+    reply = IMMessage(
+        sender=ChatSender.get_bot_sender(),
+        message_elements=[
+            TextMessage("说明文字。" * 4),
+            ImageMessage(data=png),
+            TextMessage("后续说明。" * 4),
+            VoiceMessage(data=b"RIFF0000WAVEfmt "),
+        ],
+    )
+
+    batches = await adapter._render_message_batches(reply)
+
+    kinds = [
+        "text" if all(seg.type == "text" for seg in batch) else batch[0].type
+        for batch in batches
+    ]
+    # 两段文本（可能各自分页）与两个媒体交替出现，媒体各自独立成条。
+    assert "image" in kinds and "record" in kinds
+    assert kinds.index("image") < kinds.index("record"), "媒体相对顺序被打乱"
+    first_text = next(index for index, kind in enumerate(kinds) if kind == "text")
+    assert first_text < kinds.index("image"), "首段文本应排在图片之前"
+    for batch in batches:
+        types = {segment.type for segment in batch}
+        assert types == {"text"} or "text" not in types, (
+            f"媒体与文本被塞进同一条消息：{types}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_media_only_reply_still_produces_a_batch():
+    """纯媒体回复（没有任何文字）不得被当成空消息丢掉。"""
+    from kirara_ai.im.message import ImageMessage
+
+    png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00"
+        b"\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    adapter = make_adapter()
+    reply = IMMessage(
+        sender=ChatSender.get_bot_sender(),
+        message_elements=[ImageMessage(data=png)],
+    )
+
+    batches = await adapter._render_message_batches(reply)
+
+    assert len(batches) == 1
+    assert batches[0][0].type == "image"

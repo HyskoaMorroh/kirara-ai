@@ -168,6 +168,25 @@ def request():
     )
 
 
+def estimated(text="ok"):
+    """The response a provider that reports no usage now produces.
+
+    主链路会补一个标记为 ESTIMATED 的 usage，所以「供应商没给 usage」的响应不再
+    等于 ``response(text)``（后者 usage 为 None）。这里只固定 token 数以外的部分：
+    估算算法的具体数值属于 `tests/llm/test_token_estimator.py` 的职责，
+    这些用例关心的是路由与来源标记。
+    """
+    def _matches(actual: LLMChatResponse) -> bool:
+        return (
+            actual.model == "model-a"
+            and actual.message == response(text).message
+            and actual.usage is not None
+            and actual.usage.source is UsageSource.ESTIMATED
+        )
+
+    return _matches
+
+
 def test_optional_observability_dependencies_allow_lightweight_manager_instances():
     manager = object.__new__(LLMManager)
 
@@ -215,7 +234,7 @@ def test_execute_chat_uses_stable_priority_and_switches_on_transient_failure():
 
     result = manager.execute_chat(request())
 
-    assert result.response == response()
+    assert estimated()(result.response)
     assert [attempt.provider for attempt in result.attempts] == ["primary", "secondary"]
     assert result.attempts[0].error_category == "upstream"
     assert result.attempts[1].success is True
@@ -237,7 +256,7 @@ def test_execute_chat_provider_allowlist_filters_candidates_before_failover():
         provider_allowlist={"allowed-primary", "allowed-backup"},
     )
 
-    assert result.response == response("allowed")
+    assert estimated("allowed")(result.response)
     assert blocked.calls == 0
     assert [attempt.provider for attempt in result.attempts] == [
         "allowed-primary",
@@ -251,7 +270,7 @@ def test_execute_chat_empty_provider_allowlist_preserves_legacy_behavior():
 
     result = manager.execute_chat(request(), provider_allowlist=set())
 
-    assert result.response == response("legacy")
+    assert estimated("legacy")(result.response)
     assert primary.calls == 1
 
 
@@ -355,7 +374,7 @@ def test_execute_chat_does_not_retry_a_tracer_internal_type_error():
 
     result = manager.execute_chat(request())
 
-    assert result.response == response()
+    assert estimated()(result.response)
     assert tracer.complete_calls == 1
 
 
@@ -713,3 +732,51 @@ def test_execute_stream_keeps_legacy_synchronous_adapter_compatible():
     assert legacy.calls == 1
     assert execution.attempts[-1].success is True
     assert execution.attempts[-1].first_byte_at is not None
+
+
+def test_execute_chat_marks_usage_estimated_when_the_provider_reports_none():
+    """供应商不返回 usage 时必须落一个明确标记为估算的值。
+
+    `attach_estimated_usage` 此前只挂在 `trace_llm_chat` 装饰器上，而 LLMManager
+    用 `suppress_llm_chat_tracing()` 让装饰器整体短路，所以主链路只调
+    `mark_provider_usage`。结果是这类请求以 `usage=None` 落库，统计页把它显示为
+    0 token、0 成本的「免费请求」——「0」是一个断言，「未知」不是，前者更糟。
+    """
+    provider = FakeAdapter(response("no-usage"))
+    manager = make_manager([("primary", 1, provider)])
+
+    result = manager.execute_chat(request())
+
+    assert result.response.usage is not None, "供应商未返回 usage 时必须补估算值"
+    assert result.response.usage.source is UsageSource.ESTIMATED
+    # 估算值必须真的有内容，不能是一行「已估算但全是 0」。
+    assert (result.response.usage.total_tokens or 0) > 0
+
+
+def test_execute_chat_never_relabels_a_real_provider_usage_as_estimated():
+    """供应商给了 usage 就必须原样保留，绝不能被估算值覆盖。"""
+    reported = Usage(prompt_tokens=11, completion_tokens=7, total_tokens=18)
+    provider = FakeAdapter(response("measured", usage=reported))
+    manager = make_manager([("primary", 1, provider)])
+
+    result = manager.execute_chat(request())
+
+    assert result.response.usage.source is UsageSource.PROVIDER
+    assert result.response.usage.prompt_tokens == 11
+    assert result.response.usage.completion_tokens == 7
+
+
+def test_execute_stream_marks_aggregated_usage_estimated_when_provider_reports_none():
+    """流式聚合结果同样要区分「估算」与「未知」。"""
+    provider = StreamingAdapter([response("streamed")])
+    manager = make_manager([("primary", 1, provider)])
+    tracer = RecordingTracer()
+    manager.container.register(LLMTracer, tracer)
+
+    execution = manager.execute_stream(request(), deadline_seconds=1)
+    list(execution)
+
+    assert len(tracer.completed) == 1
+    traced_response = tracer.completed[0][2]
+    assert traced_response.usage is not None
+    assert traced_response.usage.source is UsageSource.ESTIMATED

@@ -9,10 +9,24 @@ from typing import Any, Callable, Dict, List
 
 from loguru import logger
 
-# 创建 logs 文件夹
-LOG_DIR = "logs"
-if not os.path.exists(LOG_DIR):
-    os.makedirs(LOG_DIR)
+from kirara_ai.config import DATA_PATH, ensure_data_directories
+
+# 日志目录默认落在 DATA_PATH 之下。
+#
+# 原实现是裸相对路径 `logs`：它跟着进程工作目录走，既不在 DATA_PATH 里，也没有
+# 任何 compose 卷挂它。于是 `docker compose down` 之后，运维按运维文档第八节
+# 去翻「日志证据」时，那批日志刚刚随容器一起消失了——而文档开头写着
+# 「只要挂载 DATA_PATH 这一个目录，重启就不会丢状态」。文档给出与事实相反的
+# 承诺，比不写更糟。
+#
+# `KIRARA_LOG_DIR` 保留为显式覆盖出口：已经把日志接到外部收集器或独立卷的部署
+# 不该被强行改路径。
+LOG_DIR = os.path.abspath(
+    os.environ.get("KIRARA_LOG_DIR", os.path.join(DATA_PATH, "logs"))
+)
+# 复用启动期的目录校验：只读挂载、磁盘写满、被同名文件占用都会给出可执行的说明，
+# 而不是在第一条日志落盘时抛一个不指明路径的 OSError。
+ensure_data_directories([LOG_DIR])
 
 # 配置日志格式和颜色
 logger.remove()  # 移除默认的日志处理器

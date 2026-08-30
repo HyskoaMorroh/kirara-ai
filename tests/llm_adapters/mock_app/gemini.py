@@ -28,6 +28,10 @@ async def chat(model: str, request:ChatRequest = Body()) -> dict:
             "usageMetadata": {
                 "totalTokenCount": 114,
                 "promptTokenCount": 514,
+                # 真实 Gemini 用 candidatesTokenCount 报输出量。此前 mock 里
+                # 没有这个字段，而适配器读的是并不存在的顶层 promptTokensDetails，
+                # 两个错误刚好互相掩盖，使「输出恒为 0」的缺陷通过了测试。
+                "candidatesTokenCount": 66,
                 "cachedContentTokenCount": 1919
             },
             "modelVersion": "mock_chat"

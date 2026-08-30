@@ -2,6 +2,16 @@ config.json
 config.json.old
 config.cfg
 .chatgpt_cache.json
+# 服务器上 `.env` 与 compose 同目录，构建上下文默认会把它一并上传；
+# AUTH_TOKEN 等凭据由它承载（见 docs/QQ_ONEBOT_OPERATIONS.md 第四节），
+# 因此必须显式排除，只保留不含真实值的示例文件。
+.env
+.env.*
+!.env.example
+# 密码哈希等同于凭据。`.gitignore` 已挡住 Git，构建上下文需要单独声明。
+*password.hash
+**/*password.hash
+test_password.hash
 
 # 版本控制与 IDE
 .git
@@ -13,33 +23,57 @@ config.cfg
 .pylintrc
 
 # Python 缓存与构建产物
+# dockerignore 的 pattern 匹配**完整相对路径**，不是逐级路径分量：裸
+# `__pycache__` 只挡根目录那一个，挡不住 kirara_ai/**/__pycache__/（实测
+# 1300+ 个 .pyc、10 MB 会随 `COPY . /source` 上传）。因此这里同时写根形式
+# 与 `**/` 形式。
 __pycache__
+**/__pycache__
 *.py[cod]
+**/*.py[cod]
 *.egg-info
+**/*.egg-info
 build
 dist
 .pytest_cache
+**/.pytest_cache
 .mypy_cache
+.ruff_cache
+**/.ruff_cache
 
 # 本地审计、浏览器自动化与一次性分析产物
 .qa-*
 .playwright-mcp
+**/.playwright-mcp
 .playwright-cli
+**/.playwright-cli
 .superpowers
+.memsearch
+findings.md
+progress.md
+task_plan.md
+.version-sync.lock
 .codex-red-host-authorization.txt
 PATHFINDER-2026-08-21
 *.db
+**/*.db
 *.sqlite
+**/*.sqlite
 *.sqlite3
+**/*.sqlite3
 *.log
+**/*.log
 *.pid
+**/*.pid
 
 # 本机构建/测试缓存（vue-tsc、node、pytest 的临时目录），不参与镜像构建
 .build-tmp
 .npm-cache
 node_modules
+**/node_modules
 .pytest-tmp
 *.tsbuildinfo
+**/*.tsbuildinfo
 
 # 本地开发环境与前端依赖/产物由 Dockerfile 在构建阶段重新生成
 .venv
@@ -55,6 +89,14 @@ work
 tests
 pytest.ini
 
+# 规划与交接材料属于开发过程记录，不是运行时内容
+docs/superpowers
+
+# 与本项目无关的本机脚本（借款合同 DOCX 工具），既不该入镜像也不该入仓库
+create_concise_loan_contract.js
+update_loan_identity.py
+update_loan_rate.py
+
 # 本地上传/备份用的补丁副本，不属于项目源码
 fsdownload
 patches
@@ -62,6 +104,8 @@ patches
 # 本地运行时数据（data 下的默认模板需保留，仅排除运行期产物）
 data/db
 data/venv
+# 日志默认落在 DATA_PATH/logs：它是运行期产物，不进镜像。
+data/logs
 data/config.yaml
 data/config.yaml.bak
 data/web/password.hash
@@ -80,9 +124,10 @@ data/media/metadata
 data/media/files
 data/workflows/**/test-workflow-new.yaml
 
-# WebUI 构建产物由 Dockerfile 从受版本控制的 webui 源码生成，无需带入
-web/assets
-web/index.html
+# WebUI 构建产物由 Dockerfile 从受版本控制的 webui 源码生成，无需带入。
+# 整个 web/ 目录都排除：只列 assets 与 index.html 会漏掉 version.json
+# （里面写着一个过期版本号）和 favicon 等文件。
+web
 
 # 部署辅助文件
 docker-compose.yml
@@ -91,3 +136,6 @@ docker-compose.yml.example
 # 用户私有文件：即使 Dockerfile 未来改为使用更宽的构建上下文，也不得上传
 docs/LOGO.jpg
 docs/logo.jpg
+
+# 界面核对用的 QA 截图。运行时不读它们，`COPY . /source` 却会逐张上传。
+resource-*.png

@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from quart import Blueprint, Response, g, jsonify, request, websocket
 
 from kirara_ai.config.global_config import GlobalConfig
+from kirara_ai.im.delivery_timing_store import DeliveryTimingStore
 from kirara_ai.internal import shutdown_event
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.logger import get_logger
@@ -88,6 +89,35 @@ async def _trace_request_options(data: Mapping[str, Any], config: GlobalConfig):
         if value is not None and value != "":
             filters[target] = value
 
+    # 「未标注」维度必须能被显式筛选。
+    #
+    # 空串在上面的循环里被当成「没填」丢掉，所以前端无法用 `provider=""`
+    # 表达「只看没有 provider 的记录」——选了「未标注」却拿到全量数据，
+    # 那比没有这个选项更糟：它给出一个错误的答案而不是拒绝回答。
+    # 这里用一组独立的 `*_unset` 参数表达「该列为 NULL」。
+    for source, target in (
+        ("provider_unset", "provider"),
+        ("backend_unset", "backend_name"),
+        ("model_unset", "model_id"),
+        ("error_category_unset", "error_category"),
+        ("usage_source_unset", "usage_source"),
+    ):
+        raw = data.get(source)
+        if isinstance(raw, str):
+            enabled = raw.strip().lower() in {"1", "true", "yes"}
+        else:
+            enabled = bool(raw)
+        if not enabled:
+            continue
+        if target in filters:
+            return None, (
+                jsonify({
+                    "error": f"{source} cannot be combined with an explicit {target} filter"
+                }),
+                400,
+            )
+        filters[f"{target}__is_null"] = True
+
     start_time, error = _parse_iso_datetime(data.get("start_time"), "start_time", storage_timezone)
     if error:
         return None, error
@@ -120,6 +150,14 @@ def _export_value(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return str(value)
+
+
+def _delivery_timing_store():
+    """Resolve the delivery timing store, or ``None`` when it is not wired."""
+    container: DependencyContainer = g.container
+    if not container.has(DeliveryTimingStore):
+        return None
+    return container.resolve(DeliveryTimingStore)
 
 
 @tracing_bp.route("/types", methods=["GET"])
@@ -282,6 +320,10 @@ async def export_llm_traces():
         "usage_source",
         "ttft_ms",
         "attempt_count",
+        # 重试与故障转移是两项：同一家重试 3 次与切换 3 家在 `attempt_count`
+        # 上完全一样，而处置相反。导出的账单要能分开看。
+        "retry_count",
+        "failover_count",
         "status",
         "error_category",
         # 成本快照此前不在导出列里：导出的账单看不到钱，
@@ -300,6 +342,77 @@ async def export_llm_traces():
     response.headers["X-Total-Count"] = str(total)
     response.headers["X-Export-Truncated"] = str(truncated).lower()
     return response
+
+
+@tracing_bp.route("/delivery/summary", methods=["GET"])
+@require_auth
+async def get_delivery_summary():
+    """Aggregate reply latency per channel over a time range.
+
+    这是「上周二 QQ 慢是模型还是发送」的答案来源。每个阶段的平均值只对
+    **测到该阶段**的记录求平均，并给出样本数：非流式请求没有首字节，
+    把它们按 0 计入会把平均值拉低成一个不存在的数字。
+
+    除阶段耗时外还给出 ``counts``（分段数量、重试次数）——需求 19.5 九项里的
+    后两项。它们一直被落库，此前只出现在逐条记录里，于是「这批慢投递是不是因为
+    分了很多页」只能逐条翻。口径与阶段一致，且一个都没测到时给 ``null`` 而非 0。
+    """
+    store = _delivery_timing_store()
+    if store is None:
+        return jsonify({"error": "delivery timing store is not configured"}), 503
+
+    config: GlobalConfig = g.container.resolve(GlobalConfig)
+    storage_timezone, error = _timezone_or_error(
+        config.system.timezone, config.system.timezone
+    )
+    if error:
+        return error
+    assert storage_timezone is not None
+
+    start_time, error = _parse_iso_datetime(
+        request.args.get("start_time"), "start_time", storage_timezone
+    )
+    if error:
+        return error
+    end_time, error = _parse_iso_datetime(
+        request.args.get("end_time"), "end_time", storage_timezone
+    )
+    if error:
+        return error
+
+    channel = request.args.get("channel") or None
+    try:
+        summary = store.summarize(
+            channel=channel,
+            start_time=start_time,
+            end_time=end_time,
+        )
+    except Exception:
+        logger.opt(exception=True).error("Failed to summarize delivery timings")
+        return jsonify({"error": "Failed to summarize delivery timings"}), 500
+    summary["channels"] = store.list_channels()
+    return jsonify(summary)
+
+
+@tracing_bp.route("/delivery/recent", methods=["GET"])
+@require_auth
+async def get_recent_deliveries():
+    """List recent per-reply timings. Contains durations only, never message text."""
+    store = _delivery_timing_store()
+    if store is None:
+        return jsonify({"error": "delivery timing store is not configured"}), 503
+    try:
+        limit = int(request.args.get("limit", 50))
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit must be an integer"}), 400
+    try:
+        items = store.recent(channel=request.args.get("channel") or None, limit=limit)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception:
+        logger.opt(exception=True).error("Failed to list delivery timings")
+        return jsonify({"error": "Failed to list delivery timings"}), 500
+    return jsonify({"items": items})
 
 
 @tracing_bp.websocket("/ws")

@@ -489,6 +489,56 @@ describe('ResourceView lifecycle controls', () => {
     expect(api.updateRemoteResource).not.toHaveBeenCalled()
   })
 
+  it('explains an unsupported update channel instead of telling the user to retry', async () => {
+    // 非 GitHub 来源（catalog、skills.sh、本地导入）不支持自动检查更新。
+    // 后端为此专门返回 `update_channel_supported: false` 加一句可执行说明，
+    // 而界面把任何 `error` 都渲染成「检查更新失败，请重试。」——
+    // 于是用户被反复劝去重试一个永远不会成功的动作。
+    // 这比留空更糟：空白至少不会指错方向。
+    api.checkResourceUpdates.mockResolvedValue([{
+      resource_id: 'demo.skill',
+      current_version: '1.0.0',
+      update_available: false,
+      update_channel_supported: false,
+      source_provider: 'catalog',
+      error: '该来源暂不支持自动检查更新；请从来源页面重新安装以获取新版本'
+    }])
+
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('button[aria-label="更新资源"]').trigger('click')
+    await wrapper.get('button[aria-label="检查资源更新"]').trigger('click')
+    await flushPromises()
+
+    // 后端那句可执行说明必须原样出现。
+    expect(wrapper.text()).toContain('该来源暂不支持自动检查更新')
+    // 「请重试」是错误的指引：这条通道永远不会成功。
+    expect(wrapper.text()).not.toContain('检查更新失败，请重试')
+    // 也不能显示成「已是最新」——我们并不知道上游有没有新版本。
+    expect(wrapper.text()).not.toContain('已是最新')
+    expect(wrapper.find('button[aria-label="执行资源更新"]').exists()).toBe(false)
+  })
+
+  it('still reports a real transport failure as retryable', async () => {
+    // 上面那条不能把真正的失败也变成「不支持」：网络抖动确实该重试。
+    api.checkResourceUpdates.mockResolvedValue([{
+      resource_id: 'demo.skill',
+      current_version: '1.0.0',
+      update_available: false,
+      update_channel_supported: true,
+      error: 'GitHub API rate limit exceeded'
+    }])
+
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('button[aria-label="更新资源"]').trigger('click')
+    await wrapper.get('button[aria-label="检查资源更新"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('检查更新失败')
+    expect(wrapper.find('button[aria-label="执行资源更新"]').exists()).toBe(false)
+  })
+
   it('uses the unified catalog for empty-query discovery and catalog installation', async () => {
     const wrapper = mountView()
     await flushPromises()

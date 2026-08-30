@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 
 import kirara_ai.llm.format.tool as tools
 from kirara_ai.config.global_config import ModelConfig
+from kirara_ai.llm.cancellation import CancellableRequestMixin
 from kirara_ai.llm.adapter import (AutoDetectModelsProtocol, LLMBackendAdapter, LLMChatProtocol,
                                    LLMChatStreamProtocol, LLMEmbeddingProtocol)
 from kirara_ai.llm.format.message import (LLMChatContentPartType, LLMChatImageContent, LLMChatMessage,
@@ -146,6 +147,7 @@ class OpenAIConfig(BaseModel):
 
 class OpenAIAdapterChatBase(
     LLMBackendAdapter,
+    CancellableRequestMixin,
     LLMChatProtocol,
     LLMChatStreamProtocol,
     AutoDetectModelsProtocol,
@@ -205,6 +207,9 @@ class OpenAIAdapterChatBase(
             "tool_choice": req.tool_choice or ("auto" if req.tools else None),
             "logprobs": req.logprobs,
             "top_logprobs": req.top_logprobs,
+            # OpenAI 系接口用 `reasoning_effort` 字符串枚举表达推理强度。
+            # 未指定时不出现该键——部分兼容网关对未知字段直接 400。
+            "reasoning_effort": req.reasoning_effort,
         }
 
         # Remove None fields
@@ -214,13 +219,18 @@ class OpenAIAdapterChatBase(
 
         # 使用带重试机制的 session，并设置超时时间
         # timeout 参数: (连接超时, 读取超时) 单位：秒
+        #
+        # 登记在途响应，让 `cancel_pending_request` 能真正断开这条连接。
+        # 非流式请求同样会等上游几十秒，只支持流式取消等于让默认配置
+        # （`reply_stream_mode: off`）完全没有取消能力。
         response = self._session.post(api_url, json=data, headers=headers, timeout=(10, 120))
-        try:
-            response.raise_for_status()
-            response_data: dict = response.json()
-        except Exception as e:
-            logger.error(f"Response: {response.text}")
-            raise e
+        with self._track_response(req, response):
+            try:
+                response.raise_for_status()
+                response_data: dict = response.json()
+            except Exception as e:
+                logger.error(f"Response: {response.text}")
+                raise e
         logger.debug(f"Response: {response_data}")
 
         # OpenAI 兼容接口可能使用 HTTP 200 返回业务错误
@@ -276,17 +286,29 @@ class OpenAIAdapterChatBase(
 
             content = [LLMChatTextContent(text=text_content)]
 
-        usage_data = response_data.get("usage", {})
-        if not isinstance(usage_data, dict):
-            usage_data = {}
+        # 上游省略 usage 时必须交出 None，而不是一份全 0 的 Usage：
+        # 后者会被 mark_provider_usage 标成「供应商返回」，同时让
+        # attach_estimated_usage 跳过估算，于是这条请求永久记为 0 Token、
+        # 0 成本，且看起来像是上游亲口说的（需求 22.1）。
+        raw_usage = response_data.get("usage")
+        usage: Optional[Usage] = None
+        if isinstance(raw_usage, dict) and raw_usage:
+            prompt_details = raw_usage.get("prompt_tokens_details")
+            cached_tokens = (
+                prompt_details.get("cached_tokens")
+                if isinstance(prompt_details, dict)
+                else None
+            )
+            usage = Usage(
+                prompt_tokens=raw_usage.get("prompt_tokens"),
+                completion_tokens=raw_usage.get("completion_tokens"),
+                total_tokens=raw_usage.get("total_tokens"),
+                cached_tokens=cached_tokens,
+            )
 
         return LLMChatResponse(
             model=req.model,
-            usage=Usage(
-                prompt_tokens=usage_data.get("prompt_tokens", 0),
-                completion_tokens=usage_data.get("completion_tokens", 0),
-                total_tokens=usage_data.get("total_tokens", 0),
-            ),
+            usage=usage,
             message=Message(
                 content=content,
                 role=message.get("role", "assistant"),
@@ -339,6 +361,8 @@ class OpenAIAdapterChatBase(
             "stream": True,
             # 请求上游在最后一帧带上真实用量；不支持的实现会忽略该字段。
             "stream_options": req.stream_options or {"include_usage": True},
+            # 推理强度与非流式路径同一字段，两条路径口径必须一致。
+            "reasoning_effort": req.reasoning_effort,
         }
         data = {k: v for k, v in data.items() if v is not None}
 
@@ -348,7 +372,7 @@ class OpenAIAdapterChatBase(
             headers=headers,
             timeout=(10, 300),
             stream=True,
-        ) as response:
+        ) as response, self._track_response(req, response):
             try:
                 response.raise_for_status()
             except Exception as error:
@@ -378,10 +402,20 @@ class OpenAIAdapterChatBase(
                 usage = None
                 usage_data = chunk.get("usage")
                 if isinstance(usage_data, dict) and usage_data:
+                    # 缓存命中量在 prompt_tokens_details.cached_tokens，
+                    # 与非流式分支读同一个字段——两条路径的计量口径必须一致，
+                    # 否则同一模型的缓存成本会取决于是否开了流式。
+                    prompt_details = usage_data.get("prompt_tokens_details")
+                    cached_tokens = (
+                        prompt_details.get("cached_tokens")
+                        if isinstance(prompt_details, dict)
+                        else None
+                    )
                     usage = Usage(
                         prompt_tokens=usage_data.get("prompt_tokens"),
                         completion_tokens=usage_data.get("completion_tokens"),
                         total_tokens=usage_data.get("total_tokens"),
+                        cached_tokens=cached_tokens,
                     )
 
                 choices = chunk.get("choices")
@@ -501,10 +535,16 @@ class OpenAIAdapter(OpenAIAdapterChatBase, LLMEmbeddingProtocol):
             logger.error(f"Response: {response.text}")
             raise e
         logger.debug(f"Response: {response_data}")
+        # 上游省略 usage 时保持未知：嵌入常用于记忆检索，一次调用可能处理上千条
+        # 文本，把它记成 0 token 会让「记忆功能不花钱」这个错误结论看起来有数据支撑。
+        raw_usage = response_data.get("usage")
+        usage: Optional[Usage] = None
+        if isinstance(raw_usage, dict) and raw_usage:
+            usage = Usage(
+                prompt_tokens=raw_usage.get("prompt_tokens"),
+                total_tokens=raw_usage.get("total_tokens"),
+            )
         return LLMEmbeddingResponse(
             vectors=[data["embedding"] for data in response_data["data"]],
-            usage=Usage(
-                prompt_tokens=response_data["usage"].get("prompt_tokens", 0),
-                total_tokens=response_data["usage"].get("total_tokens", 0)
-            )
+            usage=usage,
         )

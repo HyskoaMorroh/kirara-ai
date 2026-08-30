@@ -29,6 +29,26 @@ export interface ManagedResource {
   installed_at: string
   updated_at: string
   versions: ResourceVersion[]
+  /**
+   * 绑定了这个资源的 Agent ID。
+   *
+   * 与 `in_effect` 分开：即使那条绑定当前被停用，绑定关系本身也值得显示——
+   * 它解释了「为什么改这个 Agent 会影响这个资源」。
+   * 读不到 Agent 注册表的部署里该字段不出现（而不是空数组）。
+   */
+  bound_agent_ids?: string[]
+  /**
+   * 这个资源当前是否真的进入 LLM 请求。
+   *
+   * 「已启用」不等于「生效」：一个 Skill 只有被某个启用的 Agent 以启用的绑定
+   * 引用之后才会进入 system 消息。缺了这个字段，用户看到「已启用」却得到
+   * 「什么都没变」，然后去怀疑模型或提示词。
+   *
+   * 字段**不出现**表示「不知道」（读不到 Agent 注册表），
+   * 与 `false`（确定未生效）是两件事——把「不知道」显示成「未生效」
+   * 等于给出一个我们没有依据的论断。
+   */
+  in_effect?: boolean
 }
 
 export interface ResourceRepository {
@@ -105,6 +125,17 @@ export interface ResourceUpdateCheck {
   update_available: boolean
   next_version?: string
   source_metadata?: Record<string, unknown>
+  /**
+   * 该来源是否支持自动检查更新。
+   *
+   * 只有 GitHub 来源能比对远端内容；catalog / skills.sh / 本地导入装的 Skill
+   * 拿不到可比对的远端版本。后端为这些来源返回 `false` 并在 `error` 里给出
+   * 应该怎么拿新版本，`false` 与「检查失败」是两件事：前者重试永远不会成功。
+   * 字段缺失按 `true` 处理，兼容不返回该字段的旧后端。
+   */
+  update_channel_supported?: boolean
+  /** 来源标识（`github` / `catalog` / `skills.sh` / …），无来源信息时为 null。 */
+  source_provider?: string | null
   error?: string
 }
 

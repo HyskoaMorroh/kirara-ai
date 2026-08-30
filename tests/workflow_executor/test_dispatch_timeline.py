@@ -150,3 +150,63 @@ def test_record_stage_swallows_a_recorder_that_raises():
     hostile = HostileMessage(ChatSender.from_c2c_chat("1", "u"), "hi")
 
     dispatcher._record_stage(hostile, "received_event")
+
+
+class _RuntimeResultStub:
+    """The subset of ``RuntimeResult`` that `_record_model_stages` reads."""
+
+    def __init__(self, *, first_byte_at=None, trace_ids=()):
+        self.response = None
+        self.trace_ids = trace_ids
+        self.llm_first_byte_at = first_byte_at
+
+
+def test_streamed_first_byte_reaches_the_delivery_timeline():
+    """流式请求测到的首字节必须进入时间线，否则那两列永远是 NULL。
+
+    ``llm_first_byte`` 阶段名、``llm_first_byte_seconds`` 列和文档三处都早已存在，
+    但生产代码从来没有写过这个阶段——只有测试自己手工记录。于是真实部署里
+    「模型首字节」与「生成耗时」永远缺失，而缺失和为零在排查时含义完全不同。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    dispatcher = bare_dispatcher()
+    request = inbound()
+    dispatcher._record_stage(request, "received_event")
+    dispatcher._record_stage(request, "workflow_started")
+
+    first_byte_at = datetime.now(timezone.utc) + timedelta(milliseconds=5)
+    dispatcher._record_model_stages(
+        request,
+        _RuntimeResultStub(first_byte_at=first_byte_at, trace_ids=("trace-1",)),
+    )
+
+    stages = [event.stage for event in request.delivery_timeline]
+    assert stages == [
+        "received_event",
+        "workflow_started",
+        "llm_first_byte",
+        "llm_completed",
+    ], "首字节必须记在 llm_completed 之前，否则按顺序读取的消费者看到倒序链路"
+
+    recorded = {event.stage: event for event in request.delivery_timeline}
+    assert recorded["llm_first_byte"].timestamp == first_byte_at
+    # trace id 要同时出现在两个模型阶段上，便于把这段耗时接回 LLM 追踪表。
+    assert recorded["llm_first_byte"].details["trace_id"] == "trace-1"
+
+    durations = request.delivery_durations()
+    assert "llm_first_byte_seconds" in durations
+    assert "llm_generation_seconds" in durations
+
+
+def test_non_stream_result_records_no_fabricated_first_byte():
+    """非流式请求没有可测的首字节，绝不能补一个。"""
+    dispatcher = bare_dispatcher()
+    request = inbound()
+    dispatcher._record_stage(request, "workflow_started")
+
+    dispatcher._record_model_stages(request, _RuntimeResultStub())
+
+    stages = [event.stage for event in request.delivery_timeline]
+    assert "llm_first_byte" not in stages
+    assert "llm_first_byte_seconds" not in request.delivery_durations()

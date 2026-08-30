@@ -215,6 +215,13 @@ jobs:
           cache: yarn
           cache-dependency-path: webui/yarn.lock
 
+      - name: Set up Python 3.11
+        # 这个 job 也调用 `scripts/version.py`（check 与 tag），它需要
+        # tomllib（3.11+）；只装 Node 会让版本推导依赖 runner 镜像的默认解释器。
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
       - name: Verify synchronized versions
         run: python scripts/version.py check
 

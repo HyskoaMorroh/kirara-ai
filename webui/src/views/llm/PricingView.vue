@@ -4,6 +4,11 @@ import { NAlert, NButton, NCard, NTag, useDialog, useMessage } from 'naive-ui'
 
 import { llmApi, type PricingVersion } from '@/api/llm'
 import { HttpRequestError } from '@/utils/http'
+import {
+  defaultEffectiveFrom,
+  EFFECTIVE_FROM_HINT,
+  normalizeEffectiveFrom
+} from './pricing-effective-from'
 
 const message = useMessage()
 const dialog = useDialog()
@@ -24,7 +29,7 @@ function emptyVersion(): PricingVersion {
     version_id: '',
     provider: '',
     model: '',
-    effective_from: new Date().toISOString(),
+    effective_from: defaultEffectiveFrom(),
     currency: 'USD',
     input_per_million: '0',
     output_per_million: '0',
@@ -91,6 +96,17 @@ async function savePricing() {
     errorMessage.value = '请填写版本 ID、Provider 和模型'
     return
   }
+  // 生效时间在本地就能判定，不该往返一次才被 pydantic 拒绝：那只是把错误延后，
+  // 而返回的英文校验错误对填表的人没有可操作性。
+  // 归一化到 UTC 的理由是后端按 UTC 存储与比较——不归一化时「界面上显示的时刻」
+  // 与「用于计费判定的时刻」是两个值，而这类偏差没有任何症状，
+  // 直到有人去核对账单。
+  const effectiveFrom = normalizeEffectiveFrom(form.value.effective_from)
+  if (!effectiveFrom.ok) {
+    errorMessage.value = effectiveFrom.error
+    return
+  }
+  form.value.effective_from = effectiveFrom.value
   saving.value = true
   errorMessage.value = ''
   conflictMessage.value = ''
@@ -254,7 +270,15 @@ onMounted(loadCatalog)
         <label>Provider<input v-model="form.provider" name="provider" autocomplete="off" /></label>
         <label>模型<input v-model="form.model" name="model" autocomplete="off" /></label>
         <label>版本 ID<input v-model="form.version_id" name="version_id" autocomplete="off" /></label>
-        <label>生效时间<input v-model="form.effective_from" name="effective_from" autocomplete="off" /></label>
+        <!--
+          格式提示常驻在字段旁，而不是只在出错后出现：后者等于让每个人都先错一次。
+          后端强制要求带时区，而「带时区」不是一个能猜到的约定。
+        -->
+        <label>
+          生效时间
+          <input v-model="form.effective_from" name="effective_from" autocomplete="off" />
+          <small class="field-hint">{{ EFFECTIVE_FROM_HINT }}</small>
+        </label>
         <label>货币<input v-model="form.currency" name="currency" maxlength="3" autocomplete="off" /></label>
         <label>输入 / 百万 Token<input v-model="form.input_per_million" name="input_per_million" inputmode="decimal" /></label>
         <label>输出 / 百万 Token<input v-model="form.output_per_million" name="output_per_million" inputmode="decimal" /></label>

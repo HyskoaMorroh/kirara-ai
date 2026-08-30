@@ -132,3 +132,117 @@ def test_wecom_and_telegram_table_rendering_keep_readable_structure():
     assert "┌" in wecom and "└" in wecom
     assert "```" in telegram
     assert "┌" in telegram and "└" in telegram
+
+
+def test_wecom_degrades_math_like_the_other_channels():
+    """企业微信也必须做数学降级，平台差异只应体现在渲染层。
+
+    此前 WeCom 路径完全跳过 `_clean_latex`，于是同一段模型回复在 QQ 上是
+    `T → 0`、在企业微信上是原始的 `$T \to 0$`。「有的平台处理了、有的没有」
+    不是平台差异，是漏了一步。
+    """
+    from kirara_ai.plugins.im_wecom_adapter.delegates import markdown_to_plain_text
+
+    rendered = markdown_to_plain_text(r"收敛到 $T \to 0$，面积 $a \times b$。")
+
+    assert "→" in rendered
+    assert "×" in rendered
+    assert "$" not in rendered
+    assert r"\to" not in rendered
+
+
+def test_wecom_keeps_fenced_code_out_of_the_math_pass():
+    """代码块内部的 LaTeX 字面量不得被降级。"""
+    from kirara_ai.plugins.im_wecom_adapter.delegates import markdown_to_plain_text
+
+    rendered = markdown_to_plain_text(
+        r"说明 $x \to 0$" + "\n\n```python\n" + r"formula = r'$x \to 0$'" + "\n```"
+    )
+
+    assert "→" in rendered
+    assert r"formula = r'$x \to 0$'" in rendered
+
+
+def test_wecom_wide_tables_degrade_to_fields_too():
+    """企业微信同样没有可靠等宽字体，宽表必须走纵向布局。"""
+    from kirara_ai.plugins.im_wecom_adapter.delegates import markdown_to_plain_text
+
+    header = "| " + " | ".join(f"列名称{index}" for index in range(1, 9)) + " |"
+    separator = "|" + "---|" * 8
+    row = "| " + " | ".join(f"数据内容{index}" for index in range(1, 9)) + " |"
+
+    rendered = markdown_to_plain_text("\n".join([header, separator, row]))
+
+    assert "┌" not in rendered
+    assert "列名称1：数据内容1" in rendered
+
+
+def test_wecom_narrow_tables_still_use_the_box_layout():
+    """窄表观感不变：既有部署看到的仍是框线表。"""
+    from kirara_ai.plugins.im_wecom_adapter.delegates import markdown_to_plain_text
+
+    rendered = markdown_to_plain_text("| 参数 | 值 |\n| --- | --- |\n| T | 0 |")
+
+    assert "┌" in rendered and "└" in rendered
+
+
+def test_telegram_degrades_math_like_the_other_channels():
+    """Telegram 也必须做数学降级：MarkdownV2 同样不渲染 LaTeX。
+
+    需求 19.1 点名 QQ、Telegram、WeCom 三个平台，要求差异只体现在渲染层。
+    不降级时同一段模型回复在 QQ 上是 `T → 0`、在 Telegram 上是原始 `$T \to 0$`
+    ——那不是平台差异，是漏了一步。
+    """
+    from kirara_ai.plugins.im_telegram_adapter.adapter import TelegramAdapter
+
+    rendered = TelegramAdapter.render_text(r"收敛到 $T \to 0$。")
+
+    assert "→" in rendered
+    assert "to" not in rendered, "LaTeX 命令名不应作为裸单词残留"
+
+
+def test_telegram_keeps_fenced_code_out_of_the_math_pass():
+    """代码块内部的 LaTeX 字面量不得被降级。"""
+    from kirara_ai.plugins.im_telegram_adapter.adapter import TelegramAdapter
+
+    rendered = TelegramAdapter.render_text(
+        r"说明 $x \to 0$" + "\n\n```python\n" + r"formula = r'$x \to 0$'" + "\n```"
+    )
+
+    assert "→" in rendered
+    assert "formula" in rendered
+
+
+def test_telegram_wide_tables_degrade_like_the_other_channels():
+    """宽表在 Telegram 上同样走纵向字段布局。"""
+    from kirara_ai.plugins.im_telegram_adapter.adapter import TelegramAdapter
+
+    header = "| " + " | ".join(f"列名称{index}" for index in range(1, 9)) + " |"
+    separator = "|" + "---|" * 8
+    row = "| " + " | ".join(f"数据内容{index}" for index in range(1, 9)) + " |"
+
+    rendered = TelegramAdapter.render_text("\n".join([header, separator, row]))
+
+    assert "┌" not in rendered
+    assert "列名称1" in rendered and "数据内容1" in rendered
+
+
+def test_all_three_channels_degrade_the_same_formula():
+    """同一段公式在三个渠道上必须得到同样的可读符号。
+
+    这条用例的价值不在单个渠道，而在「三者一致」：需求 19.1 要求平台差异只落在
+    渲染层，因此降级结果本身不该因渠道而异。
+    """
+    from kirara_ai.im.text_render import render_plain_text
+    from kirara_ai.plugins.im_telegram_adapter.adapter import TelegramAdapter
+    from kirara_ai.plugins.im_wecom_adapter.delegates import markdown_to_plain_text
+
+    source = r"收敛到 $T \to 0$，面积 $a \times b$。"
+
+    for rendered in (
+        render_plain_text(source),
+        markdown_to_plain_text(source),
+        TelegramAdapter.render_text(source),
+    ):
+        assert "→" in rendered, f"缺少箭头降级：{rendered!r}"
+        assert "×" in rendered, f"缺少乘号降级：{rendered!r}"

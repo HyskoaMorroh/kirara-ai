@@ -1,6 +1,7 @@
 import asyncio
 import base64
-from typing import Any, Dict, List, Literal, Optional, cast
+import json
+from typing import Any, Dict, Iterable, List, Literal, Optional, cast
 
 import aiohttp
 import requests
@@ -8,7 +9,9 @@ from pydantic import BaseModel, ConfigDict
 
 import kirara_ai.llm.format.tool as tool
 from kirara_ai.config.global_config import ModelConfig
-from kirara_ai.llm.adapter import AutoDetectModelsProtocol, LLMBackendAdapter, LLMChatProtocol, LLMEmbeddingProtocol
+from kirara_ai.llm.cancellation import CancellableRequestMixin
+from kirara_ai.llm.adapter import (AutoDetectModelsProtocol, LLMBackendAdapter, LLMChatProtocol,
+                                   LLMChatStreamProtocol, LLMEmbeddingProtocol)
 from kirara_ai.llm.format.message import (LLMChatContentPartType, LLMChatImageContent, LLMChatMessage,
                                           LLMChatTextContent, LLMToolCallContent, LLMToolResultContent, RoleType)
 from kirara_ai.llm.format.request import LLMChatRequest, Tool
@@ -170,7 +173,42 @@ def resolve_tool_results(element: LLMToolResultContent) -> dict:
         }
     }
 
-class GeminiAdapter(LLMBackendAdapter, AutoDetectModelsProtocol, LLMChatProtocol, LLMEmbeddingProtocol):
+#: 推理强度档位 → Gemini `thinkingConfig.thinkingBudget`（token 数）。
+#:
+#: Gemini 与 Claude 一样要一个具体预算而不是档位名，但它的字段在
+#: `generationConfig.thinkingConfig` 下，且允许独立于 `maxOutputTokens`。
+#: `-1` 是 Gemini 定义的「动态思考」（由模型自行决定预算），恰好对应「最大强度」。
+_GEMINI_THINKING_BUDGET: dict[str, int] = {
+    "low": 1024,
+    "medium": 4096,
+    "high": 12288,
+    # 动态思考：把上限交给模型，而不是我们猜一个数字。
+    "max": -1,
+}
+
+
+def build_gemini_thinking_config(reasoning_effort: Optional[str]) -> Optional[dict]:
+    """Translate a vendor-neutral effort tier into Gemini's thinking config.
+
+    返回 ``None`` 表示不写入该字段——未配置时必须保持上游默认行为，
+    而且不支持思考的模型收到这个字段会直接报错。
+    """
+    if not reasoning_effort:
+        return None
+    budget = _GEMINI_THINKING_BUDGET.get(reasoning_effort)
+    if budget is None:
+        return None
+    return {"thinkingBudget": budget}
+
+
+class GeminiAdapter(
+    LLMBackendAdapter,
+    CancellableRequestMixin,
+    AutoDetectModelsProtocol,
+    LLMChatProtocol,
+    LLMChatStreamProtocol,
+    LLMEmbeddingProtocol,
+):
 
     media_manager: MediaManager
 
@@ -200,9 +238,17 @@ class GeminiAdapter(LLMBackendAdapter, AutoDetectModelsProtocol, LLMChatProtocol
                 "maxOutputTokens": req.max_tokens,
                 "stopSequences": req.stop,
                 "responseModalities": response_modalities,
+                # 推理强度按 Gemini 自己的 thinkingConfig 表达，不透传档位名。
+                # 未配置时该键不出现：不支持思考的模型收到它会直接报错。
+                "thinkingConfig": build_gemini_thinking_config(req.reasoning_effort),
             },
             "safetySettings": SAFETY_SETTINGS,
             "tools": convert_tools_to_gemini_format(req.tools) if req.tools else None,
+        }
+        data["generationConfig"] = {
+            key: value
+            for key, value in data["generationConfig"].items()
+            if value is not None
         }
 
         self.logger.debug(f"Gemini request: {data}")
@@ -212,11 +258,13 @@ class GeminiAdapter(LLMBackendAdapter, AutoDetectModelsProtocol, LLMChatProtocol
 
         response = self._post_with_retry(api_url, json=data, headers=headers)
 
-        try:
-            response_data = response.json()
-        except Exception as e:
-            self.logger.error(f"API Response: {response.text}")
-            raise e
+        # 登记在途响应，让 `cancel_pending_request` 能真正断开这条连接。
+        with self._track_response(req, response):
+            try:
+                response_data = response.json()
+            except Exception as e:
+                self.logger.error(f"API Response: {response.text}")
+                raise e
         content: List[LLMChatContentPartType] = []
         role = "assistant"
         for part in response_data["candidates"][0]["content"]["parts"]:
@@ -241,18 +289,23 @@ class GeminiAdapter(LLMBackendAdapter, AutoDetectModelsProtocol, LLMChatProtocol
                         )
                     )
 
+        # 上游省略 usageMetadata 时交出 None，而不是一份全 0 的 Usage（需求 22.1）。
+        # 输出 Token 是 usageMetadata.candidatesTokenCount：此前读的是顶层
+        # promptTokensDetails——一个并不存在的键，于是 completion_tokens 恒为 0，
+        # 而同一适配器的流式分支读的是正确字段，两条路径口径互相矛盾。
+        metadata = response_data.get("usageMetadata")
+        usage: Optional[Usage] = None
+        if isinstance(metadata, dict) and metadata:
+            usage = Usage(
+                prompt_tokens=metadata.get("promptTokenCount"),
+                cached_tokens=metadata.get("cachedContentTokenCount"),
+                completion_tokens=metadata.get("candidatesTokenCount"),
+                total_tokens=metadata.get("totalTokenCount"),
+            )
+
         return LLMChatResponse(
             model=req.model,
-            usage=Usage(
-                prompt_tokens=response_data["usageMetadata"].get(
-                    "promptTokenCount"),
-                cached_tokens=response_data["usageMetadata"].get(
-                    "cachedContentTokenCount"),
-                completion_tokens=sum([modality.get(
-                    "tokenCount", 0) for modality in response_data.get("promptTokensDetails", [])]),
-                total_tokens=response_data["usageMetadata"].get(
-                    "totalTokenCount"),
-            ),
+            usage=usage,
             message=Message(
                 content=content,
                 role=cast(RoleType, role),
@@ -260,6 +313,113 @@ class GeminiAdapter(LLMBackendAdapter, AutoDetectModelsProtocol, LLMChatProtocol
                 tool_calls=pick_tool_calls(content)
             ),
         )
+
+    def stream_chat(self, req: LLMChatRequest) -> Iterable[LLMChatResponse]:
+        """Stream a Gemini completion as incremental responses.
+
+        Gemini 用的是 `:streamGenerateContent` 加 `alt=sse`，帧格式是 SSE，
+        但载荷结构与 OpenAI 完全不同：文本在
+        `candidates[0].content.parts[*].text`，用量在 `usageMetadata`
+        且每一帧都可能带上累计值。
+
+        这里只在最后一帧（带 `finishReason`）产出用量，避免把中途的累计值
+        当成最终结果反复覆盖统计。上游没给就保持 None，由上层估算器标记为估算。
+        """
+        api_url = (
+            f"{self.config.api_base}/models/{req.model}:streamGenerateContent"
+            f"?alt=sse&key={self.config.api_key}"
+        )
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+
+        response_modalities = ["text"]
+        if req.model in IMAGE_MODAL_MODELS:
+            response_modalities.append("image")
+
+        data = {
+            "contents": asyncio.run(
+                convert_all_messages_to_gemini_format(req.messages, self.media_manager)
+            ),
+            "generationConfig": {
+                "temperature": req.temperature,
+                "topP": req.top_p,
+                "topK": 40,
+                "maxOutputTokens": req.max_tokens,
+                "stopSequences": req.stop,
+                "responseModalities": response_modalities,
+            },
+            "safetySettings": SAFETY_SETTINGS,
+            "tools": convert_tools_to_gemini_format(req.tools) if req.tools else None,
+        }
+        data = {k: v for k, v in data.items() if v is not None}
+
+        with requests.post(
+            api_url, json=data, headers=headers, timeout=(10, 300), stream=True
+        ) as response, self._track_response(req, response):
+            try:
+                response.raise_for_status()
+            except Exception as error:
+                self.logger.error(f"Stream response: {response.text[:512]}")
+                raise error
+
+            for line in response.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[len("data:"):].strip()
+                if not payload or payload == "[DONE]":
+                    if payload == "[DONE]":
+                        break
+                    continue
+                try:
+                    chunk = json.loads(payload)
+                except ValueError:
+                    self.logger.warning("Skipped an unparsable Gemini stream chunk")
+                    continue
+                if not isinstance(chunk, dict):
+                    continue
+                if chunk.get("error"):
+                    detail = chunk["error"]
+                    raise RuntimeError(
+                        f"Gemini stream error: {detail.get('status', 'unknown')}"
+                    )
+
+                candidates = chunk.get("candidates") or []
+                if not candidates:
+                    continue
+                candidate = candidates[0]
+                finish_reason = candidate.get("finishReason")
+                parts = ((candidate.get("content") or {}).get("parts")) or []
+                text = "".join(
+                    part["text"]
+                    for part in parts
+                    if isinstance(part, dict) and isinstance(part.get("text"), str)
+                )
+
+                usage = None
+                if finish_reason:
+                    metadata = chunk.get("usageMetadata") or {}
+                    if metadata:
+                        usage = Usage(
+                            prompt_tokens=metadata.get("promptTokenCount"),
+                            cached_tokens=metadata.get("cachedContentTokenCount"),
+                            completion_tokens=metadata.get("candidatesTokenCount"),
+                            total_tokens=metadata.get("totalTokenCount"),
+                        )
+
+                if not text and not finish_reason:
+                    continue
+
+                yield LLMChatResponse(
+                    model=req.model,
+                    usage=usage,
+                    message=Message(
+                        content=[LLMChatTextContent(text=text)] if text else [],
+                        role="assistant",
+                        finish_reason=finish_reason or "",
+                    ),
+                )
 
     def embed(self, req: LLMEmbeddingRequest) -> LLMEmbeddingResponse:
         # 使用批量嵌入接口，单次嵌入接口:embedContent

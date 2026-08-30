@@ -34,6 +34,53 @@ export type WorkflowConnectionValidation =
         | 'incompatible_types'
     }
 
+/**
+ * 一次连线被拒的原因，含节点侧独有的「输入端口已被占用」。
+ *
+ * `validateWorkflowConnection` 的六种 reason 之外还有一条规则只存在于节点组件里：
+ * 一个输入端口只允许一条边。它此前 `return false` 了事，与类型不兼容的现象
+ * 完全一样（线弹回来），用户无从判断该删掉已有的线还是该换端口。
+ */
+export type WorkflowConnectionRejectionReason =
+  | Exclude<WorkflowConnectionValidation, { valid: true }>['reason']
+  | 'input_already_connected'
+
+const CONNECTION_REJECTION_MESSAGES: Record<WorkflowConnectionRejectionReason, string> = {
+  // 每种拒绝都指出「哪里不对」和「下一步动哪里」。共用一句「类型不兼容」时，
+  // 端口不存在与真正的类型冲突被混为一谈，而两者的处置完全不同。
+  input_already_connected: '该输入端口已有连线，请先删除原有连线再连接',
+  incompatible_types: '两端类型不兼容，请改用类型匹配的端口',
+  unknown_source_port: '源节点上找不到这个输出端口，可能配置已变更，请刷新后重试',
+  unknown_target_port: '目标节点上找不到这个输入端口，可能配置已变更，请刷新后重试',
+  missing_source_block: '源节点不在当前画布中，请重新加载工作流',
+  missing_target_block: '目标节点不在当前画布中，请重新加载工作流',
+  missing_endpoint: '连线缺少端点信息，请重新拖动连接'
+}
+
+/** 把拒绝原因翻译成可操作的中文提示；未知原因也必须有话可说。 */
+export const connectionRejectionMessage = (
+  reason: WorkflowConnectionRejectionReason
+): string =>
+  CONNECTION_REJECTION_MESSAGES[reason] || '无法建立这条连线，请检查两端端口'
+
+/**
+ * 归并两条判定路径，给出唯一的拒绝原因；没有拒绝时返回 ``null``。
+ *
+ * 「输入已被占用」优先于类型判定：那条已有的连线是用户能直接看到并处理的东西，
+ * 先告诉他类型问题只会让他去改一个本来没错的端口。
+ */
+export const findWorkflowConnectionRejection = (
+  _connection: WorkflowConnection,
+  state: {
+    inputAlreadyConnected: boolean
+    validation?: WorkflowConnectionValidation
+  }
+): WorkflowConnectionRejectionReason | null => {
+  if (state.inputAlreadyConnected) return 'input_already_connected'
+  if (state.validation && !state.validation.valid) return state.validation.reason
+  return null
+}
+
 export type WorkflowConnectionPortIndex = {
   outputs: Map<string, Map<string, string>>
   inputs: Map<string, Map<string, string>>

@@ -6,7 +6,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Union
 
 from typing_extensions import deprecated
 
@@ -16,8 +16,10 @@ from kirara_ai.events.llm import LLMAdapterLoaded, LLMAdapterUnloaded
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.ioc.inject import Inject
 from kirara_ai.llm.adapter import LLMBackendAdapter, LLMChatStreamProtocol
+from kirara_ai.llm.attribution import strip_ai_attribution
 from kirara_ai.llm.llm_registry import LLMBackendRegistry
 from kirara_ai.llm.model_types import ModelAbility, ModelType
+from kirara_ai.llm.format.message import LLMChatTextContent
 from kirara_ai.llm.format.request import LLMChatRequest
 from kirara_ai.llm.format.response import LLMChatResponse, Message
 from kirara_ai.llm.pricing import CostSnapshot, PriceCatalog, calculate_cost_snapshot
@@ -27,7 +29,12 @@ from kirara_ai.llm.resilience import (ChatExecutionResult, CircuitBreaker, Circu
                                       StreamInterruptedError, classify_llm_error, sanitize_error_summary)
 from kirara_ai.logger import get_logger
 from kirara_ai.tracing import LLMTracer
-from kirara_ai.tracing.decorator import mark_provider_usage, suppress_llm_chat_tracing
+from kirara_ai.tracing.decorator import (
+    attach_estimated_usage,
+    mark_provider_usage,
+    suppress_llm_chat_tracing,
+)
+
 
 
 class LLMManager:
@@ -214,6 +221,18 @@ class LLMManager:
                     self.model_info.pop(model)
 
         backend_adapter = self.backends.pop(backend_name)
+        # 卸载一个后端时中止它所有在途请求：留着不管，它们会继续跑到自然结束
+        # 并继续计费，而这个后端已经从模型表里摘掉、结果无人接收。
+        cancel_all = getattr(backend_adapter, "cancel_all_pending_requests", None)
+        if callable(cancel_all):
+            try:
+                aborted = cancel_all()
+                if aborted:
+                    self.logger.info(
+                        f"卸载 {backend_name} 时中止了 {aborted} 个在途请求"
+                    )
+            except Exception as error:  # noqa: BLE001 - 清理失败不得阻断卸载
+                self.logger.debug(f"中止在途请求失败：{error}")
         self._resilience_breakers.pop(backend_name, None)
         self._resilience_attempts.pop(backend_name, None)
         self.event_bus.post(LLMAdapterUnloaded(backend_name=backend_name, adapter=backend_adapter))
@@ -308,6 +327,87 @@ class LLMManager:
         attempts.append(attempt)
         del attempts[:-20]
 
+    def _request_for_provider(
+        self, request: LLMChatRequest, backend
+    ) -> LLMChatRequest:
+        """Apply per-provider request policy without mutating the caller's object.
+
+        `reasoning_effort` 与整流开关都配在**每个供应商**上，而同一个模型可以由
+        多个供应商提供：队列里 P1 是自建高强度推理网关、P2 是不支持思考的兼容接口
+        时，两者必须各自按自己的配置发请求。就地改写请求对象会让 P1 的设置泄漏到
+        P2，而 P2 收到未知字段可能直接 400——一次本可成功的故障转移变成两连败。
+
+        调用方在请求上显式给出的值优先：否则「这一次想快一点」「这一次不要改我的
+        请求」都无法表达。
+        """
+        if backend is None:
+            return request
+        updates: dict[str, Any] = {}
+        effort = getattr(backend, "reasoning_effort", None)
+        if effort and request.reasoning_effort is None:
+            updates["reasoning_effort"] = effort
+        if request.rectifier is None:
+            builder = getattr(backend, "build_rectifier_config", None)
+            if callable(builder):
+                updates["rectifier"] = builder()
+        if not updates:
+            return request
+        return request.model_copy(update=updates)
+
+    @staticmethod
+    def _apply_response_policy(response: LLMChatResponse, backend) -> LLMChatResponse:
+        """Apply per-provider response policy to the text the user will see.
+
+        目前只有一项：`hide_ai_attribution`。三条边界都在这里体现——
+
+        * **只改文本片段。** 工具调用参数是给程序读的，改写会让工具收到被篡改的
+          输入；因此 `LLMToolCallContent` 与其余片段原样保留。
+        * **不动用量与成本。** 署名是上游已经生成并计费的 token，
+          把它从展示里去掉不等于没花那笔钱；改写 usage 会让账单对不上。
+        * **文本没有变化时返回原对象。** 避免每条回复都白拷一份消息树。
+        """
+        if backend is None or not getattr(backend, "hide_ai_attribution", False):
+            return response
+        parts = list(response.message.content)
+        changed = False
+        for index, part in enumerate(parts):
+            if not isinstance(part, LLMChatTextContent):
+                continue
+            cleaned = strip_ai_attribution(part.text, enabled=True)
+            if cleaned != part.text:
+                parts[index] = LLMChatTextContent(text=cleaned)
+                changed = True
+        if not changed:
+            return response
+        return response.model_copy(
+            update={"message": response.message.model_copy(update={"content": parts})}
+        )
+
+    def apply_response_policy_for_attempts(
+        self, response: LLMChatResponse, attempts: Sequence[ProviderAttempt]
+    ) -> LLMChatResponse:
+        """Apply per-provider response policy to an aggregated streaming reply.
+
+        流式路径**不能**逐分片清理：一句「本回复由 AI 生成。」很可能被切成
+        ``本回复由 `` / ``AI 生成。`` 两片，逐片判断两片都不像署名，于是整句原样
+        漏出去——结果取决于上游怎么切分片，这是最难复现的一类缺陷。因此分片原样
+        交付（同时保证首字节时刻不失真），聚合完成后在这里按**真正成交的那家**
+        供应商的配置执行一次。
+
+        没有成功尝试时原样返回：宁可不清理，也不能按别人的配置改写。
+        """
+        provider = next(
+            (
+                attempt.provider
+                for attempt in reversed(list(attempts))
+                if attempt.success
+            ),
+            None,
+        )
+        if provider is None:
+            return response
+        return self._apply_response_policy(response, self._backend_config(provider))
+
     def execute_chat(
         self,
         request: LLMChatRequest,
@@ -363,8 +463,14 @@ class LLMManager:
             )
             raise
         response = mark_provider_usage(result.response)
+        # 供应商完全没给 usage 时补一个明确标记为估算的值。这一步在装饰器
+        # (`trace_llm_chat`) 里也有，但本方法通过 `suppress_llm_chat_tracing()`
+        # 让装饰器整体短路，所以必须在这条主链路上单独调用；否则这类请求会以
+        # 「0 token、0 成本」落库，被读成一次免费调用。
+        response = attach_estimated_usage(request, response)
         if response is not result.response:
             result.response = response
+
         final_provider = self._final_provider(result.attempts, initial_provider)
         self._complete_logical_trace(
             tracer,
@@ -457,6 +563,8 @@ class LLMManager:
             provider_retries = max(0, max_retries if max_retries is not None else (backend.max_retries if backend else 0))
             base_delay = max(0.0, retry_delay if retry_delay is not None else (backend.retry_backoff_seconds if backend else 0.5))
             max_delay = backend.retry_backoff_max_seconds if backend else 5.0
+            # 每个供应商按自己的配置发请求；副本而非就地改写，避免设置泄漏到下一家。
+            provider_request = self._request_for_provider(request, backend)
             for retry_index in range(provider_retries + 1):
                 attempt_started = time.monotonic()
                 if attempt_started >= deadline:
@@ -471,7 +579,7 @@ class LLMManager:
                 try:
                     response = self._call_adapter_with_deadline(
                         adapter,
-                        request,
+                        provider_request,
                         max(0.0, deadline - attempt_started),
                         cancellation_event=cancellation_event,
                     )
@@ -492,6 +600,9 @@ class LLMManager:
                     )
                     attempts.append(successful_attempt)
                     self._record_attempt(successful_attempt)
+                    # 署名清理按**该供应商**的配置执行：队列里 P1 开了、P2 没开时，
+                    # 「哪条回复被改写过」不能取决于故障转移走到了第几家。
+                    response = self._apply_response_policy(response, backend)
                     return ChatExecutionResult(response=response, trace_id=trace_id, attempts=attempts)
                 except RequestCancelledError as error:
                     completed = time.monotonic()
@@ -693,7 +804,10 @@ class LLMManager:
             raise
         else:
             response = self._combine_stream_responses(responses, request)
+            # 与同步路径保持同一口径：聚合后仍然没有 usage 的，补估算值并标记来源。
+            response = attach_estimated_usage(request, response)
             final_provider = self._final_provider(attempts, initial_provider)
+
             self._complete_logical_trace(
                 tracer,
                 trace_id,
@@ -774,6 +888,9 @@ class LLMManager:
                 backend.stream_first_byte_timeout_seconds if backend else 15.0
             )
             idle_timeout = backend.stream_idle_timeout_seconds if backend else 30.0
+            # 流式路径与非流式同一处翻译：供应商级推理强度必须在两条路径上
+            # 表现一致，否则同一个 Provider 的行为取决于是否开了流式。
+            provider_request = self._request_for_provider(request, backend)
 
             for retry_index in range(provider_retries + 1):
                 attempt_started = time.monotonic()
@@ -784,7 +901,7 @@ class LLMManager:
                 try:
                     for chunk, received_at in self._stream_adapter_events(
                         adapter,
-                        request,
+                        provider_request,
                         deadline=deadline,
                         first_byte_timeout=first_byte_timeout,
                         idle_timeout=idle_timeout,
@@ -910,10 +1027,29 @@ class LLMManager:
                     "provider": provider_name,
                     "priority": backend.priority,
                     **breaker.snapshot(),
+                    # 上游报告的限额余量（需求 9）。
+                    #
+                    # 与熔断状态放在同一行，因为两者回答的是同一个问题的两面：
+                    # 「这家现在能不能用」。熔断说的是「它已经坏了」，
+                    # 余量说的是「它还剩多少、多久后会坏」——后者是唯一能在
+                    # 撞上限之前给出信号的东西。
+                    #
+                    # 上游从不报这些头时为 `None`，界面据此显示「未上报」。
+                    # 填一组 0 会造出一个不存在的紧急情况（0 = 余量用完）。
+                    "rate_limit": (
+                        snapshot.to_dict()
+                        if (snapshot := getattr(adapter, "last_rate_limit", None))
+                        else None
+                    ),
                     "recent_error_category": next(
                         (item.error_category for item in reversed(self._resilience_attempts.get(provider_name, [])) if not item.success),
                         None,
                     ),
+                    # 熔断的**触发与恢复证据**（需求 21.3）。快照只回答「现在什么
+                    # 状态」；轮询间隔内发生的 open → half-open → closed 全部不可见，
+                    # 于是「昨天下午它被隔离过吗、隔了多久」只能靠恰好抓到那次轮询。
+                    # 只取最近 10 条：这里是运维面板，不是完整审计流。
+                    "recent_transitions": list(breaker.transitions()[-10:]),
                     "recent_attempts": [
                         {
                             "trace_id": item.trace_id,

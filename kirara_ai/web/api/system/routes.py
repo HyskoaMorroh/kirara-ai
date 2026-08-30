@@ -22,6 +22,8 @@ from kirara_ai.mcp_module.manager import MCPServerManager
 from kirara_ai.logger import WebSocketLogHandler, get_logger
 from kirara_ai.plugin_manager.plugin_loader import PluginLoader
 from kirara_ai.web.api.system.utils import (WEBUI_DIST_TAG, download_file, get_cpu_info, get_cpu_usage,
+                                            resolve_npm_release, resolve_pypi_release,
+                                            verify_artifact_digest,
                                             get_installed_version, get_latest_npm_version, get_latest_pypi_version,
                                             get_memory_usage, is_newer_release, parse_release_version)
 from kirara_ai.web.auth.services import AuthService
@@ -116,7 +118,11 @@ async def get_system_config():
             },
             "update": {
                 "pypi_registry": config.update.pypi_registry,
-                "npm_registry": config.update.npm_registry
+                "npm_registry": config.update.npm_registry,
+                # 不报出这一项，界面就没法显示当前是开还是关。`entry.py` 已经真的
+                # 读它（打开时启动阶段完全不发请求），但只能改 config.yaml——
+                # 而离线/内网部署恰恰是最需要它、也最不方便登服务器改文件的场景。
+                "disable_auto_check": config.update.disable_auto_check
             },
             "system": {
                 "timezone": config.system.timezone
@@ -164,17 +170,33 @@ async def update_plugins_config():
 @system_bp.route("/config/update", methods=["POST"])
 @require_auth
 async def update_registry_config():
-    """更新更新源配置"""
+    """更新更新源配置。
+
+    只写请求里**真的出现过**的键。原本三个下标写法各有一个坑：
+
+    - `data["pypi_registry"]` 让「只想关掉自动检查」的请求 KeyError → 500；
+    - 反过来，把缺失的键补成默认值，会让老前端（只发两个镜像源）在用户改镜像源时
+      静默把 `disable_auto_check` 关掉——和 `PUT /llm/backends/{name}` 修掉的
+      是同一种静默重置，语义在这里保持一致。
+
+    镜像源留空则拒绝：空 URL 存下去，下次检查更新会拿它发请求，
+    错误出现在几天后的启动日志里，和这次保存对不上。
+    """
     try:
         data = await request.get_json()
         config: GlobalConfig = g.container.resolve(GlobalConfig)
-        
-        if not hasattr(config, "update"):
-            config.update = {}
-        
-        config.update.pypi_registry = data["pypi_registry"]
-        config.update.npm_registry = data["npm_registry"]
-        
+
+        for key in ("pypi_registry", "npm_registry"):
+            if key not in data:
+                continue
+            value = data[key]
+            if not isinstance(value, str) or not value.strip():
+                return {"error": f"{key} 不能为空"}, 400
+            setattr(config.update, key, value.strip())
+
+        if "disable_auto_check" in data:
+            config.update.disable_auto_check = bool(data["disable_auto_check"])
+
         # 保存配置
         ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
         return {"status": "success"}
@@ -409,12 +431,42 @@ async def get_system_readiness():
 @system_bp.route("/check-update", methods=["GET"])
 @require_auth
 async def check_update():
-    """检查系统更新"""
+    """检查系统更新。
+
+    `update.disable_auto_check` 打开时，**自动**发起的这一次直接返回当前版本，
+    完全不向注册表发请求。原因是 `StatusBar.vue` 在 `onMounted` 里无条件调用这个
+    接口：如果只在启动路径上尊重那个开关，离线或内网部署每打开一次页面仍然要等
+    两次超时——而消掉这类等待正是那个开关的全部意义。
+
+    `?manual=1` 表示用户自己点了「检查更新」，照常外呼。`global_config.py` 的
+    字段说明里写了「WebUI 的检查更新按钮仍然可用」，这里是那句话的兑现处。
+
+    返回体里的 `checked` 用来区分「没查」和「查了没更新」。二者都会让
+    `backend_update_available` 为 `False`，但只有前者不能对用户说「已是最新版本」。
+    """
     config: GlobalConfig = g.container.resolve(GlobalConfig)
+    manual = request.args.get("manual", "").strip().lower() in {"1", "true", "yes"}
+
+    current_backend_version = get_installed_version()
+    static_dir = Path(current_app.static_folder or "web")
+
+    if config.update.disable_auto_check and not manual:
+        current_webui_version = get_installed_webui_version(static_dir)
+        return UpdateCheckResponse(
+            current_backend_version=current_backend_version,
+            latest_backend_version=current_backend_version,
+            backend_update_available=False,
+            backend_download_url=None,
+            # 不谎报成 "unknown"：本地装的是哪个版本我们是知道的，
+            # 不知道的只是注册表上有没有更新的那个。
+            latest_webui_version=current_webui_version,
+            webui_download_url=None,
+            checked=False,
+        ).model_dump()
+
     npm_registry = config.update.npm_registry
     pypi_registry = config.update.pypi_registry
-    
-    current_backend_version = get_installed_version()
+
     latest_backend_version, backend_download_url = await get_latest_pypi_version(
         "kirara-ai", pypi_registry
     )
@@ -436,7 +488,6 @@ async def check_update():
         latest_backend_version = current_backend_version
         backend_download_url = None
 
-    static_dir = Path(current_app.static_folder or "web")
     current_webui_version = get_installed_webui_version(static_dir)
     latest_webui_is_valid = parse_release_version(latest_webui_version) is not None
     if not latest_webui_is_valid:
@@ -458,6 +509,7 @@ async def check_update():
         backend_download_url=backend_download_url,
         latest_webui_version=latest_webui_version,
         webui_download_url=webui_download_url,
+        checked=True,
     ).model_dump()
 
 
@@ -478,7 +530,7 @@ async def perform_update():
     try:
         # Resolve all targets from trusted server configuration before downloading anything.
         if update_backend:
-            latest, trusted_url = await get_latest_pypi_version(
+            latest, trusted_url, backend_digest = await resolve_pypi_release(
                 "kirara-ai", config.update.pypi_registry
             )
             if not is_newer_release(latest, get_installed_version()):
@@ -488,10 +540,10 @@ async def perform_update():
                 }, 409
             if not trusted_url:
                 return {"status": "error", "message": "Backend download URL is unavailable"}, 502
-            backend_target = (latest, trusted_url)
+            backend_target = (latest, trusted_url, backend_digest)
 
         if update_webui:
-            latest, trusted_url = await get_latest_npm_version(
+            latest, trusted_url, webui_digest = await resolve_npm_release(
                 "kirara-ai-webui",
                 config.update.npm_registry,
                 dist_tag=WEBUI_DIST_TAG,
@@ -510,7 +562,7 @@ async def perform_update():
                 }, 409
             if not trusted_url:
                 return {"status": "error", "message": "WebUI download URL is unavailable"}, 502
-            webui_target = (latest, trusted_url, static_dir)
+            webui_target = (latest, trusted_url, static_dir, webui_digest)
     except Exception as error:
         return {"status": "error", "message": f"Unable to resolve update: {error}"}, 502
 
@@ -518,18 +570,28 @@ async def perform_update():
 
     try:
         if backend_target:
-            _, backend_url = backend_target
-            backend_file, backend_hash = await download_file(backend_url, temp_dir)
+            _, backend_url, backend_digest = backend_target
+            backend_file, _ = await download_file(backend_url, temp_dir)
             if not backend_file:
                 raise RuntimeError("Backend download failed")
+            # 装之前先比对 registry 声明的摘要。
+            #
+            # `download_file` 一直在算 SHA-256 并返回，但此前没有任何调用点比对它。
+            # 算了不比对是最坏的形态：代码看起来做了校验，而镜像地址是用户可配的
+            # （`config.update.pypi_registry`），一个被投毒的镜像返回的任意 wheel
+            # 会被直接 `pip install`。TLS 只证明「来自这个镜像」，
+            # 证明不了「这个镜像给的东西没被换过」。
+            verify_artifact_digest(backend_file, backend_digest)
             # 安装后端
             subprocess.run([sys.executable, "-m", "pip", "install", backend_file], check=True)
 
         if webui_target:
-            latest_webui_version, webui_url, static_dir = webui_target
-            webui_file, webui_hash = await download_file(webui_url, temp_dir)
+            latest_webui_version, webui_url, static_dir, webui_digest = webui_target
+            webui_file, _ = await download_file(webui_url, temp_dir)
             if not webui_file:
                 raise RuntimeError("WebUI download failed")
+            # 解包同样要先校验：解开之后文件已经落到静态目录里了。
+            verify_artifact_digest(webui_file, webui_digest)
             install_webui_archive(webui_file, static_dir, latest_webui_version)
         
         return {"status": "success", "message": "更新完成"}

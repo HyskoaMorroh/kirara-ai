@@ -50,6 +50,12 @@ jobs:
         with:
           ref: ${{ needs.verify.outputs.release_commit }}
           fetch-depth: 0
+      - name: Set up Python 3.11
+        # 版本推导需要 tomllib（3.11+），且必须与其他 job 用同一个解释器版本，
+        # 否则「同一发布身份」这条保证只在 runner 镜像默认版本恰好够用时成立。
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
       - name: Set output
         id: vars
         env:
@@ -65,19 +71,20 @@ jobs:
             echo "Checkout commit $source_commit does not match the preflight commit $EXPECTED_COMMIT."
             exit 1
           fi
-          git_tag="$(python3 scripts/version.py tag)"
-          image_version="$(python3 scripts/version.py get)"
+          git_tag="$(python scripts/version.py tag)"
+          image_version="$(python scripts/version.py get)"
           if [ "$INPUT_TAG" != "$git_tag" ]; then
             echo "image_tag must match the source Git tag ($git_tag); got $INPUT_TAG."
             exit 1
           fi
-          python3 scripts/version.py verify-tag \
+          python scripts/version.py verify-tag \
             --tag "$INPUT_TAG" \
             --expected-commit "$source_commit" \
             --expect-head \
             --remote origin
           echo "git_tag=$git_tag" >> "$GITHUB_OUTPUT"
           echo "image_version=$image_version" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
       - name: Check output
         env:
           RELEASE_GIT_TAG: ${{ steps.vars.outputs.git_tag }}
@@ -126,6 +133,20 @@ jobs:
           push: true
           platforms: 'linux/amd64,linux/arm64'
           tags: ${{ steps.image.outputs.name }}:${{ steps.vars.outputs.image_version }}
+          # 记录源提交，让「Tag 与提交绑定」在发布之后仍然可查。
+          #
+          # `verify-tag` 只检查当下的自洽（本地/远端 Tag 与 HEAD 一致）。它没有
+          # 历史记录，所以「发布后把 Tag 移到另一个提交、再手动重建同一个
+          # image_tag」这条时间线能全程通过校验，而 Docker Hub 上同名镜像的内容
+          # 已经换了一份——且没有任何地方记录这件事。
+          #
+          # revision 取 `steps.vars` 里那个已经与 preflight 提交比对过的值，
+          # 不用 `github.sha`：后者没经过那次比对，记下一个未校验的值会让这条
+          # 标签失去意义。
+          labels: |
+            org.opencontainers.image.revision=${{ steps.vars.outputs.source_commit }}
+            org.opencontainers.image.version=${{ steps.vars.outputs.git_tag }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           build-args: |
             VITE_APP_VERSION=${{ steps.vars.outputs.git_tag }}
           cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache

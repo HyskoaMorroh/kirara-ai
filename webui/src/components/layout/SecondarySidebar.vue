@@ -40,6 +40,11 @@ const menuOptions = computed<MenuOption[]>(() => {
           label: () => '成本定价',
           key: 'llm-pricing',
           path: '/llm/pricing'
+        },
+        {
+          label: () => '容错状态',
+          key: 'llm-resilience',
+          path: '/llm/resilience'
         }
       ]
     case 'workflow':
@@ -78,9 +83,19 @@ const menuOptions = computed<MenuOption[]>(() => {
     case 'tracing':
       return [
         {
+          label: () => '使用统计',
+          key: 'tracing-statistics',
+          path: '/tracing/statistics'
+        },
+        {
           label: () => 'LLM 请求记录',
           key: 'tracing-llm',
           path: '/tracing/llm'
+        },
+        {
+          label: () => '投递时间线',
+          key: 'tracing-delivery',
+          path: '/tracing/delivery'
         }
       ]
     default:
@@ -111,7 +126,8 @@ const getDefaultSubModule = (module: string) => {
     case 'memory':
       return 'list'
     case 'tracing':
-      return 'llm'
+      // 与路由的 `/tracing` 重定向保持一致：默认落在使用统计。
+      return 'statistics'
     default:
       return ''
   }

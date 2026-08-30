@@ -17,7 +17,7 @@ from packaging.version import Version
 
 from .resource_lifecycle import ResourceLifecycleService, ResourceStateError
 from .resource_sources import ResourceSourceService
-from .system_dependencies import SystemDependencyService
+from .system_dependencies import SystemDependencyService, dependency_ids_for_resource
 
 
 OFFICE_RESEARCH_PROMPT = """我是上班族，偏学术研究。我经常要处理【邮件、会议、表格、文档等】。我偶尔兼职程序员。
@@ -460,34 +460,14 @@ class ResourceCatalogService:
 
     @staticmethod
     def _dependency_ids(item: Mapping[str, Any]) -> list[str]:
-        metadata = item.get("source_metadata")
-        metadata = metadata if isinstance(metadata, Mapping) else {}
-        catalog_id = str(item.get("catalog_id") or metadata.get("catalog_id") or "").casefold()
-        resource_id = str(item.get("resource_id") or "").casefold()
-        source_key = str(item.get("source_key") or metadata.get("source_key") or "").casefold()
+        """委派给 `dependency_ids_for_resource`。
 
-        if catalog_id == "mcp:context7" or source_key == "mcp:context7" or resource_id == "mcp.context7":
-            return ["context7-runtime"]
-        if str(item.get("type") or "").casefold() != "skill":
-            return []
-
-        names = {
-            str(item.get("name") or "").strip().casefold(),
-            str(metadata.get("name") or "").strip().casefold(),
-            str(item.get("directory") or "").strip("/").rsplit("/", 1)[-1].casefold(),
-            str(metadata.get("directory") or "").strip("/").rsplit("/", 1)[-1].casefold(),
-        }
-        source_parts = {
-            source_key.rsplit(":", 1)[-1].strip("/").rsplit("/", 1)[-1],
-            str(item.get("directory") or "").strip("/").rsplit("/", 1)[-1].casefold(),
-            str(metadata.get("directory") or "").strip("/").rsplit("/", 1)[-1].casefold(),
-        }
-        identifiers = names | source_parts
-        if "agent-browser" in identifiers:
-            return ["agent-browser-cli", "agent-browser-browser"]
-        if "graphify" in identifiers:
-            return ["graphify-cli"]
-        return []
+        映射本身已移到 `system_dependencies`：Agent 运行时也要用同一份判断，
+        两处各写一份会各自漂移，而那种不一致没有症状——界面说已就绪、
+        运行时说缺失（或反过来），模型只会照着一份它执行不了的说明自信作答。
+        这个包装保留原有的内部调用点与签名。
+        """
+        return dependency_ids_for_resource(item)
 
     @staticmethod
     def _dependency_status(

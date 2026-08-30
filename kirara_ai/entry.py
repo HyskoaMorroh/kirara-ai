@@ -58,7 +58,15 @@ PLACEHOLDER_SECRET_KEY = "please-change-this-to-a-secure-secret-key"
 _interrupt_count = 0  # 添加计数器
 
 async def check_update(config: GlobalConfig):
-    """检查更新"""
+    """检查更新。
+
+    `update.disable_auto_check` 打开时**完全不发起请求**：离线或内网部署既查不到
+    注册表又要等超时，而「禁用」如果只是不打印结果，那条超时等待依然存在。
+    WebUI 的「检查更新」按钮仍然可用——那是用户主动发起的，不受这里影响。
+    """
+    if config.update.disable_auto_check:
+        logger.info("Automatic update check is disabled by configuration.")
+        return
     running_version = get_installed_version()
     logger.info("Checking for updates...")
     latest_version, _ = await get_latest_pypi_version(
@@ -282,17 +290,30 @@ def init_agent_runtime(container: DependencyContainer):
         if container.has(MemoryManager)
         else None
     )
+    # 服务器组件就绪状态。传给运行时，是为了让技能广告能说出「这个命令在服务器上
+    # 还没装」——没有它时最坏的表现不是报错，而是模型照着一份它执行不了的说明
+    # 自信作答（「我已经打开了浏览器」），而用户看不出与真的成功有什么区别。
+    #
+    # 容器里没有就传 None：嵌入式用法与既有测试的容器都不注册它，
+    # 缺它只少一句提示，不该让整个 Agent 运行时装配不起来。
+    dependency_service = (
+        container.resolve(SystemDependencyService)
+        if container.has(SystemDependencyService)
+        else None
+    )
     runtime = AgentRuntimeExecutor(
         agent_registry=agent_registry,
         llm_manager=container.resolve(LLMManager),
         mcp_manager=container.resolve(MCPServerManager),
         resource_loader=resource_service.read_entry,
         resource_service=resource_service,
+        dependency_service=dependency_service,
         session_store=session_store,
         memory_manager=memory_manager,
         hook_runtime=hook_runtime,
         context_char_threshold=runtime_config.context_char_threshold,
         reply_stream_mode=runtime_config.reply_stream_mode,
+        turn_deadline_seconds=runtime_config.turn_deadline_seconds,
         audit_sink=lambda record: _agent_runtime_audit_sink(
             record, resource_service=resource_service
         ),

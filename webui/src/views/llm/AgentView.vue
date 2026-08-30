@@ -104,6 +104,21 @@ const selectedAgent = computed(() =>
   agentOptions.value.find((agent) => agent.agent_id === selectedAgentId.value) || null
 )
 
+/**
+ * 可选队友：所有**已启用**且**不是自己**的 Agent。
+ *
+ * 停用的 Agent 不列出——选中它只会得到一个调用时必定失败的工具，
+ * 让模型撞墙一次再重试，白花一轮 token。
+ */
+const teammateOptions = computed(() =>
+  agentOptions.value
+    .filter((agent) => agent.enabled && agent.agent_id !== form.value.agent_id.trim())
+    .map((agent) => ({
+      label: agent.display_name ? `${agent.display_name}（${agent.agent_id}）` : agent.agent_id,
+      value: agent.agent_id
+    }))
+)
+
 function emptyRelations(): AgentRelations {
   return { channels: [], accounts: [], sessions: [], is_default: false }
 }
@@ -125,6 +140,7 @@ function emptyForm(): AgentConfigurationRequest {
     mcp_allowlist: [],
     allow_tools: true,
     max_tool_iterations: 8,
+    teammate_agent_ids: [],
     relations: emptyRelations()
   }
 }
@@ -157,6 +173,8 @@ function formFromAgent(agent: AgentSummary): AgentConfigurationRequest {
     mcp_allowlist: [...agent.mcp_allowlist],
     allow_tools: agent.allow_tools,
     max_tool_iterations: agent.max_tool_iterations,
+    // 旧后端可能不返回该字段：缺省为空即「不启用」，而不是让表单变成 undefined。
+    teammate_agent_ids: [...(agent.teammate_agent_ids ?? [])],
     relations: {
       channels: [...agent.relations.channels] as AgentChannel[],
       accounts: agent.relations.accounts.map((account) => ({ ...account })),
@@ -304,6 +322,11 @@ function validate() {
   if (!form.value.agent_id.trim()) return 'Agent ID 不能为空'
   if (!form.value.model_priority.some((model) => model.trim())) return '至少填写一个模型候选'
   if (form.value.max_tool_iterations < 0) return '最大工具轮数不能小于 0'
+  // 自委派是最短的无限递归：每一层都是一次真实的模型调用。
+  // 后端也会拒绝，但在这里先拦住能给出更清楚的说明。
+  if (form.value.teammate_agent_ids.includes(form.value.agent_id.trim())) {
+    return '队友列表不能包含自己：那会形成无限委派'
+  }
   for (const section of resourceSections) {
     if (form.value[section.key].some((binding) => !binding.resource_id.trim())) {
       return `${section.label} 绑定必须选择已安装资源`
@@ -561,6 +584,37 @@ function shortSessionId(sessionId: string) {
             <div class="switch-field"><span>允许调用工具</span><n-switch v-model:value="form.allow_tools" aria-label="允许调用工具" /></div>
             <label class="field"><span>最大工具轮数</span><n-input-number v-model:value="form.max_tool_iterations" :min="0" data-test="max-tool-iterations" /></label>
             <label class="field full-width"><span>MCP 工具白名单</span><n-input v-model:value="mcpAllowlistText" placeholder="例如 context7.query-docs, context7.resolve-library-id" /></label>
+          </div>
+        </section>
+
+        <section class="editor-section" aria-labelledby="teammates-heading">
+          <div class="section-heading">
+            <div>
+              <h3 id="teammates-heading">队友（Teammates）</h3>
+              <p>
+                选中的 Agent 会以 <code>delegate_to_&lt;id&gt;</code> 工具的形式提供给模型，
+                供它把子任务交出去。队友用自己的模型链、提示词、技能与工具白名单执行，
+                <strong>看不到本次对话历史</strong>，因此模型必须在任务描述里自带背景。
+                留空表示不启用。
+              </p>
+            </div>
+          </div>
+          <div class="form-grid">
+            <label class="field full-width">
+              <span>可委派的队友</span>
+              <n-select
+                v-model:value="form.teammate_agent_ids"
+                multiple
+                filterable
+                clearable
+                placeholder="留空表示不启用委派"
+                data-test="teammate-agents"
+                :options="teammateOptions"
+              />
+              <small class="field-hint">
+                委派最多向下递归 2 层，且不能选择自己——每一层都是一次真实的模型调用。
+              </small>
+            </label>
           </div>
         </section>
 

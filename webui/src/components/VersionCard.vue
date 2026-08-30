@@ -11,7 +11,9 @@ const { checkUpdate } = useUpdateViewModel()
 const webUIVersion = import.meta.env.VITE_APP_VERSION || 'unknown'
 
 const handleCheckUpdate = () => {
-  checkUpdate()
+  // 这颗按钮是用户主动点的，所以传 `true`：后端把不带 `manual` 的调用当作
+  // 自动检查，在「禁用自动检查更新」打开时直接返回不外呼，会把手动点击一起挡掉。
+  checkUpdate(true)
 }
 </script>
 

@@ -1,9 +1,0 @@
-
-> kirara-ai-webui@3.3.0-b11 dev
-> vite --debug --host 127.0.0.1 --port 15178
-
-
-  VITE v4.5.14  ready in 2065 ms
-
-  ➜  Local:   http://127.0.0.1:15178/
-  ➜  press h to show help

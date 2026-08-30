@@ -167,6 +167,9 @@ class DeliveryTimingStore:
         每个阶段的平均值只对**测到该阶段**的行求平均：非流式请求没有首字节，
         把它们按 0 计入会把平均值拉低成一个不存在的数字。
         因此每个阶段同时给出样本数，让读者知道这个平均值代表多少次请求。
+
+        除阶段耗时外还给出 ``counts``（分段数量、重试次数）——需求 19.5 九项里的
+        后两项。它们同样只对测到的行求平均，一个都没测到时给 ``None`` 而不是 0。
         """
         phases = (
             "queue_seconds",
@@ -194,6 +197,31 @@ class DeliveryTimingStore:
                 summary["phases"][phase] = {
                     "avg_seconds": float(average) if average is not None else None,
                     "max_seconds": float(maximum) if maximum is not None else None,
+                    "samples": int(samples or 0),
+                }
+
+            # 分段数量与重试次数是需求 19.5 九项里的后两项。它们不是时间戳，
+            # 因此不在 `phases` 里；但落库了却不出现在汇总里等于只能逐条翻——
+            # 「上周二那批慢投递是不是因为分了很多页」这个问题回答不了。
+            #
+            # 口径与阶段耗时完全一致：只对**测到该值**的行求平均并给出样本数。
+            # 第三方适配器可能不带 details，那时值为 NULL；把 NULL 按 0 计入会把
+            # 平均分段数拉低成一个不存在的数字，而读者无从察觉。
+            summary["counts"] = {}
+            for name in ("segment_count", "retry_count"):
+                column = getattr(DeliveryTiming, name)
+                scoped = self._apply_filters(
+                    session.query(func.avg(column), func.max(column), func.count(column)),
+                    channel,
+                    start_time,
+                    end_time,
+                ).filter(column.isnot(None))
+                average, maximum, samples = scoped.one()
+                summary["counts"][name] = {
+                    # 一个都没测到时给 None 而不是 0：`retry_count: 0` 是一个论断
+                    #（「都没重试过」），会让人以为链路一切正常，而实际只是没数据。
+                    "avg": float(average) if average is not None else None,
+                    "max": int(maximum) if maximum is not None else None,
                     "samples": int(samples or 0),
                 }
 

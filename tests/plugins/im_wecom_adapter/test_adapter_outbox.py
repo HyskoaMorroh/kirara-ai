@@ -298,3 +298,17 @@ def test_split_long_message_bounds_long_code_line_and_keeps_markers():
     assert len(pages) > 1
     assert all(len(page.encode("utf-8")) <= 180 for page in pages)
     assert all("［代码 text］" in page and "［/代码］" in page for page in pages)
+
+
+def test_split_long_message_truncates_instead_of_raising_past_page_cap():
+    """超过页数上限必须截断并提示，不能让整条回复丢失。
+
+    与 OneBot / QQBot / Telegram 保持同一语义（需求 19.4）：
+    `split_structured_text` 的 `ValueError` 会穿出发送路径，
+    用户收不到任何内容。
+    """
+    pages = split_long_message("行内容\n" * 4000, max_length=180)
+
+    assert 0 < len(pages) <= 100
+    assert all(len(page.encode("utf-8")) <= 180 for page in pages)
+    assert "已截断" in pages[-1]

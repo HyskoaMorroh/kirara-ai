@@ -1,6 +1,0 @@
-(node:10972) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated. Please use Object.assign() instead.
-(Use `node --trace-deprecation ...` to show where the warning was created)
-:54873:28)
-    at Server.emit (node:events:509:28)
-    at emitErrorNT (node:net:2203:8)
-    at process.processTicksAndRejections (node:internal/process/task_queues:90:21)

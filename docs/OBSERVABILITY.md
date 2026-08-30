@@ -11,7 +11,7 @@
 | 去向 | 级别 | 细节 |
 | --- | --- | --- |
 | 控制台 | `DEBUG` | 带颜色，格式为 `时间 \| 级别 \| tag \| 消息` |
-| 文件 `logs/log_{YYYY-MM-DD}.log` | `DEBUG` | 每天午夜轮转，保留 7 天，旧文件压缩为 zip |
+| 文件 `<DATA_PATH>/logs/log_{YYYY-MM-DD}.log` | `DEBUG` | 每天午夜轮转，保留 7 天，旧文件压缩为 zip；默认即 `data/logs/`，可用 `KIRARA_LOG_DIR` 覆盖 |
 | 内存环形缓冲 | `INFO` | `_recent_logs`，最多 500 条，供 WebUI 新连接时回灌历史 |
 | WebSocket 广播 | `INFO` | 通过 `LogBroadcaster` 推给所有订阅者 |
 
@@ -32,13 +32,22 @@
 
 「控制台」页（`webui/src/views/console/Console.vue`）通过 `WS /system/logs` 实时接收日志，支持关键词过滤和清空。连接时握手要先发一条 token 消息，无效则以 code 1008 关闭（`kirara_ai/web/api/system/routes.py:73`）。
 
-注意：WebSocket 与内存缓冲的门槛都是 `INFO`，**`DEBUG` 日志只在控制台和文件里能看到**。排查区块级细节（例如 `_can_execute` 判断某个输入未满足）必须去翻 `logs/` 下的文件。
+注意：WebSocket 与内存缓冲的门槛都是 `INFO`，**`DEBUG` 日志只在控制台和文件里能看到**。排查区块级细节（例如 `_can_execute` 判断某个输入未满足）必须去翻 `<DATA_PATH>/logs/`（默认 `data/logs/`）下的文件。
 
 ### 启动 readiness
 
 `GET /backend-api/api/system/readiness` 是鉴权后的本地、有界、密钥安全诊断。响应包含 `ready`、`timestamp` 和按固定顺序排列的 `checks`：`data_directories_writable`、`configuration_parseable`、`workflows_valid`、`dispatch_targets_exist`、`im_available`、`llm_available`、`mcp_health`。每项给出 `status`、摘要、修复建议和不含敏感值的 evidence。
 
 它不主动调用远端 LLM 来证明模型可回答，也不保证 MCP 远端持续可用。未配置 MCP 为 `skip`，部分 MCP 不可用通常为 `warn`。它需要 Bearer 鉴权，因此不能直接替代容器的匿名 TCP healthcheck。
+
+`im_available` 的 evidence 分两层：**连接层**（`connected_count`、`waiting_count`、
+`credential_rejected_count`、`upstream_refused_count`、`initializing_count`、
+`stale_count`、`disconnected_count`）说的是 Kirara 与 OneBot 实现之间的连接；
+**登录层**（`qr_waiting_scan`、`qr_expired`、`qr_scanned`、`qr_succeeded` 等，
+仅在适配器配置了上游日志路径时出现）说的是 OneBot 实现与 QQ 之间的登录。
+只差扫码时 remediation 直接指向「去扫码」而不是「查连接」——两者处置相反，
+合并成一个数字会让人查错方向。详见
+[`QQ_ONEBOT_OPERATIONS.md`](QQ_ONEBOT_OPERATIONS.md) 第六节。
 
 ---
 
@@ -64,12 +73,61 @@
 
 关于其中三个容易误读的字段：
 
-- `usage_source` 区分「供应商返回的用量」与「未知」。**当前没有本地估算器**，
-  因此不会出现 `estimated`；供应商没返回 usage 时记为 `unknown`，不会拿字符数冒充真实消耗。
+- `usage_source` 区分三种来源：`provider`（供应商返回的用量）、
+  `estimated`（供应商没返回，由本地估算器按脚本感知的字符与图片常量估算）、
+  `unknown`（连估算所需的可测内容都没有）。**估算值不是账单依据**：
+  它存在的意义是让这类请求不再显示成 0 token、0 成本的「免费请求」——
+  「0」是一个断言，「未知」不是，前者更糟。做成本核对时按 `usage_source`
+  过滤出 `provider` 那一部分。
+
+  > **为什么是三类而不是四类**：常见的分法会把「真实 Token」与「供应商返回的
+  > Token」并列成两类。本项目的数据链路里这两者无法区分——我们能拿到的唯一
+  > 「真实」就是供应商在响应里回报的那份，没有第二个独立信源可以交叉验证。
+  > 硬拆成两个枚举值只会多出一个永远没有生产者的取值（`estimated` 曾经正是
+  > 这样：有定义、有测试、主链路零调用）。因此 `provider` 同时承担这两个语义。
+  > 若将来接入独立计量来源（例如网关侧旁路计数），再新增一个成员才有意义。
 - `ttft_ms` 只有在真的观测到首字节时才有值。非流式请求没有首字节概念，
   该字段为空而**不是 0**——把「没测到」写成 0 会被读成「极快」。
 - `cost_snapshot_json` 是请求完成时冻结的价格快照。后来改价**不会**改写历史账单。
   没有匹配价格版本时该字段为空，并在统计里计入「未定价请求」，而不是按 0 元计。
+- `total_cost` / `cost_currency` 是那份快照的**投影**，写入时算一次、之后不再改。
+  它们的存在只为让汇总回到 SQL：成本埋在一个 Text 列的 JSON 里时，
+  统计必须把筛选后的每一行取回内存逐条解析，六个索引全部帮不上忙——
+  而请求日志有分页保护、统计页没有。快照仍是权威来源，两列不参与任何计算。
+  `NULL` 表示「没有定价证据」，与 `0`（定价过且确实免费）严格区分。
+- **不同货币不相加。** 汇总按 `cost_currency` 分组，`overview.total_cost`
+  只是金额最大的那个币种的合计，其余在 `overview.cost_by_currency` 里逐一列出。
+  把两种货币加进同一个数字不会报错，得到的却是一个没有单位的数——
+  混币部署里那是最难发现的一类错误，因此界面在出现第二种货币时会明确提示。
+- **重试与故障转移是两项，不是一个数。** `attempt_count` 分不开它们：
+  同一家重试 3 次与切换 3 家各试 1 次都是 3，而处置完全相反——前者调超时与
+  退避，后者查供应商健康与熔断。因此另有两列：
+
+  | 字段 | 含义 |
+  | --- | --- |
+  | `retry_count` | 相邻两次尝试的 provider **相同**的次数 |
+  | `failover_count` | 相邻两次尝试的 provider **不同**的次数 |
+
+  按**相邻**比较而不是去重计数：`A → B → A` 是两次转移，去重后（2 家 − 1）
+  只会算成 1 次，但实际发生了两次切换，每次都付了一遍连接与首字节成本。
+  两者 `null` 表示「没有 attempt 数据」（旧记录、第三方调用方、未走故障转移
+  路径），与 `0`（确实一次成功）严格区分。统计里对应
+  `latency.avg_retry_count` / `latency.avg_failover_count`，CSV 导出与请求详情
+  也分列显示。
+
+各家上游的用量字段映射（流式与非流式两条路径口径一致）：
+
+| 上游 | 输入 | 输出 | 缓存命中 | 缓存写入 |
+|---|---|---|---|---|
+| OpenAI 兼容 | `usage.prompt_tokens` | `usage.completion_tokens` | `usage.prompt_tokens_details.cached_tokens` | 上游未提供 |
+| Claude | `usage.input_tokens` | `usage.output_tokens` | `usage.cache_read_input_tokens` | `usage.cache_creation_input_tokens` |
+| Gemini | `usageMetadata.promptTokenCount` | `usageMetadata.candidatesTokenCount` | `usageMetadata.cachedContentTokenCount` | 上游未提供 |
+| Ollama | `prompt_eval_count` | `eval_count` | 上游未提供 | 上游未提供 |
+
+> **上游没回报用量时，适配器交出的是「无」而不是 0。** 缺失字段兜底成 0 再
+> 构造用量对象，会让这条请求被标成 `provider`（看起来像供应商亲口所说）
+> 并跳过估算器，最终呈现为一条「0 Token、0 成本」的免费请求。
+> 现在这种情况一律落到 `estimated`（有可测内容）或 `unknown`（没有）。
 
 **请求与响应正文默认不记录。** `LLMTracer` 三个事件处理器都会先检查 `config.tracing.llm_tracing_content`（默认 `False`，见 `kirara_ai/config/global_config.py:152`）。要看完整 prompt 和回复，去「设置 → 系统设置 → LLM请求记录时包含完整内容」打开（`TracingCard.vue`，写入接口 `POST /backend-api/api/system/config/tracing`）。这是隐私与磁盘占用的权衡，打开后聊天正文会进数据库。
 
@@ -80,21 +138,113 @@
 | 文件 | 作用 |
 | --- | --- |
 | `TracingView.vue` | 追踪模块的容器路由 |
+| `UsageStatisticsView.vue` | **使用统计**：趋势、Provider / 模型分布、成本汇总，带 Provider / 模型 / 时间范围筛选 |
+| `DeliveryTimelineView.vue` | 投递时间线：按渠道比较回复各阶段耗时 |
 | `tracing.vm.ts` | 通用追踪视图模型（分页、筛选、WebSocket 实时推送） |
 | `llm/LLMTraceList.vue` | 请求列表 + 顶部统计卡片 + 多维筛选 + CSV 导出 |
 | `llm/LLMTraceDetail.vue` | 单条请求详情：时间、耗时、错误信息、token、用量来源、首字节、尝试次数、成本快照 |
 | `llm/llm-tracing.vm.ts` | LLM 专属的表格列、统计卡片与详情字段定义 |
 
-路由为 `/tracing`（索引）、`/tracing/llm`（列表）、`/tracing/llm/detail/:traceId`（详情），见 `webui/src/router/index.ts`。
+路由为 `/tracing`（重定向到使用统计）、`/tracing/statistics`（使用统计）、
+`/tracing/llm`（请求日志）、`/tracing/llm/detail/:traceId`（单条详情）、
+`/tracing/delivery`（投递时间线），见 `webui/src/router/index.ts`。
+
+「使用统计」是这三块的入口页：图表由共享的 `LLMStatistics.vue` 渲染，
+请求日志与成本定价用链接跳转而**不在本页重做**——重做会立刻产生两套口径。
+本页提供 Provider / 模型 / 时间范围 / **时区**筛选与 CSV 导出；
+时区默认取浏览器时区但可以改（后端接受任意 IANA 名），跨时区对账时需要看到
+对方眼里的「今天」。引导页保留一个无筛选的概览并链到本页。
 
 统计卡片按数据可得性展示：总请求数、请求中、成功、失败、总 Token，
+输入 / 输出 / 缓存读写四类 Token 与缓存命中率，
 以及总成本（附计价货币）、未定价请求数、平均首字节。
 **筛选条件与浏览器时区会一并送到统计接口**，因此列表与卡片始终描述同一批数据；
 不传时区会让后端按服务器时区分桶，跨时区用户看到的「今天」是错的。
 
+#### Token 四类拆分与缓存命中率
+
+`overview` 里除 `total_tokens` 外另给四项合计
+（`total_prompt_tokens`、`total_completion_tokens`、`total_cached_tokens`、
+`total_cache_write_tokens`）与 `cache_hit_rate`，分组统计与日 / 时分桶各自也带这四项。
+
+**为什么不能只有一个总数**：输入 Token 的单价通常是缓存读取的 5~10 倍。
+一份「总 Token 完全没变」的账单，在缓存命中率从 80% 掉到 0% 时成本会翻几倍，
+而只显示总量的页面在这两种情况下给出的数字**一模一样**。
+另一半理由是处置方向：「输出涨了」查 prompt 与 `max_tokens`，
+「输入涨了」查上下文与历史长度——合成一个数就把该查什么留给读者猜。
+
+命中率口径：`cache_hit_rate = 缓存读取 /（输入 + 缓存写入 + 缓存读取）`，
+与上游计价口径一致（三者相加才是这次请求真正付费的输入侧总量）。
+
+**`null` 与 `0` 是两件事**，一路保留到界面：
+
+| 值 | 含义 | 处置 |
+| --- | --- | --- |
+| `total_cached_tokens: null` | 这批请求里没有任何上游报过缓存用量 | 查上游是否返回 usage（很多兼容端点不报缓存字段） |
+| `total_cached_tokens: 0` | 上游报了，确实没命中 | 查提示词前缀是否稳定 |
+| `cache_hit_rate: null` | 同上，命中率未知 | 界面显示「未上报」并附一句说明，不显示 0% |
+
+把未知显示成 0% 会让人去排查一个并不存在的缓存失效问题。
+趋势分桶里缓存两项按 0 累加而非 `null`——折线中间出现 `null` 会断开，
+而「这个小时没有上游报缓存」在趋势图上与「报了 0」没有不同的处置。
+
+#### 分组成功率
+
+`providers` / `models` / `backends` 等分组各自带
+`success_requests`、`failed_requests`、`pending_requests` 与 `success_rate`。
+
+`error_categories` 回答的是「在失败什么」，回答不了「谁在失败」：
+一个 `timeout` 分组里可能混着三家供应商。而故障转移队列该把哪家排后面，
+依据正是各家的成功率；没有这一项只能翻请求日志人工计数。
+它同时区分「一家慢」与「一家坏」——`avg_duration` 偏低也可能是大量快速失败
+把均值拉下来，而慢请求超时被计入了失败。
+
+`pending` 不进成功率分母（还在跑的请求既不是成功也不是失败，
+算作失败会让正在进行的长请求把成功率压下去）；一条都还没有结论时
+`success_rate` 是 `null`，界面显示「未知」。报 0% 会让一家刚配好、
+只有一条在途请求的供应商看起来是最差的那一个。
+
+#### 成本趋势
+
+日 / 时分桶各自带 `cost`、`cost_currency`、`cost_by_currency` 与
+`unpriced_requests`。这条曲线回答的是一个只有它能回答的问题：
+**「这个月贵了三倍，是哪天开始的？」** 只有一个 30 天合计时，
+它只能靠手工二分时间范围反复改筛选条件重查，而账单异常恰恰最需要快速定位到
+某一天（换了模型、上了新流量、缓存失效）。
+
+- 成本取的是写入时冻结的快照投影列，**不是现价**——历史账单不会被后来的改价改写。
+- **不同货币不画在同一条线上**：界面按币种各画一条，币种集合从数据里推导。
+  与 `overview` 同一口径，`cost` 只是主币种（金额最大者）的合计。
+- **未定价请求单列**并在 tooltip 里标出。按 0 元并入当天合计，会把
+  「有请求没匹配到价格版本」显示成「这天便宜」——两个完全不同的结论。
+- 没有任何定价证据的那一天 `cost` 为 `"0"`、`cost_currency` 为 `null`（不编币种）。
+- 成本单独一张图而不是并进 Token 趋势：金额与 Token 数差好几个数量级，
+  同框时其中一条必然被压成一条平线。
+
 筛选维度：回合 ID、模型、供应商、后端、请求状态、失败类型、用量来源、
 请求时间范围（带时区的 ISO-8601）与关键词。「导出 CSV」使用同一份筛选条件，
 超过单次上限时会明确提示已截断并要求收窄条件。
+
+**时间范围预设的日界按所选时区算。** 除日历选择器外另有今天 / 近 24 小时 /
+近 7 / 14 / 30 天。两点需要知道：
+
+- 「今天」与「近 24 小时」不是同一个问题：上午九点时前者只覆盖 9 小时，
+  后者跨到昨天下午。
+- 多天预设从**当天零点**起算（`7d` = 含今天的 7 个日历日），不是「now 减
+  7×24 小时」——后者首尾各半天，日趋势图第一根柱子永远偏低，会被读成
+  「那天用量下降」。跨夏令时的那一天只有 23 或 25 小时，逐日回退而非减固定 24 小时。
+
+日界跟随**时区筛选器**而不是浏览器时区：一个 UTC+8 的查看者选了 `UTC` 之后，
+按本地时间切出来的「今天」会横跨上游眼里的两天，而这类错位不会报错。
+直接改日历时预设自动切回「自定义」，避免标签与实际区间不一致。
+
+**「未标注」维度要用独立参数。** 空串在参数解析层被当成「没填」丢掉，所以
+`provider=""` 无法表达「只看没有 provider 的记录」。改用
+`provider_unset=1`（同理 `backend_unset` / `model_unset` /
+`error_category_unset` / `usage_source_unset`）；统计接口与请求日志接口
+共用同一语义，因此同一筛选条件在两个页面得到同一个结果集。
+同时给出 `provider=openai` 与 `provider_unset=1` 是矛盾条件，返回 400——
+静默丢掉其中一个会让人以为筛选生效了。
 
 ### 对应接口
 
@@ -105,8 +255,59 @@
 | `GET /backend-api/api/tracing/llm/detail/<trace_id>` | 单条详情 |
 | `GET /backend-api/api/tracing/llm/statistics` | 总览（含成本）+ 首字节/尝试次数摘要 + 每日与每小时分桶 + 按模型/后端/供应商/用量来源/失败类型分组，支持同一套筛选参数与 `timezone` |
 | `POST /backend-api/api/tracing/llm/export` | 导出筛选结果，`format` 为 `json` 或 `csv`，`limit` 1–10000 |
-| `GET /backend-api/api/llm/resilience/status` | 各 Provider 的熔断状态与最近尝试快照 |
+| `GET /backend-api/api/llm/resilience/status` | 各 Provider 的熔断状态、最近尝试、最近状态迁移与上游限额余量 |
 | `WS /tracing/ws` | 实时推送新的追踪事件 |
+
+#### 熔断的触发与恢复证据`resilience/status` 的每一行除了当前状态，还给出 `recent_transitions`
+（最近 10 次状态迁移，最早在前）。这一段解决的是「当前快照回答不了的问题」：
+轮询间隔内发生的 open → half-open → closed 在快照里完全不可见，
+于是「昨天下午 P1 被隔离过吗、隔了多久、是自己恢复的还是一直开着」
+只能靠恰好抓到那一次轮询——那不是证据。
+
+| `reason` | 含义 | 处置方向 |
+| --- | --- | --- |
+| `failure_threshold` | 连续失败达到 `circuit_failure_threshold` | 刚开始出问题，看上游是否短时抖动 |
+| `error_rate` | 样本数够了且错误率达到 `circuit_error_rate_threshold` | 持续不稳定；若样本很小则应调高 `circuit_min_requests` |
+| `recovery_timeout` | `circuit_recovery_timeout_seconds` 走完，转入半开 | 无需处理，这是恢复流程的一步 |
+| `recovery_success` | 半开探测成功攒够 `circuit_recovery_success_threshold` | 已恢复 |
+| `half_open_probe_failed` | 半开探测又失败，重新隔离 | 上游还没好；反复出现说明恢复等待时间偏短 |
+
+每条记录只有六个固定字段（`from_state`、`to_state`、`reason`、`at`、
+`failure_count`、`error_rate`），全部是数字或枚举字符串——这份数据会出到面板，
+不带上游报文与凭据。`at` 与 `next_recovery_time` 一样是**单调时钟**，
+只能用来算「多久以前」，不能当墙上时间格式化。
+历史按 Provider 保留最近 64 条并覆盖写：它活在内存里，
+一个持续抖动的上游不该把内存吃掉。
+
+#### 上游限额余量：撞上限之前的唯一信号
+
+`resilience/status` 每一行还带一个 `rate_limit` 对象，来自上游在**每个响应**里
+返回的限额头（`x-ratelimit-limit/remaining-requests|tokens`、
+`anthropic-ratelimit-requests|tokens-limit|remaining`、各类 `reset`、`retry-after`）。
+此前这些响应头被完整丢弃，于是限流只能事后发现——请求开始报 429 才知道撞了上限，
+而那时排队与重试已经在发生。
+
+| 字段 | 含义 |
+| --- | --- |
+| `limit_requests` / `remaining_requests` | 请求数配额与剩余 |
+| `limit_tokens` / `remaining_tokens` | Token 配额与剩余 |
+| `reset_requests_seconds` / `reset_tokens_seconds` | 距配额重置的秒数 |
+| `retry_after_seconds` | 上游明确要求的等待秒数，通常只在 429 时出现 |
+| `request_headroom` / `token_headroom` | 余量比例 0–1，缺 limit 或 remaining 任一半时为 `null` |
+
+三条口径必须记住：
+
+* **整个 `rate_limit` 为 `null` = 上游不报这些头**（很多兼容端点如此），
+  不是「余量为零」。0 表示余量真的用尽，是最该处置的状态；两者混同会让人去排查
+  一个不存在的紧急情况。
+* **只有 remaining 没有 limit 时不反推百分比。** 百分比需要分母，
+  编一个分母会得到一个看起来精确的错数字。
+* **请求数与 Token 分开。** 两者会分别见底且处置相反：请求数见底要降低发送频率，
+  Token 见底要缩短上下文。合成一个数就分不开，而分不开时任何处置都是猜。
+
+余量只保留**最近一次**，不留历史：它是当下的状态，十分钟前的余量对「现在能不能发」
+没有意义。趋势由追踪表负责。采集失败绝不影响请求——限额头是上游给的，
+一个解析异常不该让一条本已成功的请求失败。
 
 ```bash
 curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
@@ -123,7 +324,7 @@ LLM 追踪只覆盖模型调用那一段。一条回复从收到消息到发出�
 | --- | --- |
 | `received_event` | 适配器收到 IM 事件 |
 | `workflow_started` | 工作流 / Agent 开始执行 |
-| `llm_first_byte` | 模型首字节（非流式请求没有这一项，不会伪造） |
+| `llm_first_byte` | 模型首字节。**只有流式模式测得到** |
 | `llm_completed` | 模型输出完成 |
 | `formatting_started` / `formatting_completed` | 排版与分页，附分段数量 |
 | `send_started` | 开始调用平台接口 |
@@ -134,9 +335,57 @@ LLM 追踪只覆盖模型调用那一段。一条回复从收到消息到发出�
 **缺少证据的阶段不会输出**，不会用 0 顶替。四个渠道使用同一套阶段命名，
 可以横向比较同一问题在 QQ、Telegram、WeCom 上的耗时分布。
 
+> **首字节需要开流式**：`llm_first_byte` 由流式聚合路径在收到第一个非空文本
+> 片段时记录。把 `reply_stream_mode` 设为 `aggregate` 才会有这一项，
+> 因此 `llm_first_byte_seconds` 与 `llm_generation_seconds` 也只在流式下出现。
+> 非流式请求在 HTTP 响应到达前没有任何可观测的中间事件——拿响应到达时刻
+> 冒充首字节会把「思考 20 秒、吐字 1 秒」记成「首字节 21 秒、生成 0 秒」，
+> 正好反过来，所以这里坚持留空。
+
+时间线在 Agent 路径与遗留工作流路径上都会记录并落库：
+Agent 路径由 `WorkflowDispatcher` 完成；遗留工作流路径的回复对象由工作流自己
+构造、dispatcher 拿不到，因此由 `SendIMMessage` 把入站阶段拼到回复上并写入
+同一张表。两条路径口径一致，统计可以直接比较。
+
 时间线会随 `IMMessage.to_dict()` 一起序列化，可进日志或接口响应；
 `WorkflowDispatcher` 在 DEBUG 级别打印一行各阶段耗时汇总。
 QQ 侧的具体排查顺序见 [`QQ_ONEBOT_OPERATIONS.md`](QQ_ONEBOT_OPERATIONS.md) 第七节。
+
+#### 历史耗时按时间范围回查
+
+日志只能回答「刚才那条为什么慢」。「上周二 QQ 慢是模型还是发送」需要落库的行，
+存在表 `im_delivery_timings`（`kirara_ai/im/delivery_timing_store.py`）：
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /backend-api/api/tracing/delivery/summary` | 按渠道聚合各阶段平均值、最大值与样本数，以及分段数量与重试次数的平均/最大/样本数，支持 `channel`、`start_time`、`end_time`（带时区的 ISO-8601） |
+| `GET /backend-api/api/tracing/delivery/recent` | 最近若干条逐条耗时，支持 `channel` 与 `limit`（1–1000） |
+
+三条约束是这张表能用且能放心用的前提：
+
+- **不存任何消息正文。** 只有渠道、适配器实例、会话键的 SHA-256 摘要、时长与计数。
+  会话摘要让「这个会话是不是一直慢」可查，但无法反推原始会话。
+- **没测到的阶段存 NULL，不存 0。** 平均值只对「测到该阶段」的行求平均，
+  并同时给出样本数：非流式请求没有首字节，把它们按 0 计入会得到一个不存在的数字。
+- **保留期有界。** 默认 30 天，与 LLM 追踪一致，启动时清理，不会无限增长。
+
+需求 19.5 的九项里，前七项是时间戳（折算成 `phases` 下的阶段耗时），
+后两项是计数，在 `counts` 下：
+
+| 字段 | 含义 |
+| --- | --- |
+| `counts.segment_count` | 一条回复被拆成几页。回答「这批慢投递是不是因为分了很多页」 |
+| `counts.retry_count` | 投递重试了几次。回答「慢是因为上游拒过几次」 |
+
+两者与阶段耗时同一条口径：只对**测到该值**的行求平均并给出样本数；
+一个都没测到时 `avg` / `max` 为 `null` 而不是 `0`——`retry_count: 0` 是一个论断
+（「都没重试过」），会让人以为链路一切正常，而实际只是没有数据。
+第三方适配器不带 details 时该值为 NULL，不参与平均。
+
+```bash
+curl -H "Authorization: Bearer <token>" \
+  "http://127.0.0.1:8080/backend-api/api/tracing/delivery/summary?channel=onebot"
+```
 
 ### 追踪覆盖不到的部分
 
@@ -333,17 +582,14 @@ curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/js
 写清楚边界比含糊其辞有用：
 
 - **没有匿名指标/监控端点**：没有 Prometheus `/metrics`；readiness 与 `GET /backend-api/api/system/status` 都需要鉴权，不适合直接作为匿名容器探针。
-- **没有工作流执行历史**：跑过哪些工作流、每个节点花了多久、中间值是什么，都没有持久化。只有 LLM 请求那一层有记录。
-- **投递时间线不落库**：各阶段耗时可以序列化、可以进日志，但没有持久化表，
-  因此**不能**按时间范围回查「上周 QQ 的平均发送耗时」。要长期留存需要自己
-  在适配器发送完成后把 `to_dict()["delivery_durations"]` 写到自己的存储里。
+- **没有工作流执行历史**：跑过哪些工作流、每个节点花了多久、中间值是什么，都没有持久化。只有 LLM 请求与回复投递耗时两层有记录。
 - **没有分布式追踪**：`trace_id` 只在 LLM 请求内部有意义，`correlation_id` 能把
   同一回合的多次 LLM 调用串起来，但不会串成「一条消息 → 一次调度 → 一次工作流」的完整链路。
 - **没有告警**：日志和追踪都只是被动记录，框架不会主动通知。
 - **`WorkflowExecutionBegin` / `WorkflowExecutionEnd` 没有内置消费者**：事件确实发出来了，但要用起来必须自己写插件监听。
 - **日志广播的下限是 `INFO`**：WebUI 控制台看不到 `DEBUG`。
 
-前三条要补齐都需要写代码（监听 `WorkflowExecutionEnd` 落库 + 加一组只读接口），不是配置开关能打开的。
+第一、二条要补齐都需要写代码（监听 `WorkflowExecutionEnd` 落库 + 加一组只读接口），不是配置开关能打开的。
 
 ### 关于 token 用量与熔断状态的两点说明
 

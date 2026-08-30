@@ -46,6 +46,11 @@ export interface AgentSummary {
   mcp_allowlist: string[]
   allow_tools: boolean
   max_tool_iterations: number
+  /**
+   * 可被本 Agent 作为工具委派的队友 Agent（需求 8 的 Teammates 模式）。
+   * 为空表示不启用；模型会额外获得 `delegate_to_<agent_id>` 工具。
+   */
+  teammate_agent_ids: string[]
   relations: AgentRelations
 }
 
@@ -73,6 +78,11 @@ export interface AgentConfigurationRequest {
   mcp_allowlist: string[]
   allow_tools: boolean
   max_tool_iterations: number
+  /**
+   * 可被本 Agent 作为工具委派的队友 Agent（需求 8 的 Teammates 模式）。
+   * 为空表示不启用；模型会额外获得 `delegate_to_<agent_id>` 工具。
+   */
+  teammate_agent_ids: string[]
   relations: AgentRelations
 }
 

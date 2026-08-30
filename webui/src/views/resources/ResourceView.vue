@@ -48,10 +48,12 @@ import {
   checkResourceUpdates,
   deleteResourceBackup,
   disableResource,
+  discoverRepository,
   enableResource,
   getCatalogItem,
   importResource,
   installCatalogItem,
+  installResource,
   installSystemDependency,
   listDependencyTasks,
   listResourceAudit,
@@ -60,17 +62,20 @@ import {
   listResources,
   listSystemDependencies,
   probeSystemDependency,
+  restoreResource,
   restoreResourceBackup,
   retryDependencyTask,
   searchResourceCatalog,
   setRepositoryEnabled,
-  updateRemoteResource
+  updateRemoteResource,
+  updateResource
 } from '@/api/resource'
 import { listAgents } from '@/api/agent'
 import type {
   AuditRecord,
   CatalogItem,
   DependencyInstallTask,
+  DiscoveredSkill,
   ManagedResource,
   ResourceBackup,
   ResourceRepository,
@@ -114,6 +119,17 @@ const remoteError = ref('')
 const selectedCatalogItem = ref<CatalogItem | null>(null)
 const selectedFile = ref<File | null>(null)
 const importLoading = ref(false)
+/**
+ * 离线包的两种用途。
+ *
+ * 后端是两个端点、两套语义：`POST /resources`（`installResource`）直接安装一个
+ * **新**资源；`POST /resources/imports`（`importResource`）把一个已经准备好的包
+ * 纳管。界面此前只接了后者，于是需求里的「从 ZIP 安装」实际落在了「导入」按钮上。
+ * 现在同一个上传对话框按这个模式分流，不再混为一谈。
+ */
+const archiveMode = ref<'install' | 'import'>('install')
+/** 上传 ZIP 升级到新版本时的目标资源；为空表示当前不是升级流程。 */
+const versionUploadTarget = ref<ManagedResource | null>(null)
 const backups = ref<ResourceBackup[]>([])
 const backupLoading = ref(false)
 const agents = ref<AgentSummary[]>([])
@@ -343,8 +359,26 @@ const onFileListChange = (files: UploadFileInfo[]) => {
 }
 
 const chooseLocalInstall = () => {
+  archiveMode.value = 'install'
+  versionUploadTarget.value = null
   showImportModal.value = true
   panel.value = null
+}
+
+/** 「导入已有」：把一个已准备好的包纳管，与直接安装是两个后端端点。 */
+const chooseLocalImport = () => {
+  archiveMode.value = 'import'
+  versionUploadTarget.value = null
+  showImportModal.value = true
+  panel.value = null
+}
+
+/** 「上传 ZIP 升级到新版本」：离线环境下 checkResourceUpdates 无法工作时用它。 */
+const chooseVersionUpload = (resource: ManagedResource) => {
+  archiveMode.value = 'install'
+  versionUploadTarget.value = resource
+  selectedFile.value = null
+  showImportModal.value = true
 }
 
 const confirmImport = async () => {
@@ -352,20 +386,66 @@ const confirmImport = async () => {
     message.warning('请先选择资源包')
     return
   }
+  const target = versionUploadTarget.value
+  const mode = archiveMode.value
+  const title = target
+    ? `确认为「${target.resource_id}」上传新版本`
+    : mode === 'install'
+      ? '确认从资源包安装'
+      : '确认导入离线资源'
+  const content = target
+    ? '包内清单的版本号必须高于当前版本；升级前会自动备份，升级后资源保持停用状态等待再次确认。'
+    : '资源包会在服务器内校验并写入受控资源目录，导入成功后不会直接执行包内文件。'
   ask({
-    title: '确认导入离线资源',
-    content: '资源包会在服务器内校验并写入受控资源目录，导入成功后不会直接执行包内文件。',
-    positiveText: '导入',
+    title,
+    content,
+    positiveText: target ? '上传新版本' : mode === 'install' ? '安装' : '导入',
     onPositiveClick: async () => {
       importLoading.value = true
       try {
-        await run(() => importResource(selectedFile.value as File), '导入资源失败')
-        message.success('资源已导入')
+        const file = selectedFile.value as File
+        if (target) {
+          await run(() => updateResource(target.resource_id, file), '上传新版本失败')
+          message.success('新版本已安装，请确认后再启用')
+        } else if (mode === 'install') {
+          await run(() => installResource(file), '从资源包安装失败')
+          message.success('资源已安装，请确认后再启用')
+        } else {
+          await run(() => importResource(file), '导入资源失败')
+          message.success('资源已导入')
+        }
         showImportModal.value = false
         selectedFile.value = null
+        versionUploadTarget.value = null
         await loadResources()
       } finally {
         importLoading.value = false
+      }
+    }
+  })
+}
+
+/**
+ * 回滚到历史版本（需求 22.3 的「可回滚机制」）。
+ *
+ * 回滚会把生效版本改回旧版并**强制停用**该资源，等待再次确认——
+ * 旧版本的权限声明可能与当前不同，直接沿用启用状态等于跳过一次权限确认。
+ */
+const rollbackVersion = (resource: ManagedResource, version: string) => {
+  ask({
+    title: `确认回滚「${resource.resource_id}」到 ${version}`,
+    content:
+      '回滚后该资源会被停用并要求重新确认权限；当前版本仍保留在版本列表里，可以再滚回来。',
+    positiveText: '回滚',
+    onPositiveClick: async () => {
+      busyResourceId.value = resource.resource_id
+      try {
+        await run(() => restoreResource(resource.resource_id, version, true), '回滚版本失败')
+        message.success('已回滚，请确认后再启用')
+        showDetailModal.value = false
+        await loadResources()
+      } finally {
+        busyResourceId.value = ''
       }
     }
   })
@@ -399,6 +479,112 @@ const toggleRepository = async (repository: ResourceRepository) => {
   )
   await loadRepositories()
 }
+
+/**
+ * 仓库直查：列出某个已登记仓库下的全部 Skill。
+ *
+ * 与「统一目录搜索」不是一回事——目录搜索按关键词跨来源找，这里是
+ * 「我知道是哪个仓库，把它下面的都列出来」。需求 10 的「发现技能」两种都要：
+ * 只有关键词搜索时，一个刚登记的私有仓库在目录里搜不到任何东西。
+ */
+const discoveredSkills = ref<DiscoveredSkill[]>([])
+const discoverLoading = ref(false)
+const discoverTarget = ref<ResourceRepository | null>(null)
+
+const browseRepository = async (repository: ResourceRepository) => {
+  discoverLoading.value = true
+  discoverTarget.value = repository
+  discoveredSkills.value = []
+  try {
+    const result = await run(
+      () => discoverRepository(repository.owner, repository.name, repository.branch),
+      '读取仓库内容失败'
+    )
+    // 接口直接返回数组：一个仓库下的 SKILL.md 全量清单，不分页。
+    discoveredSkills.value = result ?? []
+    if (!discoveredSkills.value.length) {
+      message.info('该仓库下没有找到可安装的 Skill')
+    }
+  } finally {
+    discoverLoading.value = false
+  }
+}
+
+/** 从仓库直查结果安装：走 remote-install，与目录安装是两个端点。 */
+const installRemoteFromDiscovery = (skill: DiscoveredSkill) => {
+  ask({
+    title: `确认安装「${skill.name || skill.directory}」`,
+    content:
+      '资源会从该仓库下载并写入受控资源目录；安装后保持停用状态，需要确认权限后才生效。',
+    positiveText: '安装',
+    onPositiveClick: async () => {
+      await run(
+        () =>
+          installRemoteSkill({
+            owner: skill.owner,
+            name: skill.repository,
+            branch: skill.branch || 'main',
+            directory: skill.directory,
+            source_key: skill.source_key
+          }),
+        '安装资源失败'
+      )
+      message.success('已安装，请确认后再启用')
+      await loadResources()
+    }
+  })
+}
+
+/**
+ * 仓库表格列。
+ *
+ * 从模板里的内联数组抽出来：内联写法把渲染函数塞进一行 400 字符的属性里，
+ * 加一列就得整行重排，且 diff 完全不可读。
+ */
+const repositoryColumns = computed(() => [
+  {
+    title: '仓库',
+    key: 'name',
+    render: (row: ResourceRepository) => `${row.owner}/${row.name}`
+  },
+  { title: '分支', key: 'branch' },
+  {
+    title: '状态',
+    key: 'enabled',
+    render: (row: ResourceRepository) =>
+      h(
+        NTag,
+        { type: row.enabled ? 'success' : 'default' },
+        { default: () => (row.enabled ? '已启用' : '已停用') }
+      )
+  },
+  {
+    title: '操作',
+    key: 'actions',
+    render: (row: ResourceRepository) =>
+      h(NSpace, { size: 4 }, {
+        default: () => [
+          h(
+            NButton,
+            {
+              size: 'small',
+              quaternary: true,
+              'data-test': 'discover-repository',
+              disabled: !row.enabled,
+              loading: discoverLoading.value && discoverTarget.value?.name === row.name,
+              onClick: () => browseRepository(row)
+            },
+            { default: () => '浏览 Skill' }
+          ),
+          h(
+            NButton,
+            { size: 'small', onClick: () => toggleRepository(row) },
+            { default: () => (row.enabled ? '停用' : '启用') }
+          )
+        ]
+      })
+  }
+])
 
 const searchRemote = async (offset = 0) => {
   remoteLoading.value = true
@@ -732,9 +918,46 @@ const resourceColumns: DataTableColumns<ManagedResource> = [
   {
     title: '状态',
     key: 'enabled',
-    width: 100,
+    width: 150,
     render: (row) =>
-      h(NTag, { type: row.enabled ? 'success' : 'default', bordered: false }, { default: () => (row.enabled ? '已启用' : '未启用') })
+      h(NSpace, { size: 4, vertical: true }, {
+        default: () => {
+          const tags = [
+            h(
+              NTag,
+              { type: row.enabled ? 'success' : 'default', bordered: false },
+              { default: () => (row.enabled ? '已启用' : '未启用') }
+            )
+          ]
+          // 「已启用但没被任何 Agent 绑定」= 实际效果为零。不说出来的话，
+          // 用户看到「已启用」、得到「什么都没变」，然后去怀疑模型或提示词。
+          // `in_effect` 缺失表示「读不到绑定关系」，那时什么都不说。
+          if (row.enabled && row.in_effect === false) {
+            tags.push(
+              h(
+                NTooltip,
+                {},
+                {
+                  trigger: () =>
+                    h(
+                      NTag,
+                      {
+                        type: 'warning',
+                        size: 'small',
+                        bordered: false,
+                        'data-test': 'not-in-effect'
+                      },
+                      { default: () => '未生效' }
+                    ),
+                  default: () =>
+                    '已启用但没有任何 Agent 绑定它，因此不会进入对话。请在「模型与 Agent」里把它绑定到 Agent。'
+                }
+              )
+            )
+          }
+          return tags
+        }
+      })
   },
   {
     title: '操作',
@@ -950,7 +1173,13 @@ onBeforeUnmount(() => {
       <h2 class="card-section-title">已安装资源</h2>
       <div class="resource-toolbar">
         <n-select :value="resourceType" :options="typeOptions" :input-props="{ 'aria-label': '资源类型筛选' }" @update:value="changeType" />
-        <n-button quaternary @click="chooseLocalInstall"><template #icon><n-icon aria-hidden="true"><cloud-upload-outline /></n-icon></template>离线导入</n-button>
+        <!--
+          「从 ZIP 安装」与「导入已有」是两个后端端点、两套语义：
+          前者直接安装一个新资源，后者把一个已准备好的包纳管。
+          此前界面只有一个按钮接到后者，需求里的「从ZIP安装」实际没有入口。
+        -->
+        <n-button quaternary data-test="install-archive" @click="chooseLocalInstall"><template #icon><n-icon aria-hidden="true"><cloud-upload-outline /></n-icon></template>从 ZIP 安装</n-button>
+        <n-button quaternary data-test="import-archive" @click="chooseLocalImport"><template #icon><n-icon aria-hidden="true"><cloud-upload-outline /></n-icon></template>导入已有</n-button>
       </div>
 
       <div v-if="loading" class="loading-state" aria-busy="true"><n-skeleton text :repeat="4" /><n-skeleton text style="width: 82%" /></div>
@@ -1016,6 +1245,55 @@ onBeforeUnmount(() => {
           <n-descriptions-item label="更新时间">{{ formatDate(selectedResource.updated_at) }}</n-descriptions-item>
         </n-descriptions>
         <n-divider />
+        <!--
+          版本历史与回滚（需求 22.3 的「可回滚机制」）。
+          离线环境下 checkResourceUpdates 拿不到上游版本，因此这里同时提供
+          「上传 ZIP 升级到新版本」——两条路径都落在同一份版本列表上。
+        -->
+        <div class="version-history">
+          <div class="version-history-header">
+            <h3 class="card-section-title">版本历史</h3>
+            <n-button
+              size="small"
+              secondary
+              data-test="upload-version"
+              @click="chooseVersionUpload(selectedResource)"
+            >
+              <template #icon><n-icon aria-hidden="true"><cloud-upload-outline /></n-icon></template>
+              上传 ZIP 升级
+            </n-button>
+          </div>
+          <n-list v-if="selectedResource.versions.length" bordered>
+            <n-list-item v-for="item in selectedResource.versions" :key="item.version">
+              <n-space align="center" justify="space-between" :wrap="true">
+                <div>
+                  <span class="mono">{{ item.version }}</span>
+                  <span
+                    v-if="item.version === selectedResource.current_version"
+                    class="summary-note"
+                  >
+                    （当前生效）
+                  </span>
+                  <div class="upload-hint">
+                    安装于 {{ formatDate(item.installed_at) }} · {{ shortHash(item.content_sha256) }}
+                  </div>
+                </div>
+                <n-button
+                  v-if="item.version !== selectedResource.current_version"
+                  size="small"
+                  quaternary
+                  data-test="rollback-version"
+                  :loading="busyResourceId === selectedResource.resource_id"
+                  @click="rollbackVersion(selectedResource, item.version)"
+                >
+                  回滚到此版本
+                </n-button>
+              </n-space>
+            </n-list-item>
+          </n-list>
+          <n-empty v-else description="只有一个版本，暂无可回滚的历史" />
+        </div>
+        <n-divider />
         <n-form inline @submit.prevent="bindWorkflow(selectedResource)">
           <n-form-item label="绑定工作流"><n-input v-model:value="workflowId" placeholder="例如 chat:normal" /></n-form-item>
           <n-button type="primary" attr-type="submit"><template #icon><n-icon aria-hidden="true"><git-branch-outline /></n-icon></template>绑定</n-button>
@@ -1026,7 +1304,20 @@ onBeforeUnmount(() => {
     <n-modal v-model:show="showUpdateModal" preset="card" :title="`更新 ${selectedUpdate?.resource_id || ''}`" :aria-label="`更新 ${selectedUpdate?.resource_id || ''}`" class="resource-modal">
       <n-alert type="info" :show-icon="true">更新只适用于已登记来源的资源。服务器会先创建备份，并在内容校验通过后写入新版本。</n-alert>
       <n-space vertical class="modal-content">
-        <n-alert v-if="selectedUpdateCheck?.error" type="error" :show-icon="true">检查更新失败，请重试。</n-alert>
+        <!--
+          「该来源不支持自动检查更新」必须排在「检查失败」之前。
+          两者都带 error 文本，但含义相反：前者是这条来源的固有边界，重试永远
+          不会成功；把它显示成「请重试」等于让人反复点一个注定失败的按钮。
+        -->
+        <n-alert
+          v-if="selectedUpdateCheck && selectedUpdateCheck.update_channel_supported === false"
+          type="info"
+          :show-icon="true"
+          data-test="update-channel-unsupported"
+        >
+          {{ selectedUpdateCheck.error || '该来源暂不支持自动检查更新；请从来源页面重新安装以获取新版本。' }}
+        </n-alert>
+        <n-alert v-else-if="selectedUpdateCheck?.error" type="error" :show-icon="true">检查更新失败，请重试。</n-alert>
         <n-alert v-else-if="selectedUpdateCheck && !selectedUpdateCheck.update_available" type="success" :show-icon="true">当前版本 {{ selectedUpdate?.current_version }} 已是最新。</n-alert>
         <n-alert v-else-if="selectedUpdateCheck" type="warning" :show-icon="true">发现新版本 {{ selectedUpdateCheck.next_version || '待确定' }}，当前版本为 {{ selectedUpdate?.current_version }}。</n-alert>
         <n-button v-if="selectedUpdate" secondary :loading="checkingResourceId === selectedUpdate.resource_id" aria-label="检查资源更新" @click="checkRemoteUpdate(selectedUpdate)">
@@ -1092,8 +1383,42 @@ onBeforeUnmount(() => {
       <n-card :bordered="false" size="small">
         <h2 class="card-section-title">仓库来源</h2>
         <n-form inline @submit.prevent="saveRepository"><n-form-item label="所有者"><n-input v-model:value="repositoryForm.owner" placeholder="owner" /></n-form-item><n-form-item label="仓库"><n-input v-model:value="repositoryForm.name" placeholder="repository" /></n-form-item><n-form-item label="分支"><n-input v-model:value="repositoryForm.branch" placeholder="main" /></n-form-item><n-button type="primary" attr-type="submit">登记</n-button></n-form>
-        <n-data-table v-if="repositories.length" :loading="repositoryLoading" :data="repositories" :columns="[{ title: '仓库', key: 'name', render: (row: ResourceRepository) => `${row.owner}/${row.name}` }, { title: '分支', key: 'branch' }, { title: '状态', key: 'enabled', render: (row: ResourceRepository) => h(NTag, { type: row.enabled ? 'success' : 'default' }, { default: () => row.enabled ? '已启用' : '已停用' }) }, { title: '操作', key: 'actions', render: (row: ResourceRepository) => h(NButton, { size: 'small', onClick: () => toggleRepository(row) }, { default: () => row.enabled ? '停用' : '启用' }) }]" :pagination="false" :bordered="false" :scroll-x="560" />
+        <n-data-table v-if="repositories.length" :loading="repositoryLoading" :data="repositories" :columns="repositoryColumns" :pagination="false" :bordered="false" :scroll-x="640" />
         <n-empty v-else description="尚未登记仓库来源" />
+
+        <!--
+          仓库直查结果。与上方「统一目录」搜索的区别：目录按关键词跨来源找，
+          这里是「我知道是哪个仓库，把它下面的都列出来」。只有关键词搜索时，
+          一个刚登记的私有仓库在目录里搜不到任何东西。
+        -->
+        <template v-if="discoverTarget">
+          <n-divider />
+          <h3 class="card-section-title">
+            {{ discoverTarget.owner }}/{{ discoverTarget.name }} 下的 Skill
+          </h3>
+          <div v-if="discoverLoading" class="loading-state" aria-busy="true">
+            <n-skeleton text :repeat="3" />
+          </div>
+          <n-list v-else-if="discoveredSkills.length" bordered>
+            <n-list-item v-for="item in discoveredSkills" :key="item.source_key">
+              <n-space align="center" justify="space-between" :wrap="true">
+                <div>
+                  <strong>{{ item.name || item.directory }}</strong>
+                  <div class="upload-hint">{{ item.description || item.source_key }}</div>
+                </div>
+                <n-button
+                  size="small"
+                  type="primary"
+                  data-test="install-discovered-skill"
+                  @click="installRemoteFromDiscovery(item)"
+                >
+                  安装
+                </n-button>
+              </n-space>
+            </n-list-item>
+          </n-list>
+          <n-empty v-else description="该仓库下没有找到可安装的 Skill" />
+        </template>
       </n-card>
     </n-modal>
 

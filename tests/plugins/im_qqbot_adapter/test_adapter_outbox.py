@@ -414,3 +414,33 @@ async def test_qqbot_timeline_counts_media_upload_retries(tmp_path: Path):
     assert persisted[0].attempt_count == 1
     assert message.delivery_timeline[-1].stage == "send_succeeded"
     assert message.delivery_timeline[-1].details["retry_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_qqbot_oversized_reply_is_truncated_instead_of_lost(tmp_path: Path):
+    """超出总字节预算时用户必须收到前几页 + 截断提示，不能一条都收不到。
+
+    OneBot 用 `paginate_with_truncation_notice`，QQBot 却直接调用会抛
+    `ValueError` 的 `split_structured_text`。异常从 `_render_send_units`
+    一路穿出 `send_message`，于是**整条回复消失**——正是需求 19.4
+    「全部发送、内容不得丢失」要禁止的失败形态，而且比截断更糟：
+    用户连「还有更多」都不知道。
+    """
+    adapter, database = make_persistent_adapter(tmp_path)
+    # 每行 100 个汉字（300 字节），1400 行约 420 KB，按 3800 字节分页会超过
+    # 100 页上限。用多行而不是一条超长单行，是为了让分页保持按行线性，
+    # 测试本身不引入二次复杂度。
+    source = "\n".join("中" * 100 for _ in range(1400))
+
+    await adapter.send_message(
+        IMMessage(ChatSender.get_bot_sender(), [TextMessage(source)]),
+        c2c_recipient(),
+        delivery_id="logical-oversized",
+    )
+
+    persisted = deliveries(database, "logical-oversized")
+    contents = [json.loads(str(item.params_json))["content"] for item in persisted]
+    assert contents, "整条回复丢失：一个投递单元都没有落库"
+    assert all(len(content.encode("utf-8")) <= 3800 for content in contents)
+    assert "已截断" in contents[-1]
+    assert [item.status for item in persisted] == ["accepted"] * len(persisted)

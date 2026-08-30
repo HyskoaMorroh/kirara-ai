@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 
 from quart import Blueprint, g, jsonify, request
 
+from kirara_ai.agent_runtime import AgentRegistry
 from kirara_ai.logger import get_logger
 from kirara_ai.plugin_manager.resource_lifecycle import (
     MAX_ARCHIVE_SIZE_BYTES,
@@ -26,7 +27,7 @@ from kirara_ai.plugin_manager.system_dependencies import (
     SystemDependencyService,
 )
 from kirara_ai.mcp_module.manager import MCPServerManager
-from kirara_ai.web.auth.middleware import require_auth
+from kirara_ai.web.auth.middleware import require_auth, require_creator
 
 
 resource_bp = Blueprint("resource", __name__)
@@ -79,6 +80,54 @@ def _runtime_status(resource: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _binding_visibility(resource: dict[str, Any]) -> dict[str, Any]:
+    """Report whether any Agent actually binds this resource.
+
+    需求 22.3 的一个隐性缺口：装好并启用之后界面显示「已启用」，但一个 Skill /
+    Prompt / MCP 资源只有在被**绑定到某个 Agent** 之后才会进入 LLM 请求
+    （`executor._build_messages` 遍历 `agent.*_bindings`）。没有绑定时状态是
+    「已启用」而实际效果是零——用户看到「已启用」，得到「什么都没变」，
+    然后去怀疑模型或提示词。这不是功能缺失，是状态显示与实际效果不一致，
+    而界面上没有任何地方在说「它还差一步」。
+
+    拿不到 Agent 注册表时**返回空字典**而不是 ``in_effect: False``：
+    后者是一个论断，在读不到绑定关系的部署里给出它等于告诉用户
+    「你的 Skill 没生效」，而实际情况是「我们不知道」。
+    """
+
+    if not g.container.has(AgentRegistry):
+        return {}
+    resource_id = str(resource.get("resource_id", ""))
+    if not resource_id:
+        return {}
+    try:
+        agents = g.container.resolve(AgentRegistry).list()
+    except Exception:  # noqa: BLE001 - 观测字段不得让整个列表打不开
+        return {}
+
+    bound_agent_ids: list[str] = []
+    has_enabled_binding = False
+    for agent in agents:
+        bindings = [
+            binding
+            for binding in agent.resource_bindings
+            if binding.resource_id == resource_id
+        ]
+        if not bindings:
+            continue
+        bound_agent_ids.append(agent.agent_id)
+        # Agent 本身被停用时它的绑定不会进任何请求。
+        if agent.enabled and any(binding.enabled for binding in bindings):
+            has_enabled_binding = True
+
+    return {
+        # 「已绑定」与「生效」分开：绑定关系解释了「为什么改这个 Agent 会影响
+        # 这个资源」，即使那条绑定当前被停用，也值得显示。
+        "bound_agent_ids": sorted(bound_agent_ids),
+        "in_effect": bool(resource.get("enabled") is True and has_enabled_binding),
+    }
+
+
 def _resource_response(resource: Any) -> Any:
     """Add transient runtime and VPS readiness fields to lifecycle objects."""
 
@@ -87,6 +136,7 @@ def _resource_response(resource: Any) -> Any:
     projected = deepcopy(resource)
     projected = _catalog().project_dependencies(projected)
     projected.update(_runtime_status(projected))
+    projected.update(_binding_visibility(projected))
     return projected
 
 
@@ -238,7 +288,9 @@ async def get_system_dependency(dependency_id: str):
 
 
 @resource_bp.route("/dependencies/<dependency_id>/probe", methods=["POST"])
-@require_auth("resources.manage")
+# 探测同样会在服务器上**执行**登记的 argv（例如 `agent-browser doctor`、
+# `rtk --version`），只是不安装。既然是执行命令，就与 install 同一边界。
+@require_creator("resources.manage")
 async def probe_system_dependency(dependency_id: str):
     try:
         await _strict_json_object(set())
@@ -249,7 +301,8 @@ async def probe_system_dependency(dependency_id: str):
 
 
 @resource_bp.route("/dependencies/<dependency_id>/install", methods=["POST"])
-@require_auth("resources.manage")
+# 安装依赖会在服务器上执行命令：仅项目创建者可用（需求 10）。
+@require_creator("resources.manage")
 async def install_system_dependency(dependency_id: str):
     try:
         payload = await _strict_json_object({"confirmed"})
@@ -287,7 +340,8 @@ async def get_dependency_task(task_id: str):
 
 
 @resource_bp.route("/dependency-tasks/<task_id>/retry", methods=["POST"])
-@require_auth("resources.manage")
+# 重试等于再执行一次安装命令，同样限创建者。
+@require_creator("resources.manage")
 async def retry_dependency_task(task_id: str):
     try:
         payload = await _strict_json_object({"confirmed"})
@@ -303,7 +357,8 @@ async def retry_dependency_task(task_id: str):
 
 
 @resource_bp.route("/dependency-tasks/<task_id>/cancel", methods=["POST"])
-@require_auth("resources.manage")
+# 取消会终止创建者启动的进程，不该由其他使用者触发。
+@require_creator("resources.manage")
 async def cancel_dependency_task(task_id: str):
     try:
         await _strict_json_object(set())
@@ -322,7 +377,9 @@ async def list_repositories():
 
 
 @resource_bp.route("/repositories", methods=["POST"])
-@require_auth("resources.manage")
+# 新增仓库会写 registry.json，并把一个外部来源列入「可从这里安装」——
+# 属于修改服务器内容（需求 10）。
+@require_creator("resources.manage")
 async def add_repository():
     try:
         payload = await _json_object()
@@ -336,7 +393,8 @@ async def add_repository():
 
 
 @resource_bp.route("/repositories/<owner>/<name>/<branch>/enabled", methods=["POST"])
-@require_auth("resources.manage")
+# 启停仓库同样写 registry.json，并改变「哪些来源可被安装」。
+@require_creator("resources.manage")
 async def set_repository_enabled(owner: str, name: str, branch: str):
     try:
         payload = await _json_object()
@@ -404,7 +462,8 @@ async def get_catalog_item(catalog_id: str):
 
 
 @resource_bp.route("/catalog/install", methods=["POST"])
-@require_auth("resources.manage")
+# 目录安装会把资源解包到服务器磁盘（需求 10）。
+@require_creator("resources.manage")
 async def install_catalog_item():
     try:
         payload = await _json_object()
@@ -422,7 +481,8 @@ async def install_catalog_item():
 
 
 @resource_bp.route("/remote-install", methods=["POST"])
-@require_auth("resources.manage")
+# 远程安装会从外部仓库拉取内容并落到服务器磁盘。
+@require_creator("resources.manage")
 async def install_remote_skill():
     try:
         payload = await _json_object()
@@ -454,7 +514,8 @@ async def list_backups():
 
 
 @resource_bp.route("/backups/<backup_id>/restore", methods=["POST"])
-@require_auth("resources.manage")
+# 从备份恢复会把文件写回安装目录，属于修改服务器内容（需求 10）。
+@require_creator("resources.manage")
 async def restore_backup(backup_id: str):
     return await _state_change(
         lambda payload: _service().restore_backup(
@@ -464,7 +525,8 @@ async def restore_backup(backup_id: str):
 
 
 @resource_bp.route("/backups/<backup_id>", methods=["DELETE"])
-@require_auth("resources.manage")
+# 删除备份是不可逆的磁盘删除操作。
+@require_creator("resources.manage")
 async def delete_backup(backup_id: str):
     return await _state_change(
         lambda payload: _service().delete_backup(
@@ -533,7 +595,8 @@ async def list_resources():
 
 
 @resource_bp.route("", methods=["POST"])
-@require_auth("resources.manage")
+# 上传 ZIP 安装会把归档内容解包到服务器磁盘（需求 10）。
+@require_creator("resources.manage")
 async def install_resource():
     return await _with_uploaded_archive(
         _service().install_archive,
@@ -542,7 +605,8 @@ async def install_resource():
 
 
 @resource_bp.route("/imports", methods=["POST"])
-@require_auth("resources.manage")
+# 导入已有资源同样落盘。
+@require_creator("resources.manage")
 async def import_resource():
     return await _with_import_archive()
 
@@ -557,7 +621,8 @@ async def get_resource(resource_id: str):
 
 
 @resource_bp.route("/<resource_id>/versions", methods=["POST"])
-@require_auth("resources.manage")
+# 升级版本会写入一个新的版本目录。
+@require_creator("resources.manage")
 async def update_resource(resource_id: str):
     return await _with_uploaded_archive(
         lambda archive_path: _service().update_archive(
@@ -569,7 +634,8 @@ async def update_resource(resource_id: str):
 
 
 @resource_bp.route("/<resource_id>/update", methods=["POST"])
-@require_auth("resources.manage")
+# 远程升级会拉取上游内容并写入新版本目录。
+@require_creator("resources.manage")
 async def update_remote_resource(resource_id: str):
     try:
         updated = await asyncio.to_thread(_sources().update_skill, resource_id)
@@ -579,7 +645,10 @@ async def update_remote_resource(resource_id: str):
 
 
 @resource_bp.route("/<resource_id>/enable", methods=["POST"])
-@require_auth("resources.manage")
+# 启用是写操作：启用 mcp 资源会 refresh_managed_servers，在服务器上真正拉起
+# 进程；启用 hook 会让它进入可执行链路。停用不需要同等约束（见下），
+# 因为停用只会让扩展不再生效，不引入新的服务器副作用。
+@require_creator("resources.manage")
 async def enable_resource(resource_id: str):
     try:
         payload = await _json_object()
@@ -619,7 +688,8 @@ async def bind_workflow(resource_id: str):
 
 
 @resource_bp.route("/<resource_id>/restore", methods=["POST"])
-@require_auth("resources.manage")
+# 回滚到历史版本会改变磁盘上生效的内容。
+@require_creator("resources.manage")
 async def restore_resource(resource_id: str):
     return await _state_change(
         lambda payload: _service().restore_version(

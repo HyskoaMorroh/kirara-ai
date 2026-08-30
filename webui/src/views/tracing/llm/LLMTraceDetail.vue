@@ -93,6 +93,61 @@
             </n-card>
           </div>
 
+          <!-- 计量与容错明细。
+               这一块此前完全没有：`getDetailFields()` 定义好了却没有消费者，
+               详情页自己硬编码了更少的字段，于是「详情页信息比列表还少」。
+               现在直接用同一份定义，两处口径不会再漂移。 -->
+          <div class="section">
+            <n-card title="计量与容错" class="info-card">
+              <n-descriptions :column="3" bordered>
+                <n-descriptions-item
+                  v-for="(field, index) in detailFields"
+                  :key="`${field.key}:${index}`"
+                  :label="field.label"
+                >
+                  {{ renderDetailField(field) }}
+                </n-descriptions-item>
+              </n-descriptions>
+            </n-card>
+          </div>
+
+          <!-- 逐次尝试明细。
+               后端一直返回 `attempts`，此前没有任何界面消费它。只给「重试 2 次、
+               转移 1 次」两个数字回答不了运维真正要问的：哪一家在失败、失败类型
+               是什么、换到哪一家之后成功了——而这三件事对应完全不同的动作。 -->
+          <div v-if="attemptRows.length > 0" class="section">
+            <n-card title="逐次尝试" class="info-card" data-test="attempt-table">
+              <div class="attempt-list">
+                <div
+                  v-for="(row, index) in attemptRows"
+                  :key="`${row.attempt ?? index}:${row.provider ?? 'unknown'}`"
+                  class="attempt-row"
+                  :class="row.succeeded === false ? 'attempt-failed' : 'attempt-ok'"
+                  data-test="attempt-row"
+                >
+                  <n-tag
+                    size="small"
+                    :type="row.succeeded === false ? 'error' : row.succeeded ? 'success' : 'default'"
+                  >
+                    {{ row.succeeded === false ? '失败' : row.succeeded ? '成功' : '未知' }}
+                  </n-tag>
+                  <span class="attempt-kind">{{ attemptKindLabel(row.kind) }}</span>
+                  <span class="attempt-provider">{{ row.provider ?? '---' }}</span>
+                  <span class="attempt-metric">
+                    首字节 {{ row.ttftSeconds === null ? '---' : `${(row.ttftSeconds * 1000).toFixed(0)} ms` }}
+                  </span>
+                  <span class="attempt-metric">
+                    耗时 {{ row.durationSeconds === null ? '---' : `${row.durationSeconds.toFixed(2)} s` }}
+                  </span>
+                  <span v-if="row.errorCategory" class="attempt-error">{{ row.errorCategory }}</span>
+                  <!-- 产出过部分内容的失败与「什么都没发生」的失败不同：
+                       前者用户可能已经看到半句话，重发会造成重复。 -->
+                  <n-tag v-if="row.partialOutput" size="small" type="warning">已产出部分内容</n-tag>
+                </div>
+              </div>
+            </n-card>
+          </div>
+
           <!-- 请求内容 -->
           <div class="section">
             <n-card title="请求内容" class="content-card">
@@ -177,7 +232,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   NCard,
@@ -200,6 +255,11 @@ import {
   ContractOutline
 } from '@vicons/ionicons5'
 import { useLLMTracingViewModel } from './llm-tracing.vm'
+import {
+  summarizeTraceAttempts,
+  TRACE_ATTEMPT_KIND_LABELS,
+  type TraceAttemptKind
+} from './trace-attempts'
 
 const route = useRoute()
 const traceId = route.params.traceId as string
@@ -213,8 +273,33 @@ const {
   goBackToList,
   formatDate,
   formatDuration,
-  formatTokens
+  formatTokens,
+  detailFields
 } = useLLMTracingViewModel()
+
+/**
+ * 按字段定义取值。
+ *
+ * 同一个 `key` 可以出现多次（成本快照被拆成金额、定价版本、计价时刻三行），
+ * 因此渲染由 formatter 决定，而不是假设 key 与显示项一一对应。
+ * 没有值时统一显示 `---`：空白会被读成「这项是 0」。
+ */
+function renderDetailField(field: {
+  key: string
+  formatter?: (value: any) => any
+}): string {
+  const raw = (traceDetail.value as any)?.[field.key]
+  const value = field.formatter ? field.formatter(raw) : raw
+  if (value === null || value === undefined || value === '') return '---'
+  return String(value)
+}
+
+/** 逐次尝试明细。没有数据时是空数组，界面整块不显示——而不是显示一张空表。 */
+const attemptRows = computed(() =>
+  summarizeTraceAttempts((traceDetail.value as any)?.attempts)
+)
+
+const attemptKindLabel = (kind: TraceAttemptKind) => TRACE_ATTEMPT_KIND_LABELS[kind]
 
 // 展开/收起状态
 const isRequestExpanded = ref(false)

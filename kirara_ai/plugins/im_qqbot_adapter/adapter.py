@@ -25,7 +25,7 @@ from kirara_ai.im.message import (FileMessage, ImageMessage, IMMessage, MentionE
 from kirara_ai.im.profile import UserProfile
 from kirara_ai.im.inbound_receipts import InboundReceiptService
 from kirara_ai.im.sender import ChatSender, ChatType
-from kirara_ai.im.text_render import render_plain_text, split_structured_text
+from kirara_ai.im.text_render import paginate_with_truncation_notice, render_plain_text
 from kirara_ai.logger import get_logger
 from kirara_ai.web.app import WebServer
 from kirara_ai.workflow.core.dispatch import WorkflowDispatcher
@@ -172,14 +172,28 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
         self._outbox: Optional[QQBotOutboxService] = None
         self._inbound_receipts: Optional[InboundReceiptService] = None
         self._outbox_resume_task: Optional[asyncio.Task[Any]] = None
+        #: 持久化目录在运行期是否已不可写。由 `_outbox_counts` 每次读队列时刷新。
+        self._storage_unavailable = False
 
     def get_health_snapshot(self) -> AdapterHealthSnapshot:
         connected = self._started and self.user is not None
+        # 队列状态先读：它同时是「持久化目录还可写吗」的探针，
+        # 与 OneBot 侧同一口径（见 `AdapterHealthSnapshot.storage_unavailable`）。
+        outbox_counts = self._outbox_counts()
+        status = "connected" if connected else "waiting" if self._started else "disconnected"
+        reason: Optional[str] = None
+        if getattr(self, "_storage_unavailable", False) and status in {
+            "connected",
+            "waiting",
+        }:
+            status = "storage_unavailable"
+            reason = "data_directory_unwritable"
         return AdapterHealthSnapshot(
-            status=("connected" if connected else "waiting" if self._started else "disconnected"),
+            status=status,
             connected_account_count=1 if connected else 0,
             adapter_started=self._started,
-            outbox=self._outbox_counts(),
+            last_disconnect_reason=reason,
+            outbox=outbox_counts,
         )
 
     def _ensure_outbox(self) -> QQBotOutboxService:
@@ -200,12 +214,18 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
 
     def _outbox_counts(self) -> Optional[dict[str, int]]:
         if getattr(self, "database_manager", None) is None:
+            self._storage_unavailable = False
             return None
         try:
-            return self._ensure_outbox().status_counts()
+            counts = self._ensure_outbox().status_counts()
         except Exception as exc:
+            # 与 OneBot 侧同一判断：读不出队列意味着持久化目录出了问题，
+            # 而链路本身可能完全正常——不标出来，面板会一直显示「已连接」。
+            self._storage_unavailable = True
             self.logger.warning(f"QQBot 投递队列状态读取失败：{exc}")
             return None
+        self._storage_unavailable = False
+        return counts
 
     def _schedule_outbox_resume(self) -> None:
         if getattr(self, "database_manager", None) is None:
@@ -340,7 +360,17 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
             if not text:
                 return
             rendered = replace_url_dots(render_plain_text(text))
-            for page in split_structured_text(rendered, max_bytes=3800):
+            # 超出页数或总字节预算时截断并附提示，而不是让 ValueError 穿出
+            # send_message 把整条回复吞掉——OneBot 已经是这个语义，
+            # 四个渠道必须一致（需求 19.4「全部发送、内容不得丢失」）。
+            pages, truncated = paginate_with_truncation_notice(
+                rendered, max_bytes=3800
+            )
+            if truncated:
+                self.logger.warning(
+                    "QQBot 回复超出分页预算，已截断并追加提示；建议缩小回复长度"
+                )
+            for page in pages:
                 params: dict[str, Any] = {
                     **base_params,
                     "msg_id": msg_id,

@@ -268,20 +268,83 @@ def test_release_workflows_reject_unexpected_manual_version_tags():
     )
 
     for workflow in (latest, tagged):
-        assert "python3 scripts/version.py verify-tag" in workflow
+        assert "python scripts/version.py verify-tag" in workflow
         assert "v3.3.0a7" not in workflow
     assert 'RELEASE_TAG"' in latest
-    assert "python3 scripts/version.py verify-tag \\" in latest
+    assert "python scripts/version.py verify-tag \\" in latest
     assert '            --expected-commit "$source_commit" \\' in latest
     assert "            --expect-head \\" in latest
     assert '            --remote origin' in latest
-    assert 'EXPECTED_TAG="$(python3 scripts/version.py tag)"' in latest
-    assert 'git_tag="$(python3 scripts/version.py tag)"' in tagged
-    assert 'image_version="$(python3 scripts/version.py get)"' in tagged
+    assert 'EXPECTED_TAG="$(python scripts/version.py tag)"' in latest
+    assert 'git_tag="$(python scripts/version.py tag)"' in tagged
+    assert 'image_version="$(python scripts/version.py get)"' in tagged
     assert '            --expected-commit "$source_commit" \\' in tagged
     assert 'echo "git_tag=$git_tag" >> "$GITHUB_OUTPUT"' in tagged
     assert 'echo "image_version=$image_version" >> "$GITHUB_OUTPUT"' in tagged
     assert "workflow_dispatch:" not in latest.split("release:", maxsplit=1)[0]
+
+
+def test_every_job_that_derives_the_version_pins_its_python():
+    """调用 `scripts/version.py` 的 job 必须能真的跑起来它。
+
+    该脚本用 `tomllib` 读 `pyproject.toml`，那是 3.11 才进标准库的模块。
+    不装 Python 时它落到 runner 镜像预装的解释器上：今天恰好够用，
+    镜像一换成 3.10 这些门禁就会以 `ModuleNotFoundError` 失败，
+    而失败信息看起来像是「版本不同步」，排查方向完全被带偏。
+    需求 23.3 要求 CI/Docker 使用**同一个**发布身份——解释器版本
+    也是这条身份链的一环，不能各 job 各碰运气。
+
+    3.10 是允许的，**但必须在同一个 job 里显式安装 `tomli` 回退包**
+    （`scripts/version.py` 有 `tomllib`→`tomli` 的 import 回退）。
+    这条断言之前只检查「存在 setup-python 这个字符串」，所以既抓不到
+    「版本被降到 3.8」也抓不到「3.10 但忘了装 tomli」。现在按 job 解析。
+
+    同时钉住调用形式统一为 `python`（而不是混用 `python3`）：
+    `actions/setup-python` 只保证 `python` 指向所选版本。
+    """
+    import re
+
+    workflows_root = PROJECT_ROOT / ".github" / "workflows"
+    offenders: list[str] = []
+    for path in sorted(workflows_root.glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        if "scripts/version.py" not in text:
+            continue
+        if "python3 scripts/version.py" in text:
+            offenders.append(f"{path.name}: 仍在用 python3，应统一为 python")
+
+        # 按 job 切分：job 键在两级缩进（`jobs:` 下一层）。
+        job_blocks: dict[str, str] = {}
+        current: str | None = None
+        for line in text.splitlines():
+            match = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+            if match:
+                current = match.group(1)
+                job_blocks[current] = ""
+                continue
+            if current is not None:
+                job_blocks[current] += line + "\n"
+
+        for job_name, block in job_blocks.items():
+            if "scripts/version.py" not in block:
+                continue
+            versions = re.findall(r"python-version:\s*[\"']?([0-9.]+)[\"']?", block)
+            if not versions:
+                offenders.append(
+                    f"{path.name}:{job_name} 调用 version.py 但没有 setup-python"
+                )
+                continue
+            for version in versions:
+                major, _, minor = version.partition(".")
+                if (int(major), int(minor or 0)) >= (3, 11):
+                    continue
+                # 3.10 及更早需要 tomli 回退包，且必须装在同一个 job 里。
+                if "tomli" not in block:
+                    offenders.append(
+                        f"{path.name}:{job_name} 用 Python {version} 跑 version.py"
+                        " 但没有安装 tomli 回退包"
+                    )
+    assert not offenders, offenders
 
 
 def test_every_build_and_release_entry_point_uses_the_version_command():
@@ -529,6 +592,31 @@ def test_every_frozen_uv_sync_workflow_pins_the_default_index():
         assert "UV_DEFAULT_INDEX: https://pypi.org/simple" in contents, filename
 
 
+def test_no_release_entry_point_treats_an_offline_candidate_as_published():
+    """需求 23.2：不得把离线候选当作正式发布版本。
+
+    `--local-only` 让版本推导**跳过远端 Tag 核验**——它存在是为了断网时也能
+    在本地推一个候选出来看看。但一个没有和远端对过的候选不能拿去发布：
+    远端可能已经有同名 Tag（另一台机器刚发过），此时发布会撞车或覆盖。
+
+    `verify_tag_identity` 与 `plan_release` 都接受这个开关，因此「谁在调用它」
+    是一条必须由契约钉住的边界：任何真正发布产物的 workflow 都不许传它。
+    这条断言此前不存在，于是「哪天顺手加上去省掉一次网络调用」不会被任何门禁
+    拦住——而那正是把离线候选发成正式版本的路径。
+    """
+    workflows = PROJECT_ROOT / ".github" / "workflows"
+    offenders: list[str] = []
+    for path in sorted(workflows.glob("*.yml")):
+        contents = path.read_text(encoding="utf-8")
+        if "--local-only" in contents or "local_only" in contents:
+            offenders.append(path.name)
+    assert not offenders, (
+        f"{offenders} 在发布链路上使用了离线版本推导。"
+        "`--local-only` 跳过远端 Tag 核验，只适用于本地排查，"
+        "不得出现在任何构建或发布 workflow 里。"
+    )
+
+
 def test_pr_type_check_cannot_execute_fork_code_with_a_write_token():
     """Untrusted pull-request code must only run with a read-only token and no secrets."""
     workflow = (PROJECT_ROOT / ".github" / "workflows" / "pr_review.yml").read_text(
@@ -544,3 +632,64 @@ def test_pr_type_check_cannot_execute_fork_code_with_a_write_token():
     assert "actions/github-script" not in workflow
     assert "secrets.GITHUB_TOKEN" not in workflow
     assert "python -m mypy" in workflow
+
+
+def test_published_images_record_the_commit_they_were_built_from():
+    """镜像必须带上源提交，否则「Tag 与提交绑定」在发布之后就断了（需求 16）。
+
+    `verify-tag` 只检查**当下**的自洽：本地 Tag、远端 Tag 与 HEAD 是否指向同一个
+    提交。它没有任何历史记录，因此下面这条时间线完全通得过：
+
+    1. 打一个版本 Tag，`release: published` 触发 `docker-latest.yml`，推出镜像；
+    2. 事后把同一个 Tag 移到另一个提交（`git tag -f` + 强推）；
+    3. 手动跑一次 `docker-tag.yml`，`image_tag` 填同一个 Tag。
+
+    第 3 步的所有校验都会通过——Tag、远端与 HEAD 此刻确实一致——于是 Docker Hub 上
+    同一个版本标签被换成了另一份内容，而**没有任何地方记录这件事发生过**。
+    拉到旧镜像的人和拉到新镜像的人都认为自己跑的是同一个版本。
+
+    修法不是禁止重建（重建有正当理由：基础镜像补安全更新）。而是让镜像自己带上
+    它的源提交：`org.opencontainers.image.revision` 一进标签，两份镜像就能被区分，
+    「这个版本标签是哪个提交构建的」从无从查证变成一条 `docker inspect`。
+    """
+    workflows = ("docker-latest.yml", "docker-tag.yml")
+    for name in workflows:
+        workflow = (PROJECT_ROOT / ".github" / "workflows" / name).read_text(
+            encoding="utf-8"
+        )
+        assert "org.opencontainers.image.revision" in workflow, (
+            f"{name} 推出的镜像没有记录源提交，移动 Tag 后重建无法与原镜像区分"
+        )
+        # 版本与来源也要在标签里，否则只有 revision 时仍答不出「它自称是哪个版本」。
+        assert "org.opencontainers.image.version" in workflow, (
+            f"{name} 的镜像标签缺少版本"
+        )
+        assert "org.opencontainers.image.source" in workflow, (
+            f"{name} 的镜像标签缺少源仓库地址"
+        )
+
+
+def test_the_recorded_revision_comes_from_the_verified_commit():
+    """revision 必须取自已经过 `verify-tag` 校验的那个提交。
+
+    写 `github.sha` 看起来等价，实际上不是：手动发布路径已经显式比对过
+    checkout 的提交与 preflight 的提交（`docker-tag.yml` 的 `Set output` 步骤），
+    revision 若另取一个来源，就可能记下一个没被校验过的值——
+    那正好抵消了这条标签的全部意义。
+    """
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "docker-tag.yml").read_text(
+        encoding="utf-8"
+    )
+    revision_line = next(
+        (
+            line
+            for line in workflow.splitlines()
+            if "org.opencontainers.image.revision" in line
+        ),
+        None,
+    )
+    assert revision_line is not None
+    assert "steps.vars.outputs" in revision_line or "source_commit" in revision_line, (
+        "revision 没有使用 verify-tag 校验过的提交，"
+        f"实际是：{revision_line.strip()}"
+    )

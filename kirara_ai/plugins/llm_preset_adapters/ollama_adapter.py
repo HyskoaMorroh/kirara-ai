@@ -1,5 +1,6 @@
 import asyncio
-from typing import Any, List, Optional, cast
+import json
+from typing import Any, Iterable, List, Optional, cast
 
 import aiohttp
 import requests
@@ -7,7 +8,9 @@ from pydantic import BaseModel, ConfigDict
 
 import kirara_ai.llm.format.tool as tools
 from kirara_ai.config.global_config import ModelConfig
-from kirara_ai.llm.adapter import AutoDetectModelsProtocol, LLMBackendAdapter, LLMChatProtocol, LLMEmbeddingProtocol
+from kirara_ai.llm.cancellation import CancellableRequestMixin
+from kirara_ai.llm.adapter import (AutoDetectModelsProtocol, LLMBackendAdapter, LLMChatProtocol,
+                                   LLMChatStreamProtocol, LLMEmbeddingProtocol)
 from kirara_ai.llm.format.message import (LLMChatContentPartType, LLMChatImageContent, LLMChatMessage,
                                           LLMChatTextContent, LLMToolCallContent, LLMToolResultContent)
 from kirara_ai.llm.format.request import LLMChatRequest, Tool
@@ -115,7 +118,14 @@ def convert_tools_to_ollama_format(tools: list[Tool]) -> list[dict]:
     # 这里将其独立出来方便应对后续接口改动
     return convert_tools_to_openai_format(tools)
 
-class OllamaAdapter(LLMBackendAdapter, AutoDetectModelsProtocol, LLMChatProtocol, LLMEmbeddingProtocol):
+class OllamaAdapter(
+    LLMBackendAdapter,
+    CancellableRequestMixin,
+    AutoDetectModelsProtocol,
+    LLMChatProtocol,
+    LLMChatStreamProtocol,
+    LLMEmbeddingProtocol,
+):
     def __init__(self, config: OllamaConfig):
         self.config = config
         self.logger = get_logger("OllamaAdapter")
@@ -158,15 +168,34 @@ class OllamaAdapter(LLMBackendAdapter, AutoDetectModelsProtocol, LLMChatProtocol
                 k: v for k, v in data["options"].items() if v is not None # type: ignore
             }
 
+        # 登记在途响应，让 `cancel_pending_request` 能真正断开这条连接。
         response = requests.post(api_url, json=data, headers=headers, timeout=(10, 120))
-        try:
-            response.raise_for_status()
-            response_data = response.json()
-        except Exception as e:
-            self.logger.error(f"API Response: {response.text}")
-            raise e
+        with self._track_response(req, response):
+            try:
+                response.raise_for_status()
+                response_data = response.json()
+            except Exception as e:
+                self.logger.error(f"API Response: {response.text}")
+                raise e
         # https://github.com/ollama/ollama/blob/main/docs/api.md#generate-a-chat-completion
         content = convert_llm_response(response_data)
+        # 统计字段缺失时交出 None：此前用 response_data['prompt_eval_count']
+        # 直接下标，字段缺失会让整条请求以 KeyError 失败，而这本该只是
+        # 「用量未知」，由上层估算器标记（需求 22.1）。
+        prompt_eval = response_data.get("prompt_eval_count")
+        eval_count = response_data.get("eval_count")
+        usage: Optional[Usage] = None
+        if prompt_eval is not None or eval_count is not None:
+            total_tokens = (
+                prompt_eval + eval_count
+                if isinstance(prompt_eval, int) and isinstance(eval_count, int)
+                else None
+            )
+            usage = Usage(
+                prompt_tokens=prompt_eval,
+                completion_tokens=eval_count,
+                total_tokens=total_tokens,
+            )
         return LLMChatResponse(
             model=req.model,
             message=Message(
@@ -175,13 +204,116 @@ class OllamaAdapter(LLMBackendAdapter, AutoDetectModelsProtocol, LLMChatProtocol
                 finish_reason="stop",
                 tool_calls=pick_tool_calls(content),
             ),
-            usage=Usage(
-                prompt_tokens=response_data['prompt_eval_count'],
-                completion_tokens=response_data['eval_count'],
-                total_tokens=response_data['prompt_eval_count'] +
-                response_data['eval_count'],
-            )
+            usage=usage,
         )
+
+    def stream_chat(self, req: LLMChatRequest) -> Iterable[LLMChatResponse]:
+        """Stream an Ollama chat completion as incremental responses.
+
+        Ollama 不用 SSE：`stream: true` 时它按行返回 JSON（NDJSON），
+        每行一个对象，最后一行 `done: true` 并带上统计。因此这里按行解析，
+        而不是找 `data:` 前缀——照搬 OpenAI 的解析会一个分片都读不到。
+
+        用量只在最后一帧出现（`prompt_eval_count` / `eval_count`），
+        缺字段时保持 None，由上层估算器标记为估算，不在这里补 0。
+        """
+        api_url = f"{self.config.api_base}/api/chat"
+        headers = {"Content-Type": "application/json"}
+
+        messages = []
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            for msg in req.messages:
+                if msg.role == "tool":
+                    messages.extend(
+                        convert_tool_result_message(msg, self.media_manager, loop)
+                    )
+                else:
+                    messages.append(
+                        convert_non_tool_message(msg, self.media_manager, loop)
+                    )
+        finally:
+            loop.close()
+
+        data: dict[str, Any] = {
+            "model": req.model,
+            "messages": messages,
+            # 流式是这条路径的前提，不接受调用方把它关掉。
+            "stream": True,
+            "options": {
+                "temperature": req.temperature,
+                "top_p": req.top_p,
+                "num_predict": req.max_tokens,
+                "stop": req.stop,
+                "tools": convert_tools_to_ollama_format(req.tools) if req.tools else None,
+            },
+        }
+        data = {k: v for k, v in data.items() if v is not None}
+        if "options" in data:
+            data["options"] = {
+                k: v for k, v in data["options"].items() if v is not None  # type: ignore
+            }
+
+        with requests.post(
+            api_url, json=data, headers=headers, timeout=(10, 300), stream=True
+        ) as response, self._track_response(req, response):
+            try:
+                response.raise_for_status()
+            except Exception as error:
+                self.logger.error(f"Stream response: {response.text[:512]}")
+                raise error
+
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except ValueError:
+                    # 单个坏行不应终止整条流。
+                    self.logger.warning("Skipped an unparsable Ollama stream line")
+                    continue
+                if not isinstance(chunk, dict):
+                    continue
+                if chunk.get("error"):
+                    raise RuntimeError(f"Ollama stream error: {chunk['error']}")
+
+                message = chunk.get("message") or {}
+                text = message.get("content")
+                done = bool(chunk.get("done"))
+
+                usage = None
+                if done:
+                    prompt_tokens = chunk.get("prompt_eval_count")
+                    completion_tokens = chunk.get("eval_count")
+                    if isinstance(prompt_tokens, int) or isinstance(completion_tokens, int):
+                        usage = Usage(
+                            prompt_tokens=prompt_tokens if isinstance(prompt_tokens, int) else None,
+                            completion_tokens=(
+                                completion_tokens if isinstance(completion_tokens, int) else None
+                            ),
+                            total_tokens=(
+                                prompt_tokens + completion_tokens
+                                if isinstance(prompt_tokens, int)
+                                and isinstance(completion_tokens, int)
+                                else None
+                            ),
+                        )
+
+                if not text and not done:
+                    continue
+
+                yield LLMChatResponse(
+                    model=req.model,
+                    usage=usage,
+                    message=Message(
+                        content=[LLMChatTextContent(text=text)] if text else [],
+                        role="assistant",
+                        finish_reason=(chunk.get("done_reason") or "stop") if done else "",
+                    ),
+                )
+                if done:
+                    break
 
     def embed(self, req: LLMEmbeddingRequest) -> LLMEmbeddingResponse:
         # https://github.com/ollama/ollama/blob/main/docs/api.md#generate-embeddings api文档地址
@@ -204,11 +336,13 @@ class OllamaAdapter(LLMBackendAdapter, AutoDetectModelsProtocol, LLMChatProtocol
         except Exception as e:
             self.logger.error(f"API Response: {response.text}")
             raise e
+        # 缺统计字段时保持未知，不写 0——与聊天路径同一口径（需求 22.1）。
+        prompt_eval = response_data.get("prompt_eval_count")
         return LLMEmbeddingResponse(
             vectors=response_data["embeddings"],
-            usage=Usage(
-                prompt_tokens=response_data.get("prompt_eval_count", 0)
-            )
+            usage=(
+                Usage(prompt_tokens=prompt_eval) if prompt_eval is not None else None
+            ),
         )
 
     async def auto_detect_models(self) -> list[ModelConfig]:

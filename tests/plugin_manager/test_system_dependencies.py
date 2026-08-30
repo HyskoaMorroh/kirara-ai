@@ -42,7 +42,7 @@ class FakeRunner:
             if self.timeout:
                 return CommandResult(exit_code=None, output="command timed out", timed_out=True)
             if self.fail_install:
-                return CommandResult(1, "token=secret-value C:\\Users\\devin\\AppData\\Roaming\\npm")
+                return CommandResult(1, "token=secret-value C:\\Users\\operator\\AppData\\Roaming\\npm")
             self.installed.add("agent-browser-cli")
             return CommandResult(0, "installed agent-browser")
         if command == ("agent-browser", "doctor", "--offline", "--quick", "--json"):
@@ -184,7 +184,9 @@ def test_failed_install_redacts_output_and_retry_links_to_original_task(tmp_path
     failed = service.run_task(first["task_id"])
     assert failed["status"] == "failed"
     assert "secret-value" not in json.dumps(failed)
-    assert "C:\\Users\\devin" not in json.dumps(failed)
+    # 夹具里用的是合成用户名：把开发者本机的路径写进测试，本身就是一次
+    # 「私有路径进源码」——而这条断言的用意恰恰是禁止路径外泄。
+    assert "C:\\Users\\operator" not in json.dumps(failed)
 
     runner.fail_install = False
     retry = service.retry_task(first["task_id"], confirmed=True, start=False)

@@ -133,6 +133,15 @@ def test_compare_version_orders_release_channels_before_stable():
         ("3.3.0b10", "patch", "3.3.1"),
         ("3.3.0b10", "minor", "3.4.0"),
         ("3.3.0b10", "major", "4.0.0"),
+        # `alpha` 与它的别名 `a` 都在 RELEASE_KINDS 里，此前从未被参数化覆盖，
+        # 于是「alpha 迁移」这一条需求要求的转换是唯一没有测试的通道。
+        # alpha 早于 beta，所以从 b10 起要另开一条 patch 线，不能回退到 3.3.0a1。
+        ("3.3.0", "alpha", "3.3.1a1"),
+        ("3.3.0", "a", "3.3.1a1"),
+        ("3.3.0a7", "alpha", "3.3.0a8"),
+        ("3.3.0a7", "beta", "3.3.0b1"),
+        ("3.3.0a7", "rc", "3.3.0rc1"),
+        ("3.3.0a7", "stable", "3.3.0"),
     ],
 )
 def test_next_version_uses_an_explicit_monotonic_release_policy(
@@ -141,6 +150,24 @@ def test_next_version_uses_an_explicit_monotonic_release_policy(
     version_script = _load_version_module()
 
     assert version_script.next_version(current, kind=kind) == expected
+
+
+def test_alpha_never_moves_backwards_from_a_later_channel():
+    """已经进到 beta/rc 之后，请求 alpha 不得把版本号退回同一条线的 alpha。
+
+    渠道顺序是 a < b < rc < stable。若在 3.3.0b10 上请求 alpha 却得到 3.3.0a1，
+    那是一个比当前版本更早的号——发布单调性被破坏，且该 tag 很可能已被占用。
+    正确行为是另开下一条 patch 线。
+    """
+    version_script = _load_version_module()
+
+    for current in ("3.3.0b10", "3.3.0rc2"):
+        result = version_script.next_version(current, kind="alpha")
+
+        assert version_script.compare_versions(result, current) > 0, (
+            f"{current} → alpha 得到 {result}，不高于当前版本"
+        )
+        assert result == "3.3.1a1"
 
 
 def test_next_version_skips_occupied_local_or_remote_tags():
@@ -226,6 +253,61 @@ def test_next_version_stays_above_the_entire_published_timeline(
 
     assert candidate == expected
     assert all(version_script.compare_versions(candidate, tag) > 0 for tag in occupied)
+
+
+@pytest.mark.parametrize(
+    ("current", "kind", "occupied", "expected"),
+    [
+        # 同渠道、同发布线：应当接着往下发，而不是整条 patch 线作废。
+        ("3.3.0b10", None, {"3.3.1b4"}, "3.3.1b5"),
+        ("3.3.0b10", "beta", {"3.3.1b4"}, "3.3.1b5"),
+        ("3.3.0b10", "rc", {"3.3.1rc2"}, "3.3.1rc3"),
+        ("3.3.0a3", "alpha", {"3.3.1a9"}, "3.3.1a10"),
+    ],
+)
+def test_next_version_continues_an_in_flight_prerelease_line(
+    current, kind, occupied, expected
+):
+    """已开的预发布线要接着发，不能跳到下一条 patch 线。
+
+    别人（或另一台机器）在 `3.3.1b4` 上开了 beta 线，本机还停在 `3.3.0b10`。
+    此前的结果是 `3.3.2b1`：**整条 3.3.1 线被跳过**，而 `3.3.1b5` 明明空着
+    且高于全部已发布 tag。后果是版本号随机器新旧程度乱跳，
+    `3.3.1` 这条线永远发不出正式版——需求 23.2 的「自动跳过冲突版本」
+    指的是跳过被占用的号，不是跳过一整条线。
+    """
+    version_script = _load_version_module()
+
+    candidate = version_script.next_version(
+        current, kind=kind, occupied_versions=occupied
+    )
+
+    assert candidate == expected
+    assert all(version_script.compare_versions(candidate, tag) > 0 for tag in occupied)
+
+
+def test_stable_release_can_close_a_prerelease_line_opened_elsewhere():
+    """`3.4.0b1` 已发布时，请求 stable 应当得到 `3.4.0`，而不是 `3.4.1`。
+
+    `3.4.0` 高于 `3.4.0b1`（预发布小于同号正式版）且未被占用，正是这条
+    beta 线的收尾版本。此前返回 `3.4.1`，等于「无法为别人开的预发布线发布
+    正式版」，而且和 `--kind minor` 的行为自相矛盾——同一处判断，
+    minor 会给出 `3.4.0`，stable 却跳到 `3.4.1`。
+    """
+    version_script = _load_version_module()
+
+    assert version_script.next_version(
+        "3.3.0b10", kind="stable", occupied_versions={"3.4.0b1"}
+    ) == "3.4.0"
+
+
+def test_stable_still_advances_when_that_stable_is_already_taken():
+    """对照组：`3.4.0` 本身已被占用时才递进到 `3.4.1`。"""
+    version_script = _load_version_module()
+
+    assert version_script.next_version(
+        "3.3.0b10", kind="stable", occupied_versions={"3.4.0b1", "3.4.0"}
+    ) == "3.4.1"
 
 
 def test_remote_git_tags_parse_ls_remote_output(monkeypatch, tmp_path):
@@ -1212,6 +1294,50 @@ def test_artifact_index_catches_new_current_version_carrier(tmp_path, monkeypatc
     assert errors == [
         ".version-artifacts.json: active artifact is not indexed: ops/release.yml",
     ]
+
+
+def test_ip_literals_and_four_segment_numbers_are_not_release_tokens(tmp_path, monkeypatch):
+    """需求 23.1：artifact index 只应记录真正的发布版本号。
+
+    索引对每个载体存一份「文中出现过的发布 token」，用来发现漂移。
+    但 token 正则此前会把 `127.0.0.1` 的前三段吃成一个 `127.0.0`——
+    `docs/EXTENDING.md` 里十几处 curl 示例于是贡献了 8 个假 token。
+
+    后果不是误报，而是**掩盖**：一个载体的 token 列表里混进一堆固定噪声后，
+    真正的版本号漂移在人眼和 diff 里都不再显眼。四段数字（IP、`1.2.3.4`）
+    永远不是发布版本号，正则不应该在它们中间截断。
+    """
+    version_script = _load_version_module()
+
+    tokens = version_script._release_tokens(
+        "curl http://127.0.0.1:8080/api\n"
+        "bind 0.0.0.0:8080 and 192.168.1.1\n"
+        "semver 1.2.3.4 is not a release\n"
+        "Install v3.3.0b11 or 3.3.0-b11 or 3.4.0\n"
+    )
+
+    assert "127.0.0" not in tokens
+    assert "0.0.0" not in tokens
+    assert "192.168.1" not in tokens
+    assert "1.2.3" not in tokens
+    # 真正的版本号三种拼法都必须仍被识别，否则漂移检测会整体失效。
+    assert set(tokens) == {"v3.3.0b11", "3.3.0-b11", "3.4.0"}
+
+
+def test_the_committed_artifact_index_has_no_ip_literal_tokens():
+    """当前仓库的索引里不得残留 IP 字面量当成的假 token。"""
+    index_path = PROJECT_ROOT / ".version-artifacts.json"
+    data = json.loads(index_path.read_text(encoding="utf-8"))
+    offenders = {
+        artifact["path"]: [
+            token for token in artifact.get("tokens", []) if token.startswith("127.0.0")
+        ]
+        for artifact in data["artifacts"]
+        if any(
+            token.startswith("127.0.0") for token in artifact.get("tokens", [])
+        )
+    }
+    assert not offenders, offenders
 
 
 def test_discover_records_active_and_excluded_carriers_with_reasons(tmp_path):

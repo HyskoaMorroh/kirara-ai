@@ -41,7 +41,9 @@ class TestGeminiAdapter:
         assert response.usage.total_tokens == 114
         assert response.usage.prompt_tokens == 514
         assert response.usage.cached_tokens == 1919
-        assert response.usage.completion_tokens == 0
+        # 输出量取自 usageMetadata.candidatesTokenCount。此前断言的 0 是缺陷
+        # 的固化：适配器读了并不存在的顶层 promptTokensDetails。
+        assert response.usage.completion_tokens == 66
 
     def test_embed(self, gemini_adapter: GeminiAdapter):
         req = LLMEmbeddingRequest(

@@ -72,6 +72,23 @@ class VoyageConfig(BaseModel):
     api_base: str = "https://api.voyageai.com"
     model_config = ConfigDict(frozen=True)
 
+
+def _optional_total_usage(response_data: dict) -> Optional[Usage]:
+    """Read ``usage.total_tokens`` without asserting 0 when it is absent.
+
+    上游省略 usage 时保持未知（需求 22.1）：嵌入与重排常用于记忆检索，
+    一次调用可能处理上千条文本，把它记成 0 token 会让「这条链路不花钱」
+    这个错误结论看起来有数据支撑。缺 ``usage`` 键时旧实现还会直接 KeyError。
+    """
+    raw_usage = response_data.get("usage")
+    if not isinstance(raw_usage, dict) or not raw_usage:
+        return None
+    total = raw_usage.get("total_tokens")
+    if total is None:
+        return None
+    return Usage(total_tokens=total)
+
+
 class VoyageAdapter(LLMBackendAdapter, LLMEmbeddingProtocol, LLMReRankProtocol):
     media_manager: MediaManager
 
@@ -114,9 +131,7 @@ class VoyageAdapter(LLMBackendAdapter, LLMEmbeddingProtocol, LLMReRankProtocol):
 
         return LLMEmbeddingResponse(
             vectors=[data["embedding"] for data in response_data["data"]],
-            usage = Usage(
-                total_tokens=response_data["usage"].get("total_tokens", 0)
-            )
+            usage=_optional_total_usage(response_data),
         )
 
     def _multi_modal_embedding(self, req: LLMEmbeddingRequest) -> LLMEmbeddingResponse:
@@ -160,9 +175,7 @@ class VoyageAdapter(LLMBackendAdapter, LLMEmbeddingProtocol, LLMReRankProtocol):
 
         return LLMEmbeddingResponse(
             vectors=[data["embedding"] for data in response_data["data"]],
-            usage = Usage(
-                total_tokens=response_data["usage"].get("total_tokens", 0)
-            )
+            usage=_optional_total_usage(response_data),
         )
 
     def rerank(self, req: LLMReRankRequest) -> LLMReRankResponse:
@@ -197,8 +210,6 @@ class VoyageAdapter(LLMBackendAdapter, LLMEmbeddingProtocol, LLMReRankProtocol):
                     document = data.get("document", None),
                     score = data["relevance_score"]
             ) for data in response_data["data"]],
-            usage = Usage(
-                total_tokens = response_data["usage"].get("total_tokens", 0)
-            ),
+            usage=_optional_total_usage(response_data),
             sort = cast(bool, req.sort) # 强制类型转换，避免mypy报错。
         )

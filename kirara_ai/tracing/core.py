@@ -136,6 +136,15 @@ class TracerBase(Generic[R], abc.ABC):
                         condition = self.record_class.request_time >= value
                     elif field == "end_time":
                         condition = self.record_class.request_time < value
+                    elif field.endswith("__is_null"):
+                        # 「未标注」维度：显式筛选该列为 NULL。与统计接口同一约定，
+                        # 否则同一个筛选条件在列表页和统计页会得到不同的结果集。
+                        column = getattr(
+                            self.record_class, field.removesuffix("__is_null"), None
+                        )
+                        if column is None:
+                            continue
+                        condition = column.is_(None)
                     elif hasattr(self.record_class, field):
                         condition = getattr(self.record_class, field) == value
                     else:

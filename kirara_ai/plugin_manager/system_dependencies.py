@@ -261,7 +261,112 @@ def _definitions() -> tuple[DependencyDefinition, ...]:
             install_commands=(("uv", "tool", "install", "--upgrade", "graphifyy"),),
             prerequisites=("python-tooling",),
         ),
+        DependencyDefinition(
+            dependency_id="rtk-cli",
+            name="RTK CLI",
+            description=(
+                "RTK（Rust Token Killer）终端输出压缩代理，用于降低命令输出的 token 占用。"
+                "注意与同名的 Rust Type Kit 不是同一个工具：以 `rtk gain` 是否可用为准。"
+            ),
+            kind="cli",
+            required_by=("终端输出压缩",),
+            probe_commands=(("rtk", "--version"),),
+            install_commands=(("cargo", "install", "--locked", "rtk-cli"),),
+            operator_guidance=(
+                "若服务器没有 cargo，请由 VPS 运维改用官方发行的二进制包安装，"
+                "并确保服务进程的 PATH 可以访问 rtk。"
+            ),
+        ),
+        DependencyDefinition(
+            dependency_id="memsearch-cli",
+            name="MemSearch CLI",
+            description="MemSearch 跨会话记忆检索命令行工具，PyPI 包名为 memsearch。",
+            kind="cli",
+            required_by=("记忆检索",),
+            probe_commands=(("memsearch", "--version"),),
+            install_commands=(("uv", "tool", "install", "--upgrade", "memsearch"),),
+            prerequisites=("python-tooling",),
+        ),
+        DependencyDefinition(
+            dependency_id="context-mode-plugin",
+            name="Context Mode Plugin",
+            description=(
+                "Context Mode 是 Claude Code 插件，在沙箱内处理大输出并只回传结论。"
+                "它安装在操作者自己的 Claude 配置里，不是服务器运行时组件。"
+            ),
+            kind="claude-plugin",
+            required_by=("大输出分析",),
+            # 只探测宿主 CLI 是否存在：插件本身没有独立可执行文件，
+            # 用它自己的名字去探测只会永远报 missing。
+            probe_commands=(("claude", "--version"),),
+            operator_guidance=(
+                "请在操作者本机的 Claude Code 中安装该插件（claude plugin install），"
+                "服务器侧无需也无法代为安装。"
+            ),
+        ),
+        DependencyDefinition(
+            dependency_id="caveman-plugin",
+            name="Caveman Plugin",
+            description=(
+                "Caveman 是 Claude Code 插件，用于压缩输出表达。"
+                "它安装在操作者自己的 Claude 配置里，不是服务器运行时组件。"
+            ),
+            kind="claude-plugin",
+            required_by=("输出压缩",),
+            probe_commands=(("claude", "--version"),),
+            operator_guidance=(
+                "请在操作者本机的 Claude Code 中安装该插件（claude plugin install），"
+                "服务器侧无需也无法代为安装。"
+            ),
+        ),
     )
+
+
+def dependency_ids_for_resource(item: Mapping[str, Any]) -> list[str]:
+    """Return the server dependencies one catalog item or resource needs.
+
+    住在这里而不是资源目录服务里，是因为**两个**调用方需要同一份映射：
+
+    - 安装界面（`ResourceCatalogService.project_dependencies`）用它显示
+      「这个技能还缺什么」；
+    - Agent 运行时用它决定要不要在技能广告里加一句「服务器上没有这个命令」。
+
+    两边各写一份的后果不是重复代码，而是**两份会各自漂移的判断**：界面说已就绪、
+    运行时说缺失（或者反过来），而这种不一致没有任何症状能让人察觉——
+    模型只会照着一份它其实执行不了的说明自信作答。
+
+    键位兼容目录项（`catalog_id` / `source_key` / `directory`）与已安装资源
+    （`resource_id` / `source_metadata`）两种形状：同一个技能在这两处的字段名不同，
+    而它需要的依赖是同一批。
+    """
+    metadata = item.get("source_metadata")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    catalog_id = str(item.get("catalog_id") or metadata.get("catalog_id") or "").casefold()
+    resource_id = str(item.get("resource_id") or "").casefold()
+    source_key = str(item.get("source_key") or metadata.get("source_key") or "").casefold()
+
+    if catalog_id == "mcp:context7" or source_key == "mcp:context7" or resource_id == "mcp.context7":
+        return ["context7-runtime"]
+    if str(item.get("type") or "").casefold() != "skill":
+        return []
+
+    names = {
+        str(item.get("name") or "").strip().casefold(),
+        str(metadata.get("name") or "").strip().casefold(),
+        str(item.get("directory") or "").strip("/").rsplit("/", 1)[-1].casefold(),
+        str(metadata.get("directory") or "").strip("/").rsplit("/", 1)[-1].casefold(),
+    }
+    source_parts = {
+        source_key.rsplit(":", 1)[-1].strip("/").rsplit("/", 1)[-1],
+        str(item.get("directory") or "").strip("/").rsplit("/", 1)[-1].casefold(),
+        str(metadata.get("directory") or "").strip("/").rsplit("/", 1)[-1].casefold(),
+    }
+    identifiers = names | source_parts
+    if "agent-browser" in identifiers:
+        return ["agent-browser-cli", "agent-browser-browser"]
+    if "graphify" in identifiers:
+        return ["graphify-cli"]
+    return []
 
 
 class SystemDependencyService:
@@ -543,12 +648,25 @@ class SystemDependencyService:
         outputs: list[str] = []
         for argv in definition.probe_commands:
             command_outputs: list[str] = []
-            result = self._runner(
-                argv,
-                timeout=min(definition.timeout_seconds, 60),
-                cancellation_event=cancellation_event,
-                output_sink=lambda value: command_outputs.append(_sanitize_output(value)),
-            )
+            try:
+                result = self._runner(
+                    argv,
+                    timeout=min(definition.timeout_seconds, 60),
+                    cancellation_event=cancellation_event,
+                    output_sink=lambda value: command_outputs.append(_sanitize_output(value)),
+                )
+            except OSError as error:
+                # 探测一个不存在的可执行文件是「未安装」，不是接口错误。
+                # 默认 runner 已经把 OSError 转成 exit 127；注入的自定义 runner
+                # 可能直接抛出，这里同样按未安装处理，避免探测接口 500。
+                return DependencyProbe(
+                    definition.dependency_id,
+                    False,
+                    "missing",
+                    None,
+                    _sanitize_output(str(error)) or "dependency is not available",
+                    _timestamp(),
+                )
             outputs.extend(command_outputs or [_sanitize_output(result.output)])
             if result.cancelled or cancellation_event.is_set():
                 return DependencyProbe(

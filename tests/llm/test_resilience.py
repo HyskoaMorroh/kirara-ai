@@ -56,6 +56,36 @@ def test_circuit_breaker_uses_error_rate_after_minimum_sample_size():
     assert breaker.state(now=3) == CircuitState.OPEN
 
 
+def test_error_rate_still_applies_when_min_requests_exceeds_the_default_window():
+    """``min_requests`` 大于默认样本窗口时，错误率熔断仍必须生效。
+
+    结果窗口是一个定长 deque。窗口固定 20 而 ``circuit_min_requests`` 只校验
+    ``ge=1``，于是 ``len(outcomes) >= min_requests`` 永假：配 30 的用户拿到的是
+    「错误率熔断被静默关掉」，只剩连续失败阈值。100% 失败率却保持 closed，
+    是比不熔断更糟的状态——面板显示健康，请求继续付超时。
+    """
+    breaker = CircuitBreaker(
+        failure_threshold=1000,   # 抬高到不可达，隔离出错误率分支
+        error_rate_threshold=0.5,
+        min_requests=50,          # 远大于默认 history_size=20
+        recovery_timeout_seconds=10,
+    )
+
+    for timestamp in range(50):
+        assert breaker.acquire(now=timestamp) is True, (
+            f"第 {timestamp} 次请求就被拒绝，说明在攒满 min_requests 前已熔断"
+        )
+        breaker.record_failure(now=timestamp)
+
+    snapshot = breaker.snapshot(now=50)
+    assert snapshot["requests"] >= breaker.min_requests, (
+        "样本窗口必须能容纳 min_requests 条结果，否则错误率分支永远不触发"
+    )
+    assert breaker.state(now=50) == CircuitState.OPEN
+    # 熔断已打开：恢复等待期内不再放行任何请求。
+    assert breaker.acquire(now=50) is False
+
+
 def test_half_open_requires_configured_successes_before_closing():
     breaker = CircuitBreaker(
         failure_threshold=1,

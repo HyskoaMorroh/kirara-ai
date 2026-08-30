@@ -134,6 +134,63 @@ describe('PricingView', () => {
     expect(wrapper.text()).toContain('定价版本已保存')
   })
 
+  it('refuses to submit a生效时间 without a timezone and says how to fix it', async () => {
+    // 后端强制要求带时区（pydantic 校验器直接 raise）。前端不校验的话，
+    // 用户按最自然的写法填 `2026-01-01 00:00` → 保存 → 拿到一个 pydantic 4xx，
+    // 说的是 `effective_from must include a timezone`。
+    // 界面既不阻止错写法、也不说明对写法，填对全靠猜。
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="create-pricing"]').trigger('click')
+    await wrapper.get('input[name="provider"]').setValue('anthropic')
+    await wrapper.get('input[name="model"]').setValue('claude-sonnet')
+    await wrapper.get('input[name="version_id"]').setValue('v1')
+    await wrapper.get('input[name="effective_from"]').setValue('2026-01-01 00:00')
+    await wrapper.get('[data-test="save-pricing"]').trigger('click')
+    await flushPromises()
+
+    // 不该发出请求：这一步能在本地判定，往返一次只是把错误延后。
+    expect(api.createPricing).not.toHaveBeenCalled()
+    // 必须说出「缺什么」和「对的写法长什么样」，否则用户只能继续猜。
+    expect(wrapper.text()).toContain('时区')
+    expect(wrapper.text()).toContain('2026-01-01T00:00:00Z')
+  })
+
+  it('normalizes an offset timestamp to UTC before sending it', async () => {
+    // 归一化的理由：后端按 UTC 存储与比较。不归一化时「界面上显示的时刻」
+    // 与「用于计费判定的时刻」是两个值，而这类偏差没有任何症状——
+    // 直到有人去核对账单。
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="create-pricing"]').trigger('click')
+    await wrapper.get('input[name="provider"]').setValue('anthropic')
+    await wrapper.get('input[name="model"]').setValue('claude-sonnet')
+    await wrapper.get('input[name="version_id"]').setValue('v1')
+    await wrapper.get('input[name="effective_from"]').setValue('2026-01-01T08:00:00+08:00')
+    await wrapper.get('[data-test="save-pricing"]').trigger('click')
+    await flushPromises()
+
+    expect(api.createPricing).toHaveBeenCalledWith(
+      expect.objectContaining({
+        version: expect.objectContaining({
+          effective_from: '2026-01-01T00:00:00.000Z'
+        })
+      })
+    )
+  })
+
+  it('shows the required format next to the field, not only after a failure', async () => {
+    // 提示必须在填之前就在那里：只在出错后才说明，等于让每个人都先错一次。
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="create-pricing"]').trigger('click')
+
+    expect(wrapper.text()).toContain('需带时区')
+  })
+
   it('requires confirmation before delete and restore operations', async () => {
     const wrapper = mountView()
     await flushPromises()

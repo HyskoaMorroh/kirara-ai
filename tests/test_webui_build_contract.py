@@ -1,5 +1,8 @@
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 try:
     import tomllib
@@ -256,6 +259,15 @@ def test_docker_context_excludes_local_audit_and_runtime_state():
         "*.sqlite3",
         "*.log",
         "*.pid",
+        # `.env` 承载 AUTH_TOKEN 等凭据，且在服务器上与 compose 同目录，
+        # 默认会被 `docker build .` 一并上传。
+        ".env",
+        "*password.hash",
+        # MemSearch 与本轮排查笔记同样只属于本机现场。
+        ".memsearch",
+        "findings.md",
+        "progress.md",
+        "task_plan.md",
     }
 
     configured_patterns = {
@@ -264,3 +276,156 @@ def test_docker_context_excludes_local_audit_and_runtime_state():
         if line.strip() and not line.lstrip().startswith("#")
     }
     assert required_patterns.issubset(configured_patterns)
+    # 示例文件必须保留：否则文档教人复制 `.env.example` 时镜像里找不到它。
+    assert "!.env.example" in configured_patterns
+
+
+# 一次性审计产物、浏览器留痕和本机会话状态的路径前缀。`.gitignore` 只能阻止
+# **新增**文件进入索引，对已经 `git add` 过的文件完全无效——2026-08-27 的四个
+# 「回填交接现场」提交就是这样把 727 个文件、14 MB 内容带进了 HEAD，使
+# `git archive HEAD` 膨胀到 46 MB，并让 GitHub Release 源码包携带
+# PATHFINDER-2026-08-21/（原始计划红线明确禁止）。这条测试是防复发的门禁：
+# 规则写了不等于生效，必须断言索引本身是干净的。
+UNTRACKED_LOCAL_ARTIFACT_PREFIXES = (
+    ".qa-",
+    ".playwright-mcp/",
+    ".playwright-cli/",
+    ".superpowers/",
+    ".memsearch/",
+    "work/",
+    "PATHFINDER-2026-08-21/",
+    "findings.md",
+    "progress.md",
+    "task_plan.md",
+)
+
+#: 运行期数据库同样不属于源码。`data/mcp/audit.db` 与
+#: `data/mcp/confirmations.db` 曾被提交，携带本机的 MCP 工具调用审计记录
+#: （724 行）与一条待确认令牌摘要——运行态数据不该随仓库分发。
+UNTRACKED_RUNTIME_DATABASE_SUFFIXES = (".db", ".sqlite", ".sqlite3")
+
+
+def _tracked_paths() -> list[str]:
+    """Every path in the Git index, or skip when Git is unavailable."""
+    result = subprocess.run(
+        ["git", "ls-files"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip("git 不可用，无法校验索引内容")
+    return [path for path in result.stdout.splitlines() if path]
+
+
+def _head_paths() -> list[str]:
+    """Every path in the HEAD commit, or skip when Git is unavailable.
+
+    索引与 HEAD 是两件事：`git update-index --force-remove` 只清索引，
+    HEAD 里的文件依旧在。而 `git archive`、GitHub Release 源码包和
+    `git checkout <tag>` 读的都是**提交**，不是索引。
+    """
+    result = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip("git 不可用或仓库尚无提交，无法校验 HEAD 内容")
+    return [path for path in result.stdout.splitlines() if path]
+
+
+def _staged_deletions() -> set[str]:
+    """Paths already staged for deletion, i.e. gone in the *next* commit."""
+    result = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=D"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip("git 不可用，无法校验暂存区删除")
+    return {path for path in result.stdout.splitlines() if path}
+
+
+def test_git_index_carries_no_local_audit_artifacts():
+    """本地审计产物不得存在于 Git 索引中（`.gitignore` 无法反跟踪已提交文件）。"""
+    offenders = sorted(
+        path
+        for path in _tracked_paths()
+        if path.startswith(UNTRACKED_LOCAL_ARTIFACT_PREFIXES)
+    )
+    assert not offenders, (
+        "以下本地审计产物仍在 Git 索引中，会随 GitHub Release 源码包分发；"
+        "请执行 `git ls-files | grep <prefix> | git update-index --force-remove --stdin`"
+        f"（磁盘文件不会被删除）：{offenders[:10]}"
+    )
+
+
+def test_release_commit_will_carry_no_local_audit_artifacts():
+    """**提交**（而非索引）才是发布产物的来源，必须同样干净。
+
+    上一条只校验索引。索引清干净之后 HEAD 里仍然留着这些文件，而
+    `git archive`、GitHub Release 源码包与 `git checkout <tag>` 读的都是提交：
+    在这种状态下打 Tag，发出去的源码包依旧携带全部本地审计产物
+    （实测 HEAD 1542 文件 / 索引 810 文件，差额 730 个即这批内容）。
+
+    因此这里允许两种通过方式：HEAD 本身已经干净，或者这些路径**已在暂存区
+    标记删除**——后者意味着下一个提交就会清掉它们。两者都不满足时说明
+    「清理只做了一半」，此时不得创建 Tag。
+    """
+    pending_removal = _staged_deletions()
+    offenders = sorted(
+        path
+        for path in _head_paths()
+        if path.startswith(UNTRACKED_LOCAL_ARTIFACT_PREFIXES)
+        and path not in pending_removal
+    )
+    assert not offenders, (
+        "以下本地审计产物仍在 HEAD 中且未标记删除；在此状态下打 Tag，"
+        "GitHub Release 源码包会携带它们。请先提交已暂存的删除，"
+        f"或 `git rm --cached` 这些路径（磁盘文件不会被删除）：{offenders[:10]}"
+    )
+
+
+def test_release_commit_will_carry_no_runtime_databases():
+    """运行期数据库同样以提交为准：HEAD 里不得残留，或必须已标记删除。"""
+    pending_removal = _staged_deletions()
+    offenders = sorted(
+        path
+        for path in _head_paths()
+        if path.endswith(UNTRACKED_RUNTIME_DATABASE_SUFFIXES)
+        and path not in pending_removal
+    )
+    assert not offenders, (
+        "以下运行期数据库仍在 HEAD 中且未标记删除，会随源码包分发本机运行状态："
+        f"{offenders[:10]}"
+    )
+
+
+def test_git_index_carries_no_runtime_databases():
+    """运行期 SQLite 数据库不得存在于 Git 索引中。
+
+    `data/mcp/audit.db` 曾带着 724 行本机 MCP 工具调用审计记录被提交，
+    `data/mcp/confirmations.db` 带着一条待确认令牌摘要。运行态数据随仓库
+    分发既无意义（每台机器都不同），又会把本地操作记录发出去。
+    """
+    offenders = sorted(
+        path
+        for path in _tracked_paths()
+        if path.endswith(UNTRACKED_RUNTIME_DATABASE_SUFFIXES)
+    )
+    assert not offenders, (
+        "以下运行期数据库仍在 Git 索引中；请 `git update-index --force-remove` "
+        f"移除（磁盘文件不会被删除）：{offenders[:10]}"
+    )
