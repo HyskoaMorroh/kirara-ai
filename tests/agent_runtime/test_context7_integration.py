@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.utils.external_tools import require_tool
+
 from kirara_ai.agent_runtime import (
     AgentDefinition,
     AgentRegistry,
@@ -129,6 +131,11 @@ def _agent() -> AgentDefinition:
 @pytest.mark.integration
 @pytest.mark.usefixtures("creator_principal")
 async def test_real_context7_mcp_completes_agent_turn_after_model_failover():
+    # context7 是一个 npm 包，靠 `npx` 拉起。运行时镜像不装 Node——
+    # MCP 服务器由使用者自己的环境提供，不是本镜像的职责。
+    # 没有 npx 时这条用例无从执行；报 error 会把「环境缺一个工具」
+    # 说成「MCP 集成坏了」。
+    require_tool("npx", reason="context7 MCP 服务器需要 Node 运行时")
     config = GlobalConfig(
         mcp=MCPConfig(
             servers=[

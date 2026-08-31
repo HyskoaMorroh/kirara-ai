@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.utils.external_tools import require_git
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
@@ -307,6 +309,7 @@ UNTRACKED_RUNTIME_DATABASE_SUFFIXES = (".db", ".sqlite", ".sqlite3")
 
 def _tracked_paths() -> list[str]:
     """Every path in the Git index, or skip when Git is unavailable."""
+    require_git("无法校验索引内容")
     result = subprocess.run(
         ["git", "ls-files"],
         cwd=PROJECT_ROOT,
@@ -328,6 +331,7 @@ def _head_paths() -> list[str]:
     HEAD 里的文件依旧在。而 `git archive`、GitHub Release 源码包和
     `git checkout <tag>` 读的都是**提交**，不是索引。
     """
+    require_git("无法校验提交内容")
     result = subprocess.run(
         ["git", "ls-tree", "-r", "--name-only", "HEAD"],
         cwd=PROJECT_ROOT,
@@ -344,6 +348,7 @@ def _head_paths() -> list[str]:
 
 def _staged_deletions() -> set[str]:
     """Paths already staged for deletion, i.e. gone in the *next* commit."""
+    require_git("无法校验暂存区删除")
     result = subprocess.run(
         ["git", "diff", "--cached", "--name-only", "--diff-filter=D"],
         cwd=PROJECT_ROOT,

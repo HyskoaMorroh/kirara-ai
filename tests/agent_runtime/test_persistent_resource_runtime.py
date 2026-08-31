@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.utils.external_tools import require_tool
+
 from kirara_ai.agent_runtime import (
     AgentDefinition,
     AgentRegistry,
@@ -242,6 +244,10 @@ def _agent(lifecycle):
 @pytest.mark.integration
 @pytest.mark.usefixtures("creator_principal")
 async def test_persisted_catalog_resources_drive_one_real_agent_turn(tmp_path: Path):
+    # 这一轮里 context7 MCP 是真的被连起来的（这正是它作为 integration 用例的
+    # 意义：证明持久化的资源能驱动一次真实回合）。而 context7 靠 `npx` 拉起，
+    # 运行时镜像不装 Node——MCP 服务器由使用者的环境提供，不是本镜像的职责。
+    require_tool("npx", reason="context7 MCP 服务器需要 Node 运行时")
     lifecycle = ResourceLifecycleService(tmp_path / "vps-data")
     catalog = ResourceCatalogService(lifecycle)
     _ensure_builtins_after_legacy_prompt(lifecycle, catalog)
@@ -550,6 +556,9 @@ def _require_real_downloaded_skill() -> Path:
 async def test_real_downloaded_agent_browser_skill_enters_persistent_runtime(tmp_path: Path):
     """Prove the server-downloaded Skill, rather than a test stub, reaches the model."""
 
+    # 这一轮同时连真实的 context7 MCP（靠 `npx`）。运行时镜像不装 Node——
+    # MCP 服务器由使用者的环境提供，不是本镜像的职责。
+    require_tool("npx", reason="context7 MCP 服务器需要 Node 运行时")
     downloaded_root = _require_real_downloaded_skill()
 
     downloaded_manifest = json.loads(

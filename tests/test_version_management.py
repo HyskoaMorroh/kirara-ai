@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.utils.external_tools import require_git
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VERSION_SCRIPT = PROJECT_ROOT / "scripts" / "version.py"
@@ -24,7 +26,13 @@ def _load_version_module():
 
 
 def _git(root: Path, *arguments: str) -> str:
-    """Run a small, isolated Git command for release identity fixtures."""
+    """Run a small, isolated Git command for release identity fixtures.
+
+    Git 缺失时跳过而不是报错：这些用例验的是**发布身份推导**，
+    而运行时镜像不装 git（产品也不需要它）。在那里它们无从执行，
+    但「无从执行」与「执行了并且不对」必须是两种不同的结论。
+    """
+    require_git("无法构造发布身份夹具")
     result = subprocess.run(
         ["git", *arguments],
         cwd=root,

@@ -167,6 +167,27 @@
 本轮修正的缺陷有一个共同形态：**功能看起来在工作，实际给出反向或空白的结果**。
 每条都先有一个失败的回归测试，再改最小范围代码。
 
+- **十八条测试在「镜像内测试」里以 error 收场，因为三处 skip 判断都漏了同一条
+  路径**（需求 24.3）：`run-tests.yml` 的 Docker image validation 把仓库挂进
+  **运行时**镜像再跑整个 `./tests`。那个镜像只装 Python + ffmpeg + libmagic1——
+  没有 `git`、没有 Node/`npx`，而产品本身不需要它们。
+  失败分两类，原因都与被测行为无关：
+  `git` 相关 16 条（私有路径门禁 7、WebUI 契约 4、版本管理 5）——这三份文件
+  **各自都写过**一句「git 不可用就 skip」，但都只看 `returncode != 0`，
+  而可执行文件不存在时 `subprocess.run` 直接抛 `FileNotFoundError`，
+  那句判断一次都没执行到；`npx` 相关 2 条是 context7 MCP 用例。
+  现新增 `tests/utils/external_tools.py`，把「这个工具在不在」收成一处
+  `shutil.which` 判断，六个站点统一调用（三份 git helper + `_staged_deletions`
+  + 两条 MCP 用例）。用 `which` 而不是「跑一次看它报什么错」：后者要为每个工具
+  各写一遍异常处理，而缺失这件事与工具无关，是同一个判断——散在三处各写一遍的
+  后果就是上面那个「三处都漏同一条路径」。
+  **刻意不用 `-m "not integration"` 排除**：那会让本机也不再验这条链路，
+  而它证明的是需求 10 的核心证据（真实下载的 Skill 进运行时、正文经
+  `skill_<id>` 到达模型）。skip 与 pass 的区别在报告里可见，exclude 之后连这个
+  都看不到。本机有 Node 与那份下载产物时照常运行。
+  验证方式同步改掉：不再拿本机 venv 结果当发布依据，而是本机 `docker build`
+  后用 CI 的同一条命令在容器里跑（已确认镜像内 `git ABSENT` / `npx ABSENT`）。
+
 - **三处测试把本机环境当成了普遍环境，Linux CI 上必然失败**（需求 24.3）：
   本机 2935 passed 而 CI 四个后端 job 全红，`docker` job 因此被跳过——门禁拦住了
   镜像发布，但这三处本该在推送之前就被发现。共同形态是**测试断言了一个只在

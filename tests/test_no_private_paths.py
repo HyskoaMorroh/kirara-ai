@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.utils.external_tools import require_git
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -94,6 +96,10 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 
 def _tracked_text_files() -> list[Path]:
+    # 运行时镜像里没有 git（它不需要）。缺失时 `subprocess.run` 抛
+    # FileNotFoundError，下面那句 `returncode != 0` 一次都执行不到——
+    # 这道门禁因此在镜像内测试里以 error 而不是 skip 收场。
+    require_git("无法枚举跟踪文件")
     result = subprocess.run(
         ["git", "ls-files"],
         cwd=PROJECT_ROOT,
