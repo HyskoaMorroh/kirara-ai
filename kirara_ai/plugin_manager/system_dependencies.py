@@ -270,7 +270,13 @@ def _definitions() -> tuple[DependencyDefinition, ...]:
             ),
             kind="cli",
             required_by=("终端输出压缩",),
-            probe_commands=(("rtk", "--version"),),
+            # 两条命令都必须通过。
+            #
+            # 只跑 `rtk --version` 无法与同名的 Rust Type Kit 区分——那个工具
+            # 同样有 `--version`。描述里已经写明「以 `rtk gain` 是否可用为准」，
+            # 但判据此前只在文档里、没有进探针：VPS 上装错 crate 时前端照样
+            # 显示「就绪」，之后每次终端输出压缩都静默走偏。
+            probe_commands=(("rtk", "--version"), ("rtk", "gain")),
             install_commands=(("cargo", "install", "--locked", "rtk-cli"),),
             operator_guidance=(
                 "若服务器没有 cargo，请由 VPS 运维改用官方发行的二进制包安装，"

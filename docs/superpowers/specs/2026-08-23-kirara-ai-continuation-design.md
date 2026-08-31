@@ -38,7 +38,7 @@
    设计一致。
 2. 每次 props 变化都初始化会覆盖本地编辑和 debounce 保存，属于更危险的表面修复。
 3. 继续保留兼容入口，避免破坏已有组件调用方和历史行为。
-4. `cc-switch` 的优势在 Provider 状态、故障转移队列和可观测性，不在 Kirara
+4. 桌面端参考实现的优势在 Provider 状态、故障转移队列和可观测性，不在 Kirara
    画布执行器；它的 React/Tauri/SQLite 架构不能直接移植到 Vue/Quart/YAML 边界。
 
 ### 2.2 Task 8：补当前运行文档与发布证据
@@ -105,12 +105,12 @@ Kirara 不承担外部 QQ 登录器职责，但必须可靠管理自己到 OneBo
   新 Skill 默认禁用，权限变更必须再次确认后才可启用。
 - Prompt 记录来源、版本、启用状态、内容摘要和审计；Session 记录所有权、状态、转录索引、
   恢复点和保留策略。删除属于单独高风险动作，不与浏览或恢复混在一起。
-- 控制面借鉴 CC Switch 的来源、更新、备份、会话详情与状态信息架构，但服务端不接管用户
+- 控制面借鉴参考实现的来源、更新、备份、会话详情与状态信息架构，但服务端不接管用户
   桌面应用配置。
 
 ### 2.7 明确不照搬与受保护边界
 
-- 不把 `cc-switch` 的 Tauri 桌面壳、外部客户端 live 配置接管或真实用户 Provider 数据
+- 不把参考实现的 Tauri 桌面壳、外部客户端 live 配置接管或真实用户 Provider 数据
   引入 Kirara；只吸收可验证的状态模型和交互信息架构。
 - 不修改、移动、删除、暂存或打包 `docs/LOGO.jpg`。
 - 不纳入或打包 `PATHFINDER-2026-08-21/`。
@@ -164,7 +164,7 @@ Kirara 不承担外部 QQ 登录器职责，但必须可靠管理自己到 OneBo
 - 原始项目约束：`docs/superpowers/plans/2026-08-17-kirara-ai-excellence-overhaul.md`
 - 当前现场：`docs/superpowers/plans/2026-08-23-handoff.md`
 - 用户验收附件：桌面 `1.txt`，第 17.1 至 24.5 条
-- 本地参考：操作者本机桌面的 `cc-switch-main` 与 `ccs截图`
+- 本地参考：操作者本机桌面的参考实现源码与其界面截图目录
 - 同类项目：`n8n-io/n8n`、`langgenius/dify`、`BerriAI/litellm`、
   `open-webui/open-webui` 的公开仓库与文档
 - Vue 组件行为依据：Vue 3 官方文档的 props/watch 生命周期说明；本次实现仍遵循

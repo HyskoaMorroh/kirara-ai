@@ -34,7 +34,11 @@ const SWITCHES = [
   'rectifier_enabled',
   'rectify_thinking_signature',
   'rectify_thinking_budget',
-  'rectify_media_fallback'
+  'rectify_media_fallback',
+  // 第四类整流：上游不认识 `reasoning_effort` 时删掉该字段再重试一次。
+  // 换供应商帮不上忙（备用上游收到同一个不合法字段同样会拒），
+  // 因此它属于整流而不是故障转移。
+  'rectify_reasoning_effort_unsupported'
 ]
 
 describe('rectifier controls', () => {

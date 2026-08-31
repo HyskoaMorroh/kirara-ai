@@ -51,11 +51,14 @@ import {
   discoverRepository,
   enableResource,
   getCatalogItem,
+  getResourceContent,
   importResource,
   installCatalogItem,
+  installImportableArchive,
   installResource,
   installSystemDependency,
   listDependencyTasks,
+  listImportableArchives,
   listResourceAudit,
   listResourceBackups,
   listRepositories,
@@ -78,6 +81,7 @@ import type {
   DiscoveredSkill,
   ManagedResource,
   ResourceBackup,
+  ResourceContent,
   ResourceRepository,
   ResourceType,
   ResourceUpdateCheck,
@@ -86,7 +90,14 @@ import type {
 import type { AgentSummary } from '@/api/agent'
 
 type ResourceFilter = ResourceType | 'all'
-type PanelName = 'install' | 'discover' | 'backups' | 'relations' | 'dependencies' | null
+type PanelName =
+  | 'install'
+  | 'discover'
+  | 'staged'
+  | 'backups'
+  | 'relations'
+  | 'dependencies'
+  | null
 
 const message = useMessage()
 const dialog = useDialog()
@@ -299,6 +310,12 @@ const disable = (resource: ManagedResource) => {
 const openDetail = (resource: ManagedResource) => {
   selectedResource.value = resource
   showDetailModal.value = true
+  // 正文与详情一起取：打开详情就是为了看「这个资源到底是什么」，
+  // 而对 prompt 而言正文就是全部内容。取失败只让正文那一块显示原因，
+  // 不影响详情其余字段。
+  entryContent.value = null
+  entryContentError.value = ''
+  void loadEntryContent(resource)
 }
 
 const openUpdate = (resource: ManagedResource) => {
@@ -371,6 +388,89 @@ const chooseLocalImport = () => {
   versionUploadTarget.value = null
   showImportModal.value = true
   panel.value = null
+}
+
+/**
+ * 当前正文预览。
+ *
+ * prompt 类型的全部内容就是正文，而此前界面上看不到它——「提示词管理」
+ * 回答不了它唯一要回答的问题。只读：安装后的正文不能就地改（摘要与清单绑定），
+ * 改正文走「上传 ZIP 升级」。
+ */
+const entryContent = ref<ResourceContent | null>(null)
+const entryContentLoading = ref(false)
+const entryContentError = ref('')
+const entryContentVersion = ref('')
+
+const loadEntryContent = async (resource: ManagedResource, version?: string) => {
+  entryContentLoading.value = true
+  entryContentError.value = ''
+  try {
+    const result = await getResourceContent(resource.resource_id, version)
+    entryContent.value = result
+    entryContentVersion.value = result.version
+  } catch (error) {
+    entryContent.value = null
+    entryContentError.value = error instanceof Error ? error.message : '读取正文失败'
+  } finally {
+    entryContentLoading.value = false
+  }
+}
+
+/** 正文与运行时载入的是否同一份：摘要一致才成立，不靠信任。 */
+const entryDigestMatches = computed(() => {
+  const current = entryContent.value
+  if (!current || !selectedResource.value) return false
+  const record = selectedResource.value.versions.find(
+    (item) => item.version === current.version
+  )
+  return !!record && record.content_sha256 === current.content_sha256
+})
+
+/** 服务器 `resources/imports` 目录里已经放好的包。 */
+const stagedArchives = ref<ImportableArchive[]>([])
+const stagedLoading = ref(false)
+const stagedBusyFile = ref('')
+
+/**
+ * 列出服务器上已经放好、还没安装的包。
+ *
+ * 这条路径与「导入已有」的上传弹窗解决的是不同处境：用户手里没有可上传的文件，
+ * 包已经用 scp 放在服务器上了。此前只能上传，于是几十 MB 的包要经浏览器
+ * 再走一遍，慢且容易断。
+ */
+const loadStagedArchives = async () => {
+  stagedLoading.value = true
+  try {
+    const result = await run(() => listImportableArchives(), '读取服务器待导入目录失败')
+    stagedArchives.value = result?.imports ?? []
+  } finally {
+    stagedLoading.value = false
+  }
+}
+
+const openStagedPanel = async () => {
+  panel.value = 'staged'
+  await loadStagedArchives()
+}
+
+const installStaged = (entry: ImportableArchive) => {
+  ask({
+    title: `确认安装「${entry.resource_id ?? entry.file_name}」`,
+    content:
+      '资源包会在服务器内校验并写入受控资源目录；安装后资源保持停用状态，等待你确认权限后再启用。',
+    positiveText: '安装',
+    onPositiveClick: async () => {
+      stagedBusyFile.value = entry.file_name
+      try {
+        await run(() => installImportableArchive(entry.file_name), '安装服务器资源包失败')
+        message.success('资源已安装，请确认后再启用')
+        await Promise.all([loadResources(), loadStagedArchives()])
+      } finally {
+        stagedBusyFile.value = ''
+      }
+    }
+  })
 }
 
 /** 「上传 ZIP 升级到新版本」：离线环境下 checkResourceUpdates 无法工作时用它。 */
@@ -1180,6 +1280,12 @@ onBeforeUnmount(() => {
         -->
         <n-button quaternary data-test="install-archive" @click="chooseLocalInstall"><template #icon><n-icon aria-hidden="true"><cloud-upload-outline /></n-icon></template>从 ZIP 安装</n-button>
         <n-button quaternary data-test="import-archive" @click="chooseLocalImport"><template #icon><n-icon aria-hidden="true"><cloud-upload-outline /></n-icon></template>导入已有</n-button>
+        <!--
+          「服务器上的包」与上面两个按钮的区别是**包在哪里**：那两个要浏览器上传，
+          这个列服务器 resources/imports 目录里已经放好的。运维 scp 完一批包之后，
+          手里没有可上传的文件，只需要「列出来让我选」。
+        -->
+        <n-button quaternary data-test="staged-archives" @click="openStagedPanel"><template #icon><n-icon aria-hidden="true"><archive-outline /></n-icon></template>服务器上的包</n-button>
       </div>
 
       <div v-if="loading" class="loading-state" aria-busy="true"><n-skeleton text :repeat="4" /><n-skeleton text style="width: 82%" /></div>
@@ -1244,6 +1350,74 @@ onBeforeUnmount(() => {
           <n-descriptions-item label="工作流">{{ selectedResource.workflow_id || '未绑定' }}</n-descriptions-item>
           <n-descriptions-item label="更新时间">{{ formatDate(selectedResource.updated_at) }}</n-descriptions-item>
         </n-descriptions>
+        <n-divider />
+        <!--
+          入口正文（需求 10 的「提示词管理」）。prompt 类型的全部内容就是正文，
+          而此前界面上没有任何地方能看到它。只读：安装后的正文不能就地改
+          （`content_sha256` 与清单绑定，运行时每次载入都重新校验），
+          改正文走下面的「上传 ZIP 升级」。
+        -->
+        <div class="entry-content" data-test="entry-content">
+          <div class="entry-content-header">
+            <h3 class="card-section-title">入口正文</h3>
+            <n-space align="center" :size="8">
+              <span class="mono entry-content-path">{{ selectedResource.entry }}</span>
+              <n-select
+                v-if="selectedResource.versions.length > 1"
+                v-model:value="entryContentVersion"
+                class="entry-version-select"
+                size="small"
+                :options="selectedResource.versions.map((item) => ({
+                  label: item.version === selectedResource!.current_version
+                    ? `${item.version}（当前生效）`
+                    : item.version,
+                  value: item.version
+                }))"
+                @update:value="(value) => loadEntryContent(selectedResource!, value)"
+              />
+              <n-button
+                size="tiny"
+                quaternary
+                data-test="reload-entry-content"
+                :loading="entryContentLoading"
+                @click="loadEntryContent(selectedResource!, entryContentVersion)"
+              >
+                重新读取
+              </n-button>
+            </n-space>
+          </div>
+
+          <div v-if="entryContentLoading" class="loading-state" aria-busy="true">
+            <n-skeleton text :repeat="3" />
+          </div>
+          <n-alert v-else-if="entryContentError" type="warning" :show-icon="true">
+            {{ entryContentError }}
+          </n-alert>
+          <template v-else-if="entryContent">
+            <!--
+              摘要一致才说明「你看到的」与「运行时载入的」是同一份。
+              不显示这一行时，用户只能靠信任——而这正是完整性校验存在的理由。
+            -->
+            <p class="entry-digest">
+              <n-tag
+                :type="entryDigestMatches ? 'success' : 'warning'"
+                size="small"
+                data-test="entry-digest"
+              >
+                {{ entryDigestMatches ? '摘要一致' : '摘要待核对' }}
+              </n-tag>
+              <span class="mono">{{ shortHash(entryContent.content_sha256) }}</span>
+            </p>
+            <pre class="entry-body">{{ entryContent.content }}</pre>
+            <p class="upload-hint">
+              正文不可就地编辑：内容摘要与清单绑定，运行时每次载入都会重新校验，
+              就地改会让这个资源在下一次载入时失败。要改正文请用下面的
+              「上传 ZIP 升级」装一个新版本。
+            </p>
+          </template>
+          <n-empty v-else description="该资源没有可显示的入口正文" />
+        </div>
+
         <n-divider />
         <!--
           版本历史与回滚（需求 22.3 的「可回滚机制」）。
@@ -1505,6 +1679,66 @@ onBeforeUnmount(() => {
       <n-empty v-if="!backupLoading && !backups.length" description="暂无资源备份" />
     </n-modal>
 
+    <n-modal :show="panel === 'staged'" preset="card" title="服务器上的资源包" aria-label="服务器上的资源包" class="resource-modal" @update:show="(value) => !value && closePanel()">
+      <n-alert type="info" :show-icon="true">
+        这里列出服务器 <code>resources/imports</code> 目录里已经存在的资源包——
+        用 scp 放上去的、或者从备份目录里翻出来的，都不需要再经浏览器上传一次。
+        列举是只读的：点「安装」才会解包，且安装后资源保持停用等待你确认权限。
+      </n-alert>
+      <div v-if="stagedLoading" class="loading-state" aria-busy="true"><n-skeleton text :repeat="3" /></div>
+      <n-empty
+        v-else-if="!stagedArchives.length"
+        description="服务器待导入目录里没有资源包"
+      >
+        <template #extra>
+          <span class="staged-empty-hint">
+            把 .zip 放进数据目录下的 <code>resources/imports</code>，再回到这里刷新。
+          </span>
+        </template>
+      </n-empty>
+      <ul v-else class="staged-list">
+        <li v-for="entry in stagedArchives" :key="entry.file_name" class="staged-row">
+          <div class="staged-main">
+            <strong class="mono">{{ entry.resource_id ?? entry.file_name }}</strong>
+            <span class="staged-meta">
+              <template v-if="entry.error">
+                <!-- 坏包单独标错：一个损坏的 ZIP 不该让整份列表打不开。 -->
+                <n-tag size="small" type="error">无法读取</n-tag>
+                {{ entry.error }}
+              </template>
+              <template v-else>
+                <n-tag v-if="entry.type" size="small">{{ typeLabel(entry.type as ResourceType) }}</n-tag>
+                <span class="mono">{{ entry.version }}</span>
+                <!-- 「已装 1.0.0、盘上有 2.0.0」与「已装 2.0.0」处置不同：
+                     前者点更新，后者什么都不用做。 -->
+                <n-tag v-if="entry.is_upgrade" size="small" type="warning">
+                  可更新（已装 {{ entry.installed_version }}）
+                </n-tag>
+                <n-tag v-else-if="entry.installed" size="small" type="success">已安装</n-tag>
+                <span class="staged-file mono">{{ entry.file_name }}</span>
+              </template>
+            </span>
+          </div>
+          <n-button
+            size="small"
+            :disabled="!!entry.error || (entry.installed && !entry.is_upgrade)"
+            :loading="stagedBusyFile === entry.file_name"
+            @click="installStaged(entry)"
+          >
+            {{ entry.is_upgrade ? '更新' : '安装' }}
+          </n-button>
+        </li>
+      </ul>
+      <template #footer>
+        <n-space justify="end">
+          <n-button quaternary :loading="stagedLoading" @click="loadStagedArchives">
+            <template #icon><n-icon aria-hidden="true"><refresh-outline /></n-icon></template>
+            重新扫描
+          </n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
     <n-modal :show="panel === 'relations'" preset="card" title="Agent 与资源关系" aria-label="Agent 与资源关系" class="resource-modal" @update:show="(value) => !value && closePanel()">
       <div v-if="relationLoading" class="loading-state"><n-skeleton text :repeat="4" /></div>
       <n-empty v-else-if="!agents.length" description="暂无 Agent 关系" />
@@ -1625,5 +1859,105 @@ h1 { margin: 8px 0 6px; font-size: 30px; line-height: 1.2; letter-spacing: 0; }
   .agent-relations { justify-content: flex-start; }
   .agent-row-detailed { grid-template-columns: 1fr; }
   .binding-groups { grid-column: 1; }
+  /* 窄屏下把每一行折成两层：文件名与版本挤在一行时会被截断，
+     而截断掉的恰恰是「哪一个包」这个唯一有区分度的信息。 */
+  .staged-row { align-items: stretch; flex-direction: column; }
+}
+
+.staged-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.staged-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--n-border-color, rgba(128, 128, 128, 0.24));
+  border-radius: 10px;
+}
+
+.staged-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.staged-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--text-color-secondary);
+  font-size: 0.85rem;
+}
+
+/* 文件名比资源 ID 弱一档：出问题时要找的是「哪个文件」，
+   但正常情况下用户关心的是「哪个资源」。 */
+.staged-file {
+  color: var(--text-color-tertiary);
+}
+
+.staged-empty-hint {
+  color: var(--text-color-tertiary);
+  font-size: 0.85rem;
+}
+
+.entry-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.entry-content-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.entry-content-path {
+  color: var(--text-color-tertiary);
+  font-size: 0.85rem;
+}
+
+.entry-version-select {
+  width: 190px;
+}
+
+.entry-digest {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--text-color-secondary);
+  font-size: 0.85rem;
+}
+
+/* 正文用等宽 + 保留换行：提示词的段落与缩进是它语义的一部分，
+   按普通段落折行会让「先给结论，再给依据」这类结构读不出来。
+   限高并可滚动，避免一份长提示词把整个详情弹窗挤成一条长卷。 */
+.entry-body {
+  max-height: 320px;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--n-border-color, rgba(128, 128, 128, 0.24));
+  border-radius: 10px;
+  background-color: var(--code-bg-color, rgba(128, 128, 128, 0.08));
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  tab-size: 2;
 }
 </style>

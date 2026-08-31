@@ -1,4 +1,4 @@
-"""Unified CC Switch-style resource catalog.
+"""Unified resource catalog for discover-and-install flows.
 
 The catalog is deliberately small and server-owned.  Search results are
 metadata only; installation always resolves a server-generated catalog ID and

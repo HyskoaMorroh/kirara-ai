@@ -25,6 +25,33 @@
 
 Agent 的实际执行仍由 WorkflowExecutor 完成；禁用对应规则或删除用户副本即可停止它。不要把能写文件、发消息、改配置、执行命令或产生费用的工具直接挂到公开规则。
 
+### 可以绑定 Agent 的渠道
+
+`POST /backend-api/api/agents/<agent_id>/bind-channel` 接受的渠道类型是一份固定枚举：
+
+| 渠道类型 | 入口 |
+| --- | --- |
+| `webui` | WebUI 的对话页 |
+| `onebot` | OneBot / QQ（反向 WebSocket） |
+| `qqbot` | QQ 官方机器人 |
+| `telegram` | Telegram |
+| `wecom` | 企业微信与微信公众号 |
+| `http` | HTTP Legacy API（`im_http_legacy_adapter`） |
+
+`http` 此前**不在**这份枚举里，而适配器类名推导出的渠道类型是 `httplegacy`：
+两侧对不上，绑定请求被拒，该入口只能退到全局默认 Agent——想给它单独配一条
+模型链或一套 Prompt 都做不到。
+
+现在**六个适配器全部显式声明 `channel_type`**，不再有任何一个依赖类名推导。
+推导今天恰好给出正确结果，但那是巧合而非契约：一次类名重构会让该渠道的所有
+Agent 绑定**静默失效**（绑定表存旧值、运行时算新值，两边对不上，请求退回全局默认
+Agent），会话键也跟着漂移使历史上下文断开——两者都不报错。
+源码级契约测试 `tests/agent_runtime/test_channel_type_declarations.py` 要求：
+枚举里每个渠道有且只有一个适配器声明它，且改类名不影响声明值。
+
+按账号绑定（`bind-account`）与按会话绑定（`bind-session`）对六个渠道一视同仁，
+优先级为「会话 > 账号 > 渠道 > 全局默认」。
+
 ## 3. 目录支持的 Skill
 
 `kirara_ai/workflow/presets/catalog.json` 为每个随包 YAML 提供稳定 ID、中文名、用途、前置条件、触发示例、能力和难度。比如 `chat:time_aware` 可描述成“输入聊天消息，注入当前时间后输出回复”的 Skill，但执行物仍是 `time_aware.yaml`。
@@ -45,6 +72,43 @@ Agent 的实际执行仍由 WorkflowExecutor 完成；禁用对应规则或删�
 非 GitHub 来源（catalog、skills.sh、本地导入）也会出现在结果里，
 带 `update_channel_supported: false` 并说明应如何获取新版本——
 此前这些来源被直接跳过，界面上看不到任何行，等于被当成「无更新」。
+
+### 装进来的四条路径
+
+| 入口 | 包在哪里 | 接口 |
+| --- | --- | --- |
+| 从 ZIP 安装 | 浏览器本地 | `POST /backend-api/api/resources` |
+| 导入已有 | 浏览器本地 | `POST /backend-api/api/resources/imports` |
+| **服务器上的包** | 服务器 `resources/imports` 目录 | `GET /backend-api/api/resources/imports` 列举、`POST .../imports/install` 安装 |
+| 从仓库 / skills.sh 发现 | 远端 | `GET .../repositories/<owner>/<name>/<branch>/discover`、`GET .../skills-sh/search` |
+
+第三条覆盖的是**用户手里没有可上传文件**的处境：运维用 `scp` 把一批包放进了
+服务器，或者包有几十 MB 走浏览器既慢又容易断。它只扫 `resources/imports`
+这一层，安装时只接受**文件名**——允许路径就等于把一个只读列举接口变成任意
+文件安装接口，连子目录也不认。
+
+列举是只读的（不解包、不落盘，`resources.read` 即可），安装与上传安装同一边界
+（创建者身份，装完保持停用等待确认权限）。已装过的包标为「已安装」或
+「可更新（已装 x.y.z）」而不是从列表里消失——消失会让人以为文件没放对，
+于是反复重传同一个包。解析失败的包单独标错，不影响同目录其他行。
+
+### 看正文：`GET /resources/<id>/content`
+
+prompt 类型的全部内容就是正文，因此「提示词管理」必须能回答「现在生效的
+提示词到底写了什么」。这个只读接口返回入口的包内相对路径、正文、
+**已校验摘要**、来源与权限声明；WebUI 在资源详情弹窗里显示它，多版本时可切换。
+
+摘要一起给出是必需的：它让「你看到的」与「运行时载入的是同一份」可自证，
+而不是靠信任。
+
+**没有对应的写入接口，这是设计而不是遗漏。** `content_sha256` 把清单与文件
+绑在一起，`read_entry` 每次读取都重新校验摘要。就地编辑的后果不是
+「改了没生效」，而是那个资源在下一次载入时直接失败。改正文的受支持路径是
+`POST /resources/<id>/versions`（版本号必须递增、自动备份、装完保持停用
+等待确认权限）。提供一个会破坏完整性契约的编辑框，比不提供更糟。
+
+`version` 必须在该资源的 `versions` 列表里，否则请求被拒——一个拼错的版本号
+不能变成任意路径读取。
 
 ### 「已启用」不等于「生效」
 
@@ -70,8 +134,7 @@ Agent** 之后才会进入 LLM 请求——`executor._build_messages` 遍历的�
 我们没有依据的论断，而那会让人去解决一个不存在的问题。
 
 ## 3.1 技能的渐进披露：模型「选用」而不是被灌满
-
-绑定的技能不再整篇塞进每一次请求。机制与 cc-switch / Claude Code 一致：
+绑定的技能不再整篇塞进每一次请求。机制与主流 Agent 客户端一致：
 
 | 技能形态 | 系统提示词里 | 正文什么时候载入 |
 | --- | --- | --- |
@@ -140,6 +203,38 @@ Agent** 之后才会进入 LLM 请求——`executor._build_messages` 遍历的�
 用 `GET /backend-api/api/plugin/plugins` 查看插件清单，用 `GET /backend-api/api/plugin/plugins/<plugin_name>` 查看单个插件及 manifest。禁用或删除插件属于运行状态变更，应先确认受影响工作流；旧式无 manifest 插件为兼容性仍可加载，不能据此推断其最小权限。
 
 ## 5. MCP 工具集成
+
+### 5.0 工具也走渐进披露：Tool Search
+
+工具数超过 `agent_runtime.tool_search_threshold`（默认 12）时，系统提示词里
+**不再放每个工具的完整 JSON Schema**，只放一行目录（名字 + 一句用途），
+完整定义由 `search_tools` 按关键词取回。机制与技能的渐进披露（第 3.1 节）
+完全对称，因此只需要理解一套心智模型。
+
+为什么按数量而不是按开关：
+
+| 工具数 | 全量注入 | 目录 + 搜索 |
+| --- | --- | --- |
+| 三个 | 一次性开销很小 | 多一轮往返，纯损失 |
+| 四十个 | 每轮固定多付上万 token，且模型更容易选错 | 目录几百 token，用到才付 schema |
+
+同一个布尔开关在这两种规模上一个是纯损失、一个是纯收益，所以它是阈值。
+**`0` 表示关闭**，拿回逐字节一致的全量注入行为。
+
+四条边界：
+
+- **搜到的工具立即进入本轮工具列表。** 只把名字告诉模型而不放进列表，
+  它下一轮调用会撞 `permission denied for MCP tool`——按我们给的目录做了正确的事
+  却被判成越权，而那个错误无法自查。
+- **搜索工具搜完不收走。** 第一次没搜准时才有第二次机会。
+- **白名单之外的工具既不进目录，也搜不出来。** 搜索是一条取回路径，不是提权路径；
+  否则「工具白名单」这个边界就没了。
+- **无命中返回「没找到」并建议换词，不猜最接近的那个。** 猜一个交出去比返回空更糟，
+  模型会调用一个它没有要求的工具。
+
+**怎么确认这步成了**：在「追踪 → 请求日志」里打开一次真实请求，工具列表里应只有
+`search_tools`（工具多时），而系统提示词里能看到那份目录。模型用到某个工具的那一轮，
+它才出现在工具列表里。
 
 只读盘点接口：
 
@@ -340,6 +435,11 @@ Skill 包和它依赖的可执行程序是**两件事**。装上 `agent-browser`
   这是「只有创建者能改 VPS」这条约束在依赖安装上的落地方式。
 - **探测一个不存在的可执行文件是「未安装」，不是接口错误。** 探测接口在这种情况下
   返回 `missing` 状态而不是 5xx，因此前端可以正常展示「未安装」并给出下一步。
+- **探测命令必须能区分同名的不同工具。** `rtk` 有两个不相关的同名程序，
+  两个都响应 `--version`。只探版本号会把装错的那个判成「就绪」，
+  而错误要到实际调用时才暴露——那时界面已经说过它可用了。因此 `rtk-cli` 探测
+  `rtk --version` 与 `rtk gain` 两条，后者是说明里点名的判据。
+  一条依赖的全部探测命令必须**逐条**成功才算就绪。
 
 ### 依赖状态会进到对话里
 
@@ -393,7 +493,7 @@ Skill 包和它依赖的可执行程序是**两件事**。装上 `agent-browser`
 ```yaml
 agent_runtime:
   creator_channel_identities:
-    - channel_type: onebot        # webui / onebot / qqbot / telegram / wecom
+    - channel_type: onebot        # webui / onebot / qqbot / telegram / wecom / http
       sender_scope: "10001"       # 你自己在该渠道上的用户标识，不是机器人的
       # account_scope: "20002"    # 可选：只认经由这个机器人账号收到的消息
       # adapter_instance: onebot-main  # 可选：限定适配器实例

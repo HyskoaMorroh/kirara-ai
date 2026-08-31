@@ -676,6 +676,30 @@ class LLMManager:
             cause=last_error,
         ) from last_error
 
+    def stream_supports_tool_calls(
+        self,
+        model_id: str,
+        provider_allowlist: Optional[Iterable[str]] = None,
+    ) -> bool:
+        """这个模型的**每一个**候选供应商是否都能在流式下交出工具调用。
+
+        要求「每一个」而不是「至少一个」：故障转移会在候选之间切换，如果只有第一家
+        支持而第二家不支持，那么一次转移之后工具调用就静默消失了——而用户看到的是
+        一次成功的纯文本回复。能力必须按最弱的候选算。
+
+        没有候选时返回 ``False``：那时走非流式让既有的错误路径给出可读原因，
+        比在流式路径上失败更容易排查。
+        """
+        candidates = self.get_provider_candidates(
+            model_id, provider_allowlist=provider_allowlist
+        )
+        if not candidates:
+            return False
+        return all(
+            bool(getattr(adapter, "supports_stream_tool_calls", False))
+            for adapter in candidates
+        )
+
     def execute_stream(
         self,
         request: LLMChatRequest,
@@ -1428,7 +1452,23 @@ class LLMManager:
         return False
 
     def reset_provider_circuit(self, provider_name: str) -> None:
+        """把一个 Provider 的熔断器手动清回 closed，并撤销它的持久化隔离。
+
+        必须先删持久化记录再重建内存状态。反过来做的话，`_initialize_resilience_state`
+        会把「字典里没有这个名字」当成新建，紧接着从状态文件里把刚被重置的
+        open / half-open **原地恢复**回来——重置不需要等到重启就已经失效，
+        而调用方拿到的是成功返回。那种失败最难查：界面说已重置，
+        下一个请求仍然跳过这个 Provider，日志里既没有错误也没有重置痕迹。
+        """
+        store = self._circuit_store()
+        if store is not None:
+            try:
+                store.forget(provider_name)
+            except Exception as error:  # noqa: BLE001 - 撤销失败不该让重置整体失败
+                # 仍然继续清内存：本进程内立即生效，最坏情况是下次启动又恢复一次。
+                self.logger.warning(f"熔断状态撤销失败：{error}")
         self._resilience_breakers.pop(provider_name, None)
+        self._resilience_attempts.pop(provider_name, None)
         self._initialize_resilience_state()
 
     def get_supported_models(self, model_type: Union[ModelType, ModelAbility], ability: Optional[ModelAbility] = None) -> List[str]:

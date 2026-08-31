@@ -66,6 +66,14 @@ export interface LLMBackend {
   rectify_thinking_budget?: boolean
   /** 会改变模型看到的内容（图片被换成占位文本），因此单列一项可关。 */
   rectify_media_fallback?: boolean
+  /**
+   * 上游不认识 `reasoning_effort` 时删掉该字段再重试一次。
+   *
+   * 与其他三项同理不进 `resilienceDefaults()`：后端默认开启，
+   * 前端补一份 `true` 会让用户在 config.yaml 里关掉的那次被一次无关的编辑
+   * 重新打开。
+   */
+  rectify_reasoning_effort_unsupported?: boolean
 }
 
 /**
@@ -187,6 +195,30 @@ export interface RateLimitHeadroom {
   /** 余量比例 0–1。缺 limit 或 remaining 任一半时为 `null`，不反推。 */
   request_headroom: number | null
   token_headroom: number | null
+}
+
+/**
+ * 一个后端的自动检测计划状态。字段与 `TaskScheduler.get_status()` 平铺一致。
+ */
+export interface AutoDetectScheduleRow {
+  name: string
+  /** 天。`0` 表示这个后端关闭了自动检测。 */
+  interval_days: number
+  /**
+   * 上一次**成功**检测的 ISO 时间；`null` 表示从未成功跑过。
+   *
+   * `null` 与「很久以前」是两件事：前者可能是从没到期、也可能是每次都失败，
+   * 界面必须让它区别于一个真实的旧时间戳，否则运维会以为它跑过。
+   */
+  last_run: string | null
+  /** 当前这个后端配置里有多少个模型。 */
+  model_count: number
+}
+
+export interface AutoDetectScheduleResponse {
+  /** 后台调度循环是否在跑。为 false 时所有间隔配置都不会生效。 */
+  running: boolean
+  backends: AutoDetectScheduleRow[]
 }
 
 export interface ProviderResilienceRow {
@@ -357,6 +389,43 @@ export const llmApi = {
     })
   },
 
+  /**
+   * 模型目录的定期自动刷新计划。
+   *
+   * 后端一直提供这三个接口，但前端**零调用点**——运维要改一个后端的检测间隔
+   * 只能 curl 或者手改 `data/config.yaml` 再重启。「定期自动刷新」这件事在产品上
+   * 因此不可见：没有页面说明下一轮什么时候跑、上一轮跑没跑成、这个后端到底有没有
+   * 开启。这里补上调用点，由「模型 → 自动检测计划」页消费。
+   */
+  getAutoDetectSchedule(signal?: AbortSignal) {
+    return http.get<AutoDetectScheduleResponse>('/llm/auto-detect-schedule', { signal })
+  },
+
+  /**
+   * 改一个后端的检测间隔天数。`0` 表示关闭。
+   *
+   * 这个动作会**写入 `data/config.yaml`**（后端带备份保存），因此界面上必须说明
+   * 它不是一次临时查询。后端拒绝负数（400）。
+   */
+  updateAutoDetectSchedule(backendName: string, intervalDays: number) {
+    return http.put<{ name: string; interval_days: number }>(
+      `/llm/backends/${encodeURIComponent(backendName)}/auto-detect-schedule`,
+      { interval_days: intervalDays }
+    )
+  },
+
+  /**
+   * 立刻对所有配置了间隔的后端跑一轮检测。
+   *
+   * 这会**访问每一个上游**并可能改写配置里的模型目录，不是只读操作。
+   * 界面上要有确认，且要说清影响范围——它不是「刷新一下页面」。
+   */
+  runAutoDetectNow() {
+    return http.post<{ results: Record<string, boolean> }>(
+      '/llm/auto-detect-schedule/run'
+    )
+  },
+
   listPricing() {
     return http.get<PricingCatalogResponse>('/llm/pricing')
   },
@@ -370,6 +439,23 @@ export const llmApi = {
    */
   getResilienceStatus(signal?: AbortSignal) {
     return http.get<{ data: ProviderResilienceRow[] }>('/llm/resilience/status', { signal })
+  },
+
+  /**
+   * 把一个 Provider 的熔断器清回 `closed`，并同时撤销持久化的隔离。
+   *
+   * 没有这个动作时，一次上游抖动打开的熔断只能等满恢复窗口，或者重启整个
+   * 进程——而重启会一并中断所有正在进行的对话。面板显示 `已熔断` 却没有任何
+   * 动作能改变它，是这条接口存在的理由。
+   *
+   * `confirmed: true` 是后端的硬要求（缺它返回 400）：这个动作把一个刚被判定
+   * 不健康的上游放回真实流量，因此不接受「顺手点一下」。
+   */
+  resetProviderCircuit(name: string) {
+    return http.post<{ data: ProviderResilienceRow[] }>(
+      `/llm/backends/${encodeURIComponent(name)}/circuit/reset`,
+      { confirmed: true }
+    )
   },
 
   createPricing(payload: { expected_revision: number; version: PricingVersion }) {

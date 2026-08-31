@@ -74,6 +74,16 @@ OneBot 实现（LLOneBot / NapCat 等）主动连过来。因此保存适配器�
    这种情况再等也不会自己好，必须改配置。
 3. QQ 侧容器从启动到登录完成通常要 30–90 秒，这段时间显示「等待连接」是正常的。
 
+两个后来才会遇到的状态，先知道比事后查更省事：
+
+- **「正在重连」不是故障。** `docker compose down && pull && up -d` 之后
+  OneBot 实现会自己回连，这段时间什么都不用做。它与「已断开」是两回事——
+  后者才需要你动手。超过重连宽限期（默认 45 秒）仍没连上才转为「已断开」。
+- **二维码总是过期时，先点那一行的「刷新扫码状态」。** 有效期实测 120 秒，
+  比「看一眼、去拿手机、回来扫」这个动作序列短，屏幕上那张常常已经不是最新的。
+  该按钮只重读上游日志（二维码由 OneBot 实现自己生成），看不到扫码信息时是
+  没配 `qr_login_log_path`，不是故障。
+
 状态含义、断开原因码对照、数据目录清单与 Compose 验收矩阵见
 [`QQ_ONEBOT_OPERATIONS.md`](QQ_ONEBOT_OPERATIONS.md)。
 
@@ -105,31 +115,79 @@ OneBot 实现（LLOneBot / NapCat 等）主动连过来。因此保存适配器�
 | 上次检测时间记录 | `data/auto_detect_state.json` |
 | 目录有变化时 | 写回 `data/config.yaml`（带备份），并重载该后端 |
 
-相关接口：`GET /backend-api/api/llm/auto-detect-schedule` 查看各后端计划与上次执行时间，`PUT /backend-api/api/llm/backends/<backend_name>/auto-detect-schedule` 改间隔天数，`POST /backend-api/api/llm/auto-detect-schedule/run` 立刻强制跑一轮。后两项会写配置/状态，强制检测还会访问远端；不要把它们放进默认只读 smoke。
+界面在**「模型 → 自动检测计划」**（`/llm/auto-detect`）。这一页给出每个后端的间隔天数、上次成功时间、下一轮预计时刻与当前模型数，可以直接改间隔（保存即生效，不需要重启），也可以「立即检测全部」跑一轮。
 
-> 注意：截至当前版本，这三个接口**没有对应的 WebUI 界面**，只能用 API 调用（下面第 6 步给了可直接复制的命令）。间隔天数也可以直接改 `data/config.yaml` 里后端的 `auto_detect_interval_days` 后重启。
+三处刻意的呈现，都是为了不给出错误的安心：
 
-### 回复生成模式：非流式（默认）与流式
+- **上次成功为「—」表示从未成功检测过**，与「很久以前检测过」是两件不同的事。启动后首轮有 60 秒基础延迟加 0–300 秒随机抖动；长期为「—」要去查该后端的凭据与网络。
+- **后台调度循环没在运行时页首会显著提示**。那种情况下所有间隔配置都不会触发，逐行显示「每 5 天」是一句谎话。
+- **「立即检测全部」带确认**：它会访问每一个上游、消耗配额，并在目录有变化时改写 `data/config.yaml`（后端先备份），不是一次只读刷新。
 
-`data/config.yaml` 的 `agent_runtime.reply_stream_mode` 有两个取值：
+对应接口：`GET /backend-api/api/llm/auto-detect-schedule` 查看各后端计划与上次执行时间，`PUT /backend-api/api/llm/backends/<backend_name>/auto-detect-schedule` 改间隔天数，`POST /backend-api/api/llm/auto-detect-schedule/run` 立刻强制跑一轮。后两项会写配置/状态，强制检测还会访问远端；不要把它们放进默认只读 smoke（下面第 6 步给了可直接复制的命令）。间隔天数也可以直接改 `data/config.yaml` 里后端的 `auto_detect_interval_days` 后重启。
+
+### 回复生成模式：非流式（默认）、流式聚合与逐步推送
+
+`data/config.yaml` 的 `agent_runtime.reply_stream_mode` 有三个取值：
 
 | 取值 | 行为 | 何时用 |
 |---|---|---|
 | `off`（默认） | 非流式请求，一次拿到完整回复 | 默认；与既有部署行为完全一致 |
 | `aggregate` | 以**流式**方式向上游取回内容，再整段投递 | 想让流式超时与首字节前的故障转移生效时 |
+| `incremental` | 在 `aggregate` 之上，边生成边把内容推给用户 | 渠道能改写已交付内容时（Telegram 编辑已发消息、WebUI 在线对话走 SSE） |
 
-`aggregate` **不是**逐字推送。QQ、Telegram、WeCom 都不支持对已发出的消息逐字编辑，
-逐字推送只会变成几十条碎片消息。它的实际收益是三条容错路径开始生效：
+`aggregate` **不是**逐字推送。它的实际收益是三条容错路径开始生效：
 
 - `stream_first_byte_timeout_seconds`：等首个数据块的上限，超时可切换下一个供应商；
 - `stream_idle_timeout_seconds`：识别中途卡住的流；
 - **首字节之前**的故障转移是安全的（还没有任何内容发给用户）；一旦已经产出内容，
   系统不会切换并拼接，避免用户看到两段重复回复。
 
+`incremental` 需要渠道能**改写已经交付出去的内容**。两个渠道具备：
+
+- **Telegram**（`editMessageText`）：先发一条「正在生成回复…」占位消息，随生成不断
+  改写它，改写间隔 1.2 秒以避开限流。
+- **WebUI 的在线对话**（SSE）：`POST /backend-api/api/llm/chat/stream` 把一轮回复送成
+  `start` / `delta` / `done` 事件，一条事件就是一次追加，界面上文字逐段出现。
+  这条路**默认开启**，不需要改配置；界面右上角有「流式 / 非流式」开关可以现场对比。
+
+QQ / OneBot 与企业微信没有等价接口，在那些渠道上这一档**自动退化成 `aggregate`**
+（仍走流式请求，仍有超时保护，用户仍只看到一条完整回复），不会报错也不会变成几十条
+碎片消息。
+
+> 反向代理关掉分块传输时 SSE 会被攒成一整块再发出，表现是「等很久然后整段出现」。
+> 后端已经带上 `X-Accel-Buffering: no`（nginx 的约定）；仍有问题时把
+> `channel_reply_stream_modes.webui` 显式配成 `off`，可以确认问题在代理而不在项目。
+
+增量投递成功之后**不会**再整段发一次——否则同一段回复会出现两遍。反之，占位消息
+发不出去、改写被限流、或渠道不支持编辑时，整段投递照常兜底，用户不会什么都收不到。
+
+按渠道覆盖用 `agent_runtime.channel_reply_stream_modes`，键是渠道类型
+（`telegram` / `onebot` / `wecom` / `qqbot` / `webui` / `http`）：
+
+```yaml
+agent_runtime:
+  reply_stream_mode: aggregate          # 进程默认
+  channel_reply_stream_modes:
+    telegram: incremental               # 编辑已发出的那条消息
+    onebot: aggregate                   # QQ 没有等价能力，写 incremental 也会退回这一档
+```
+
+`webui` 不写也会走 SSE：那条路由本身就是按流式协议接住回复的，所以「客户端已经打开
+了一条流」这件事本身就是一次 `incremental` 声明（优先级在 Agent 与渠道**之后**、
+进程默认之前）。要关掉它就把 `webui` 显式写成 `off`。
+
+单个 Agent 还可以再覆盖一层（`reply_stream_mode`，多一个取值 `inherit` 表示跟随
+上层，也是默认值）。优先级是 **Agent 声明 > 渠道默认 > 进程默认**；无法识别的取值
+一律当「跟随上层」，绝不当开启。入口在「Agent 管理 → 回复取回方式」。
+
 前提是所用适配器实现了流式接口。**OpenAI 兼容、Claude、Gemini、Ollama 均已实现**
 （OpenAI 兼容那一族包含 DeepSeek、Moonshot、Mistral、OpenRouter、SiliconFlow、
 硅基/火山/阿里云等预设）；未实现的适配器会自动回退到非流式路径，不会报错。
-工具调用轮次始终走非流式——工具轮需要结构化的 `tool_calls`，聚合文本会把它丢掉。
+
+**带工具的请求也能走流式**，前提是适配器的流式解析会累积 `delta.tool_calls`——
+OpenAI 兼容那一族已经会，Claude / Gemini / Ollama 目前只解析文本增量，
+带工具时仍走非流式。这个区分很重要：绑了 MCP 的 Agent 在第 0 轮就带着工具，
+如果一律按非流式处理，它**永远**拿不到上面那三项保护，而那是本项目最常见的形态。
 
 ### 单轮总时间预算：`turn_deadline_seconds`
 

@@ -1,6 +1,6 @@
 """Teammates 模式：把其他 Agent 作为工具委派（需求 8）。
 
-cc-switch 的 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` 打开的是 Claude Code CLI 的
+参考实现的实验性 agent teams 开关打开的是编码 CLI 的
 多 agent 协作。本项目的等价物在 Agent 层而不是供应商层——供应商是「上游模型」，
 不是「协作单元」。因此实现为 `AgentDefinition.teammate_agent_ids`：
 打开后当前 Agent 会额外获得若干 `delegate_to_<agent_id>` 工具，

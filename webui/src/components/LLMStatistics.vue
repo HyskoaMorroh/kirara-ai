@@ -721,15 +721,19 @@ const providerUsageOption = computed(() => {
 /** 用量来源分布：真实 / 估算 / 未知必须能一眼看出比例。 */
 const usageSourceOption = computed(() => {
   const rows = llmStats.value?.usage_sources ?? []
+  // `provider_partial` 单列：它的总额是补出来的（上游没报缓存维度，
+  // 缺失维度按 0 计价）。与 `provider` 合并显示等于把一份系统性偏低的账单
+  // 说成完全可信。
   const labels: Record<string, string> = {
     provider: '供应商返回',
+    provider_partial: '供应商部分回报',
     estimated: '本地估算',
     unknown: '未知'
   }
   return {
     title: {
       text: 'Token 来源构成',
-      subtext: '估算与未知不能当作实测消耗',
+      subtext: '估算与未知不能当作实测消耗；部分回报的总额按缺失维度为 0 计',
       left: 'center',
       top: 10,
       textStyle: { fontSize: 15, fontWeight: 'normal', color: chartText.value },

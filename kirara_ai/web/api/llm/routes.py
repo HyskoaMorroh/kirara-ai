@@ -1,5 +1,6 @@
 from copy import deepcopy
 from functools import wraps
+import asyncio
 import json
 import os
 from typing import Any
@@ -9,6 +10,7 @@ from quart import Blueprint, Response, g, jsonify, request
 
 from kirara_ai.agent_runtime import AgentRegistry, RuntimeStatus
 from kirara_ai.config.config_loader import CONFIG_FILE, ConfigLoader
+from kirara_ai.credential_keys import NON_CREDENTIAL_KEY_NAMES, is_credential_key
 from kirara_ai.config.global_config import GlobalConfig, LLMBackendConfig
 from kirara_ai.im.message import IMMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
@@ -24,10 +26,10 @@ from kirara_ai.scheduler.scheduler import CONFIG_UPDATE_LOCK
 from kirara_ai.web.api.llm.models import (LLMAdapterConfigSchema, LLMAdapterTypes, LLMBackendCreateRequest,
                                           LLMBackendInfo, LLMBackendList, LLMBackendListResponse, LLMBackendResponse,
                                           LLMBackendUpdateRequest, ModelConfigListResponse, WebUIChatRequest)
-from kirara_ai.web.api.llm.webui_adapter import WebUIAdapter
+from kirara_ai.web.api.llm.webui_adapter import WebUIAdapter, WebUIStreamSink
 from kirara_ai.workflow.core.dispatch.dispatcher import WorkflowDispatcher
 
-from ...auth.middleware import require_auth
+from ...auth.middleware import require_auth, require_creator
 
 llm_bp = Blueprint("llm", __name__)
 logger = get_logger("WebServer.LLM")
@@ -383,17 +385,7 @@ async def webui_chat():
             return jsonify({"error": "Request body must be a JSON object"}), 400
         chat_request = WebUIChatRequest.model_validate(payload)
 
-        if chat_request.chat_type == "group":
-            sender = ChatSender.from_group_chat(
-                user_id=chat_request.session_id,
-                group_id=chat_request.group_id or "",
-                display_name=chat_request.username,
-            )
-        else:
-            sender = ChatSender.from_c2c_chat(
-                user_id=chat_request.session_id,
-                display_name=chat_request.username,
-            )
+        sender = _webui_sender(chat_request)
 
         message = IMMessage(
             sender=sender,
@@ -444,6 +436,181 @@ async def webui_chat():
         return jsonify({"error": "Agent runtime dispatch failed"}), 502
 
 
+def _webui_sender(chat_request: WebUIChatRequest) -> ChatSender:
+    """把一次 WebUI 请求映射成渠道身份。
+
+    抽出来供流式与非流式两条路由共用：两处各写一份时，「群聊要带 group_id」
+    这类规则迟早只在一条路径上成立，而两条路径产出的 ``session_key`` 一旦不同,
+    同一个人在同一个会话里切换流式开关就会换到另一段历史上去。
+    """
+    if chat_request.chat_type == "group":
+        return ChatSender.from_group_chat(
+            user_id=chat_request.session_id,
+            group_id=chat_request.group_id or "",
+            display_name=chat_request.username,
+        )
+    return ChatSender.from_c2c_chat(
+        user_id=chat_request.session_id,
+        display_name=chat_request.username,
+    )
+
+
+def _sse_frame(event: str, payload: dict[str, Any]) -> str:
+    """一个 SSE 事件帧。
+
+    ``data`` 用紧凑 JSON 且 ``ensure_ascii=False``：中文回复按 ``\\uXXXX`` 转义会让
+    传输量涨到三倍，而 SSE 规定 UTF-8，没有必须转义的理由。负载里的换行由 JSON
+    自己转义成 ``\\n``，因此一定是单行——SSE 的 ``data:`` 按行分割，多行负载会被
+    浏览器拼成带换行的字符串，那时 ``JSON.parse`` 仍然可用但边界更脆。
+    """
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event}\ndata: {body}\n\n"
+
+
+@llm_bp.route("/chat/stream", methods=["POST"])
+@require_auth
+async def webui_chat_stream():
+    """Stream one WebUI reply as Server-Sent Events (需求 4).
+
+    与 ``/chat`` 同一条派发链路、同一个渠道身份、同一份 Agent 解析，只是把回复
+    改成边生成边送。需求 4 要「流式和非流式输出」，而此前项目自己的 WebUI 在线
+    对话是四个入口里唯一连技术上的可能都没有的一个：一次性 POST，后端没有任何
+    聊天 SSE 路由。浏览器里这件事本来最容易——一条事件就是一次改写。
+
+    三个边界，每一个都对应一种「看起来成功其实坏了」的失败：
+
+    * **校验错误留在流之外。** 请求体写错时仍然返回 400。塞进 SSE 会让「请求写错
+      了」和「生成失败了」在客户端长得一样，而前者应当由表单立刻提示。
+    * **运行期错误必须作为事件送达。** 响应头在第一个字节之后就发出去了，此后
+      无法再改状态码。这时把异常抛出去，浏览器看到的是一个正常结束的空流——
+      界面停在「正在生成」，只有后端日志里有错误。
+    * **``done`` 永远带完整文本。** ``reply_stream_mode`` 配成 ``off`` 或运行时一次
+      增量都没推时，流里没有任何 ``delta``；此时 ``done`` 必须补上整段，否则那些
+      部署在 WebUI 上得到一个空回复而日志显示成功。
+    """
+    payload = await request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
+    try:
+        chat_request = WebUIChatRequest.model_validate(payload)
+        sender = _webui_sender(chat_request)
+    except ValidationError as error:
+        logger.debug("Rejected invalid WebUI stream request: {}", error.error_count())
+        return jsonify({"error": "Invalid WebUI chat request"}), 400
+    except ValueError as error:
+        logger.warning("WebUI stream chat rejected: {}", error)
+        return jsonify({"error": str(error)}), 400
+
+    dispatcher: WorkflowDispatcher = g.container.resolve(WorkflowDispatcher)
+    sink = WebUIStreamSink()
+    adapter = WebUIAdapter(
+        session_agent_id=chat_request.agent_id,
+        stream_sink=sink.emit,
+    )
+    message = IMMessage(
+        sender=sender,
+        message_elements=[TextMessage(chat_request.message)],
+    )
+
+    async def run_dispatch() -> dict[str, Any]:
+        """跑完一轮并交出终局事件的负载。异常在这里被翻译成 ``error`` 负载。"""
+        try:
+            result = await dispatcher.dispatch(
+                adapter,
+                message,
+                require_agent=True,
+                # 客户端已经打开了一条流，默认就该往里推。这个声明在
+                # `resolve_reply_stream_mode` 里排在 Agent 与渠道之后：
+                # 运维写下的明确取值仍然优先，但默认配置下这条路由不会退化成
+                # 「只发 start 与 done」——那样这个功能在所有未特意配置的部署上
+                # 都不生效。
+                reply_stream_mode="incremental",
+            )
+        except LookupError as error:
+            if str(error) == "No Agent is configured for this channel identity":
+                return {"_event": "error", "error": str(error)}
+            logger.warning("WebUI stream chat rejected: {}", error)
+            return {"_event": "error", "error": str(error)}
+        except ValueError as error:
+            logger.warning("WebUI stream chat rejected: {}", error)
+            return {"_event": "error", "error": str(error)}
+        except Exception as error:  # noqa: BLE001 - 必须变成流内事件而不是死流
+            logger.opt(exception=error).error("WebUI stream dispatch failed")
+            return {"_event": "error", "error": "Agent runtime dispatch failed"}
+        if result is None:
+            return {"_event": "error", "error": "No dispatch rule handled this message"}
+        if result.status is RuntimeStatus.FAILED:
+            logger.warning(
+                "WebUI stream Agent runtime failed with type {}",
+                (result.error or {}).get("type", "RuntimeError"),
+            )
+            # 上游原始错误不外泄：只给一个稳定、可处置的说法。
+            return {"_event": "error", "error": "Agent runtime failed"}
+        context = result.context
+        if context is None:
+            from kirara_ai.agent_runtime import ChannelContext
+
+            context = ChannelContext.from_message(adapter, message)
+        return {
+            "_event": "done",
+            "status": result.status.value,
+            "text": result.text or "",
+            "agent_id": result.agent_id,
+            "session_id": chat_request.session_id,
+            "session_key": context.session_key,
+            "confirmation_id": result.confirmation_id,
+        }
+
+    async def events():
+        yield _sse_frame("start", {"session_id": chat_request.session_id})
+        task = asyncio.ensure_future(run_dispatch())
+        # 生产者结束后必须放下哨兵，否则 drain 会永远等下去：界面停在
+        # 「正在生成」而后端已经没有人在干活。用 done callback 而不是在 task 里
+        # 自己收尾，这样异常路径也一定会走到。
+        task.add_done_callback(lambda _: sink.close())
+        streamed = 0
+        try:
+            async for kind, text in sink.drain():
+                if kind == "reset":
+                    # 上游重写了已交付前缀（极少见）。让客户端整段替换，
+                    # 而不是让它按追加拼出一段与服务端不同的文本。
+                    streamed = len(text)
+                    yield _sse_frame("reset", {"text": text})
+                    continue
+                streamed += len(text)
+                yield _sse_frame("delta", {"text": text})
+            final = await task
+        except asyncio.CancelledError:
+            # 客户端断开。取消这一轮而不是让它在后台跑到底：那会白付一次上游费用,
+            # 而没有人会收到结果。
+            task.cancel()
+            raise
+        event = final.pop("_event")
+        if event == "done" and streamed == 0 and final.get("text"):
+            # 一次增量都没推（off 档，或运行时不走增量）：done 补上整段。
+            pass
+        yield _sse_frame(event, final)
+
+    return Response(
+        events(),
+        content_type="text/event-stream; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            # nginx 默认会缓冲代理响应，一段一段的事件会被攒成一块再发出，
+            # 用户端看到的仍然是「等很久然后整段出现」。这个头是 nginx 的约定。
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+#: 历史名称，保留为兼容入口：判定已统一到 `kirara_ai.credential_keys`。
+#:
+#: 这两份字面量与追踪层的 `_SENSITIVE_KEYS` 各自演化过，结果是同一对凭据里
+#: 只有一半被识别——`access_key_secret` 命中 `_secret` 后缀，而
+#: `access_key_id`（火山引擎声明的「API 密钥 ID」，参与签名）两处都不命中：
+#: 导出文件里一半打码、一半明文，看到打码那一半的人会以为整份文件可以转发。
+#: 现在统一走共享判定，新增供应商不会再让两份表分叉。
 SENSITIVE_CONFIG_KEYS = frozenset(
     {
         "authorization",
@@ -457,18 +624,11 @@ SENSITIVE_CONFIG_KEYS = frozenset(
     }
 )
 SENSITIVE_CONFIG_SUFFIXES = ("_token", "_secret", "_password", "_credential")
-NON_SECRET_TOKEN_KEYS = frozenset(
-    {"max_tokens", "prompt_tokens", "completion_tokens", "total_tokens"}
-)
+NON_SECRET_TOKEN_KEYS = NON_CREDENTIAL_KEY_NAMES
 
 
 def _is_sensitive_config_key(key: object) -> bool:
-    normalized = str(key).strip().lower()
-    if normalized in NON_SECRET_TOKEN_KEYS:
-        return False
-    return normalized in SENSITIVE_CONFIG_KEYS or normalized.endswith(
-        SENSITIVE_CONFIG_SUFFIXES
-    )
+    return is_credential_key(key)
 
 
 def _redact_sensitive_config(value: Any) -> Any:
@@ -879,6 +1039,44 @@ async def get_resilience_status():
     except Exception as e:
         logger.opt(exception=e).error("Failed to get LLM resilience status")
         return jsonify({"error": "Failed to get LLM resilience status"}), 500
+
+
+@llm_bp.route("/backends/<backend_name>/circuit/reset", methods=["POST"])
+# 把一个刚被判定不健康的上游重新放回队列会立刻影响真实流量，
+# 因此与依赖安装同一边界：要求创建者身份，不是「有 scope 就行」。
+@require_creator("llm.manage")
+async def reset_backend_circuit(backend_name: str):
+    """手动把一个 Provider 的熔断器清回 closed。
+
+    没有这条路由时，一次上游抖动打开的熔断只能等满配置里的恢复窗口，
+    或者重启整个进程——而重启会一并中断所有正在进行的对话。
+    界面上看得到 `open` 却没有任何动作能改变它，是这条接口存在的理由。
+    """
+    try:
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "request body must be a JSON object"}), 400
+        unexpected = set(payload) - {"confirmed"}
+        if unexpected:
+            # 不接受顺带改配置：那是 `PUT /backends/<name>` 的职责，
+            # 混在重置里等于一次没有审计记录的配置写入。
+            return jsonify({"error": "request body contains unsupported fields"}), 400
+        if payload.get("confirmed") is not True:
+            return jsonify({"error": "circuit reset requires confirmation"}), 400
+
+        manager: LLMManager = g.container.resolve(LLMManager)
+        config: GlobalConfig = g.container.resolve(GlobalConfig)
+        if not any(backend.name == backend_name for backend in config.llms.api_backends):
+            # 「没有这个后端」是客户端问题，不是服务器故障。在这里判而不是靠
+            # `reset_provider_circuit` 抛错：它对未知名字是静默通过的（重置一个
+            # 已被删掉的 Provider 本身不算错），于是接口会返回 200 说重置成功，
+            # 而实际上什么都没发生——一个拼错的名字看起来和成功一模一样。
+            return jsonify({"error": f"backend '{backend_name}' not found"}), 404
+        manager.reset_provider_circuit(backend_name)
+        return jsonify({"data": manager.get_resilience_status()})
+    except Exception as e:
+        logger.opt(exception=e).error("Failed to reset LLM provider circuit")
+        return jsonify({"error": "Failed to reset LLM provider circuit"}), 500
 
 
 @llm_bp.route("/backends", methods=["POST"])

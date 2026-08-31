@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { imApi } from '@/api/im'
-import type { IMAdapter, IMAdapterInfo, UserProfile } from '@/api/im'
-import { ref, onMounted, computed } from 'vue'
+import type { IMAdapter, IMAdapterInfo, QRLoginSnapshot, UserProfile } from '@/api/im'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NCard,
@@ -77,12 +77,45 @@ const disconnectReasonText = (adapter: IMAdapter): string | null => {
 const QR_STATE_TEXT: Record<string, { label: string; type: StatusTagType }> = {
   pending: { label: '等待二维码', type: 'default' },
   waiting_scan: { label: '待扫码', type: 'warning' },
+  age_unknown: { label: '二维码时效未知', type: 'warning' },
   scanned: { label: '已扫码待确认', type: 'info' },
   expired: { label: '二维码已过期', type: 'error' },
   succeeded: { label: 'QQ 已登录', type: 'success' },
   failed: { label: '登录失败', type: 'error' },
   unavailable: { label: '二维码暂不可用', type: 'default' },
   quick_login: { label: '免扫码登录', type: 'success' }
+}
+
+/**
+ * 会自己走的当前时刻，用于二维码倒计时。
+ *
+ * 后端给的 `remaining_seconds` 是**取快照那一刻**的读数。二维码只有 120 秒
+ * 有效期，而「看一眼面板、拿手机、解锁、打开扫一扫」轻易就花掉一半——
+ * 一次性渲染的数字在这个尺度上必然说谎，且它说的谎恰好是「还来得及」。
+ * 因此界面按 `expires_at` 自行倒数，每秒重算。
+ */
+const now = ref(Date.now())
+let qrCountdownTimer: ReturnType<typeof setInterval> | null = null
+
+/**
+ * 连接状态的自动刷新。
+ *
+ * 冷启动宽限期 180 秒、二维码有效期 120 秒——两个都是会自己变化的状态，而此前这一页
+ * 只在 `onMounted` 拉一次。于是「正在启动，等就行」这句处置建议在一个静止的画面上
+ * 变成了「盯着它等」：上游两分钟前就连上了，用户要手动刷新整页才知道。
+ *
+ * 10 秒与容错面板同一间隔：足以观察一次状态迁移，又不至于把诊断页变成压测。
+ */
+const HEALTH_REFRESH_INTERVAL_MS = 10_000
+const autoRefresh = ref(true)
+let healthTimer: ReturnType<typeof setInterval> | null = null
+
+/** 二维码还剩多少秒；无法判断时返回 `null`（绝不返回一个编出来的数字）。 */
+const qrRemainingSeconds = (qr: QRLoginSnapshot): number | null => {
+  if (!qr.expires_at) return null
+  const expiresAt = Date.parse(qr.expires_at)
+  if (Number.isNaN(expiresAt)) return null
+  return Math.max(0, (expiresAt - now.value) / 1000)
 }
 
 const qrLoginTag = (
@@ -92,25 +125,104 @@ const qrLoginTag = (
   // 未配置上游日志路径时后端返回 null，此时不该显示任何扫码信息——
   // 显示「未知」会让用户以为出了问题。
   if (!qr || qr.state === 'unknown') return null
-  const preset = QR_STATE_TEXT[qr.state]
+
+  // 倒计时归零后必须改口：继续显示「待扫码（剩 0 秒）」是把过期说成可扫，
+  // 而用户此刻要做的是刷新取新码，不是再试一次扫。
+  const remaining = qr.state === 'waiting_scan' ? qrRemainingSeconds(qr) : null
+  const state = remaining !== null && remaining <= 0 ? 'expired' : qr.state
+  const preset = QR_STATE_TEXT[state]
   if (!preset) return null
 
-  // 剩余时间只在还能扫的时候有意义，且必须是「还剩多久」而不是绝对时刻：
-  // 用户要判断的是「现在扫还来不来得及」。
-  const remaining =
-    qr.state === 'waiting_scan' && typeof qr.remaining_seconds === 'number'
-      ? `（剩 ${Math.max(0, Math.round(qr.remaining_seconds))} 秒）`
+  // 剩余时间必须是「还剩多久」而不是绝对时刻：用户要判断的是
+  // 「现在扫还来不来得及」。`age_unknown` 下 remaining 为 null，不拼任何数字。
+  const countdown =
+    state === 'waiting_scan' && remaining !== null
+      ? `（剩 ${Math.round(remaining)} 秒）`
       : ''
 
   const details: string[] = []
-  if (qr.remediation) details.push(qr.remediation)
+  if (state === 'expired' && qr.state === 'waiting_scan') {
+    details.push('这张二维码已超过有效期，请点「刷新扫码状态」取最新一张。')
+  } else if (qr.remediation) {
+    details.push(qr.remediation)
+  }
+  if (qr.validity_seconds) details.push(`有效期 ${qr.validity_seconds} 秒`)
   if (qr.latest_qr_path) details.push(`最新二维码：${qr.latest_qr_path}`)
   if (qr.refresh_count > 0) details.push(`已刷新 ${qr.refresh_count} 次`)
 
   return {
-    label: `${preset.label}${remaining}`,
+    label: `${preset.label}${countdown}`,
     type: preset.type,
     title: details.join('\n')
+  }
+}
+
+/**
+ * QQ 自身热更新的一枚独立标签。
+ *
+ * 与扫码标签分开是必须的（需求 18.4、19.5）：热更新在后台拉一个几十 MB 的包，
+ * 占带宽、可能拖慢这段时间内的登录与消息投递，但它**不影响这张码能不能扫**。
+ * 合进扫码标签会让「正在下载更新」顶掉「等待扫码」，而操作者此刻真正需要看到的
+ * 是后者。
+ *
+ * 只在两种状态下出现：`downloading`（正在占带宽，是「为什么慢」的候选原因）与
+ * `failed`（会反复重试并占带宽）。`ready` / `up_to_date` / `checking` 不显示——
+ * 它们此刻不影响任何事，常驻一枚「已就绪」标签只会挤占状态区，
+ * 让真正需要注意的标签更难被看见。
+ */
+const HOT_UPDATE_TAG: Record<string, { label: string; type: StatusTagType }> = {
+  downloading: { label: 'QQ 正在下载更新', type: 'warning' },
+  failed: { label: 'QQ 热更新失败', type: 'error' }
+}
+
+const hotUpdateTag = (
+  adapter: IMAdapter
+): { label: string; type: StatusTagType; title: string } | null => {
+  const hot = adapter.health?.qr_login?.hot_update
+  if (!hot) return null
+  const preset = HOT_UPDATE_TAG[hot.state]
+  if (!preset) return null
+
+  const details: string[] = []
+  if (hot.remediation) details.push(hot.remediation)
+  if (hot.target_version) details.push(`目标版本 ${hot.target_version}`)
+  // 上游这些日志行只有时分秒、没有日期，因此只给区间长度，不格式化绝对时刻——
+  // 拿一个编出来的日期去显示「2026-08-31 07:56 开始」是在给出没有依据的精确。
+  if (hot.duration_seconds !== null && hot.duration_seconds !== undefined) {
+    details.push(`本轮下载耗时 ${Math.round(hot.duration_seconds)} 秒`)
+  }
+  return { label: preset.label, type: preset.type, title: details.join('\n') }
+}
+
+/** 正在刷新扫码状态的适配器名；用名字而不是布尔，多个实例才不会一起转圈。 */
+const qrRefreshing = ref<string | null>(null)
+
+/**
+ * 重新读取上游日志，把这一行的扫码状态换成最新的。
+ *
+ * 只更新这一个适配器的 `qr_login`，不重取整份列表：整表刷新会让用户正在
+ * 编辑的配置表单被冲掉，而他此刻只是想知道那张码还能不能扫。
+ */
+const refreshQRLogin = async (adapter: IMAdapter) => {
+  qrRefreshing.value = adapter.name
+  try {
+    const result = await imApi.refreshQRLogin(adapter.name)
+    if (!result.supported) {
+      message.info('该适配器没有扫码登录环节')
+      return
+    }
+    if (adapter.health) adapter.health.qr_login = result.qr_login
+    if (!result.qr_login) {
+      // 「没开这个功能」要说清是差一个配置项，否则用户会去查挂载。
+      message.warning(result.remediation ?? '暂时读不到扫码状态')
+      return
+    }
+    const preset = QR_STATE_TEXT[result.qr_login.state]
+    message.success(`扫码状态：${preset?.label ?? result.qr_login.state}`)
+  } catch (error: any) {
+    message.error(error.response?.data?.error ?? '刷新扫码状态失败')
+  } finally {
+    qrRefreshing.value = null
   }
 }
 
@@ -133,6 +245,11 @@ const adapterStatus = (
       return { label: '正在启动', type: 'default', className: 'initializing' }
     case 'waiting':
       return { label: '等待连接', type: 'warning', className: 'waiting' }
+    // 「稍等」与「去修」必须用不同的颜色说：警告色配「正在重连」，
+    // 错误色留给真的需要动手的状态。用同一个红色标签显示两者，
+    // 会让一次正常的 compose 重启看起来像一次故障。
+    case 'reconnecting':
+      return { label: '正在重连', type: 'warning', className: 'reconnecting' }
     case 'credential_rejected':
       return { label: '凭据被拒', type: 'error', className: 'credential-rejected' }
     case 'upstream_refused':
@@ -182,9 +299,11 @@ const fetchAdapterConfigSchema = async () => {
 }
 
 // 获取适配器列表
-const fetchAdapters = async () => {
+const fetchAdapters = async ({ silent = false }: { silent?: boolean } = {}) => {
   try {
-    loading.value = true
+    // 后台轮询不动 loading：每 10 秒闪一次骨架屏会让整页看起来一直在重载，
+    // 而这一页的用途正是长时间盯着状态变化。
+    if (!silent) loading.value = true
     const { adapters: adapterList } = await imApi.getAdapters()
     // 过滤出当前类型的适配器
     // bot_profile 的查询是异步过程，所以这里先备份当前 adapters 的 bot_profile 历史数据，等 adpters 查询完毕后恢复，最后再刷新真实的 bot_profile
@@ -214,10 +333,12 @@ const fetchAdapters = async () => {
       })
     )
   } catch (error) {
-    message.error('获取适配器列表失败: ' + error)
+    // 轮询失败只进控制台：每 10 秒弹一次「获取适配器列表失败」会把界面糊满，
+    // 而那通常只是一次网络抖动，下一轮就好了。首次加载失败必须说。
+    if (!silent) message.error('获取适配器列表失败: ' + error)
     console.error('获取适配器列表失败:', error)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -327,10 +448,38 @@ const fetchAdapterInfo = async () => {
   }
 }
 
+/** 起停连接状态轮询。关掉自动刷新时立刻停，而不是等下一轮空转。 */
+const startHealthTimer = () => {
+  if (healthTimer !== null) clearInterval(healthTimer)
+  healthTimer = setInterval(() => {
+    if (autoRefresh.value) void fetchAdapters({ silent: true })
+  }, HEALTH_REFRESH_INTERVAL_MS)
+}
+
 onMounted(async () => {
   await fetchAdapterInfo()
   await fetchAdapterConfigSchema()
   await fetchAdapters()
+  // 二维码只有 120 秒有效期，倒计时必须自己走：一次性渲染的数字会一直停在
+  // 打开页面那一刻的读数，而用户正是拿着那个读数去判断「还来不来得及扫」。
+  qrCountdownTimer = setInterval(() => {
+    now.value = Date.now()
+  }, 1000)
+  // 状态本身也要自己刷：冷启动宽限期 180 秒内状态会从「正在启动」变成「已连接」，
+  // 而「等就行」这句建议只有在面板会自己变的前提下才成立。
+  startHealthTimer()
+})
+
+onUnmounted(() => {
+  // 两个都要清：留着的会在组件卸载后继续唤醒，后者还会继续发请求。
+  if (qrCountdownTimer !== null) {
+    clearInterval(qrCountdownTimer)
+    qrCountdownTimer = null
+  }
+  if (healthTimer !== null) {
+    clearInterval(healthTimer)
+    healthTimer = null
+  }
 })
 
 defineExpose({
@@ -375,20 +524,35 @@ defineExpose({
             <div class="panel-header">
               <n-space justify="space-between" align="center">
                 <h3 class="panel-title">实例列表</h3>
-                <n-button
-                  type="primary"
-                  @click="addAdapter"
-                  size="small"
-                  v-if="adapters.length > 0"
-                  class="add-button"
-                >
-                  <template #icon>
-                    <n-icon>
-                      <AddOutline />
-                    </n-icon>
-                  </template>
-                  添加配置
-                </n-button>
+                <n-space align="center" :size="12">
+                  <!--
+                    连接状态每 10 秒自己刷新一次。可关：排查时正在读某个状态，
+                    它被刷走了反而碍事。
+                  -->
+                  <n-space align="center" :size="6" class="auto-refresh-toggle">
+                    <n-switch
+                      v-model:value="autoRefresh"
+                      size="small"
+                      aria-label="自动刷新连接状态"
+                      data-test="auto-refresh"
+                    />
+                    <span class="auto-refresh-label">自动刷新</span>
+                  </n-space>
+                  <n-button
+                    type="primary"
+                    @click="addAdapter"
+                    size="small"
+                    v-if="adapters.length > 0"
+                    class="add-button"
+                  >
+                    <template #icon>
+                      <n-icon>
+                        <AddOutline />
+                      </n-icon>
+                    </template>
+                    添加配置
+                  </n-button>
+                </n-space>
               </n-space>
             </div>
 
@@ -443,6 +607,18 @@ defineExpose({
                         >
                           {{ qrLoginTag(adapter)!.label }}
                         </n-tag>
+                        <!-- QQ 自身热更新再单独一枚：它占带宽、可能拖慢这段时间内的
+                             投递，但不影响这张码能不能扫。合进上面那枚会让
+                             「正在下载更新」顶掉「等待扫码」。 -->
+                        <n-tag
+                          v-if="hotUpdateTag(adapter)"
+                          :type="hotUpdateTag(adapter)!.type"
+                          class="status-tag hot-update"
+                          data-test="hot-update-tag"
+                          :title="hotUpdateTag(adapter)!.title || undefined"
+                        >
+                          {{ hotUpdateTag(adapter)!.label }}
+                        </n-tag>
                       </n-space>
                     </template>
                     <template #description>
@@ -468,6 +644,18 @@ defineExpose({
                           class="edit-button"
                         >
                           编辑
+                        </n-button>
+
+                        <!-- 只在这个适配器真的有扫码环节时才出现：给 Telegram
+                             放一个永远无事可做的按钮，比没有按钮更让人困惑。 -->
+                        <n-button
+                          v-if="adapter.health?.qr_login"
+                          size="small"
+                          class="qr-refresh-button"
+                          :loading="qrRefreshing === adapter.name"
+                          @click.stop="refreshQRLogin(adapter)"
+                        >
+                          刷新扫码状态
                         </n-button>
 
                         <n-popconfirm
@@ -671,6 +859,13 @@ defineExpose({
   gap: 0.5rem;
 }
 
+/* 自动刷新开关：次要控件，字号与颜色都退到标题之后，不与「添加配置」抢注意力。 */
+.auto-refresh-label {
+  font-size: 0.8rem;
+  color: var(--text-color-tertiary, #999);
+  user-select: none;
+}
+
 .instances-list {
   display: flex;
   flex-direction: column;
@@ -715,6 +910,30 @@ defineExpose({
   color: white;
 }
 
+/* 「正在重连」用警告色而非错误色，并加一段轻微脉动：它是一个会自己结束的
+   过程态，静态的红色标签会让人以为需要立刻动手。动画尊重系统的减少动效设置。 */
+.status-tag.reconnecting {
+  background-color: var(--warning-color);
+  color: white;
+  animation: reconnect-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes reconnect-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.62;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-tag.reconnecting {
+    animation: none;
+  }
+}
+
 .status-tag.disconnected,
 .status-tag.credential-rejected,
 .status-tag.upstream-refused,
@@ -748,6 +967,12 @@ defineExpose({
    两行并排时需要能一眼分出主次。 */
 .qr-login-hint {
   color: var(--text-color-tertiary);
+}
+
+/* 刷新扫码状态是一个只读动作（重读上游日志），因此用与「编辑」同级的中性外观，
+   不用主色——主色会把它读成「登录」这类推进性操作。 */
+.qr-refresh-button {
+  font-variant-numeric: tabular-nums;
 }
 
 .status-tag.disabled {

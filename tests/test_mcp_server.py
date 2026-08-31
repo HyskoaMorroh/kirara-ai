@@ -78,7 +78,7 @@ def test_init(stdio_config):
     assert not server._connected_event.is_set()
 
 
-def test_transport_startup_timeout_uses_cc_switch_compatible_default(stdio_config):
+def test_transport_startup_timeout_uses_interoperable_default(stdio_config):
     assert stdio_config.server.startup_timeout_ms == 120_000
 
 

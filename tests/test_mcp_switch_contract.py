@@ -13,7 +13,7 @@ from kirara_ai.mcp_module.compat import (
 )
 
 
-def test_canonical_entry_keeps_cc_switch_shape_and_argument_boundaries():
+def test_canonical_entry_keeps_interoperable_shape_and_argument_boundaries():
     entry = normalize_mcp_server_entry(
         {
             "id": "docs",
@@ -61,7 +61,7 @@ def test_canonical_entry_keeps_cc_switch_shape_and_argument_boundaries():
         {"type": "sse", "url": "https://example.invalid/events"},
     ],
 )
-def test_all_cc_switch_transport_types_are_valid(server):
+def test_all_interoperable_transport_types_are_valid(server):
     entry = normalize_mcp_server_entry({"id": "server", "name": "Server", "server": server})
     assert entry.server.type == server["type"]
 
@@ -166,7 +166,7 @@ args = ["server.py", "a value"]
     assert entry.server.args == ["server.py", "a value"]
 
 
-def test_client_projection_matches_cc_switch_field_names():
+def test_client_projection_matches_interoperable_field_names():
     entry = normalize_mcp_server_entry(
         {
             "id": "local",

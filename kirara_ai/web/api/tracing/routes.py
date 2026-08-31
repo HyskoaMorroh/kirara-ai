@@ -356,6 +356,8 @@ async def get_delivery_summary():
     除阶段耗时外还给出 ``counts``（分段数量、重试次数）——需求 19.5 九项里的
     后两项。它们一直被落库，此前只出现在逐条记录里，于是「这批慢投递是不是因为
     分了很多页」只能逐条翻。口径与阶段一致，且一个都没测到时给 ``null`` 而非 0。
+
+    这是**单渠道**视角。跨渠道的可比视图在 ``/delivery/compare``。
     """
     store = _delivery_timing_store()
     if store is None:
@@ -392,6 +394,50 @@ async def get_delivery_summary():
         return jsonify({"error": "Failed to summarize delivery timings"}), 500
     summary["channels"] = store.list_channels()
     return jsonify(summary)
+
+
+@tracing_bp.route("/delivery/compare", methods=["GET"])
+@require_auth
+async def compare_delivery_channels():
+    """Return the same phase aggregates for **every** channel side by side.
+
+    需求 19.5 的最后一句是硬要求：「应给出 Telegram、WeCom 与 QQ 的**可比**
+    链路耗时」。``/delivery/summary`` 只接受一个 ``channel``，靠切换它得到的是
+    三次独立查询——对比这件事被推给了读者的短期记忆，而 19.5 要回答的问题恰恰是
+    对比式的：「QQ 慢，是 QQ 这条链路慢，还是模型本来就慢（三个渠道一样慢）」。
+
+    时间范围参数与 ``/delivery/summary`` 完全一致，因此两个视图可以用同一段时间
+    互相印证；不传时覆盖全部保留期。
+    """
+    store = _delivery_timing_store()
+    if store is None:
+        return jsonify({"error": "delivery timing store is not configured"}), 503
+
+    config: GlobalConfig = g.container.resolve(GlobalConfig)
+    storage_timezone, error = _timezone_or_error(
+        config.system.timezone, config.system.timezone
+    )
+    if error:
+        return error
+    assert storage_timezone is not None
+
+    start_time, error = _parse_iso_datetime(
+        request.args.get("start_time"), "start_time", storage_timezone
+    )
+    if error:
+        return error
+    end_time, error = _parse_iso_datetime(
+        request.args.get("end_time"), "end_time", storage_timezone
+    )
+    if error:
+        return error
+
+    try:
+        channels = store.compare(start_time=start_time, end_time=end_time)
+    except Exception:
+        logger.opt(exception=True).error("Failed to compare delivery timings")
+        return jsonify({"error": "Failed to compare delivery timings"}), 500
+    return jsonify({"channels": channels})
 
 
 @tracing_bp.route("/delivery/recent", methods=["GET"])

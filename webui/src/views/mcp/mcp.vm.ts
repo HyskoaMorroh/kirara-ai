@@ -19,7 +19,7 @@ export interface MCPApps {
   [key: string]: unknown
 }
 
-// MCP server uses the same canonical shape as the backend and CC Switch.
+// MCP server uses the same canonical shape as the backend and other MCP clients.
 export interface MCPServer {
   id: string
   name: string
@@ -314,7 +314,7 @@ export function useMCPViewModel() {
     showServerModal.value = true
   }
 
-  // Context7 follows the canonical CC Switch/MCP stdio entry shape.
+  // Context7 follows the canonical MCP stdio entry shape.
   const openContext7Template = () => {
     modalMode.value = 'create'
     formModel.value = {

@@ -1,8 +1,8 @@
 """Removal of AI self-attribution sentences from a model reply.
 
-需求 8 点名了 cc-switch 的「隐藏 AI 署名」。cc-switch 改的是
-`attribution.commit` / `attribution.pr`——Claude Code 写 git commit 时的
-`Co-Authored-By`。本项目不代写 commit，但同一个用户意图在聊天场景里有确切落点：
+需求 8 点名了「隐藏 AI 署名」。参考实现改的是编码客户端写 git commit 时的
+`Co-Authored-By` 尾注（`attribution.commit` / `attribution.pr`）。
+本项目不代写 commit，但同一个用户意图在聊天场景里有确切落点：
 模型经常在回复里自报身份（「作为一个 AI 助手，我……」「本回复由 AI 生成」），
 QQ / 企业微信这类面向真人的渠道里这类句子既占篇幅又暴露实现细节。
 

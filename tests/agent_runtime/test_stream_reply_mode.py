@@ -169,10 +169,41 @@ async def test_the_stream_is_closed_even_when_it_raises(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_tool_request_still_uses_the_non_stream_path(tmp_path):
-    """Tool rounds need structured tool_calls; aggregated text would lose them."""
+async def test_a_tool_request_falls_back_when_the_adapter_cannot_stream_tool_calls(
+    tmp_path,
+):
+    """只读文本增量的适配器上，带工具的请求必须保持非流式。
+
+    这条原来断言的是「凡是带工具的请求都不流式」。那个限制被放开了——它把
+    「聚合文本会丢掉 tool_calls」这个**适配器**缺口，误当成了「带工具」这个
+    请求属性的问题，结果绑了 MCP 的 Agent（本项目的主流用法）永远拿不到
+    首字节与静默超时保护。
+
+    放开之后的判据变成适配器能力：不会累积 `delta.tool_calls` 的适配器上仍然
+    走非流式，否则工具调用会静默消失——上层把「模型想调工具」当成「模型答完了」，
+    而那是比失去超时保护更糟的失败形态。
+    """
     stream = FakeStream([chunk("ignored")])
     executor, manager = make_executor("aggregate", stream=stream, tmp_path=tmp_path)
+    manager.stream_supports_tool_calls = MagicMock(return_value=False)
+    tool = Tool(
+        name="read_file",
+        description="read",
+        parameters=ToolParameters(properties={}, required=[]),
+    )
+
+    await executor._execute_model(request(tools=[tool]), ("model-a",), "model-a")
+
+    assert manager.execute_chat.call_count == 1
+    assert manager.execute_stream.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_manager_that_cannot_report_the_capability_falls_back(tmp_path):
+    """问不出能力时走安全的那一侧：工具调用完整，只是少了超时保护。"""
+    stream = FakeStream([chunk("ignored")])
+    executor, manager = make_executor("aggregate", stream=stream, tmp_path=tmp_path)
+    del manager.stream_supports_tool_calls
     tool = Tool(
         name="read_file",
         description="read",

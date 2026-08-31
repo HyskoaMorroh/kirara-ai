@@ -110,14 +110,23 @@ async def test_onebot_records_local_delivery_stages(tmp_path: Path):
         delivery_id="logical-timeline",
     )
 
+    # `send_pacing_waited` 在 send 终局之前：需求 19.5 要求把「我们为防刷屏主动
+    # 等的时间」与「上游真的慢」分开归因，而 `send_seconds` 两者都含。
+    # 单页回复不触发节流，因此这里的值是 0.0——「测了，结论是没等」，
+    # 与「这条链路没测量节流」（该阶段缺席）是两种不同的处境。
     assert [event.stage for event in message.delivery_timeline] == [
         "formatting_started",
         "formatting_completed",
         "send_started",
+        "send_pacing_waited",
         "send_succeeded",
     ]
     assert message.delivery_timeline[1].details["segment_count"] == 1
+    assert message.delivery_timeline[-2].details["pacing_seconds"] == 0.0
     assert message.delivery_timeline[-1].details["retry_count"] == 0
+    durations = message.delivery_durations()
+    assert durations["send_pacing_seconds"] == 0.0
+    assert "send_upstream_seconds" in durations
 
 
 @pytest.mark.asyncio
@@ -140,10 +149,13 @@ async def test_onebot_records_send_failure_stage(tmp_path: Path):
             delivery_id="logical-timeline-failure",
         )
 
+    # 失败路径同样要分开归因：「等了 18 秒然后失败」与「上游 18 秒后拒了」
+    # 是两个不同的故障，而它们的 `send_seconds` 相同。
     assert [event.stage for event in message.delivery_timeline] == [
         "formatting_started",
         "formatting_completed",
         "send_started",
+        "send_pacing_waited",
         "send_failed",
     ]
     failed = message.delivery_timeline[-1]

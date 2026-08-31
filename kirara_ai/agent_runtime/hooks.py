@@ -614,7 +614,7 @@ class AgentHookRuntime:
     def _matcher_value(value: Any) -> Optional[str]:
         """Normalize a tool matcher into one anchored regular expression.
 
-        接受两种写法，与 Claude Code / CC Switch 的 Hook 声明保持一致：
+        接受两种写法，与主流 Agent 客户端的 Hook 声明保持一致：
         单个正则字符串（``"Edit|Write"``），或工具名列表（``["Bash", "Write"]``）。
         列表会被转成对各名称做字面量转义后的并集，避免工具名里的 ``.`` 被当通配符。
         """

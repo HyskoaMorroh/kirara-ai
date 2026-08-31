@@ -545,6 +545,26 @@ const resetResilience = () => {
                 而用户以为它真的看过那张图
               </span>
             </n-form-item>
+
+            <n-form-item label="去掉不支持的推理强度" v-if="adapter.rectifier_enabled !== false">
+              <n-switch
+                :value="adapter.rectify_reasoning_effort_unsupported !== false"
+                data-test="rectify-reasoning-effort-unsupported"
+                @update:value="
+                  (value) =>
+                    updateAdapter((nextAdapter) => {
+                      nextAdapter.rectify_reasoning_effort_unsupported = value
+                    })
+                "
+              />
+              <span class="resilience-inline-help">
+                大量兼容网关只实现了核心字段，收到 <code>reasoning_effort</code> 直接拒绝。
+                这类失败<strong>换供应商也没用</strong>——同一个不合法字段发给备用上游同样会被拒。
+                只在错误里同时出现字段名与「不支持/不认识」类措辞时才动；
+                取值非法（上游只认 low/medium/high 而配了最大强度）不会命中，
+                否则一个只需降档的请求会被整个删掉思考能力
+              </span>
+            </n-form-item>
           </n-form>
 
           <n-collapse :default-expanded-names="['queue']">

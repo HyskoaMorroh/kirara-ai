@@ -134,8 +134,37 @@ class _WecomSendUnit:
     params: dict[str, Any]
 
 
+def truncated_passive_reply(first_page: str, *, dropped_pages: int) -> str:
+    """被动回复只能发一条时，在那条消息末尾说明还有几页发不出去。
+
+    企业微信未开通主动回复能力时上游返回 `48001`，只能走被动回复 API，
+    而它**只能回一条消息**。此前的处理是把第 1 页交出去、记一条 `send_succeeded`
+    就结束——用户收到「第 1 页 / 共 4 页」然后什么都没有，而看板上这一轮是成功。
+    19.4 要求「保证顺序稳定、**全部发送**、失败可记录」，这一条正好三项全丢。
+
+    能发多少是平台的限制，如实说出来是我们的责任。因此追加一句说明，
+    并给出用户自己能做的事（问得更窄、或分次问）。
+
+    **刻意不把剩余页塞回这一条。** 被动回复的长度上限与主动发送一致
+    （`split_long_message` 已按它切过），硬拼回去只会让整条被上游拒收——
+    那时用户连第 1 页都收不到，比现在更糟。
+    """
+    if dropped_pages <= 0:
+        return first_page
+    return (
+        f"{first_page}\n\n"
+        f"（本次仅能回复 1 条消息，还有 {dropped_pages} 页未能发出："
+        "企业微信未开通主动回复能力时只能被动回一条。"
+        "请缩小提问范围或分次获取剩余部分。）"
+    )
+
+
 class WecomAdapter(IMAdapter, AdapterHealthProvider):
     """企业微信适配器"""
+
+    #: 统一关系模型里的渠道类型（需求 10）。显式声明的理由见
+    #: `im_onebot_adapter/adapter.py` 上同名属性的注释。
+    channel_type = "wecom"
 
     dispatcher: WorkflowDispatcher
     web_server: WebServer
@@ -742,10 +771,21 @@ class WecomAdapter(IMAdapter, AdapterHealthProvider):
         except Exception as exc:
             if "Error code: 48001" in str(exc):
                 if reply_task is not None and not reply_task.done():
+                    # 被动回复只能发一条。丢掉的页数必须让用户知道，也必须留在
+                    # 时间线上——否则「上周二那批回复用户说看不全」事后无从查证。
+                    text_units = sum(1 for unit in units if unit.action == "text")
+                    dropped_pages = max(0, text_units - 1)
                     self.logger.warning(
-                        "未开通主动回复能力，将采用被动回复消息 API，此模式下只能回复一条消息。"
+                        "未开通主动回复能力，将采用被动回复消息 API，"
+                        f"此模式下只能回复一条消息；本次有 {dropped_pages} 页未能发出。"
                     )
-                    reply_task.set_result(text_reply)
+                    reply_task.set_result(
+                        truncated_passive_reply(
+                            text_reply or "", dropped_pages=dropped_pages
+                        )
+                        if text_reply is not None
+                        else text_reply
+                    )
                     message.record_delivery_stage(
                         "send_succeeded",
                         adapter="wecom",
@@ -753,6 +793,8 @@ class WecomAdapter(IMAdapter, AdapterHealthProvider):
                             max(0, item.attempt_count - 1) for item in results
                         ),
                         delivery_mode="passive_reply",
+                        # 不是完全成功：内容确实少发了，阶段里要留下证据。
+                        dropped_pages=dropped_pages,
                     )
                     return
                 self.logger.warning("未开通主动回复能力，且不在上下文中，无法发送消息。")

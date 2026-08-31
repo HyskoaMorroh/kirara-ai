@@ -43,6 +43,41 @@ _ALLOWED_HOME_NAMES = {
     "runneradmin",  # GitHub Actions Windows runner 的固定账户
 }
 
+#: 会话转录路径与本机仓库绝对路径。
+#:
+#: 这一类比家目录路径更隐蔽：`~\.codex\sessions\...` 里没有用户名，
+#: `E:\output\kirara-ai\...` 也不含 `C:\Users`，所以上面那条家目录规则一个都
+#: 抓不到。但它们同样是「操作者本机的东西随仓库分发」——转录路径还额外暴露
+#: 会话 ID 与本机 AI 工具的目录结构。
+#:
+#: 实际后果：`2026-08-28-handoff.md` 带着 51 处转录路径与仓库绝对路径被跟踪了
+#: 三天。当时停止跟踪同类文档时按文件名逐个列举，没有回头扫一遍同类，
+#: 而这道门禁那时也只查家目录。判据应当是「这类内容一律不进仓库」，
+#: 而不是「哪几个文件名」。
+_LOCAL_ARTIFACT_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    (
+        "AI 工具会话转录路径",
+        re.compile(r"[~.][\/]\.(?:claude|codex|gemini)[\/]\S*", re.IGNORECASE),
+    ),
+    (
+        "会话转录文件名",
+        re.compile(
+            r"(?:rollout-\d{4}-\d{2}-\d{2}T[\w-]+"
+            r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl"
+        ),
+    ),
+)
+
+#: **刻意不把「本机仓库绝对路径」（`E:\output\kirara-ai\...`）列为门禁。**
+#:
+#: 加过一次又撤掉，理由记在这里以免下次又加：它命中 9 份历史规划文档（其中 5 份
+#: 已在远端），而它泄漏的东西是「这台机器上有个 E 盘、里面有个 output 目录」——
+#: 没有用户名、没有凭据、没有会话标识，目录名本身还与仓库名重复。
+#: 为它改写 9 份历史规划材料是纯 churn，而 17.3 明确要求不得擅自清理既有内容。
+#:
+#: 上面两条留着的原因正相反：会话转录路径带**会话 UUID** 与所用 AI 工具，
+#: 那是这台机器上的一次具体对话的标识，别人拿到毫无用处却能看出很多东西。
+
 #: 凭据类模式。占位符（`<token>`、`your-api-key`）不匹配，因为它们不含实值。
 _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("OpenAI 风格密钥", re.compile(r"\bsk-[A-Za-z0-9]{20,}")),
@@ -126,6 +161,31 @@ def test_no_credential_values_in_tracked_files(label: str, pattern: re.Pattern[s
             if match:
                 offenders.append(f"{relative}:{index}")
     assert not offenders, f"以下跟踪文件疑似包含{label}：{offenders[:10]}"
+
+
+@pytest.mark.parametrize(("label", "pattern"), _LOCAL_ARTIFACT_PATTERNS)
+def test_no_local_machine_artifacts_in_tracked_files(
+    label: str, pattern: "re.Pattern[str]"
+):
+    """跟踪文件不得引用本机的会话转录或仓库绝对路径。
+
+    这些路径在别人的 clone 里毫无意义，而它们泄漏的是操作者本机的目录结构、
+    所用 AI 工具与会话标识。需要说明路径形态时用 `<仓库根>` / `<会话转录>`。
+    """
+    offenders: list[str] = []
+    for path in _tracked_text_files():
+        relative = path.relative_to(PROJECT_ROOT).as_posix()
+        # 本文件自身定义这些模式，跳过以免自我命中。
+        if relative == "tests/test_no_private_paths.py":
+            continue
+        for index, line in enumerate(_read(path).splitlines(), start=1):
+            match = pattern.search(line)
+            if match:
+                offenders.append(f"{relative}:{index}: {match.group(0)[:70]}")
+    assert not offenders, (
+        f"以下跟踪文件包含{label}，会随仓库分发（改用占位符，"
+        f"或把该文档从跟踪中移除）：{offenders[:10]}"
+    )
 
 
 def test_the_allowlist_stays_small():

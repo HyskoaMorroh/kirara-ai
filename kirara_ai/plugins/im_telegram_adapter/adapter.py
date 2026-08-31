@@ -2,12 +2,14 @@ import asyncio
 import base64
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
-from telegram import Bot, ChatFullInfo, Update, User
+from telegram import (Bot, ChatFullInfo, CopyTextButton, InlineKeyboardButton,
+                      InlineKeyboardMarkup, Update, User)
 from telegram.constants import MessageEntityType
 from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -20,14 +22,19 @@ from kirara_ai.im.adapter import (
     BotProfileAdapter,
     EditStateAdapter,
     IMAdapter,
+    IncrementalReplyHandle,
     UserProfileAdapter,
 )
 from kirara_ai.im.message import (FileElement, ImageMessage, IMMessage, MentionElement, MessageElement, TextMessage,
                                   VideoMessage, VoiceMessage)
 from kirara_ai.im.profile import UserProfile
 from kirara_ai.im.sender import ChatSender, ChatType
-from kirara_ai.im.text_render import (convert_markdown_tables, degrade_math,
-                                      paginate_with_truncation_notice)
+from kirara_ai.im.text_render import (convert_markdown_tables,
+                                      copyable_button_text, degrade_math,
+                                      fence_unfenced_code,
+                                      oversized_code_copy_hint,
+                                      paginate_with_truncation_notice,
+                                      split_for_copyable_code)
 from kirara_ai.logger import get_logger
 from kirara_ai.workflow.core.dispatch import WorkflowDispatcher
 
@@ -217,6 +224,10 @@ class TelegramAdapter(
     """
     Telegram Adapter，包含 Telegram Bot 的所有逻辑。
     """
+
+    #: 统一关系模型里的渠道类型（需求 10）。显式声明的理由见
+    #: `im_onebot_adapter/adapter.py` 上同名属性的注释。
+    channel_type = "telegram"
 
     dispatcher: WorkflowDispatcher
     database_manager: DatabaseManager
@@ -486,12 +497,19 @@ class TelegramAdapter(
     def render_text(text: str) -> str:
         """Render one text element into Telegram MarkdownV2.
 
-        单独抽出来是因为这条管线的**顺序**本身就是约定：先做数学降级
+        单独抽出来是因为这条管线的**顺序**本身就是约定：先给无围栏代码补围栏
+        （补完之后数学降级与表格转换才会跳过这些代码内容），再做数学降级
         （它会保护围栏代码块），再转表格，最后交给 markdownify 做 MarkdownV2
         转义。顺序颠倒会让转义后的反斜杠被当成 LaTeX 命令重新处理。
         抽成公开静态方法后，这个约定可以被直接断言，而不必构造整个适配器。
+
+        ``fence_unfenced_code`` 在 Telegram 上尤其必要：markdownify 会把行首空格
+        当排版空白吃掉，一段没有围栏的缩进代码会被压成全部顶格的一堆行——
+        Python 的块结构就是缩进，那等于把代码改坏。
         """
-        return markdownify(convert_markdown_tables(degrade_math(text), fenced=True))
+        return markdownify(
+            convert_markdown_tables(degrade_math(fence_unfenced_code(text)), fenced=True)
+        )
 
     async def _render_send_units(
         self,
@@ -502,20 +520,44 @@ class TelegramAdapter(
         units: list[_TelegramSendUnit] = []
         for element in message.message_elements:
             if isinstance(element, TextMessage):
-                # 数学降级走共享实现，顺序约定见 `render_text`。
-                text = self.render_text(element.text)
-                for chunk in split_telegram_message(text):
-                    units.append(
-                        _TelegramSendUnit(
-                            "text",
-                            {
-                                "_action": "text",
-                                "chat_id": chat_id,
-                                "text": chunk,
-                                "parse_mode": "MarkdownV2",
-                            },
-                        )
-                    )
+                for part in split_for_copyable_code(element.text):
+                    # 数学降级走共享实现，顺序约定见 `render_text`。
+                    text = self.render_text(part.text)
+                    # 复制载荷取**代码原文**而不是渲染结果：MarkdownV2 转义会把
+                    # `_` 变成 `\_`，复制走那份粘进编辑器就是坏代码。
+                    copy_text = copyable_button_text(part.code) if part.is_code else None
+                    for index, chunk in enumerate(split_telegram_message(text)):
+                        params: dict[str, Any] = {
+                            "_action": "text",
+                            "chat_id": chat_id,
+                            "text": chunk,
+                            "parse_mode": "MarkdownV2",
+                        }
+                        # 一个代码块被拆成多片时按钮只挂第一片：每片都挂等于给出
+                        # 几个内容不同却看不出区别的「复制」，点错一个就拿到半段代码。
+                        if copy_text is not None and index == 0:
+                            params["_copy_text"] = copy_text
+                        units.append(_TelegramSendUnit("text", params))
+                    # 超过按钮载荷上限（256 字符）的代码此前**什么提示都没有**，
+                    # 而它旁边一条更短的代码带着显眼的「复制代码」按钮——
+                    # 两条看起来能力不同，实际都能复制（客户端在代码块右上角自带
+                    # 复制图标）。缺的不是途径，是用户不知道有。
+                    #
+                    # 指引单独成一条：那条代码消息整体是可复制的代码，
+                    # 往里掺中文会污染复制结果。每个代码块只发一句，不是每片一句。
+                    if part.is_code and copy_text is None and part.code:
+                        hint = oversized_code_copy_hint(len(part.code))
+                        if hint is not None:
+                            units.append(
+                                _TelegramSendUnit(
+                                    "text",
+                                    {
+                                        "_action": "text",
+                                        "chat_id": chat_id,
+                                        "text": hint,
+                                    },
+                                )
+                            )
                 continue
             media_action = (
                 "photo"
@@ -546,6 +588,10 @@ class TelegramAdapter(
     async def _send_outbox_payload(self, params: dict[str, Any]) -> Any:
         payload = dict(params)
         action = str(payload.pop("_action"))
+        # `_copy_text` 是本项目的内部约定字段：outbox 把 params 存成 JSON，
+        # 而 `InlineKeyboardMarkup` 这类对象过不了那一跳，所以持久化的是纯字符串，
+        # 在这里才重建成 markup。原样传给 Bot API 会因未知参数让整条发送被拒。
+        copy_text = payload.pop("_copy_text", None)
         method_name = {
             "text": "send_message",
             "photo": "send_photo",
@@ -557,6 +603,12 @@ class TelegramAdapter(
             raise ValueError(f"Unsupported Telegram delivery action: {action}")
         if action != "text":
             payload[action] = base64.b64decode(str(payload.pop("media_data")))
+        if copy_text:
+            # 平台原生复制按钮：点一下把代码放进用户剪贴板，不走回调，
+            # 机器人也不必再发一条消息（1.txt 需求 6「代码框旁边有直接复制键」）。
+            payload["reply_markup"] = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("复制代码", copy_text=CopyTextButton(str(copy_text)))]]
+            )
         method = getattr(self.application.bot, method_name)
         try:
             return await asyncio.wait_for(
@@ -821,6 +873,118 @@ class TelegramAdapter(
                 )
         except Exception as e:
             self.logger.warning(f"Failed to set chat editing state: {str(e)}")
+
+    # ------------------------------------------------------------------
+    # 增量投递（需求 4）：把生成中的回复真的逐步推给用户。
+    #
+    # Telegram 是四个渠道里唯一技术可行的一个：`editMessageText` 能改写已发出的
+    # 消息，因此可以先发一条占位消息、再随生成不断改写同一条。QQ / OneBot 与
+    # 企业微信没有等价能力，在那里逐步推送只能变成几十条碎片消息——比一条完整
+    # 回复更糟。因此这是一个**可选协议**，不实现它的适配器自动退回整段投递。
+    # ------------------------------------------------------------------
+
+    #: 两次改写之间的最小间隔。Telegram 对 editMessageText 有频率限制，
+    #: 逐 token 改写会撞 429，之后这条回复的所有更新全部丢失——比不流式更糟。
+    #: 取 1.2s：足够让用户感到「它在写」，又远离限流阈值。
+    INCREMENTAL_EDIT_INTERVAL_SECONDS = 1.2
+
+    #: 占位消息文案。它是「模型已经在写了」这个事实的唯一载体，
+    #: 而那正是等待期间用户唯一需要知道的事。
+    INCREMENTAL_PLACEHOLDER_TEXT = "正在生成回复…"
+
+    async def begin_incremental_reply(
+        self, recipient: ChatSender
+    ) -> Optional[IncrementalReplyHandle]:
+        """发一条占位消息并返回可继续改写它的句柄。
+
+        拿不到占位消息就没有可改写的目标，此时返回 ``None`` 让调用方退回整段投递，
+        而不是抛错让整轮对话失败——增量投递是体验优化，不是投递本身。
+        """
+        try:
+            _, chat_id = self._recipient(recipient)
+            sent = await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=self.INCREMENTAL_PLACEHOLDER_TEXT,
+            )
+        except Exception as error:  # noqa: BLE001 - 占位失败只损失增量体验
+            self.logger.debug(f"增量投递无法建立占位消息，退回整段投递：{error}")
+            return None
+        message_id = getattr(sent, "message_id", None)
+        if message_id is None and isinstance(sent, dict):
+            message_id = sent.get("message_id")
+        if message_id is None:
+            return None
+        return IncrementalReplyHandle(message_id=str(message_id), chat_id=str(chat_id))
+
+    async def update_incremental_reply(
+        self,
+        handle: IncrementalReplyHandle,
+        text: str,
+        *,
+        now: Optional[float] = None,
+    ) -> None:
+        """把那条消息改写成 ``text``（到目前为止的**完整**内容）。
+
+        ``now`` 只用于测试注入时钟；生产路径用单调时钟，因为节流判断的是间隔，
+        而墙上时间会被系统时间调整影响。
+        """
+        await self._write_incremental(handle, text, now=now, final=False)
+
+    async def finish_incremental_reply(
+        self,
+        handle: IncrementalReplyHandle,
+        text: str,
+        *,
+        now: Optional[float] = None,
+    ) -> None:
+        """收尾：让那条消息的最终内容与整段投递路径逐字一致。
+
+        收尾**不受节流约束**：被节流掉的收尾会让用户永远停在半句话上，
+        而日志显示这一轮成功。
+        """
+        await self._write_incremental(handle, text, now=now, final=True)
+
+    async def _write_incremental(
+        self,
+        handle: IncrementalReplyHandle,
+        text: str,
+        *,
+        now: Optional[float],
+        final: bool,
+    ) -> None:
+        rendered = self.render_text(text) if text else self.INCREMENTAL_PLACEHOLDER_TEXT
+        # 内容没变就不发请求：一次无变化的改写会被平台以「消息未修改」拒绝，
+        # 而那是一条会进日志的错误，看起来像故障。
+        previous = getattr(handle, "_rendered", None)
+        if previous == rendered:
+            return
+        timestamp = time.monotonic() if now is None else float(now)
+        if not final:
+            last_written = getattr(handle, "_last_written_at", None)
+            if (
+                last_written is not None
+                and timestamp - last_written < self.INCREMENTAL_EDIT_INTERVAL_SECONDS
+            ):
+                return
+        # 超长回复不在这条路径上分页：分页要改的是「一条消息」这个前提，
+        # 而增量投递的整个机制建立在「持续改写同一条」上。超出平台上限时停止
+        # 增量，交给整段投递路径按页发送——那条路径已经处理好边界与页码。
+        if len(rendered) > TELEGRAM_MESSAGE_LIMIT:
+            return
+        try:
+            await self.application.bot.edit_message_text(
+                chat_id=handle.chat_id,
+                message_id=int(handle.message_id),
+                text=rendered,
+                parse_mode="MarkdownV2",
+            )
+        except Exception as error:  # noqa: BLE001 - 增量失败不该让整轮失败
+            # 整段投递路径仍然会在最后把完整回复发出去，因此这里只记不抛。
+            self.logger.debug(f"增量改写失败，已忽略：{error}")
+            return
+        object.__setattr__(handle, "_rendered", rendered)
+        object.__setattr__(handle, "_last_written_at", timestamp)
+        handle.delivered_length = len(text)
 
     @lru_cache(maxsize=10)
     async def _cached_get_chat(self, user_id):

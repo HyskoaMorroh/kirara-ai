@@ -61,6 +61,18 @@ class DeliveryTiming(Base):
     llm_generation_seconds = Column(Float, nullable=True)
     formatting_seconds = Column(Float, nullable=True)
     send_seconds = Column(Float, nullable=True)
+    #: 发送段的两个分量（需求 19.5：发送限流不能与「上游真的慢」混成一个「QQ 慢」）。
+    #:
+    #: ``send_seconds`` 是整段墙钟时间——它回答「用户等了多久」，必须保留。
+    #: 但它回答不了「该去查谁」：一条十页回复因防刷屏节流等了 20 秒，
+    #: 显示成「平台发送 20 秒」会让运维去查 QQ，而 QQ 什么问题都没有。
+    #: 两者处置相反：节流要调 ``send_pacing`` 配置，上游慢要查上游。
+    #:
+    #: 与其余列同一条口径：**没测到就是 NULL**。没有节流概念的渠道
+    #: （Telegram / WeCom）与第三方适配器这两列为空，而 ``0`` 是
+    #: 「测了，这次没等」——两者在排查时的含义完全不同。
+    send_pacing_seconds = Column(Float, nullable=True)
+    send_upstream_seconds = Column(Float, nullable=True)
     total_seconds = Column(Float, nullable=True)
 
     segment_count = Column(Integer, nullable=True)
@@ -105,6 +117,12 @@ class DeliveryTimingStore:
             return None
         return number
 
+    #: `_positive_or_none` 的同义实现，保留独立名字是为了让调用点自我说明：
+    #: 用它的那两列（节流归因）里 `0.0` 是一个**有效测量**，不是「没测到」。
+    #: 两者当前行为相同，但含义不同——将来若要给「没测到」加别的判据，
+    #: 改的是其中一个而不是两个。
+    _zero_aware_or_none = _positive_or_none
+
     def record(
         self,
         *,
@@ -130,6 +148,16 @@ class DeliveryTimingStore:
                 durations.get("formatting_seconds")
             ),
             "send_seconds": self._positive_or_none(durations.get("send_seconds")),
+            # 节流两列用 `_zero_aware_or_none`：`0.0` 是一个有效测量
+            #（「节流开着，这一次没等」），而 `_positive_or_none` 会把它当成没测到。
+            # 这个区别正是这两列存在的理由——把「测了是 0」丢成 NULL
+            # 会让运维无法排除节流这个原因。
+            "send_pacing_seconds": self._zero_aware_or_none(
+                durations.get("send_pacing_seconds")
+            ),
+            "send_upstream_seconds": self._zero_aware_or_none(
+                durations.get("send_upstream_seconds")
+            ),
             "total_seconds": self._positive_or_none(durations.get("total_seconds")),
         }
         if all(value is None for value in measured.values()):
@@ -170,15 +198,12 @@ class DeliveryTimingStore:
 
         除阶段耗时外还给出 ``counts``（分段数量、重试次数）——需求 19.5 九项里的
         后两项。它们同样只对测到的行求平均，一个都没测到时给 ``None`` 而不是 0。
+
+        单渠道视角。跨渠道的**可比**视图见 :meth:`compare`——19.5 的最后一句要求
+        「给出 Telegram、WeCom 与 QQ 的可比链路耗时」，而靠切换本方法的 ``channel``
+        参数得到的是三次独立查询，对比这件事被推给了读者的短期记忆。
         """
-        phases = (
-            "queue_seconds",
-            "llm_first_byte_seconds",
-            "llm_generation_seconds",
-            "formatting_seconds",
-            "send_seconds",
-            "total_seconds",
-        )
+        phases = self.PHASE_COLUMNS
         with self.database.get_session() as session:
             query = session.query(DeliveryTiming)
             query = self._apply_filters(query, channel, start_time, end_time)
@@ -208,7 +233,7 @@ class DeliveryTimingStore:
             # 第三方适配器可能不带 details，那时值为 NULL；把 NULL 按 0 计入会把
             # 平均分段数拉低成一个不存在的数字，而读者无从察觉。
             summary["counts"] = {}
-            for name in ("segment_count", "retry_count"):
+            for name in self.COUNT_COLUMNS:
                 column = getattr(DeliveryTiming, name)
                 scoped = self._apply_filters(
                     session.query(func.avg(column), func.max(column), func.count(column)),
@@ -233,6 +258,150 @@ class DeliveryTimingStore:
             ).filter(DeliveryTiming.status != "succeeded").scalar()
             summary["failed_deliveries"] = int(failed or 0)
         return summary
+
+    #: 参与汇总与对比的阶段列，顺序即链路顺序。
+    #:
+    #: 提到类级别是因为 `summarize()` 与 `compare()` 必须用同一份列表：
+    #: 两处各写一份时，新增一个阶段只会出现在其中一个视图里，
+    #: 而「单渠道视图有这一段、对比视图没有」是一个读者无从解释的差异。
+    PHASE_COLUMNS = (
+        "queue_seconds",
+        "llm_first_byte_seconds",
+        "llm_generation_seconds",
+        "formatting_seconds",
+        "send_seconds",
+        # 发送段的两个分量紧跟在整段之后：读者先看到「用户等了多久」，
+        # 再看到它由哪两部分构成。
+        "send_pacing_seconds",
+        "send_upstream_seconds",
+        "total_seconds",
+    )
+
+    #: 参与汇总与对比的计数列（需求 19.5 九项里的后两项）。
+    COUNT_COLUMNS = ("segment_count", "retry_count")
+
+    def compare(
+        self,
+        *,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> list[dict[str, Any]]:
+        """Aggregate the same phases for **every** channel in one pass.
+
+        19.5 的最后一句是硬要求：「应给出 Telegram、WeCom 与 QQ 的**可比**链路耗时」。
+        :meth:`summarize` 只接受一个 ``channel``，界面上是一个下拉筛选器——要比较三个
+        渠道，运维得切三次下拉框再靠记忆对比六个阶段的数字。那不是可比，那是把对比
+        推给人的短期记忆。而 19.5 要回答的问题恰恰是对比式的：「QQ 慢，是 QQ 这条
+        链路慢，还是模型本来就慢（三个渠道一样慢）」——没有对照组时这个问题
+        无法回答，而单渠道视图永远给不出对照组。
+
+        口径与 :meth:`summarize` 逐字一致：只对**测到该阶段**的行求平均、每项带样本数、
+        一个都没测到时给 ``None`` 而不是 0。在对比视图里这条比单渠道时更要紧——
+        一个渠道显示 0 ms 首字节、另一个显示 2 s 时，看起来是前者快得多，
+        而事实是前者根本没测。
+
+        **一次分组查询，不是每个渠道各查一遍。** 六个阶段 × N 个渠道 = 6N 次查询，
+        而这张表在长期运行的部署上会长（默认保留 30 天）；N+1 查询在这种表上是一个
+        会随时间变慢的设计，慢下来的时候正好是最需要它的时候。
+        ``idx_im_delivery_channel_time`` 覆盖 ``(channel, recorded_at)``，分组聚合走它。
+        """
+        rows: dict[str, dict[str, Any]] = {}
+
+        def bucket(channel: str) -> dict[str, Any]:
+            entry = rows.get(channel)
+            if entry is None:
+                entry = rows[channel] = {
+                    "channel": channel,
+                    "deliveries": 0,
+                    "failed_deliveries": 0,
+                    "phases": {},
+                    "counts": {},
+                }
+            return entry
+
+        with self.database.get_session() as session:
+            totals = self._apply_filters(
+                session.query(
+                    DeliveryTiming.channel,
+                    func.count(DeliveryTiming.id),
+                ),
+                None,
+                start_time,
+                end_time,
+            ).group_by(DeliveryTiming.channel)
+            for channel, count in totals:
+                bucket(str(channel))["deliveries"] = int(count or 0)
+
+            failures = self._apply_filters(
+                session.query(
+                    DeliveryTiming.channel,
+                    func.count(DeliveryTiming.id),
+                ),
+                None,
+                start_time,
+                end_time,
+            ).filter(DeliveryTiming.status != "succeeded").group_by(
+                DeliveryTiming.channel
+            )
+            for channel, count in failures:
+                bucket(str(channel))["failed_deliveries"] = int(count or 0)
+
+            for phase in self.PHASE_COLUMNS:
+                column = getattr(DeliveryTiming, phase)
+                grouped = self._apply_filters(
+                    session.query(
+                        DeliveryTiming.channel,
+                        func.avg(column),
+                        func.max(column),
+                        func.count(column),
+                    ),
+                    None,
+                    start_time,
+                    end_time,
+                ).filter(column.isnot(None)).group_by(DeliveryTiming.channel)
+                measured = {
+                    str(channel): (average, maximum, samples)
+                    for channel, average, maximum, samples in grouped
+                }
+                for entry in rows.values():
+                    average, maximum, samples = measured.get(
+                        entry["channel"], (None, None, 0)
+                    )
+                    entry["phases"][phase] = {
+                        "avg_seconds": float(average) if average is not None else None,
+                        "max_seconds": float(maximum) if maximum is not None else None,
+                        "samples": int(samples or 0),
+                    }
+
+            for name in self.COUNT_COLUMNS:
+                column = getattr(DeliveryTiming, name)
+                grouped = self._apply_filters(
+                    session.query(
+                        DeliveryTiming.channel,
+                        func.avg(column),
+                        func.max(column),
+                        func.count(column),
+                    ),
+                    None,
+                    start_time,
+                    end_time,
+                ).filter(column.isnot(None)).group_by(DeliveryTiming.channel)
+                measured = {
+                    str(channel): (average, maximum, samples)
+                    for channel, average, maximum, samples in grouped
+                }
+                for entry in rows.values():
+                    average, maximum, samples = measured.get(
+                        entry["channel"], (None, None, 0)
+                    )
+                    entry["counts"][name] = {
+                        "avg": float(average) if average is not None else None,
+                        "max": int(maximum) if maximum is not None else None,
+                        "samples": int(samples or 0),
+                    }
+
+        # 渠道名升序：顺序稳定，两次查看同一时间范围得到同一张表。
+        return [rows[channel] for channel in sorted(rows)]
 
     def list_channels(self) -> list[str]:
         with self.database.get_session() as session:
@@ -295,6 +464,8 @@ class DeliveryTimingStore:
             "llm_generation_seconds": row.llm_generation_seconds,
             "formatting_seconds": row.formatting_seconds,
             "send_seconds": row.send_seconds,
+            "send_pacing_seconds": row.send_pacing_seconds,
+            "send_upstream_seconds": row.send_upstream_seconds,
             "total_seconds": row.total_seconds,
             "segment_count": row.segment_count,
             "retry_count": row.retry_count,

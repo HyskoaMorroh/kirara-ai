@@ -83,6 +83,27 @@ memory:
 agent_runtime:
   context_char_threshold: 0  # 上下文压缩阈值，0 表示保持默认行为
   debug_hooks_enabled: true  # 注册受控的 Agent 调试 Hook Handler
+  # 回复取回方式。三档，默认 off（与既有部署行为完全一致）。
+  #
+  #   off         非流式，一次拿到完整回复。
+  #   aggregate   以流式方式向上游取回，再整段投递。用户端看不出区别，
+  #               买到的是首字节超时、静默超时与首字节前的故障转移。
+  #   incremental 在 aggregate 之上，边生成边改写已发出的那条消息。
+  #
+  # incremental 需要渠道能编辑已发消息——当前只有 Telegram 具备。QQ / 企业微信
+  # 上它自动退化成 aggregate（不报错，也不会变成几十条碎片消息）。
+  reply_stream_mode: "off"
+  # 按渠道覆盖上面那一档。键是渠道类型，无法识别的取值一律按「跟随上层」处理。
+  channel_reply_stream_modes: {}
+  # channel_reply_stream_modes:
+  #   telegram: incremental   # 只有 Telegram 真的能逐步显示
+  #   onebot: aggregate
+  # 单轮对话（含多次工具往返）的总时间预算，单位秒。0 表示不设预算。
+  # 预算耗尽会真的断开在途的上游连接——只停止等待而不断开的话，上游会把内容
+  # 生成完并照旧计费：日志里写着已取消，账单上一分不少。
+  turn_deadline_seconds: 0.0
+  # 工具数超过这个阈值时改为按需搜索工具，而不是把全部工具塞进每次请求。
+  tool_search_threshold: 12
   # 声明哪些 IM 渠道身份属于项目创建者。
   #
   # 默认为空。不声明时聊天侧拿不到任何身份，因此 MCP 工具与 command 型 Hook

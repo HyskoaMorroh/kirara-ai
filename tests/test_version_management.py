@@ -328,6 +328,23 @@ def test_remote_git_tags_parse_ls_remote_output(monkeypatch, tmp_path):
     assert version_script._remote_git_tags(tmp_path, "origin") == {"v3.3.0b10"}
 
 
+def _occupancy(version_script, versions, *, released=None):
+    """Build an `OccupancyReport` for tests that only care about the collision set.
+
+    发布计划现在读的是 `occupied_release_versions()`——它一次拿到「占用全集」
+    与「为什么被占用」（远端已发布 vs 仅本地打过标，需求 23.2）。
+    只关心碰撞判定的用例用这个助手构造报告，默认把全部版本记为「已发布」，
+    因为那是这些用例原本模拟的情形（远端已有该 Tag）。
+    """
+    taken = set(versions)
+    published = taken if released is None else set(released)
+    return version_script.OccupancyReport(
+        all_versions=version_script._sorted_versions(taken),
+        released=version_script._sorted_versions(published),
+        reserved_locally=version_script._sorted_versions(taken - published),
+    )
+
+
 def test_occupied_git_versions_normalizes_local_and_remote_tags(
     monkeypatch, tmp_path
 ):
@@ -586,8 +603,8 @@ def test_bump_allow_dirty_resolves_and_applies_the_candidate(tmp_path, monkeypat
     applied = []
     monkeypatch.setattr(
         version_script,
-        "occupied_git_versions",
-        lambda root, remote=None, local_only=False: set(),
+        "occupied_release_versions",
+        lambda root, remote=None, local_only=False: _occupancy(version_script, set()),
     )
     monkeypatch.setattr(
         version_script,
@@ -642,8 +659,10 @@ def test_cli_next_uses_the_project_root_and_prints_the_candidate(monkeypatch, ca
     monkeypatch.setattr(version_script, "_read_project_version", lambda root: "3.3.0b10")
     monkeypatch.setattr(
         version_script,
-        "occupied_git_versions",
-        lambda root, remote=None, local_only=False: {"3.3.0b10"},
+        "occupied_release_versions",
+        lambda root, remote=None, local_only=False: _occupancy(
+            version_script, {"3.3.0b10"}
+        ),
     )
 
     assert version_script.main(["next", "--remote", "origin"]) == 0
@@ -660,11 +679,10 @@ def test_release_plan_derives_every_publish_identity_from_one_candidate(
     )
     monkeypatch.setattr(
         version_script,
-        "occupied_git_versions",
-        lambda root, remote=None, local_only=False: {
-            "3.3.0b9",
-            "3.3.0b11",
-        },
+        "occupied_release_versions",
+        lambda root, remote=None, local_only=False: _occupancy(
+            version_script, {"3.3.0b9", "3.3.0b11"}
+        ),
     )
 
     plan = version_script.build_release_plan(tmp_path, remote="origin")
@@ -695,6 +713,11 @@ def test_cli_release_plan_json_is_stable_and_machine_readable(monkeypatch, capsy
             remote="origin",
             local_only=False,
             occupied=("3.3.0b10",),
+            # 「已发布」与「仅本地占号」分列（需求 23.2）：后者往往是上一次发布
+            # 中断留下的残留，处置是删掉那个本地 Tag 再重试，而不是把版本号
+            # 一路往上跳。这里模拟「远端已有 3.3.0b10」这个最常见的情形。
+            released=("3.3.0b10",),
+            reserved_locally=(),
         ),
     )
 
@@ -706,6 +729,8 @@ def test_cli_release_plan_json_is_stable_and_machine_readable(monkeypatch, capsy
         "local_only": False,
         "npm": "3.3.0-b11",
         "occupied": ["3.3.0b10"],
+        "released": ["3.3.0b10"],
+        "reserved_locally": [],
         "remote": "origin",
         "tag": "v3.3.0b11",
     }
@@ -724,6 +749,13 @@ def test_bump_rechecks_remote_tags_before_synchronizing(monkeypatch, tmp_path):
         return set() if len(occupied_calls) == 1 else {"3.3.0b11"}
 
     monkeypatch.setattr(version_script, "occupied_git_versions", occupied)
+    monkeypatch.setattr(
+        version_script,
+        "occupied_release_versions",
+        lambda root, remote=None, local_only=False: _occupancy(
+            version_script, occupied(root, remote, local_only)
+        ),
+    )
     monkeypatch.setattr(
         version_script,
         "set_version",
@@ -757,6 +789,13 @@ def test_bump_rejects_a_newer_different_remote_tag_before_synchronizing(
     monkeypatch.setattr(version_script, "occupied_git_versions", occupied)
     monkeypatch.setattr(
         version_script,
+        "occupied_release_versions",
+        lambda root, remote=None, local_only=False: _occupancy(
+            version_script, occupied(root, remote, local_only)
+        ),
+    )
+    monkeypatch.setattr(
+        version_script,
         "set_version",
         lambda root, version: pytest.fail("stale candidate must not be synchronized"),
     )
@@ -777,8 +816,8 @@ def test_cli_bump_dry_run_does_not_call_set_version(monkeypatch, capsys):
     monkeypatch.setattr(version_script, "_read_project_version", lambda root: "3.3.0b10")
     monkeypatch.setattr(
         version_script,
-        "occupied_git_versions",
-        lambda root, remote=None, local_only=False: set(),
+        "occupied_release_versions",
+        lambda root, remote=None, local_only=False: _occupancy(version_script, set()),
     )
     monkeypatch.setattr(
         version_script,

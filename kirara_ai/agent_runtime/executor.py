@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
+from kirara_ai.im.adapter import IncrementalDeliveryAdapter, IncrementalReplyHandle
 from kirara_ai.im.message import IMMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
 from kirara_ai.llm.format.message import (
@@ -32,7 +33,7 @@ from kirara_ai.llm.format.message import (
     LLMToolCallContent,
 )
 from kirara_ai.llm.format.request import LLMChatRequest, Tool, ToolParameters
-from kirara_ai.llm.format.response import LLMChatResponse, Message
+from kirara_ai.llm.format.response import LLMChatResponse, Message, Usage, UsageSource
 from kirara_ai.llm.format.tool import LLMToolResultContent, ToolCall
 from kirara_ai.llm.resilience import (
     ChatExecutionResult,
@@ -68,6 +69,198 @@ from .skills import (
     skill_catalog_section,
     skill_readiness_note,
 )
+from .tool_search import (
+    DEFAULT_TOOL_SEARCH_THRESHOLD,
+    TOOL_SEARCH_TOOL_NAME,
+    build_tool_search_tool,
+    search_tool_entries,
+    should_use_tool_search,
+    tool_catalog_section,
+)
+
+#: 流式用量的可合并维度。列举而不是遍历 ``model_fields``：``source`` 不是计数，
+#: 需要另一套规则（见 ``merge_stream_usage``）。
+_USAGE_COUNT_FIELDS = (
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "cached_tokens",
+    "cache_write_tokens",
+)
+
+#: 真正会向上游发起流式请求的两档。``incremental`` 在 ``aggregate`` 之上再把
+#: 内容推给用户，取回方式相同。
+_STREAMING_MODES = frozenset({"aggregate", "incremental"})
+
+
+class IncrementalReplyDelivery:
+    """把生成中的文本推给一个具备「编辑已发出消息」能力的渠道（需求 4）。
+
+    `aggregate` 只是把流在服务端吃完再发一条完整消息——用户端从来没收到过流式，
+    等待期间界面上什么都没有。`incremental` 在它之上多一步：边生成边改写同一条消息。
+
+    这个类刻意做成**可以完全惰性**的：
+
+    * 渠道对象为 ``None``（WebUI 的 HTTP 路径没有适配器）或不实现增量协议
+      （QQ / 企业微信）时，所有方法都是空操作。判空集中在这里而不是散落在调用点：
+      散落时漏掉一处就是一次 ``AttributeError`` 打断整轮对话。
+    * 任何一次推送失败都**就地停用自己**并且不抛。增量是体验优化，
+      整段投递路径仍会在最后把完整回复发出去；而一个正在限流的渠道上反复改写
+      只会加深限流，每次失败还要付一次往返。
+    """
+
+    def __init__(self, channel: Any, *, recipient: Any) -> None:
+        self._channel = channel if isinstance(channel, IncrementalDeliveryAdapter) else None
+        self._recipient = recipient
+        self._handle: Optional[IncrementalReplyHandle] = None
+        self._failed = self._channel is None
+        self._delivered = False
+
+    @property
+    def active(self) -> bool:
+        """是否仍在向渠道推送。失败或渠道不支持时为 ``False``。"""
+        return self._channel is not None and self._handle is not None and not self._failed
+
+    @property
+    def delivered(self) -> bool:
+        """最终文本是否已经确实写到平台上了。
+
+        这是「要不要再走整段投递」的唯一判据。**不能**用「本轮尝试过增量」代替：
+        占位消息发不出去、中途改写被限流、渠道压根不支持编辑——这几种情况下
+        用户此刻屏幕上没有完整回复，整段投递必须照常发生。反过来，收尾成功之后
+        再整段投递一次，用户会看到同一段几千字的内容出现两遍。
+        """
+        return self._delivered
+
+    async def start(self) -> None:
+        if self._channel is None or self._failed:
+            return
+        try:
+            self._handle = await self._channel.begin_incremental_reply(self._recipient)
+        except Exception:  # noqa: BLE001 - 建立占位失败只损失增量体验
+            self._handle = None
+        if self._handle is None:
+            # 拿不到占位消息就没有可改写的目标。停用而不是对着 None 反复尝试。
+            self._failed = True
+
+    async def push(self, text: str) -> None:
+        """推送**到目前为止的完整文本**（不是增量片段）。"""
+        if not self.active or not text or not text.strip():
+            # 空文本改写会把占位消息变成空消息（平台会拒），或者把「正在生成」抹掉，
+            # 让用户以为回复已经结束。
+            return
+        try:
+            await self._channel.update_incremental_reply(self._handle, text)
+        except Exception:  # noqa: BLE001 - 推送失败不该让整轮失败
+            self._failed = True
+
+    async def complete(self, text: str) -> None:
+        """收尾，交出最终文本。没有走过增量路径时是空操作。
+
+        只有这一步成功之后 :attr:`delivered` 才为真：那时用户屏幕上的那条消息
+        与整段投递路径会给出的内容逐字一致，再发一遍就是重复。
+        """
+        if self._channel is None or self._handle is None or self._failed:
+            # 一轮里根本没走增量路径（例如工具轮）时，不该凭空发一条消息出来。
+            return
+        try:
+            await self._channel.finish_incremental_reply(self._handle, text)
+        except Exception:  # noqa: BLE001 - 收尾失败由整段投递兜底
+            self._failed = True
+            return
+        self._delivered = True
+
+
+def resolve_reply_stream_mode(
+    *,
+    agent_mode: Optional[str],
+    channel_modes: Optional[Mapping[str, str]],
+    channel_type: Optional[str],
+    process_mode: Optional[str],
+    request_mode: Optional[str] = None,
+) -> str:
+    """按「Agent 显式声明 > 渠道默认 > 本次请求 > 进程默认」定出这一轮的取回方式。
+
+    原本只有一个进程级 ``reply_stream_mode``，一个部署里所有 Agent、所有渠道共用
+    同一档。而这两个维度本就该不同：一个接了慢上游的 Agent 需要流式带来的首字节
+    超时保护，另一个走本地小模型、毫秒级返回的 Agent 打开它只是白付一次握手；
+    而渠道之间对流式的承载能力也不同——能编辑已发出消息（Telegram）或本身就是
+    追加式传输（WebUI 的 SSE）的渠道才能兑现 ``incremental``。于是运维只能二选一，
+    而两种选择都对一部分入口是错的。
+
+    ``request_mode`` 是**本次调用**声明的取回方式，只有确实按流式协议接住回复的
+    入口才该传它（目前是 WebUI 的 SSE 路由）。它的位置刻意放在渠道之后：客户端
+    打开了一条流，默认就该往里推——否则这条路由在默认配置下永远只发 ``start`` 与
+    ``done``，一个「已实现」的功能在所有未特意配置的部署上都不生效。但只要运维在
+    Agent 或渠道上写下了明确取值，那句配置仍然优先，因为它是一个人做出的决定。
+
+    两条边界：
+
+    * **无法识别的取值一律当作「跟随上层」，绝不当作开启。** 把拼写错误理解成
+      开启会让一处笔误静默改变整条取回路径，而配置界面上它看起来是有效的。
+    * **各层都缺省时返回 ``off``**，与本特性之前逐字节一致：升级不会让任何既有
+      部署突然改变取回方式。
+    """
+
+    def normalized(value: Optional[str]) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        candidate = value.strip().lower()
+        if candidate in _STREAMING_MODES or candidate == "off":
+            return candidate
+        return None
+
+    explicit = normalized(agent_mode)
+    if explicit is not None:
+        return explicit
+
+    if channel_modes and isinstance(channel_type, str):
+        channel_explicit = normalized(channel_modes.get(channel_type.strip().lower()))
+        if channel_explicit is not None:
+            return channel_explicit
+
+    requested = normalized(request_mode)
+    if requested is not None:
+        return requested
+
+    return normalized(process_mode) or "off"
+
+
+def merge_stream_usage(accumulated: Optional[Usage], incoming: Optional[Usage]) -> Optional[Usage]:
+    """把一个分片回报的用量并入已累积的那份，按字段合并而不是整体替换。
+
+    流式响应把用量拆在多个分片里回报是常见形态：OpenAI 兼容端点里
+    ``prompt_tokens`` 往往只在第一个带 usage 的分片出现（提示词在请求时就已确定），
+    而 ``completion_tokens`` / ``total_tokens`` 要等生成结束才有值。
+
+    整体替换会让最后一个带 usage 的分片抹掉先前那份，表现是**账单里的输入 Token
+    变成「未上报」**，而这条请求明明报过输入用量。更麻烦的是 ``usage_source``
+    仍然是 ``provider``，所以界面上没有任何「这条数据不完整」的迹象——
+    它看起来是一条正常的、便宜的请求。
+
+    合并口径：
+
+    * 后到的**非 None** 值优先。增量计数的上游每片回报「到目前为止」的值，
+      最后那份才是最终值。
+    * 后到的 ``None`` **不覆盖**已有值。``None`` 是「这个分片没提」，
+      不是「这个值是空」——与本项目在别处坚持的「``None`` 与 ``0`` 是两件事」同一条
+      规则。``0`` 会照常覆盖，因为它是「报了，确实没有」这个论断。
+    * ``source`` 只升不降：上游报过用量这件事，不该被一个没写 source 的收尾分片
+      抹成 ``UNKNOWN``——那会让这条请求在统计里从「有据可依」掉进「不明」。
+    """
+    if incoming is None:
+        return accumulated
+    if accumulated is None:
+        return incoming
+
+    merged = accumulated.model_copy()
+    for name in _USAGE_COUNT_FIELDS:
+        value = getattr(incoming, name, None)
+        if value is not None:
+            setattr(merged, name, value)
+    if incoming.source is not UsageSource.UNKNOWN:
+        merged.source = incoming.source
+    return merged
 
 
 class RuntimeStatus(str, Enum):
@@ -95,6 +288,15 @@ class RuntimeResult:
     #: ``None``，而不是拿「请求返回时刻」冒充首字节——后者会把「模型思考了 20 秒」
     #: 记成「首字节 20 秒、生成 0 秒」，与真实情况正好相反。
     llm_first_byte_at: Optional[datetime] = None
+    #: 这一轮的最终文本是否已经通过增量投递写到渠道上了。
+    #:
+    #: 为真时调用方**不得**再整段投递一次：用户屏幕上那条被改写完成的消息与
+    #: 整段投递会发出的内容逐字相同，再发一遍就是同一段回复出现两遍。
+    #:
+    #: 默认必须是 ``False``：默认反了会让所有非增量回复静默消失。只有增量收尾
+    #: 确实成功（`IncrementalReplyDelivery.delivered`）时才置真，因此占位失败、
+    #: 改写被限流、渠道不支持编辑这几种情况仍然走整段投递兜底。
+    delivered_incrementally: bool = False
 
 
 @dataclass
@@ -137,6 +339,8 @@ class AgentRuntimeExecutor:
         context_char_threshold: Optional[int] = None,
         compactor: Optional[Callable[..., Any]] = None,
         reply_stream_mode: str = "off",
+        channel_reply_stream_modes: Optional[Mapping[str, str]] = None,
+        tool_search_threshold: int = DEFAULT_TOOL_SEARCH_THRESHOLD,
         turn_deadline_seconds: float = 0.0,
     ) -> None:
         if context_char_threshold is not None:
@@ -146,8 +350,35 @@ class AgentRuntimeExecutor:
                 raise ValueError("context_char_threshold must be a non-negative integer")
         if compactor is not None and not callable(compactor):
             raise TypeError("compactor must be callable")
-        if reply_stream_mode not in {"off", "aggregate"}:
-            raise ValueError("reply_stream_mode must be either off or aggregate")
+        # 进程级默认不接受 `inherit`：它没有上层可以跟随，写成它等于没有默认值。
+        if reply_stream_mode not in {"off", "aggregate", "incremental"}:
+            raise ValueError(
+                "reply_stream_mode must be one of off, aggregate, incremental"
+            )
+        #: 各渠道的默认取回方式，优先级在 Agent 声明之下、进程默认之上（需求 4）。
+        #:
+        #: 各渠道对流式的承载能力本就不同：Telegram 能编辑已发出的消息，
+        #: WebUI 的在线对话走 SSE（一条事件就是一次追加），这两个能兑现
+        #: `incremental`；QQ / OneBot 与企业微信没有等价能力，
+        #: 在那里它自动退化成 `aggregate`。
+        #: 此前只有一个进程级开关，运维只能二选一，两种选择都对一部分入口是错的。
+        #: 不合法的取值在这里就被剔除而不是留到运行时——一处笔误不该静默改变
+        #: 整条取回路径，而配置界面上它看起来是有效的。
+        self.channel_reply_stream_modes: dict[str, str] = {
+            str(channel).strip().lower(): str(mode).strip().lower()
+            for channel, mode in (channel_reply_stream_modes or {}).items()
+            if str(mode).strip().lower() in {"off", "aggregate", "incremental"}
+        }
+        #: 工具数超过它才改用「目录 + 搜索」（需求 8 的 Tool Search）。
+        #:
+        #: ``0`` 表示关闭，拿回逐字节一致的全量注入行为。用阈值而不是布尔开关，
+        #: 是因为这件事的收益完全取决于工具数量：同一个开关在「三个工具」和
+        #: 「四十个工具」上一个是纯损失、一个是纯收益。
+        if isinstance(tool_search_threshold, bool) or not isinstance(
+            tool_search_threshold, int
+        ) or tool_search_threshold < 0:
+            raise ValueError("tool_search_threshold must be a non-negative integer")
+        self.tool_search_threshold = tool_search_threshold
         if isinstance(turn_deadline_seconds, bool) or not isinstance(
             turn_deadline_seconds, (int, float)
         ) or turn_deadline_seconds < 0:
@@ -193,12 +424,27 @@ class AgentRuntimeExecutor:
         workflow_mcp_allowlist: Optional[Iterable[str]] = None,
         history: Optional[Sequence[LLMChatMessage]] = None,
         teammate_depth: Optional[int] = None,
+        incremental_channel: Any = None,
+        reply_stream_mode: Optional[str] = None,
     ) -> RuntimeResult:
         """Execute one inbound message and never perform an unconfirmed tool.
 
         ``teammate_depth`` 是本轮还允许的委派层数（需求 8 的 Teammates 模式）。
         默认取 ``DEFAULT_TEAMMATE_DEPTH``；队友被委派执行时由调用方递减，
         因此 A→B→A 不会无限递归。
+
+        ``incremental_channel`` 是投递这一轮回复的适配器对象（需求 4）。
+        它实现 ``IncrementalDeliveryAdapter`` 且本轮解析出的取回方式是
+        ``incremental`` 时，生成中的内容会边生成边改写同一条消息推给用户。
+        传 ``None``（或一个不支持编辑的适配器）时整条增量链路是空操作，
+        行为与此前逐字节一致。
+
+        ``reply_stream_mode`` 是**本次调用**声明的取回方式，只有确实按流式协议
+        接住回复的入口才该传（目前是 WebUI 的 SSE 路由）。它在
+        :func:`resolve_reply_stream_mode` 的优先级里排在 Agent 与渠道之后、
+        进程默认之前：客户端既然打开了一条流，默认就该往里推，否则那条路由在
+        默认配置下永远只发 ``start`` 与 ``done``；而运维一旦在 Agent 或渠道上写下
+        明确取值，那句配置仍然优先。
         """
 
         correlation_id = uuid.uuid4().hex
@@ -207,6 +453,11 @@ class AgentRuntimeExecutor:
         result: Optional[RuntimeResult] = None
         depth = (
             DEFAULT_TEAMMATE_DEPTH if teammate_depth is None else max(0, int(teammate_depth))
+        )
+        # 增量投递的 sink 在这里就构造好：渠道不支持时它是惰性的，因此下游不需要
+        # 到处判空——判空散落在调用点时，漏掉一处就是一次 AttributeError 打断整轮。
+        incremental = IncrementalReplyDelivery(
+            incremental_channel, recipient=message.sender
         )
         try:
             agent = self._trusted_agent(self.agent_registry.resolve(context, session_agent_id))
@@ -273,6 +524,19 @@ class AgentRuntimeExecutor:
                 (session_hook, prompt_hook),
             )
             tools = self._build_tools(tool_entries, effective_tools) if agent.allow_tools else []
+            # Tool Search（需求 8）：工具多到一定数量时不再全量注入完整 schema，
+            # 改成「一行目录 + 一个搜索工具」。机制与技能的渐进披露完全对称，
+            # 因此运维只需要理解一套心智模型。
+            #
+            # 只对 MCP 工具做这件事：队友委派工具与技能工具本身就已经是压缩形态
+            # （每个只有一句描述），把它们也藏起来只会多一轮往返。
+            searchable_tools: list[Tool] = []
+            if should_use_tool_search(tools, threshold=self.tool_search_threshold):
+                searchable_tools = list(tools)
+                catalog = tool_catalog_section(searchable_tools)
+                if catalog:
+                    messages = self._append_system_text(messages, catalog)
+                tools = [build_tool_search_tool()]
             # 委派工具与 MCP 工具同一形态，因此模型侧不需要区分「这是队友还是工具」。
             # 深度耗尽或未配置队友时列表为空，行为与此前一致。
             teammate_tools = (
@@ -306,8 +570,18 @@ class AgentRuntimeExecutor:
                 teammate_tool_names=teammate_names,
                 teammate_depth=depth,
                 skill_tool_names=skill_names,
+                searchable_tools=tuple(searchable_tools),
+                incremental=incremental,
+                reply_stream_mode=reply_stream_mode,
             )
             if result.status is RuntimeStatus.COMPLETED:
+                # 收尾必须在返回之前：让那条被反复改写的消息的最终内容与整段投递
+                # 路径逐字一致。跳过它会让用户永远停在最后一次节流之前的半句话上，
+                # 而日志显示这一轮成功。
+                await incremental.complete(result.text or "")
+                # 收尾确实成功时告知调用方屏幕上已经有完整回复了，否则它会再整段
+                # 投递一次，同一段内容出现两遍。失败时保持 False 走兜底。
+                result.delivered_incrementally = incremental.delivered
                 self._persist_history(context.session_key, agent.agent_id, result)
                 self._persist_memory(
                     context,
@@ -692,11 +966,21 @@ class AgentRuntimeExecutor:
         teammate_tool_names: frozenset[str] = frozenset(),
         teammate_depth: int = 0,
         skill_tool_names: frozenset[str] = frozenset(),
+        searchable_tools: tuple[Tool, ...] = (),
+        incremental: Optional[IncrementalReplyDelivery] = None,
+        reply_stream_mode: Optional[str] = None,
     ) -> RuntimeResult:
         current_messages = list(messages)
         current_model = model_id
         current_traces = list(trace_ids)
         response: Optional[LLMChatResponse] = None
+        # Tool Search（需求 8）：本轮已经被搜出来、因此可以直接调用的工具。
+        #
+        # 搜到之后必须把它**放进工具列表**，否则模型下一轮调用它会撞
+        # 「permission denied for MCP tool」——它按我们给的目录做了正确的事，
+        # 却被判成越权，而那个错误无法自查。
+        current_tools = list(tools)
+        disclosed_tool_names: set[str] = set()
         # 只有流式请求能测到首字节；多轮工具调用时保留**最后一次**模型请求的
         # 首字节，因为它才是最终回复文本的起点。
         model_timings: dict[str, Any] = {}
@@ -735,7 +1019,7 @@ class AgentRuntimeExecutor:
             request = LLMChatRequest(
                 messages=current_messages,
                 model=current_model,
-                tools=tools if agent.allow_tools and iteration < agent.max_tool_iterations else None,
+                tools=current_tools if agent.allow_tools and iteration < agent.max_tool_iterations else None,
                 tool_choice=("none" if iteration >= agent.max_tool_iterations else None),
             )
             response, current_model, trace_id = await self._execute_model(
@@ -747,6 +1031,14 @@ class AgentRuntimeExecutor:
                 timings=model_timings,
                 cancellation_event=turn_cancellation,
                 deadline_seconds=remaining_budget(),
+                stream_mode=resolve_reply_stream_mode(
+                    agent_mode=getattr(agent, "reply_stream_mode", None),
+                    channel_modes=self.channel_reply_stream_modes,
+                    channel_type=getattr(context, "channel_type", None),
+                    process_mode=self.reply_stream_mode,
+                    request_mode=reply_stream_mode,
+                ),
+                incremental=incremental,
             )
             if trace_id:
                 current_traces.append(trace_id)
@@ -774,6 +1066,31 @@ class AgentRuntimeExecutor:
                     )
                     continue
                 name = call.function.name
+                if name == TOOL_SEARCH_TOOL_NAME and searchable_tools:
+                    # Tool Search（需求 8）：本地检索，不动服务器也不外呼，
+                    # 因此与技能载入同一判断——不走 `_requires_confirmation`。
+                    # 给它加人工确认等于每次找工具都要人点一下同意。
+                    query = ""
+                    arguments = call.function.arguments
+                    if isinstance(arguments, dict):
+                        raw_query = arguments.get("query")
+                        query = raw_query if isinstance(raw_query, str) else ""
+                    matched = search_tool_entries(searchable_tools, query)
+                    for tool in matched:
+                        # 搜到就放进工具列表：只把名字告诉模型、不放进列表，
+                        # 它下一轮调用会撞「permission denied」——按我们给的目录
+                        # 做了正确的事却被判成越权，而那个错误无法自查。
+                        if tool.name not in disclosed_tool_names:
+                            disclosed_tool_names.add(tool.name)
+                            current_tools.append(tool)
+                    current_messages.append(self._assistant_tool_message(call))
+                    current_messages.append(
+                        LLMChatMessage(
+                            role="tool",
+                            content=[self._tool_search_result(call, matched)],
+                        )
+                    )
+                    continue
                 if name in teammate_tool_names:
                     # 委派：跑队友的一次完整 turn，把它的回答作为 tool 结果带回。
                     # 委派本身不动服务器，因此不需要人工确认；队友自身的高危工具
@@ -789,8 +1106,7 @@ class AgentRuntimeExecutor:
                         LLMChatMessage(role="tool", content=[delegated])
                     )
                     continue
-                if name in skill_tool_names:
-                    # 技能载入：把这篇技能的正文交给模型，让它据此作答。
+                if name in skill_tool_names:                    # 技能载入：把这篇技能的正文交给模型，让它据此作答。
                     #
                     # 不走 `_requires_confirmation`：这是一次**本地只读**，
                     # 读的还是本轮快照已经固定的那个版本，不动服务器也不外呼。
@@ -1378,6 +1694,8 @@ class AgentRuntimeExecutor:
         timings: Optional[dict[str, Any]] = None,
         cancellation_event: Optional[threading.Event] = None,
         deadline_seconds: Optional[float] = None,
+        stream_mode: Optional[str] = None,
+        incremental: Optional[IncrementalReplyDelivery] = None,
     ) -> tuple[LLMChatResponse, str, str]:
         """Run one model request, advancing the model chain on replayable errors.
 
@@ -1437,9 +1755,20 @@ class AgentRuntimeExecutor:
                 # 流式模式下走 execute_stream，让首字节超时、静默超时与
                 # 「首字节之前的故障转移」真正生效；结果聚合成一条响应返回，
                 # 调用方看到的形状与非流式完全一致。
-                if self._stream_chat_available() and not candidate_request.tools:
+                if self._stream_request_allowed(candidate_request, stream_mode):
                     response, trace_id = await self._execute_model_streaming(
-                        candidate_request, model_id, options, timings=timings
+                        candidate_request,
+                        model_id,
+                        options,
+                        timings=timings,
+                        # 工具轮不做增量：工具调用的中间产物不是给用户看的文本，
+                        # 推出去等于把内部状态当回复。带工具的请求现在**可以**走流式
+                        # （聚合器会保住 tool_calls），但增量投递仍然只给文本轮。
+                        incremental=(
+                            incremental
+                            if stream_mode == "incremental" and not candidate_request.tools
+                            else None
+                        ),
                     )
                     return response, model_id, trace_id
                 result = execute_chat(candidate_request, **options)
@@ -1459,11 +1788,54 @@ class AgentRuntimeExecutor:
             raise last_error
         raise LookupError("Agent has no available model")
 
-    def _stream_chat_available(self) -> bool:
-        """Whether this request may be served as a stream."""
-        return self.reply_stream_mode == "aggregate" and callable(
+    def _stream_chat_available(self, mode: Optional[str] = None) -> bool:
+        """Whether this request may be served as a stream.
+
+        ``mode`` 是本轮解析出的取回方式（见 :func:`resolve_reply_stream_mode`）。
+        省略时退回进程级值，让既有第三方调用方与测试保持可用。
+        """
+        effective = mode if mode is not None else self.reply_stream_mode
+        return effective in _STREAMING_MODES and callable(
             getattr(self.llm_manager, "execute_stream", None)
         )
+
+    def _stream_request_allowed(
+        self,
+        request: LLMChatRequest,
+        mode: Optional[str] = None,
+        *,
+        supports_tool_calls: Optional[bool] = None,
+    ) -> bool:
+        """这一次请求能不能走流式。
+
+        此前的条件是 `_stream_chat_available(mode) and not request.tools`——
+        「凡是带工具的请求都不许流式」。而 `tools` 在**第 0 轮**就非空：`run()` 先拼好
+        MCP 工具、队友委派工具与技能工具再进循环。于是一个绑了任何工具的 Agent，
+        它绝大多数只需一次回复的对话从头到尾没有一次流式请求，也就拿不到
+        `stream_first_byte_timeout_seconds`、`stream_idle_timeout_seconds` 与
+        首字节前的安全故障转移——而 21.3 要求这三项必须生效。绑了 MCP 的 Agent
+        是本项目的主流用法，不是边缘情况。
+
+        那条限制的原始理由是「聚合文本会丢掉 `tool_calls`」。它只对**真的产生了
+        工具调用**的那一轮成立，而真正的缺口在适配器：流式解析只读 `delta.content`。
+        补上累积之后，限制就该按**适配器能力**而不是「有没有带工具」来下。
+
+        ``supports_tool_calls`` 供测试直接注入；生产路径问 LLMManager，
+        由它按该模型的全部候选供应商取最弱的那个（故障转移会在候选之间切换，
+        只有第一家支持的话，一次转移之后工具调用就静默消失了）。
+        """
+        if not self._stream_chat_available(mode):
+            return False
+        if not request.tools:
+            return True
+        if supports_tool_calls is None:
+            probe = getattr(self.llm_manager, "stream_supports_tool_calls", None)
+            if not callable(probe):
+                # 老的 manager 问不出能力：保持此前「带工具不流式」的行为，
+                # 那是安全的一侧——工具调用完整，只是少了超时保护。
+                return False
+            supports_tool_calls = bool(probe(request.model or ""))
+        return bool(supports_tool_calls)
 
     async def _execute_model_streaming(
         self,
@@ -1472,12 +1844,19 @@ class AgentRuntimeExecutor:
         options: dict[str, Any],
         *,
         timings: Optional[dict[str, Any]] = None,
+        incremental: Optional[IncrementalReplyDelivery] = None,
     ) -> tuple[LLMChatResponse, str]:
         """Consume a stream and return it as one aggregated response.
 
-        为什么不逐字推送：QQ、Telegram、WeCom 都不支持对已发出的消息逐字编辑，
-        逐字推送只会变成几十条碎片消息。这里取的是流式**请求**本身的收益——
-        首字节超时、静默超时，以及「首字节之前可以安全切换 Provider」。
+        ``incremental`` 非空且渠道能改写已经交付出去的内容时，边聚合边把
+        **到目前为止的完整文本**推给用户（需求 4 的 ``incremental`` 档）。
+        不具备该能力的渠道上它是空操作，因此这里不需要分支——
+        逐字发新消息会变成几十条碎片消息，比一条完整回复更糟，那条路不存在。
+
+        能兑现的是 Telegram（`editMessageText`）与 WebUI 的在线对话（SSE，
+        一条事件就是一次追加）；QQ / OneBot 与企业微信没有等价能力，在那里默认取的
+        是流式**请求**本身的收益——首字节超时、静默超时，以及「首字节之前可以安全
+        切换 Provider」。
         工具调用不走这条路：工具轮次需要结构化的 tool_calls，聚合文本会丢掉它。
 
         同时这里是整条链路上**唯一**能测到「模型首字节」的位置：拿到第一个非空
@@ -1487,6 +1866,10 @@ class AgentRuntimeExecutor:
         """
         execution = self.llm_manager.execute_stream(request, **options)
         chunks: list[str] = []
+        # 工具调用与文本一起聚合。只拼文本时工具调用会在这一步静默消失，
+        # 上层于是把「模型想调工具」当成「模型答完了」——那比一刀切成非流式更糟：
+        # 前者是能力缺失，后者是静默错误。
+        tool_calls: list[LLMToolCallContent] = []
         usage = None
         finish_reason = ""
         first_byte_at: Optional[datetime] = None
@@ -1494,13 +1877,23 @@ class AgentRuntimeExecutor:
             for chunk in execution:
                 message = getattr(chunk, "message", None)
                 for part in getattr(message, "content", None) or ():
+                    if isinstance(part, LLMToolCallContent):
+                        tool_calls.append(part)
+                        continue
                     text = getattr(part, "text", None)
                     if isinstance(text, str) and text:
                         if first_byte_at is None:
                             first_byte_at = datetime.now(timezone.utc)
+                            if incremental is not None:
+                                # 占位消息在**第一个非空片段**之后才建立，不在请求
+                                # 之前：请求还可能因参数错误立刻失败，那时已经发出
+                                # 的「正在生成回复…」就成了一条永远不会被改写的消息。
+                                await incremental.start()
                         chunks.append(text)
+                        if incremental is not None:
+                            await incremental.push("".join(chunks))
                 if getattr(chunk, "usage", None) is not None:
-                    usage = chunk.usage
+                    usage = merge_stream_usage(usage, chunk.usage)
                 reason = getattr(message, "finish_reason", None)
                 if reason:
                     finish_reason = reason
@@ -1512,12 +1905,15 @@ class AgentRuntimeExecutor:
         if timings is not None and first_byte_at is not None:
             timings["llm_first_byte_at"] = first_byte_at
 
+        # 没有工具调用时形状与此前逐字一致：一个文本部件，哪怕文本是空的。
+        content: list[Any] = [LLMChatTextContent(text="".join(chunks))]
+        content.extend(tool_calls)
         aggregated = LLMChatResponse(
             model=model_id,
             usage=usage,
             message=Message(
                 role="assistant",
-                content=[LLMChatTextContent(text="".join(chunks))],
+                content=content,
                 finish_reason=finish_reason,
             ),
         )
@@ -1780,7 +2176,7 @@ class AgentRuntimeExecutor:
             if not text:
                 continue
             if binding.resource_type == "skill" and agent.allow_tools:
-                # 渐进披露（需求 10，与 cc-switch / Claude Code 同一原理）：
+                # 渐进披露（需求 10，与主流 Agent 客户端同一原理）：
                 # 能广告的技能只在系统提示词里留一行目录，正文由 `skill_` 工具
                 # 在模型真的要用时取回。整篇注入的代价是「技能数 × 请求数」，
                 # 而其中绝大部分与当轮问题无关。
@@ -1898,6 +2294,63 @@ class AgentRuntimeExecutor:
         if not text:
             return self._error_result(call, f"skill is empty: {resource_id}")
         return LLMToolResultContent(id=call.id, name=name, content=text)
+
+    @staticmethod
+    def _tool_search_result(
+        call: ToolCall, matched: Sequence[Tool]
+    ) -> LLMToolResultContent:
+        """把搜索结果作为 tool 结果返回：完整的参数定义，不只是名字。
+
+        返回完整定义而不是名字列表，是因为交出一个没有参数的壳子会让模型用空参数
+        去调，然后拿到一个它无法理解的校验错误。
+
+        无命中时明确说「没找到」并提示换个词，而**不猜**最接近的那个：
+        猜一个交出去比返回空更糟——模型会调用一个它没有要求的工具。
+        """
+        name = call.function.name if call.function else TOOL_SEARCH_TOOL_NAME
+        if not matched:
+            return LLMToolResultContent(
+                id=call.id,
+                name=name,
+                content=(
+                    "没有匹配的工具。可以换一个更宽的关键词再搜一次，"
+                    "或者直接用你已有的知识回答。"
+                ),
+            )
+        lines = ["以下工具现在可以直接调用："]
+        for tool in matched:
+            schema = {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": tool.parameters.properties,
+                    "required": list(tool.parameters.required or []),
+                },
+            }
+            lines.append(json.dumps(schema, ensure_ascii=False))
+        return LLMToolResultContent(id=call.id, name=name, content="\n".join(lines))
+
+    @staticmethod
+    def _append_system_text(
+        messages: list[LLMChatMessage], text: str
+    ) -> list[LLMChatMessage]:
+        """把一段文字并进**已有的**首条 system 消息，而不是新增一条。
+
+        新增一条会让同一轮里出现两条 system 消息：部分上游只认第一条，
+        于是这段目录被静默丢弃——而那正是「功能存在但不生效」的形态。
+        没有 system 消息时才新建一条。
+        """
+        if not text:
+            return messages
+        result = list(messages)
+        for index, message in enumerate(result):
+            if message.role != "system":
+                continue
+            merged = [*message.content, LLMChatTextContent(text=text)]
+            result[index] = LLMChatMessage(role="system", content=merged)
+            return result
+        return [LLMChatMessage(role="system", content=[LLMChatTextContent(text=text)]), *result]
 
     def _load_resource(self, resource_id: str, version: str) -> Any:
         """Load one resource at the version captured by this turn.

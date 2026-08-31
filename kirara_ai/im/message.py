@@ -38,6 +38,18 @@ DELIVERY_STAGES: tuple[str, ...] = (
     "formatting_started",
     "formatting_completed",
     "send_started",
+    #: 本次投递为防刷屏**主动等待**的总秒数（走 details 里的 ``pacing_seconds``）。
+    #:
+    #: 19.5 点名「发送限流」不能与「LLM 慢」「WebSocket 重连」混成一个「QQ 慢」，
+    #: 而 ``send_seconds`` 是整段墙钟时间，里面同时含着两件性质相反的事：
+    #: 我们主动等的时间，和上游真的慢的时间。两者的处置正好相反——前者调
+    #: ``send_pacing`` 配置，后者查上游。混成一个数字时，一条十页回复因节流等了
+    #: 20 秒会显示成「平台发送 20 秒」，运维去查 QQ 而 QQ 什么问题都没有。
+    #:
+    #: 秒数走 details 而不是两个时间戳相减：节流是**一段一段**发生的（每页之前等
+    #: 一次），墙钟差只给出「第一次等待开始到最后一次等待结束」，中间还夹着真正的
+    #: 发送。累加值才是「我们一共主动等了多久」。
+    "send_pacing_waited",
     "send_succeeded",
     "send_failed",
 )
@@ -488,6 +500,27 @@ class IMMessage:
         self._delivery_timeline.append(event)
         return event
 
+    def _recorded_pacing_seconds(self) -> Optional[float]:
+        """本次投递主动等待的总秒数；没有任何节流记录时返回 ``None``。
+
+        累加所有 ``send_pacing_waited`` 事件的 ``pacing_seconds``：节流是一段一段
+        发生的（每页之前等一次），适配器可以逐页记，也可以在最后记一次总额。
+        两种写法在这里得到同一个结果。
+
+        ``None`` 与 ``0.0`` 严格区分：前者是「这条链路没有测量节流」
+        （第三方适配器、或压根没有节流概念的渠道），后者是「测了，结论是没等」。
+        把前者当 0 会让运维排除掉一个其实没被测量的原因。
+        """
+        total: Optional[float] = None
+        for event in self._delivery_timeline:
+            if event.stage != "send_pacing_waited":
+                continue
+            value = event.details.get("pacing_seconds")
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                continue
+            total = (total or 0.0) + max(0.0, float(value))
+        return total
+
     def delivery_durations(self) -> Dict[str, float]:
         """把时间线折算成各阶段耗时（秒）。
 
@@ -515,9 +548,18 @@ class IMMessage:
         send_start = timeline.get("send_started")
         send_end = timeline.get("send_succeeded") or timeline.get("send_failed")
         if send_start is not None and send_end is not None:
-            measurements["send_seconds"] = max(
-                0.0, (send_end - send_start).total_seconds()
-            )
+            send_total = max(0.0, (send_end - send_start).total_seconds())
+            measurements["send_seconds"] = send_total
+            # 节流归因（需求 19.5）。`send_seconds` 是「用户等了多久」，
+            # 它必须保留；但它回答不了「该去查谁」——那需要把我们主动等的那部分
+            # 单独拆出来。缺少节流记录时两项都不产出：写 0 会被读成
+            #「节流没等」，从而排除掉一个其实没有被测量的原因。
+            pacing = self._recorded_pacing_seconds()
+            if pacing is not None:
+                measurements["send_pacing_seconds"] = pacing
+                # 钳到 0：时钟抖动或记录顺序异常时，负数会让「上游有多慢」
+                # 变成一个荒谬的数字，而读者无从判断是数据坏了还是链路有异常。
+                measurements["send_upstream_seconds"] = max(0.0, send_total - pacing)
 
         first_stage = self._delivery_timeline[0].timestamp
         last_stage = self._delivery_timeline[-1].timestamp

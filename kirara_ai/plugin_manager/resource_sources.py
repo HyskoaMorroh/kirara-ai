@@ -1,4 +1,4 @@
-"""Server-side sources for CC Switch-style Skill discovery and installation.
+"""Server-side sources for Skill discovery and installation.
 
 The browser only submits repository coordinates.  Downloads, archive parsing,
 manifest generation, and persistence all happen inside the container so the
@@ -100,9 +100,27 @@ class ResourceSourceService:
 
     @classmethod
     def source_key(cls, owner: str, name: str, directory: str) -> str:
+        """由 **用户请求的** 目录构造 source identity。
+
+        仓库根标记 `"."` 不是合法输入，见 `REPOSITORY_ROOT_MARKER`；
+        内部已解析出「仓库本身就是 Skill」时用 `resolved_source_key`。
+        """
         owner, name, _ = cls.validate_repository(owner, name, "main")
         directory = cls._validate_directory(directory)
         return f"{owner}/{name}:{directory}"
+
+    @classmethod
+    def resolved_source_key(cls, owner: str, name: str, resolved_directory: str) -> str:
+        """由 **已解析的** 目录构造 source identity，允许仓库根标记。
+
+        与 `source_key` 分开，是因为两者的信任边界不同：一个接受用户输入，
+        一个接受 `_fetch_skill_files` 的结果。合成一个函数就等于让 `"."`
+        重新成为可请求的输入。
+        """
+        owner, name, _ = cls.validate_repository(owner, name, "main")
+        if resolved_directory == cls.REPOSITORY_ROOT_MARKER:
+            return f"{owner}/{name}:{cls.REPOSITORY_ROOT_MARKER}"
+        return f"{owner}/{name}:{cls._validate_directory(resolved_directory)}"
 
     @classmethod
     def validate_remote_url(cls, raw_url: str) -> str:
@@ -173,11 +191,19 @@ class ResourceSourceService:
                 continue
             cls._validate_public_address(address)
 
+    #: 「整个仓库就是一个 Skill」的内部标记。
+    #:
+    #: 它是 `_fetch_skill_files` 在 `_resolve_skill_directory` 返回 `None` 时
+    #: 自己填的**结果值**，不是用户可以请求的输入。此前 `_validate_directory`
+    #: 在所有形态检查之前就把 `"."` 原样返回，于是这个值绕过了 `_DIRECTORY_PART`、
+    #: `..`、`//`、`\\` 全部判据：直接请求 `"."` 会把整个仓库（上限 4096 个成员 /
+    #: 128 MB）当成一个 Skill 装进来，`source_key` 变成 `owner/repo:.`，
+    #: 重复安装检测也识别不到。
+    REPOSITORY_ROOT_MARKER = "."
+
     @staticmethod
     def _validate_directory(directory: str) -> str:
         directory = str(directory or "").strip().strip("/")
-        if directory == ".":
-            return directory
         if (
             not _DIRECTORY_PART.fullmatch(directory)
             or ".." in directory
@@ -189,6 +215,19 @@ class ResourceSourceService:
         if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
             raise ResourceSourceError("Skill directory must remain inside the repository")
         return path.as_posix()
+
+    @classmethod
+    def _validate_stored_directory(cls, directory: str) -> str:
+        """校验 **服务端此前存下的** 目录，允许仓库根标记。
+
+        `check_updates` / `update_skill` 读的是安装时由 `_fetch_skill_files`
+        写进 manifest 的 `directory`，对「仓库本身就是 Skill」的资源那就是
+        `"."`。用面向用户输入的 `_validate_directory` 去校验它，会让这类资源
+        既查不到更新也升不了级——堵掉一个绕过口，不能顺手把合法资源锁死。
+        """
+        if str(directory).strip() == cls.REPOSITORY_ROOT_MARKER:
+            return cls.REPOSITORY_ROOT_MARKER
+        return cls._validate_directory(directory)
 
     def add_repository(self, owner: str, name: str, branch: str = "main") -> dict[str, Any]:
         owner, name, branch = self.validate_repository(owner, name, branch)
@@ -271,7 +310,7 @@ class ResourceSourceService:
         selected, metadata, resolved_directory = self._fetch_skill_files(
             owner, name, branch, directory
         )
-        generated_source_key = self.source_key(owner, name, resolved_directory)
+        generated_source_key = self.resolved_source_key(owner, name, resolved_directory)
         resource_id = self._resource_id(generated_source_key)
         archive = self._build_skill_archive(
             resource_id=resource_id,
@@ -343,11 +382,11 @@ class ResourceSourceService:
             directory = str(metadata.get("directory", ""))
             try:
                 owner, repository, branch = self.validate_repository(owner, repository, branch)
-                directory = self._validate_directory(directory)
+                directory = self._validate_stored_directory(directory)
                 files, remote_metadata, resolved_directory = self._fetch_skill_files(
                     owner, repository, branch, directory
                 )
-                source_key = self.source_key(owner, repository, resolved_directory)
+                source_key = self.resolved_source_key(owner, repository, resolved_directory)
                 remote_hash = self._files_content_hash(files)
                 current_hash = str(resource.get("content_sha256", ""))
                 results.append(
@@ -407,14 +446,14 @@ class ResourceSourceService:
             str(metadata.get("repository", "")),
             str(metadata.get("branch", "main")),
         )
-        directory = self._validate_directory(str(metadata.get("directory", "")))
+        directory = self._validate_stored_directory(str(metadata.get("directory", "")))
         files, skill_metadata, resolved_directory = self._fetch_skill_files(
             owner, repository, branch, directory
         )
         remote_hash = self._files_content_hash(files)
         if remote_hash == resource.get("content_sha256"):
             raise ResourceStateError("resource is already up to date")
-        source_key = self.source_key(owner, repository, resolved_directory)
+        source_key = self.resolved_source_key(owner, repository, resolved_directory)
         archive = self._build_skill_archive(
             resource_id=resource_id,
             source_key=source_key,
@@ -506,7 +545,14 @@ class ResourceSourceService:
         path such as ``skills/agent-browser``.  A complete directory is always
         preferred.  Fallback discovery is anchored on ``SKILL.md`` so a
         same-name package or wrapper directory cannot be installed by mistake.
+
+        ``raw_directory`` 可能是安装时存下的仓库根标记（``"."``），
+        那种情况下要直接回到「仓库本身就是 Skill」这条路径，
+        而不是把标记当成一个同名子目录去找。
         """
+
+        if str(raw_directory).strip() == cls.REPOSITORY_ROOT_MARKER:
+            return None
 
         requested = cls._validate_directory(raw_directory)
         direct_prefix = PurePosixPath(repository_root, requested)

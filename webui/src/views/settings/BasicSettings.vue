@@ -8,6 +8,7 @@ import PasswordCard from './components/PasswordCard.vue'
 import FrpServiceCard from './components/FrpServiceCard.vue'
 import TimezoneCard from './components/TimezoneCard.vue'
 import TracingCard from './components/TracingCard.vue'
+import AgentRuntimeCard from './components/AgentRuntimeCard.vue'
 import BackupCard from './components/BackupCard.vue'
 import AppearanceCard from './components/AppearanceCard.vue'
 </script>
@@ -34,6 +35,7 @@ import AppearanceCard from './components/AppearanceCard.vue'
           <n-space vertical :gap="32">
             <TimezoneCard />
             <TracingCard />
+            <AgentRuntimeCard />
           </n-space>
         </n-tab-pane>
 

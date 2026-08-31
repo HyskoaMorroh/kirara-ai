@@ -72,6 +72,22 @@ export interface DeliverySummary {
   channels: string[]
 }
 
+/**
+ * 一个渠道在对比视图里的一行。
+ *
+ * 与 `DeliverySummary` 的区别只在于**它是并排的一行**而不是整份汇总：
+ * 阶段与计数的口径逐字一致，因此两个视图的数字可以直接互相印证。
+ * 需求 19.5 的最后一句要求「给出 Telegram、WeCom 与 QQ 的可比链路耗时」——
+ * 靠切换单渠道筛选器得到的是三次独立查询，对比被推给读者的短期记忆。
+ */
+export interface DeliveryChannelComparison {
+  channel: string
+  deliveries: number
+  failed_deliveries: number
+  phases: Record<DeliveryPhase, DeliveryPhaseSummary>
+  counts: Record<DeliveryCountKey, DeliveryCountSummary>
+}
+
 export interface DeliveryRecord {
   id: number
   channel: string
@@ -106,6 +122,26 @@ export const tracingApi = {
     if (params.end_time) query.set('end_time', params.end_time)
     const suffix = query.toString() ? `?${query}` : ''
     return http.get<DeliverySummary>(`/tracing/delivery/summary${suffix}`, { signal })
+  },
+
+  /**
+   * 所有渠道的同一组阶段并排返回（需求 19.5 的「可比」）。
+   *
+   * 与 `getDeliverySummary` 的时间参数完全一致，因此两个视图能用同一段时间
+   * 互相印证。这里**不接受** `channel`：一次只看一个渠道正是它要解决的问题。
+   */
+  compareDeliveryChannels(
+    params: { start_time?: string; end_time?: string } = {},
+    signal?: AbortSignal
+  ) {
+    const query = new URLSearchParams()
+    if (params.start_time) query.set('start_time', params.start_time)
+    if (params.end_time) query.set('end_time', params.end_time)
+    const suffix = query.toString() ? `?${query}` : ''
+    return http.get<{ channels: DeliveryChannelComparison[] }>(
+      `/tracing/delivery/compare${suffix}`,
+      { signal }
+    )
   },
 
   getRecentDeliveries(

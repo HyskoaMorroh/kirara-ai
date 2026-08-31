@@ -77,6 +77,15 @@ graphify-out/
 /findings.md
 /progress.md
 /task_plan.md
+# 外部参考产品的界面逐条记录与历史交接原文。它们是调研素材，不是本项目产物；
+# 内容整篇在描述另一个产品的界面与文案，留在公开仓库里等于对外描述该产品。
+# 历史交接文档另有一层：正文含操作者原话与本机绝对路径，改写即失真，
+# 因此停止跟踪而不是改写。文件保留在本地供继续参考，只是不再随仓库分发。
+/docs/superpowers/plans/ccs-ui-notes.md
+/docs/superpowers/plans/ccs-ui-inventory.md
+/docs/superpowers/plans/2026-08-23-handoff.md
+/docs/superpowers/plans/2026-08-25-handoff.md
+/docs/superpowers/plans/2026-08-27-handoff.prev.md
 # 本地探索期留下的授权说明草稿，不属于发布内容
 /.codex-red-host-authorization.txt
 .version-sync.lock
@@ -86,3 +95,18 @@ graphify-out/
 /create_concise_loan_contract.js
 /update_loan_identity.py
 /update_loan_rate.py
+# 本机 Claude Desktop 安装路径的探针输出。它指向本机 WindowsApps 下的绝对路径，
+# 与本项目无关，且暴露本机软件安装位置。
+/.asar-path.txt
+# 一次性分析与渲染探针的落地目录（例如把上游回复喂进渲染函数看输出）。
+# 内容随排查而变，不是产品产物。
+/tmp/
+# 与上面三份同一理由：正文含操作者原话、本机绝对路径与会话转录路径。
+# 保留在本地供继续参考，不随仓库分发。
+#
+# `2026-08-28-handoff.md` 被漏掉过一轮：它在停止跟踪那三份的**之前**就已加入索引，
+# 而当时只按文件名逐个列举，没有回头扫一遍同类文件。它含 51 处会话转录路径
+# （`~\.codex\sessions\...`）与本机仓库绝对路径，与那三份完全同一形态。
+# 判据不是「哪几个文件名」，而是「这类文档一律不跟踪」。
+/docs/superpowers/plans/2026-08-28-handoff.md
+/docs/superpowers/plans/2026-08-31-handoff.md

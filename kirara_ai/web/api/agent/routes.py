@@ -86,6 +86,10 @@ def _agent_payload(agent: AgentDefinition, registry: AgentRegistry) -> dict[str,
         "allow_tools": agent.allow_tools,
         "max_tool_iterations": agent.max_tool_iterations,
         "teammate_agent_ids": list(agent.teammate_agent_ids),
+        # 三层优先级（Agent 声明 > 渠道默认 > 进程默认）的最上面一层。
+        # 只读不写等于「界面能看见但改不了」，只写不读等于「改了看不见」，
+        # 两者都是半个功能，所以这里与 `_agent_from_payload` 必须成对出现。
+        "reply_stream_mode": agent.reply_stream_mode,
         "relations": registry.relation_summary(agent.agent_id),
     }
 
@@ -155,6 +159,8 @@ def _agent_from_payload(payload: dict[str, Any], existing: AgentDefinition | Non
         "allow_tools": existing.allow_tools if existing else True,
         "max_tool_iterations": existing.max_tool_iterations if existing else 8,
         "teammate_agent_ids": existing.teammate_agent_ids if existing else (),
+        # 缺省 `inherit` 即「跟随渠道 / 进程默认」，与不声明这一层完全等价。
+        "reply_stream_mode": existing.reply_stream_mode if existing else "inherit",
     }
     for name in (
         "display_name",
@@ -162,6 +168,9 @@ def _agent_from_payload(payload: dict[str, Any], existing: AgentDefinition | Non
         "workflow_id",
         "allow_tools",
         "max_tool_iterations",
+        # 取值合法性交给 `AgentDefinition.__post_init__`：那里已经有一份
+        # 权威的档位集合，在这里再写一遍迟早与它分叉。
+        "reply_stream_mode",
     ):
         if name in payload:
             base[name] = payload[name]

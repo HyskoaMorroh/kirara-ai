@@ -638,8 +638,19 @@ def calculate_cost_snapshot(
     output_cost = _cost(output_tokens, price.output_per_million)
     cache_read_cost = _cost(cache_read_tokens, price.cache_read_per_million)
     cache_write_cost = _cost(cache_write_tokens, price.cache_write_per_million)
-    dimensions = (input_cost, output_cost, cache_read_cost, cache_write_cost)
-    total_cost = sum(dimensions, Decimal("0")) if all(value is not None for value in dimensions) else None
+    # 合计只累加**已上报**的维度。
+    #
+    # 此前这里要求四个维度全部非 None，而 `cache_write_tokens` 只有 Claude
+    # 适配器会填：OpenAI、Gemini、Ollama 都不填，Gemini/Ollama 连
+    # `cached_tokens` 也没有。于是除 Claude 之外每一家的 `total_cost` 恒为
+    # None，`apply_cost_projection` 把成本两列留 NULL，统计页把这些请求全部
+    # 算进「未定价」——配好定价、跑满一万次请求，账单显示 0，而 Token 数看
+    # 起来是对的。
+    #
+    # per-dimension 的 None 保持原样，「没上报」与「上报为 0」仍然可区分；
+    # 四个维度都没上报时合计才是 None，那才是真的没有定价证据。
+    priced = [value for value in (input_cost, output_cost, cache_read_cost, cache_write_cost) if value is not None]
+    total_cost = sum(priced, Decimal("0")) if priced else None
 
     return CostSnapshot(
         price_version_id=price.version_id,

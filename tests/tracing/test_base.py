@@ -65,10 +65,15 @@ class TracingTestBase(unittest.TestCase):
     def create_test_response(self, usage: Optional[Usage] = None) -> LLMChatResponse:
         """创建测试用的LLM响应"""
         if usage is None:
+            # 默认代表「上游正常回报了全部维度」这个基准场景，因此缓存两维
+            # 显式给 0（报了、确实没命中）而不是留空（没报）。两者在
+            # `UsageSource` 上落在不同档位：留空会被判为 `PROVIDER_PARTIAL`。
             usage = Usage(
                 prompt_tokens=10,
                 completion_tokens=20,
-                total_tokens=30
+                total_tokens=30,
+                cached_tokens=0,
+                cache_write_tokens=0
             )
         return LLMChatResponse(
             model="test-model",

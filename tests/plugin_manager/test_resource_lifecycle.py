@@ -399,14 +399,24 @@ def test_restore_only_accepts_registered_versions_for_bound_resource(tmp_path: P
     second, second_files = _manifest(version="2.0.0", body="second")
     service.update_archive(_write_archive(tmp_path / "restore-v2.zip", second, second_files))
 
-    with pytest.raises(ResourceStateError):
-        service.restore_version("demo.skill", "1.0.0", confirmed=True)
-    service.bind_workflow("demo.skill", "chat:normal")
+    # 未注册的版本一律拒绝，绑定与否都一样：回退到一个注册表里没有的版本会让
+    # 资源指向不存在的内容，而状态显示成「已恢复」。
     with pytest.raises(ResourceValidationError):
         service.restore_version("demo.skill", "9.0.0", confirmed=True)
+
+    # 回退**不要求**先绑定工作流。`workflow_id` 只有绑定了工作流的资源才有，
+    # 而 skill / prompt / hook / mcp / memory 从设计上就没有；要求它等于让这些
+    # 类型永远无法回退，而报出的理由与用户正在做的事无关。
     service.restore_version("demo.skill", "1.0.0", confirmed=True)
     assert service.get_resource("demo.skill")["current_version"] == "1.0.0"
     assert service.get_resource("demo.skill")["enabled"] is False
+
+    # 绑定之后行为不变：放宽前置条件没有改掉原本可用的那条路径。
+    # 先回到 2.0.0（它仍在注册表里），再绑定，再回退一次。
+    service.restore_version("demo.skill", "2.0.0", confirmed=True)
+    service.bind_workflow("demo.skill", "chat:normal")
+    service.restore_version("demo.skill", "1.0.0", confirmed=True)
+    assert service.get_resource("demo.skill")["current_version"] == "1.0.0"
 
 
 def test_prompt_and_session_use_the_same_registered_resource_boundary(tmp_path: Path):

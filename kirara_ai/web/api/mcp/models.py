@@ -11,7 +11,7 @@ REDACTED_SECRET = "********"
 
 
 class MCPTransportInfo(BaseModel):
-    """Public CC Switch transport shape with secret values redacted."""
+    """Public interoperable transport shape with secret values redacted."""
 
     type: str
     command: Optional[str] = None

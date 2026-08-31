@@ -309,6 +309,76 @@ export async function importResource(file: File) {
   return http.postForm<ManagedResource>('/resources/imports', formData)
 }
 
+/**
+ * 服务器 `resources/imports` 目录里已经存在的一个资源包。
+ *
+ * 只有文件名，没有宿主机路径——路径不该经由接口流出去。
+ */
+export interface ImportableArchive {
+  file_name: string
+  size: number | null
+  resource_id: string | null
+  type: string | null
+  version: string | null
+  installed: boolean
+  installed_version: string | null
+  /** 盘上这个版本高于已装版本；点「更新」而不是「安装」。 */
+  is_upgrade: boolean
+  /** 解析失败的原因；`null` 表示这个包可以安装。 */
+  error: string | null
+}
+
+/**
+ * 列出服务器上已经放好、还没安装的资源包。
+ *
+ * 覆盖的是「手里没有可上传文件」的场景：运维用 scp 把一批包放进了服务器，
+ * 或者包有几十 MB 走浏览器上传既慢又容易断。
+ *
+ * 只读：不解包、不落盘。
+ */
+export async function listImportableArchives() {
+  return http.get<{ imports: ImportableArchive[] }>('/resources/imports')
+}
+
+/**
+ * 一个已注册版本的入口正文与它的已校验身份。
+ *
+ * `entry` 是**包内相对路径**，不是容器或宿主绝对路径。
+ */
+export interface ResourceContent {
+  resource_id: string
+  version: string
+  entry: string
+  content: string
+  content_sha256: string
+  source: string
+  permissions: string[]
+}
+
+/**
+ * 读一个资源某个版本的正文。
+ *
+ * prompt 这个类型的全部内容就是正文，而此前界面上没有任何地方能看到它——
+ * 「提示词管理」回答不了它唯一要回答的问题「现在生效的提示词到底写了什么」。
+ *
+ * **只读，没有对应的写入接口。** 安装后的正文不能就地改：`content_sha256`
+ * 把清单与文件绑在一起，运行时每次载入都重新校验摘要，就地编辑的后果不是
+ * 「改了没生效」而是那个资源彻底不可用。改正文走「上传 ZIP 升级」。
+ */
+export async function getResourceContent(resourceId: string, version?: string) {
+  const query = version ? `?version=${encodeURIComponent(version)}` : ''
+  return http.get<ResourceContent>(
+    `/resources/${encodeURIComponent(resourceId)}/content${query}`
+  )
+}
+
+/** 安装一个已经在盘上的包。只传文件名，服务器不接受路径。 */
+export async function installImportableArchive(fileName: string) {
+  return http.post<ManagedResource>('/resources/imports/install', {
+    file_name: fileName
+  })
+}
+
 export async function updateResource(resourceId: string, file: File) {
   const formData = new FormData()
   formData.append('resource', file)

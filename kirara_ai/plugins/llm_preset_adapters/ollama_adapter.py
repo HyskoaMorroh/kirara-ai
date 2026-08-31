@@ -25,6 +25,32 @@ from .openai_adapter import convert_tools_to_openai_format
 from .utils import generate_tool_call_id, pick_tool_calls
 
 
+#: 与厂商无关的推理强度档位到 Ollama `think` 取值的映射。
+#:
+#: Ollama 用**顶层** `think` 字段表达思考（不是 `options` 里的一项），
+#: 取值是布尔或 `"low"` / `"medium"` / `"high"`。它没有 `"max"` 这一档，
+#: 因此 `max` 映射到 `"high"`：把上游不认识的字面量透传过去会被拒，
+#: 而降一档仍然满足「最高可用强度」这个语义。
+_OLLAMA_THINK_LEVELS = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "max": "high",
+}
+
+
+def resolve_ollama_think(req: LLMChatRequest) -> Optional[str]:
+    """Translate the vendor-neutral effort tier into Ollama's ``think`` value.
+
+    未指定时返回 ``None``，调用方据此**不写入该键**——不支持思考的模型收到
+    `think` 会直接报错，而「没配置」必须逐字节保持旧请求体。
+    """
+    effort = getattr(req, "reasoning_effort", None)
+    if not effort:
+        return None
+    return _OLLAMA_THINK_LEVELS.get(effort)
+
+
 def resolve_tool_calls(response_data: dict[str, dict]) -> Optional[list[ToolCall]]:
     if tool_calls := response_data["message"].get("tool_calls"):
         return [
@@ -152,6 +178,10 @@ class OllamaAdapter(
             "model": req.model,
             "messages": messages,
             "stream": False,
+            # 推理强度：Ollama 的思考开关是**顶层** `think`，不是 options 里的
+            # 一项。塞进 options 会被当成未知采样参数忽略——那正是
+            # 「界面上配好了、那个值从未生效」这一类静默失效。
+            "think": resolve_ollama_think(req),
             "options": {
                 "temperature": req.temperature,
                 "top_p": req.top_p,
@@ -241,6 +271,10 @@ class OllamaAdapter(
             "messages": messages,
             # 流式是这条路径的前提，不接受调用方把它关掉。
             "stream": True,
+            # 与非流式路径同一口径。两条路径给出不同强度是一个无法自查的差异：
+            # 同一个 Agent 在 `off` 与 `aggregate` 两档下会得到不同质量的回答，
+            # 而配置里看不出任何区别。
+            "think": resolve_ollama_think(req),
             "options": {
                 "temperature": req.temperature,
                 "top_p": req.top_p,

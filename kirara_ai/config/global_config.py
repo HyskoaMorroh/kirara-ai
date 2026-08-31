@@ -108,6 +108,17 @@ class LLMBackendConfig(BaseModel):
             "而不是对着空内容编一个答案"
         ),
     )
+    rectify_reasoning_effort_unsupported: bool = Field(
+        default=True,
+        description=(
+            "整流：上游不认识 reasoning_effort 字段时，去掉该字段后重试一次。"
+            "大量兼容网关只实现了核心字段，收到它直接 400；"
+            "这类失败换供应商也没用——同一个不合法请求发给备用上游同样会被拒。"
+            "只在错误里同时出现字段名与「不支持/不认识」类措辞时才动，"
+            "取值非法（只认 low/medium/high 而发了 max）不会命中，"
+            "否则一个只需降档的请求会被整个删掉思考能力"
+        ),
+    )
 
     def build_rectifier_config(self) -> "RectifierConfig":
         """把配置映射成运行时那份 `RectifierConfig`。
@@ -123,6 +134,9 @@ class LLMBackendConfig(BaseModel):
             request_thinking_signature=self.rectify_thinking_signature,
             request_thinking_budget=self.rectify_thinking_budget,
             request_media_fallback=self.rectify_media_fallback,
+            request_reasoning_effort_unsupported=(
+                self.rectify_reasoning_effort_unsupported
+            ),
         )
 
     @model_validator(mode="after")
@@ -213,9 +227,10 @@ class LLMConfig(BaseModel):
     )
 
 class MCPTransportConfig(BaseModel):
-    """CC Switch-compatible MCP server transport configuration.
+    """Interoperable MCP server transport configuration.
 
-    The public shape deliberately mirrors CC Switch and common MCP client
+    The public shape deliberately mirrors the entry shape used by mainstream
+    MCP desktop managers and common MCP client
     configuration files.  Validation of required fields is performed by the
     import boundary as well, while this model remains permissive enough to
     load an old, temporarily incomplete Kirara configuration for migration.
@@ -246,7 +261,7 @@ class MCPTransportConfig(BaseModel):
 
 
 class MCPAppsConfig(BaseModel):
-    """CC Switch application enablement matrix."""
+    """Per-application enablement matrix for an MCP entry."""
 
     claude: bool = False
     claude_desktop: bool = Field(default=False, alias="claude-desktop")
@@ -274,7 +289,7 @@ def _legacy_args_to_list(value: Any) -> List[str]:
 
 
 class MCPServerConfig(BaseModel):
-    """MCP entry using the CC Switch unified structure.
+    """MCP entry using the interoperable unified structure.
 
     Canonical fields are ``id``, ``name``, ``server``, ``apps`` and metadata
     fields.  The compatibility properties at the bottom are intentionally
@@ -562,13 +577,44 @@ class AgentRuntimeConfig(BaseModel):
         default=True,
         description="是否注册受控的 Agent 调试 Hook Handler",
     )
-    reply_stream_mode: Literal["off", "aggregate"] = Field(
+    reply_stream_mode: Literal["off", "aggregate", "incremental"] = Field(
         default="off",
         description=(
-            "回复生成模式。off：非流式请求（默认，与既有行为一致）；"
+            "进程级默认的回复取回方式。off：非流式请求（默认，与既有行为一致）；"
             "aggregate：以流式方式向上游取回内容再整段投递，"
-            "从而让流式首字节超时、静默超时与首字节前的故障转移真正生效。"
-            "IM 平台普遍不支持逐字编辑消息，因此这里不做逐字推送。"
+            "从而让流式首字节超时、静默超时与首字节前的故障转移真正生效；"
+            "incremental：在 aggregate 之上把生成中的内容真的推给用户，"
+            "需要渠道能改写已交付内容才能兑现（Telegram 的 editMessageText、"
+            "WebUI 在线对话的 SSE），"
+            "其余渠道自动退回 aggregate——逐字发新消息会变成几十条碎片。"
+            "本项可被渠道默认与 Agent 声明逐级覆盖，优先级为「Agent > 渠道 > 本项」。"
+        ),
+    )
+    channel_reply_stream_modes: dict[str, Literal["off", "aggregate", "incremental"]] = Field(
+        default_factory=dict,
+        description=(
+            "按渠道覆盖回复取回方式，键为渠道类型"
+            "（webui / onebot / qqbot / telegram / wecom / http）。"
+            "各渠道对流式的承载能力本就不同：Telegram 能编辑已发出的消息、"
+            "WebUI 在线对话走 SSE，这两个能兑现 incremental；"
+            "QQ / OneBot 与企业微信上 incremental 会自动退化成 "
+            "aggregate（仍走流式请求、保留首字节与静默超时保护，"
+            "但用户端仍是一条完整回复），不会报错。"
+            "只有一个进程级开关时运维只能二选一，而两种选择都对一部分入口是错的。"
+            "未列出的渠道使用 reply_stream_mode。"
+        ),
+    )
+    tool_search_threshold: int = Field(
+        default=12,
+        ge=0,
+        le=500,
+        description=(
+            "工具数超过它才改用「一行目录 + search_tools 搜索」，"
+            "而不是把每个工具的完整 JSON Schema 都放进每一次请求（需求 8 的 Tool Search）。"
+            "0 表示关闭，拿回逐字节一致的全量注入行为。"
+            "用阈值而不是布尔开关，是因为收益完全取决于工具数量："
+            "三个工具时多一层搜索是纯损失，四十个工具时全量注入是每轮固定多付上万 token，"
+            "而且几十个名字相近的工具挤在一起会让模型的选择质量下降。"
         ),
     )
     turn_deadline_seconds: float = Field(

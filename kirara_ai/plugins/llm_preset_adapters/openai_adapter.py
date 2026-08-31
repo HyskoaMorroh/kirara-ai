@@ -15,6 +15,7 @@ from kirara_ai.llm.adapter import (AutoDetectModelsProtocol, LLMBackendAdapter, 
                                    LLMChatStreamProtocol, LLMEmbeddingProtocol)
 from kirara_ai.llm.format.message import (LLMChatContentPartType, LLMChatImageContent, LLMChatMessage,
                                           LLMChatTextContent, LLMToolCallContent, LLMToolResultContent)
+from kirara_ai.llm.rectifier import rectify_request
 from kirara_ai.llm.format.request import LLMChatRequest, Tool
 from kirara_ai.llm.format.response import LLMChatResponse, Message, Usage
 from kirara_ai.llm.format.tool import Function, ToolCall
@@ -125,6 +126,82 @@ def convert_tools_to_openai_format(tools: list[Tool]) -> list[dict]:
         }
     } for tool in tools]
 
+def accumulate_stream_tool_calls(
+    state: dict[int, dict[str, Any]], deltas: Any
+) -> None:
+    """把一帧里的 `delta.tool_calls` 增量并进累积状态。
+
+    流式协议同时下发两种增量：文本增量与工具调用增量。此前这里只读
+    `delta.content`，于是「带工具的请求」被上层一刀切成非流式
+    （`executor.py` 的 `and not candidate_request.tools`）——而绑了 MCP 的 Agent
+    是本项目最常见的形态，结果是流式首字节超时与静默超时在主流部署上从未生效。
+
+    三条协议事实决定了累积方式：
+
+    * `index` 是归属键。一轮可以并行调多个工具，它们的帧交错到达。
+    * `id` 与 `function.name` 通常只在该调用的**第一帧**出现。
+    * `function.arguments` 是**分片**到达的 JSON 文本，必须按序拼接；
+      每帧当成独立 JSON 解析会在第一个分片上就失败。
+
+    坏帧跳过而不抛：与文本增量同一约定——单个坏帧不该终止整条流。
+    """
+    if not isinstance(deltas, list):
+        return
+    for item in deltas:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index", 0))
+        except (TypeError, ValueError):
+            continue
+        slot = state.setdefault(index, {"id": None, "name": None, "arguments": ""})
+        call_id = item.get("id")
+        if isinstance(call_id, str) and call_id:
+            slot["id"] = call_id
+        function = item.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if isinstance(name, str) and name:
+            slot["name"] = name
+        fragment = function.get("arguments")
+        if isinstance(fragment, str):
+            slot["arguments"] += fragment
+
+
+def resolve_stream_tool_calls(
+    state: dict[int, dict[str, Any]],
+) -> list[LLMToolCallContent]:
+    """把累积状态变成与非流式路径同一形状的工具调用列表。
+
+    按 `index` 升序返回：到达顺序是网络顺序，而调用顺序是模型的意图。
+
+    没有函数名的调用**丢弃**——它无法执行，交出去只会在下游变成一次 KeyError。
+    参数拼不成合法 JSON 时按空参数处理：一个参数错的调用还有机会被工具自己拒绝
+    并给出可读错误，而让整轮对话抛异常的话用户只看到「请求失败」。
+    """
+    calls: list[LLMToolCallContent] = []
+    for index in sorted(state):
+        slot = state[index]
+        name = slot.get("name")
+        if not name:
+            continue
+        raw = slot.get("arguments") or "{}"
+        try:
+            parameters = json.loads(raw) if raw.strip() else {}
+        except ValueError:
+            logger.warning(
+                "Stream tool call arguments were not valid JSON; using empty parameters"
+            )
+            parameters = {}
+        if not isinstance(parameters, dict):
+            parameters = {}
+        calls.append(
+            LLMToolCallContent(id=slot.get("id"), name=str(name), parameters=parameters)
+        )
+    return calls
+
+
 def resolve_tool_calls_from_response(tool_calls: Optional[list[dict]]):
     if tool_calls is None:
         return None
@@ -153,6 +230,13 @@ class OpenAIAdapterChatBase(
     AutoDetectModelsProtocol,
 ):
     media_manager: MediaManager
+
+    #: 本适配器的流式解析会累积 `delta.tool_calls` 并交出 `LLMToolCallContent`。
+    #:
+    #: 上层据此决定「带工具的请求要不要走流式」。只读文本增量的实现声明为假时，
+    #: 那类请求保持非流式——工具调用完整，只是失去首字节与静默超时保护；
+    #: 声明为真却不实现累积，工具调用会静默消失，那是更糟的失败形态。
+    supports_stream_tool_calls: bool = True
 
     def __init__(self, config: OpenAIConfig):
         self.config = config
@@ -223,14 +307,39 @@ class OpenAIAdapterChatBase(
         # 登记在途响应，让 `cancel_pending_request` 能真正断开这条连接。
         # 非流式请求同样会等上游几十秒，只支持流式取消等于让默认配置
         # （`reply_stream_mode: off`）完全没有取消能力。
-        response = self._session.post(api_url, json=data, headers=headers, timeout=(10, 120))
-        with self._track_response(req, response):
-            try:
-                response.raise_for_status()
-                response_data: dict = response.json()
-            except Exception as e:
-                logger.error(f"Response: {response.text}")
-                raise e
+        #
+        # 整流（需求 8）：与 Claude 路径同一套语义。此前 `rectify_request` 只在
+        # `claude_adapter.py` 被调用过，而十个 OpenAI 兼容适配器全部继承本基类——
+        # 于是供应商编辑页上的四个整流开关对它们**从未参与任何决策**。
+        # 用户看到的是一次硬失败（「请求失败」），而真正的原因是一张图或一个
+        # 上游不认识的字段，两者都不是他能自己改的。
+        #
+        # 只对**真实的上游拒绝**生效，且每类最多一次：改完仍失败就抛原始错误。
+        response_data: dict
+        applied_rectifications: set[str] = set()
+        while True:
+            response = self._session.post(api_url, json=data, headers=headers, timeout=(10, 120))
+            with self._track_response(req, response):
+                try:
+                    response.raise_for_status()
+                    response_data = response.json()
+                    break
+                except Exception as e:
+                    body_text = response.text
+                    logger.error(f"Response: {body_text}")
+                    rectified, record = rectify_request(
+                        data,
+                        body_text,
+                        req.rectifier,
+                        already_applied=frozenset(applied_rectifications),
+                    )
+                    if rectified is None or record is None:
+                        raise e
+                    logger.warning(
+                        "整流器改写请求后重试：%s %s", record.kind, record.details
+                    )
+                    applied_rectifications.add(record.kind)
+                    data = rectified
         logger.debug(f"Response: {response_data}")
 
         # OpenAI 兼容接口可能使用 HTTP 200 返回业务错误
@@ -379,6 +488,11 @@ class OpenAIAdapterChatBase(
                 logger.error(f"Stream response: {response.text[:512]}")
                 raise error
 
+            # 工具调用增量按 `index` 累积，与文本增量并行处理。缺了它，
+            # 「带工具的请求」只能被上层一刀切成非流式，而绑了 MCP 的 Agent
+            # 是最常见的形态——流式超时保护因此在主流部署上从未生效。
+            tool_call_state: dict[int, dict[str, Any]] = {}
+
             for line in response.iter_lines(decode_unicode=True):
                 if not line:
                     continue
@@ -427,6 +541,9 @@ class OpenAIAdapterChatBase(
                         finish_reason = first.get("finish_reason")
                         delta = first.get("delta")
                         if isinstance(delta, dict):
+                            accumulate_stream_tool_calls(
+                                tool_call_state, delta.get("tool_calls")
+                            )
                             raw = delta.get("content")
                             if isinstance(raw, str):
                                 delta_text = raw
@@ -440,13 +557,28 @@ class OpenAIAdapterChatBase(
 
                 if not delta_text and usage is None and finish_reason is None:
                     # 心跳帧或纯角色声明帧，没有可交付内容。
+                    # 工具调用增量已经并进累积状态，不必为它单独产出一帧——
+                    # 那会让上层把「参数拼到一半」当成一次可见输出。
                     continue
+
+                # 工具调用只在收尾帧交付：`arguments` 是分片拼接的，
+                # 中途交出去的是半截 JSON。没有工具调用时这里是空列表，
+                # 纯文本回复的形状因此逐字不变。
+                tool_calls = (
+                    resolve_stream_tool_calls(tool_call_state)
+                    if finish_reason is not None
+                    else []
+                )
+                content: list[Any] = (
+                    [LLMChatTextContent(text=delta_text)] if delta_text else []
+                )
+                content.extend(tool_calls)
 
                 yield LLMChatResponse(
                     model=req.model,
                     usage=usage,
                     message=Message(
-                        content=[LLMChatTextContent(text=delta_text)] if delta_text else [],
+                        content=content,
                         role="assistant",
                         finish_reason=finish_reason or "",
                     ),

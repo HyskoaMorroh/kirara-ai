@@ -208,6 +208,7 @@ def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck
         "disconnected": 0,
         "stale": 0,
         "initializing": 0,
+        "reconnecting": 0,
         "credential_rejected": 0,
         "upstream_refused": 0,
         "storage_unavailable": 0,
@@ -216,6 +217,12 @@ def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck
     # 被连上」，`qr_waiting_scan` 说的是「上游连上了、但 QQ 还没登录」。
     # 前者要查地址与 Token，后者要去扫码——混成一个数字会把处置指向错误方向。
     qr_states: dict[str, int] = {}
+    # 被隔离的出站投递。这两类**只要大于 0 就必然有人收不到消息**：同一收件人序列里
+    # 存在更早的 ambiguous / dead_letter 时，后续投递会被直接跳过而不发送。
+    # 于是链路显示 connected、日志没有错误、投递接口每次都成功返回，而某个群从此
+    # 收不到任何回复。计数本来就采集了（健康快照的 `outbox`），此前没有任何消费方。
+    stuck_ambiguous = 0
+    stuck_dead_letter = 0
     for name in enabled:
         if not manager.is_adapter_running(name):
             counts["disconnected"] += 1
@@ -234,11 +241,22 @@ def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck
             if qr_login is not None:
                 key = f"qr_{qr_login.state}"
                 qr_states[key] = qr_states.get(key, 0) + 1
+            # `None` 是「读不到队列」（没配数据库），不是「队列空的」——
+            # 前者没有这个能力，后者是一个可以断言的事实。
+            outbox = getattr(snapshot, "outbox", None)
+            if isinstance(outbox, dict):
+                stuck_ambiguous += int(outbox.get("ambiguous", 0) or 0)
+                stuck_dead_letter += int(outbox.get("dead_letter", 0) or 0)
         else:
             counts["connected"] += 1
 
     available = counts["connected"]
-    status: ReadinessStatus = "pass" if not enabled or available == len(enabled) else "warn"
+    stuck_deliveries = stuck_ambiguous + stuck_dead_letter
+    status: ReadinessStatus = (
+        "pass"
+        if not enabled or (available == len(enabled) and not stuck_deliveries)
+        else "warn"
+    )
     # A rejected credential or refused handshake is not a "wait and it will
     # settle" state, so say what to fix instead of pointing at the heartbeat.
     blocked = counts["credential_rejected"] + counts["upstream_refused"]
@@ -250,6 +268,14 @@ def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck
     # 存储故障排在最前：链路可能完全正常，但每一条要落库的投递都在失败。
     # 处置是查挂载与磁盘，与「查 Token」「去扫码」完全是两个方向。
     storage_broken = counts["storage_unavailable"]
+    # 「刚掉线、上游会自己回来」必须与「上游没了」分开报。合在一个数字里时，
+    # 一次正常的 compose 重启与一次真实故障给出同一句处置建议。
+    reconnecting = counts["reconnecting"]
+    # 「刚起来、上游还在冷启动 QQ」同样是不需要动手的状态。反向 WebSocket 由
+    # 上游拨入，而它要先起 QQ 再登录——现场日志里这一段超过 90 秒。落到兜底
+    # 分支会给出「去查心跳」，那是这个窗口里最不该给的建议：心跳、令牌、地址
+    # 三项都没有问题，上游还没起来而已。
+    starting_up = counts["initializing"]
     if status == "pass":
         summary = "IM 适配器已连接"
         remediation = "无需处理"
@@ -259,9 +285,27 @@ def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck
     elif blocked:
         summary = "部分 IM 适配器的上游连接被拒绝"
         remediation = "核对适配器访问令牌与上游反向连接配置，再查看连接原因码"
+    elif stuck_deliveries:
+        # 排在扫码与重连之前：那两类是「等就行」，这一类是「已经在丢消息了」。
+        # 链路可能完全正常——被隔离的投递会挡住同一收件人后面所有的消息，
+        # 而适配器状态、日志与投递接口都看不出异常。
+        summary = "部分 IM 适配器有被隔离的出站投递，该会话后续消息发不出去"
+        remediation = (
+            "到 QQ 客户端确认这些投递是否已经送达，再决定人工补发或忽略；"
+            "**不要重发**——它们的上游结果未知，重发会造成重复消息"
+        )
     elif awaiting_scan:
         summary = "部分 IM 适配器的上游仍在等待扫码登录"
         remediation = "取最新二维码路径完成扫码登录；不要扫已过期的旧二维码"
+    elif reconnecting:
+        summary = "部分 IM 适配器的上游正在重连"
+        remediation = "等待上游反向连接自行恢复；超过重连宽限期仍未连上才需要排查"
+    elif starting_up:
+        summary = "部分 IM 适配器正在启动，等待上游首次接入"
+        remediation = (
+            "等待上游 OneBot 实现完成 QQ 冷启动与登录后自行接入；"
+            "超过首次连接宽限期仍未接入才需要排查地址与令牌"
+        )
     else:
         summary = "部分 IM 适配器尚未建立连接"
         remediation = "检查 IM 适配器运行状态、登录状态和连接心跳"
@@ -276,9 +320,15 @@ def _im_availability(config: GlobalConfig, manager: IMManager) -> ReadinessCheck
         disconnected_count=counts["disconnected"],
         stale_count=counts["stale"],
         initializing_count=counts["initializing"],
+        reconnecting_count=counts["reconnecting"],
         credential_rejected_count=counts["credential_rejected"],
         upstream_refused_count=counts["upstream_refused"],
         storage_unavailable_count=counts["storage_unavailable"],
+        # 被隔离的投递数。`ambiguous` 是「结果未知、刻意不重发」，
+        # `dead_letter` 是「同一份内容永远不会通过」；两者都会挡住同一收件人
+        # 后面所有的消息，因此外部监控应当对它们大于 0 直接告警。
+        outbox_ambiguous_count=stuck_ambiguous,
+        outbox_dead_letter_count=stuck_dead_letter,
         **qr_states,
     )
 

@@ -5,7 +5,7 @@ import json
 from typing import Any, Dict, Iterable, Mapping, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import case, func
+from sqlalchemy import Integer, case, func
 
 from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.events.tracing import LLMRequestCompleteEvent, LLMRequestFailEvent, LLMRequestStartEvent
@@ -39,6 +39,26 @@ UNRECORD_RESPONSE = Message(
         )
     ]
 )
+
+#: 趋势分桶在 SQL 侧的槽长（分钟）。
+#:
+#: 15 分钟是所有 IANA 时区偏移的公约数（含印度 +05:30、尼泊尔 +05:45），
+#: 因此一个槽只会落进一个本地小时——按整小时分槽会把这些时区的一个槽
+#: 劈到两个本地小时里，趋势图上表现为两根都偏低的柱子。
+_SLOT_MINUTES = 15
+
+#: 一天有多少个槽。
+_SLOTS_PER_DAY = 24 * 60 // _SLOT_MINUTES
+
+#: 槽序号的零点。与 `_JULIAN_EPOCH` 必须指向同一时刻。
+_SLOT_EPOCH = datetime(1970, 1, 1)
+
+#: 1970-01-01T00:00:00 的儒略日。SQLite 的 `julianday()` 返回儒略日，
+#: 减掉这个常量再乘每天的槽数即得槽序号。
+_JULIAN_EPOCH = 2440587.5
+
+#: 槽序号转整型时用的 SQL 类型。
+_SLOT_CAST_TYPE = Integer
 
 class LLMTracer(TracerBase[LLMRequestTrace]):
     """LLM追踪器，负责处理LLM请求的跟踪"""
@@ -400,8 +420,67 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
         return str(currency) if currency else None
 
     @staticmethod
+    def _fetch_bucket_rows(query, columns, storage_timezone: ZoneInfo):
+        """Aggregate trend rows in SQL, one row per 15-minute slot per currency.
+
+        为什么是「15 分钟槽」而不是直接 `GROUP BY date(request_time)`：
+
+        - **数据库不做时区截断。** SQLite 没有时区库，`date()` 只能按存储值截断；
+          按存储时区分完桶再搬到输出时区，跨时区对账时日界会整体错位一整天，
+          而那种错误不会报错，只会给出一个看起来正常的数字。
+        - **15 分钟能整除所有真实时区偏移。** 印度 +05:30、尼泊尔 +05:45 这类
+          半小时/三刻钟偏移下，按整小时分槽会把一个槽劈到两个本地小时里。
+          15 分钟是所有 IANA 偏移的公约数，因此槽到本地桶是一对一的映射。
+        - **取回行数由时间跨度决定，不再由请求数决定。** 这正是需求 22.2 结尾
+          点名的那一点：一年的范围是固定的槽数量级，而不是一年的请求数。
+
+        `GROUP BY` 的键额外带上 ``status`` 与 ``cost_currency``：成功/失败要分开
+        计数，而两种货币加进同一个数字得到的是一串没有单位的数字。
+        """
+        (
+            request_time_column,
+            total_tokens,
+            status,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+            cache_write_tokens,
+            total_cost,
+            cost_currency,
+        ) = columns
+        # 槽序号 = 距 epoch 的 15 分钟数。用整数除法而不是字符串截断：
+        # 字符串在不同方言上的函数名不一致，而整数运算到处都一样。
+        slot = func.cast(
+            (func.julianday(request_time_column) - _JULIAN_EPOCH)
+            * _SLOTS_PER_DAY,
+            _SLOT_CAST_TYPE,
+        )
+        rows = (
+            query.with_entities(
+                slot.label("slot"),
+                status,
+                cost_currency,
+                func.count().label("requests"),
+                func.sum(total_tokens),
+                func.sum(prompt_tokens),
+                func.sum(completion_tokens),
+                func.sum(cached_tokens),
+                func.sum(cache_write_tokens),
+                func.sum(total_cost),
+                func.sum(case((total_cost.is_(None), 1), else_=0)),  # type: ignore
+            )
+            .group_by(slot, status, cost_currency)
+            .all()
+        )
+        return rows
+
+    @staticmethod
     def _time_buckets(rows, storage_timezone: ZoneInfo, output_timezone: ZoneInfo):
         """按本地日期与小时分桶，带四类 Token 拆分与成本。
+
+        输入是 `_fetch_bucket_rows` 的**已聚合**行（每 15 分钟槽 × 状态 × 币种
+        一行），不是原始请求行。时区换算仍在 Python 里用真正的 `astimezone`
+        完成——只有它认得 DST 与半小时偏移。
 
         只给一个 `tokens` 的趋势线看得出「涨了」，看不出涨的是输入还是输出——
         而两者的处置相反（输入涨查上下文与历史长度，输出涨查 prompt 与
@@ -453,41 +532,49 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
         )
         for row in rows:
             (
-                request_time,
-                total_tokens,
+                slot,
                 status,
+                cost_currency,
+                requests,
+                total_tokens,
                 prompt_tokens,
                 completion_tokens,
                 cached_tokens,
                 cache_write_tokens,
                 total_cost,
-                cost_currency,
+                unpriced,
             ) = row
-            localized = request_time.replace(tzinfo=storage_timezone).astimezone(output_timezone)
+            # 槽序号还原成槽起点，再做一次真正的时区换算。槽长 15 分钟，
+            # 能整除所有 IANA 偏移，因此一个槽只会落进一个本地小时。
+            slot_start = _SLOT_EPOCH + timedelta(minutes=int(slot) * _SLOT_MINUTES)
+            localized = slot_start.replace(tzinfo=storage_timezone).astimezone(
+                output_timezone
+            )
             date_key = localized.strftime("%Y-%m-%d")
             hour_key = localized.strftime("%Y-%m-%d %H:00:00")
-            daily[date_key]["requests"] += 1
-            daily[date_key]["tokens"] += total_tokens or 0
-            daily[date_key]["prompt_tokens"] += prompt_tokens or 0
-            daily[date_key]["completion_tokens"] += completion_tokens or 0
-            daily[date_key]["cached_tokens"] += cached_tokens or 0
-            daily[date_key]["cache_write_tokens"] += cache_write_tokens or 0
+            requests = int(requests or 0)
+            daily[date_key]["requests"] += requests
+            daily[date_key]["tokens"] += int(total_tokens or 0)
+            daily[date_key]["prompt_tokens"] += int(prompt_tokens or 0)
+            daily[date_key]["completion_tokens"] += int(completion_tokens or 0)
+            daily[date_key]["cached_tokens"] += int(cached_tokens or 0)
+            daily[date_key]["cache_write_tokens"] += int(cache_write_tokens or 0)
             if status == "success":
-                daily[date_key]["success"] += 1
+                daily[date_key]["success"] += requests
             elif status == "failed":
-                daily[date_key]["failed"] += 1
-            hourly[hour_key]["requests"] += 1
-            hourly[hour_key]["tokens"] += total_tokens or 0
-            hourly[hour_key]["prompt_tokens"] += prompt_tokens or 0
-            hourly[hour_key]["completion_tokens"] += completion_tokens or 0
-            hourly[hour_key]["cached_tokens"] += cached_tokens or 0
-            hourly[hour_key]["cache_write_tokens"] += cache_write_tokens or 0
-            if total_cost is None:
-                # 未定价请求单列。按 0 元并入当天合计，会把「有请求没匹配到
-                # 价格版本」显示成「这天便宜」——两个完全不同的结论。
-                daily[date_key]["unpriced_requests"] += 1
-                hourly[hour_key]["unpriced_requests"] += 1
-            else:
+                daily[date_key]["failed"] += requests
+            hourly[hour_key]["requests"] += requests
+            hourly[hour_key]["tokens"] += int(total_tokens or 0)
+            hourly[hour_key]["prompt_tokens"] += int(prompt_tokens or 0)
+            hourly[hour_key]["completion_tokens"] += int(completion_tokens or 0)
+            hourly[hour_key]["cached_tokens"] += int(cached_tokens or 0)
+            hourly[hour_key]["cache_write_tokens"] += int(cache_write_tokens or 0)
+            # 未定价条数单列。按 0 元并入当天合计，会把「有请求没匹配到
+            # 价格版本」显示成「这天便宜」——两个完全不同的结论。
+            unpriced = int(unpriced or 0)
+            daily[date_key]["unpriced_requests"] += unpriced
+            hourly[hour_key]["unpriced_requests"] += unpriced
+            if total_cost is not None:
                 amount = Decimal(str(total_cost))
                 currency = str(cost_currency or "")
                 daily_costs[date_key][currency] += amount
@@ -640,8 +727,10 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
                 )
 
             # 四类 Token 一并取回：分桶要能回答「涨的是输入还是输出」。
-            # 仍然只取分桶用得到的这几列，不取整行——请求/响应正文在这张表里，
-            # 取整行会把统计页变成一次全表物化。
+            # 聚合在 SQL 侧完成（见 `_fetch_bucket_rows`），取回的行数由时间跨度
+            # 决定而不是请求数——此前是把区间内每一行的这十列读进进程内存，
+            # 显式时间范围会跳过近 30 天/近 24 小时的兜底过滤器，于是
+            # 「导出全年趋势」等于一次全区间物化。
             bucket_columns = (
                 LLMRequestTrace.request_time,
                 LLMRequestTrace.total_tokens,
@@ -655,14 +744,13 @@ class LLMTracer(TracerBase[LLMRequestTrace]):
                 LLMRequestTrace.total_cost,
                 LLMRequestTrace.cost_currency,
             )
-            daily_rows = recent_query.with_entities(*bucket_columns).all()
             _, hourly_buckets = self._time_buckets(
-                hourly_query.with_entities(*bucket_columns).all(),
+                self._fetch_bucket_rows(hourly_query, bucket_columns, storage_timezone),
                 storage_timezone,
                 output_timezone,
             )
             daily_buckets, _ = self._time_buckets(
-                daily_rows,
+                self._fetch_bucket_rows(recent_query, bucket_columns, storage_timezone),
                 storage_timezone,
                 output_timezone,
             )

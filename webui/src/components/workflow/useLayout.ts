@@ -20,7 +20,28 @@ const PORT_ROW_HEIGHT = 28
 const PORTS_PADDING = 12
 const CONFIG_ROW_HEIGHT = 30
 const BODY_PADDING = 24
-const CODE_PREVIEW_HEIGHT = 132
+/**
+ * 代码预览区的固定开销：`.code-preview` 的 padding 与圆角边框。
+ *
+ * 行高单独算（见 `CODE_PREVIEW_LINE_HEIGHT`）：`codePreview` 取代码前 5 行，
+ * 超过 5 行时再补一行 `# ...`，因此预览区高度随代码行数变化，最多 6 行。
+ * 此前这里是一个 132px 的定值——6 行 12px/1.4 行高已经约 100px 加上下 padding，
+ * 真实高度接近 120px；而 `white-space: pre-wrap` 让长行继续折行，定值必然偏小，
+ * 而 `useLayout` 自己的判据是「估算值宁可略大也不能偏小」。
+ */
+const CODE_PREVIEW_PADDING = 16
+/** `.code-preview-content` 的 font-size 12px × line-height 1.4，向上取整 */
+const CODE_PREVIEW_LINE_HEIGHT = 17
+/** `codePreview` 最多展示的行数：前 5 行 + 一行 `# ...` */
+const CODE_PREVIEW_MAX_LINES = 6
+/**
+ * 零端口代码节点的空态提示高度（`.ports-empty-state`）。
+ *
+ * 刚拖进画布的自定义脚本节点端口由用户在配置面板声明，因此两侧都是空的，
+ * 此时渲染的是一段约三行的中文提示。`portRows === 0` 时端口区贡献 0，
+ * 漏算它等于让这类节点的估算高度比真实少七十来像素——而它是最常被新增的节点。
+ */
+const CODE_PORTS_EMPTY_STATE_HEIGHT = 70
 /** .config-preview 的 gap：配置项之间的纵向间隔 */
 const CONFIG_ROW_GAP = 4
 /** .config-preview-item 的左右 padding 合计 */
@@ -125,6 +146,12 @@ export interface LayoutBlockDescriptor {
   inputs?: LayoutPortDescriptor[]
   outputs?: LayoutPortDescriptor[]
   configs?: LayoutConfigDescriptor[]
+  /**
+   * 代码节点的脚本内容，用于估算预览区占几行。
+   *
+   * 缺省时按「一行占位提示」算——那正是空代码时界面上显示的东西。
+   */
+  code?: string
   /** 已渲染节点的实测尺寸；提供时优先于估算值 */
   size?: { width: number; height: number }
   /** Saved canvas position. Invalid or absent coordinates are repaired locally. */
@@ -156,6 +183,19 @@ export interface LayoutMissingNodesOptions {
   grid?: number
 }
 
+/**
+ * 代码预览区会渲染多少行。
+ *
+ * 与 `CodeNode.vue` 的 `codePreview` 同一规则：取前 5 行，超过 5 行时补一行
+ * `# ...`；空代码显示一行占位提示。行数封顶，否则一个 600 行的脚本会把估算高度
+ * 拉到几千像素，dagre 随之在画布上留出一片空白。
+ */
+function codePreviewLines(code: string | undefined): number {
+  if (!code) return 1
+  const lines = code.split('\n').length
+  return Math.min(lines > 5 ? 6 : lines, CODE_PREVIEW_MAX_LINES)
+}
+
 /** 估算普通节点的尺寸；纯函数，不依赖 vue-flow */
 export function estimateBlockSize(block: LayoutBlockDescriptor): { width: number; height: number } {
   const inputs = block.inputs || []
@@ -168,12 +208,23 @@ export function estimateBlockSize(block: LayoutBlockDescriptor): { width: number
   let height = NODE_HEADER_HEIGHT + portRows * PORT_ROW_HEIGHT + PORTS_PADDING
 
   if (isCodeNode) {
-    // 代码节点的主体是固定高度的代码预览区，不渲染配置项列表
-    height += CODE_PREVIEW_HEIGHT
+    if (portRows === 0) {
+      // 端口两侧都空时渲染的是空态提示，而不是一个零高度的端口区。
+      // 刚拖进画布的脚本节点一定是这个形态——端口要用户自己在配置面板声明。
+      height += CODE_PORTS_EMPTY_STATE_HEIGHT
+    }
+    // 代码预览区的高度随预览行数变化，最多 `CODE_PREVIEW_MAX_LINES` 行。
+    height += CODE_PREVIEW_PADDING + codePreviewLines(block.code) * CODE_PREVIEW_LINE_HEIGHT
   } else if (configs.length > 0) {
     // 配置项之间还有 gap，节点越高越不能漏算，否则纵向仍会压叠
     height +=
       configs.length * CONFIG_ROW_HEIGHT + (configs.length - 1) * CONFIG_ROW_GAP + BODY_PADDING
+  } else {
+    // `.custom-node-body` 是**无条件**渲染的 padding: 12px 容器
+    // （CustomNode.vue:332-337）。此前只在有配置项时算它，于是没有配置项的
+    // 节点（GetIMMessage / SendIMMessage / IMMessageToText，每个工作流的头尾）
+    // 真实高度比估算多 24px，纵向留白被吃掉一半。
+    height += BODY_PADDING
   }
   height += NODE_BORDER + NODE_SIZE_SAFETY_MARGIN
 
@@ -232,7 +283,10 @@ export function estimateNodeSize(node: Node): { width: number; height: number } 
     label: data.label,
     inputs: data.inputs || [],
     outputs: data.outputs || [],
-    configs: data.blockType?.configs || []
+    configs: data.blockType?.configs || [],
+    // 代码节点的预览区高度随脚本行数变化；不传它就退回「一行」，
+    // 对一个 6 行预览的节点会少算约 85px。
+    code: data.config?.code
   })
 }
 
@@ -428,6 +482,11 @@ export const snapToGrid = (value: number, grid = LAYOUT_GRID_SIZE) =>
  *
  * 用于拖放新节点与复制节点：期望位置可用就原样返回，否则沿对角线按网格
  * 逐步试探，找到第一个空位。返回值同样对齐到网格。
+ *
+ * 候选全部被占时**不返回未检查过的坐标**：那会让新节点正好叠在既有节点上生成，
+ * 而这类失败最难查——画布上只看到一个节点，用户以为拖放没生效，再拖一次，叠三层。
+ * 兜底改为沿对角线继续外推到一个确定的空位，并对总试探次数设上界：
+ * 无界搜索会在极端图上把一次拖放变成长时间无响应。
  */
 export function findFreeNodePosition(
   preferred: { x: number; y: number },
@@ -452,14 +511,24 @@ export function findFreeNodePosition(
       height: size.height + separation * 2
     }).length > 0
 
-  let x = snapToGrid(preferred.x, grid)
-  let y = snapToGrid(preferred.y, grid)
-  for (let step = 0; step <= maxSteps; step += 1) {
+  const baseX = snapToGrid(preferred.x, grid)
+  const baseY = snapToGrid(preferred.y, grid)
+  // 上界取 maxSteps 的两倍：正常路径在 maxSteps 内就命中，多出的一段留给
+  // 「对角线整条被占」这种情形，让兜底也能走到障碍带之外。
+  const hardLimit = maxSteps * 2
+  for (let step = 0; step <= hardLimit; step += 1) {
+    const x = baseX + stepX * step
+    const y = baseY + stepY * step
     if (!collides(x, y)) return { x, y }
-    x = snapToGrid(preferred.x, grid) + stepX * (step + 1)
-    y = snapToGrid(preferred.y, grid) + stepY * (step + 1)
   }
-  return { x, y }
+  // 连硬上界都没找到空位：把落点推到所有障碍的右下角之外，那里必然是空的。
+  // 这比返回一个已知重叠的坐标好——节点仍然可见，用户可以自己拖回来。
+  const fallbackX = occupied.reduce((max, box) => Math.max(max, box.x + box.width), baseX)
+  const fallbackY = occupied.reduce((max, box) => Math.max(max, box.y + box.height), baseY)
+  return {
+    x: snapToGrid(fallbackX + separation, grid),
+    y: snapToGrid(fallbackY + separation, grid)
+  }
 }
 
 const getBlockSize = (block: LayoutBlockDescriptor) => {
@@ -651,6 +720,9 @@ export function useLayout() {
         inputs: data.inputs || [],
         outputs: data.outputs || [],
         configs: data.blockType?.configs || [],
+        // 实测尺寸缺失时（节点刚插入还没渲染）下面会走估算，代码节点的
+        // 预览行数要靠它才算得准。
+        code: data.config?.code,
         size: hasMeasured ? { width: measuredWidth, height: measuredHeight } : undefined
       }
     })

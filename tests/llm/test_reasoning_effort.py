@@ -1,7 +1,7 @@
 """供应商级「最大强度思考」与「禁用自动升级」的真实语义（需求 8）。
 
-需求 8 点名了 cc-switch 的四个开关。它们在 cc-switch 里写的是 **Claude Code
-CLI 进程**的设置（commit 署名、实验性 agent teams、tool search、CLI 自动更新器），
+需求 8 点名了参考实现的四个开关。它们在那里写的是 **编码 CLI
+进程**的设置（commit 署名、实验性 agent teams、tool search、CLI 自动更新器），
 照搬到 kirara 的供应商模型只会得到永远没人读的死配置——这正是本轮反复在修的
 那类缺陷（`UsageSource.ESTIMATED` 曾经就是有定义、有测试、主链路零调用）。
 

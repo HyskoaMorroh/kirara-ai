@@ -313,6 +313,8 @@ def init_agent_runtime(container: DependencyContainer):
         hook_runtime=hook_runtime,
         context_char_threshold=runtime_config.context_char_threshold,
         reply_stream_mode=runtime_config.reply_stream_mode,
+        channel_reply_stream_modes=runtime_config.channel_reply_stream_modes,
+        tool_search_threshold=runtime_config.tool_search_threshold,
         turn_deadline_seconds=runtime_config.turn_deadline_seconds,
         audit_sink=lambda record: _agent_runtime_audit_sink(
             record, resource_service=resource_service

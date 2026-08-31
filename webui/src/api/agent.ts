@@ -30,6 +30,19 @@ export interface AgentRelations {
   is_default: boolean
 }
 
+/**
+ * 一个 Agent 的回复取回方式。
+ *
+ * `inherit` 表示跟随渠道默认与进程默认（三层优先级里的下两层），也是默认值。
+ * 它必须是一个可选项而不是「留空」：一个曾被显式设成 `off` 的 Agent 需要能改回
+ * 跟随，否则运维只能靠猜上层是什么再手填同一个值。
+ *
+ * `incremental` 需要渠道能改写已交付出去的内容：Telegram 靠 `editMessageText`，
+ * WebUI 的在线对话靠 SSE（一条事件就是一次追加）。QQ / OneBot 与企业微信没有等价
+ * 能力，在那里它静默退化成 `aggregate`（仍走流式请求，用户仍只看到一条完整回复）。
+ */
+export type AgentReplyStreamMode = 'inherit' | 'off' | 'aggregate' | 'incremental'
+
 export interface AgentSummary {
   agent_id: string
   display_name?: string | null
@@ -51,6 +64,8 @@ export interface AgentSummary {
    * 为空表示不启用；模型会额外获得 `delegate_to_<agent_id>` 工具。
    */
   teammate_agent_ids: string[]
+  /** 本 Agent 的回复取回方式；早于该字段的后端不返回它，按 `inherit` 处理。 */
+  reply_stream_mode?: AgentReplyStreamMode
   relations: AgentRelations
 }
 
@@ -83,6 +98,8 @@ export interface AgentConfigurationRequest {
    * 为空表示不启用；模型会额外获得 `delegate_to_<agent_id>` 工具。
    */
   teammate_agent_ids: string[]
+  /** 本 Agent 的回复取回方式，`inherit` 表示跟随渠道 / 进程默认。 */
+  reply_stream_mode: AgentReplyStreamMode
   relations: AgentRelations
 }
 

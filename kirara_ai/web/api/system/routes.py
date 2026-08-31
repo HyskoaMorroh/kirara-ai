@@ -129,6 +129,17 @@ async def get_system_config():
             },
             "tracing": {
                 "llm_tracing_content": config.tracing.llm_tracing_content
+            },
+            # Agent 运行时的四个参数此前只能改 config.yaml。它们都有真实消费点
+            # （`entry.py` 读它们建 executor），却没有任何 HTTP 写入路径——
+            # 需求 21.3 要的是「集中配置并校验边界」，登服务器改 YAML 不是。
+            "agent_runtime": {
+                "turn_deadline_seconds": config.agent_runtime.turn_deadline_seconds,
+                "reply_stream_mode": config.agent_runtime.reply_stream_mode,
+                "channel_reply_stream_modes": dict(
+                    config.agent_runtime.channel_reply_stream_modes
+                ),
+                "tool_search_threshold": config.agent_runtime.tool_search_threshold,
             }
         }
     except Exception as e:
@@ -244,6 +255,107 @@ async def update_tracing_config():
         return {"status": "success"}
     except Exception as e:
         return {"error": str(e)}, 500
+
+
+#: 进程默认允许的取回档位。
+#:
+#: `inherit` 刻意不在其中：它只在 Agent 层有意义（「跟随上层」），
+#: 进程默认没有上层可继承，接受它会让整条解析链没有终点。
+_PROCESS_REPLY_STREAM_MODES = ("off", "aggregate", "incremental")
+
+#: 本路由允许写入的键。白名单而非黑名单：打错的键必须报错，
+#: 静默丢掉会让界面显示「保存成功」而那个值从未生效。
+_AGENT_RUNTIME_WRITABLE_KEYS = frozenset(
+    {
+        "turn_deadline_seconds",
+        "reply_stream_mode",
+        "channel_reply_stream_modes",
+        "tool_search_threshold",
+    }
+)
+
+
+@system_bp.route("/config/agent-runtime", methods=["POST"])
+@require_auth
+async def update_agent_runtime_config():
+    """Update the Agent runtime's deadline, stream mode and tool-search threshold.
+
+    三条刻意的设计：
+
+    - **没提交的键保留原值。** 与 `PUT /llm/backends/{name}` 的 `exclude_unset`
+      语义一致。「改一个字段把其余重置回出厂值」是这批容错字段真实发生过的
+      缺陷，不能在这里重挖一遍。
+    - **边界校验在路由层给出 400。** 让 pydantic 在落盘阶段抛出来只会得到
+      一个 500：用户需要知道是哪一项越界，而不是「服务器错误」。
+    - **`0` 是值，不是缺省。** `turn_deadline_seconds=0` 表示不设总预算，
+      `tool_search_threshold=0` 表示关闭渐进披露；把它们当成「没填」而忽略，
+      等于让这两个状态无法表达。
+    """
+    data = await request.get_json()
+    if not isinstance(data, dict):
+        return {"error": "请求体必须是一个 JSON 对象"}, 400
+    unknown = set(data) - _AGENT_RUNTIME_WRITABLE_KEYS
+    if unknown:
+        return {
+            "error": f"不支持的配置项：{', '.join(sorted(unknown))}"
+        }, 400
+
+    config: GlobalConfig = g.container.resolve(GlobalConfig)
+    runtime = config.agent_runtime
+
+    if "turn_deadline_seconds" in data:
+        raw = data["turn_deadline_seconds"]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return {"error": "turn_deadline_seconds 必须是数字"}, 400
+        if not 0 <= float(raw) <= 3600:
+            return {"error": "turn_deadline_seconds 必须在 0 到 3600 秒之间"}, 400
+
+    if "reply_stream_mode" in data:
+        raw = data["reply_stream_mode"]
+        if raw not in _PROCESS_REPLY_STREAM_MODES:
+            return {
+                "error": "reply_stream_mode 只能是 "
+                f"{'、'.join(_PROCESS_REPLY_STREAM_MODES)}"
+            }, 400
+
+    if "channel_reply_stream_modes" in data:
+        raw = data["channel_reply_stream_modes"]
+        if not isinstance(raw, dict):
+            return {"error": "channel_reply_stream_modes 必须是一个对象"}, 400
+        for channel, mode in raw.items():
+            if not isinstance(channel, str) or not channel.strip():
+                return {"error": "渠道名不能为空"}, 400
+            if mode not in _PROCESS_REPLY_STREAM_MODES:
+                return {
+                    "error": f"渠道 {channel} 的取回档位无效："
+                    f"只能是 {'、'.join(_PROCESS_REPLY_STREAM_MODES)}"
+                }, 400
+
+    if "tool_search_threshold" in data:
+        raw = data["tool_search_threshold"]
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            return {"error": "tool_search_threshold 必须是整数"}, 400
+        if not 0 <= raw <= 500:
+            return {"error": "tool_search_threshold 必须在 0 到 500 之间"}, 400
+
+    try:
+        if "turn_deadline_seconds" in data:
+            runtime.turn_deadline_seconds = float(data["turn_deadline_seconds"])
+        if "reply_stream_mode" in data:
+            runtime.reply_stream_mode = data["reply_stream_mode"]
+        if "channel_reply_stream_modes" in data:
+            runtime.channel_reply_stream_modes = dict(
+                data["channel_reply_stream_modes"]
+            )
+        if "tool_search_threshold" in data:
+            runtime.tool_search_threshold = int(data["tool_search_threshold"])
+
+        ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
+    except Exception as e:
+        return {"error": str(e)}, 500
+    # 这批参数在启动时被读进 executor，改完需要重启才生效。如实告知，
+    # 而不是让用户以为下一条消息就会按新档位取回。
+    return {"status": "success", "restart_required": True}
 
 
 @system_bp.route("/backups/export", methods=["GET"])

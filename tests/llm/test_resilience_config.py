@@ -157,9 +157,9 @@ def test_retry_backoff_max_cannot_be_smaller_than_the_initial_backoff():
         )
 
 
-def test_cc_switch_recommended_resilience_values_are_accepted():
+def test_reference_recommended_resilience_values_are_accepted():
     backend = LLMBackendConfig(
-        name="cc-switch-parity",
+        name="reference-parity",
         adapter="fake",
         max_retries=6,
         circuit_failure_threshold=8,

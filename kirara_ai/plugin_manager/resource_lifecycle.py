@@ -413,12 +413,22 @@ class ResourceLifecycleService:
     def restore_version(
         self, resource_id: str, version: str, *, confirmed: bool = False
     ) -> dict[str, Any]:
+        """把资源回退到一个已注册且仍在磁盘上的版本。
+
+        这里**不要求**资源绑定了工作流。`workflow_id` 只有绑定了工作流的资源才有，
+        而 skill / prompt / hook / mcp / memory 从设计上就没有；曾经的
+        「未绑定工作流就拒绝」让这个接口对那五类资源永远返回 409：
+        一个被升级搞坏的 Skill 明明还留着上一版目录和备份，却没有任何办法回退，
+        而报出来的理由（「没绑定工作流」）与用户正在做的事毫无关系，
+        看起来像 bug 而不是限制。
+
+        回退真正需要的前置条件是下面三条，且都在检查：显式确认、目标版本在注册表里、
+        那个版本的目录还在磁盘上。
+        """
         with self._lock:
             current = self._require_resource(resource_id)
             if not confirmed:
                 raise ResourceStateError("explicit confirmation is required")
-            if not current.get("workflow_id"):
-                raise ResourceStateError("resource is not bound to a workflow")
             version_record = next(
                 (
                     item
@@ -814,6 +824,111 @@ class ResourceLifecycleService:
         except ValueError as error:
             raise ResourceValidationError("import archive must be staged by the server") from error
         return self.install_archive(archive)
+
+    def discover_importable_archives(self) -> list[dict[str, Any]]:
+        """List archives already sitting in ``resources/imports``, without installing.
+
+        需求 10 把「导入已有」与「从ZIP安装」并列，而只支持浏览器上传时两者
+        在机制上是同一件事。这个方法覆盖的是用户手里**没有可上传文件**的场景：
+        运维用 ``scp`` 把一批包放进了服务器，或者包有几十 MB 走浏览器既慢又易断。
+        那时他要的是「服务器上已经有的那些，列出来让我选」。
+
+        四条边界：
+
+        - **只扫 ``resources/imports`` 这一层。** 让请求方指定目录等于给出一个
+          任意文件系统读取接口；连子目录也不递归，见 `import_discovered_archive`。
+        - **只列，不装。** 发现是只读的；安装仍走原有的确认与校验链路。
+        - **已装过的包标出来而不是隐藏。** 从列表里消失会让人以为文件没放对，
+          于是反复重传同一个包。
+        - **坏包只影响自己那一行。** 一个损坏的 ZIP 不该让整份列表打不开，
+          那会把一个坏文件放大成功能不可用。
+
+        返回值里只有文件名，没有宿主机路径：路径不该经由接口流出去。
+        """
+        entries: list[dict[str, Any]] = []
+        try:
+            candidates = sorted(
+                path
+                for path in self.imports_path.iterdir()
+                if path.is_file()
+                and not path.is_symlink()
+                and path.suffix.lower() == ".zip"
+            )
+        except OSError:
+            # 目录读不到时返回空列表而不是抛出：一个只读挂载不该让「导入」
+            # 这个页面整体打不开。
+            return entries
+
+        with self._lock:
+            installed = {
+                resource_id: record.get("current_version")
+                for resource_id, record in self._registry["resources"].items()
+            }
+
+        for path in candidates:
+            entry: dict[str, Any] = {
+                "file_name": path.name,
+                "size": None,
+                "resource_id": None,
+                "type": None,
+                "version": None,
+                "installed": False,
+                "installed_version": None,
+                "is_upgrade": False,
+                "error": None,
+            }
+            try:
+                entry["size"] = path.stat().st_size
+            except OSError:
+                pass
+            try:
+                manifest = self._validate_archive(path)
+            except ResourceValidationError as error:
+                # 原因如实给出（「不是合法 ZIP」与「清单缺字段」处置不同），
+                # 但不带宿主路径。
+                entry["error"] = str(error)
+                entries.append(entry)
+                continue
+            except Exception as error:  # noqa: BLE001 - 一个坏包不该打挂整份列表
+                entry["error"] = f"读取失败：{error}"
+                entries.append(entry)
+                continue
+
+            entry["resource_id"] = manifest.resource_id
+            entry["type"] = manifest.type
+            entry["version"] = manifest.version
+            current = installed.get(manifest.resource_id)
+            if current is not None:
+                entry["installed"] = True
+                entry["installed_version"] = current
+                # 「已装 1.0.0、盘上有 2.0.0」与「已装 2.0.0」处置不同：
+                # 前者点「更新」，后者什么都不用做。
+                try:
+                    entry["is_upgrade"] = Version(manifest.version) > Version(current)
+                except InvalidVersion:
+                    entry["is_upgrade"] = False
+            entries.append(entry)
+        return entries
+
+    def import_discovered_archive(self, file_name: str) -> dict[str, Any]:
+        """Install one archive discovered by :meth:`discover_importable_archives`.
+
+        参数是**文件名**，不是路径。只认 ``resources/imports`` 这一层：
+        允许子路径就等于把「文件名」悄悄变成「相对路径」，而那要把穿越安全性
+        重新论证一遍。分隔符、``..`` 与绝对路径一律直接拒绝，
+        而不是先拼接再检查——先拼接的写法只要有一处规范化差异就会漏。
+        """
+        name = (file_name or "").strip()
+        if not name:
+            raise ResourceValidationError("import archive name is required")
+        if name in {".", ".."} or "/" in name or "\\" in name:
+            raise ResourceValidationError("import archive name must not contain a path")
+        if Path(name).is_absolute() or Path(name).name != name:
+            raise ResourceValidationError("import archive name must not contain a path")
+        candidate = self.imports_path / name
+        if not candidate.is_file() or candidate.is_symlink():
+            raise ResourceValidationError("import archive does not exist")
+        return self.import_archive(candidate)
 
     def _update_state(
         self, resource_id: str, changes: dict[str, Any], operation: str

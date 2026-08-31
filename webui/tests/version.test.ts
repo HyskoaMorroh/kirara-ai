@@ -26,6 +26,40 @@ describe('version.compare', () => {
     expect(version.compare('3.3.0b8', '3.3.0b7')).toBe(1)
   })
 
+  it.each([
+    ['3.3.0b8', '3.3.0b11'],
+    ['3.3.0b9', '3.3.0b10'],
+    ['3.3.0a9', '3.3.0a12'],
+    ['3.3.0rc2', '3.3.0rc10']
+  ])(
+    // semver 把 `b11` 当成一个字母数字标识符按字典序比较，于是 `b11 < b8`。
+    // PEP 440 的序号是数字，`b11` 必须大于 `b8`。两位数序号一出现，
+    // 「有新版本」的判断就会反向：用户装着 b11，界面提示他升级到 b8。
+    'orders a two-digit prerelease above a one-digit one: %s < %s',
+    (older, newer) => {
+      expect(version.compare(older, newer)).toBe(-1)
+      expect(version.compare(newer, older)).toBe(1)
+    }
+  )
+
+  it.each([
+    ['3.3.0a5', '3.3.0b1'],
+    ['3.3.0b11', '3.3.0rc1'],
+    ['3.3.0rc1', '3.3.0']
+  ])('keeps the release-stage order: %s < %s', (older, newer) => {
+    expect(version.compare(older, newer)).toBe(-1)
+    expect(version.compare(newer, older)).toBe(1)
+  })
+
+  it('treats an identical version as equal', () => {
+    expect(version.compare('3.3.0b11', '3.3.0b11')).toBe(0)
+  })
+
+  it('still compares npm-style spellings of the same release', () => {
+    expect(version.compare('3.3.0-b11', '3.3.0b11')).toBe(0)
+    expect(version.compare('3.3.0-b8', '3.3.0b11')).toBe(-1)
+  })
+
   it('does not claim an update relationship for development identities', () => {
     expect(version.compare('3.3.0-b8', 'dev-abc1234')).toBe(0)
   })

@@ -56,6 +56,20 @@ const policyOptions = [
   { label: '固定版本', value: 'fixed' }
 ]
 
+/**
+ * 回复取回方式的四个档位。
+ *
+ * `inherit` 必须在列表里、而且排第一：它是默认值，也是唯一能把一个显式设过档位的
+ * Agent 改回「跟随上层」的途径。少了它，运维只能靠猜上层是什么再手填同一个值，
+ * 而那份手填的副本此后不会随上层改变。
+ */
+const replyStreamModeOptions = [
+  { label: '跟随上层（渠道 / 进程默认）', value: 'inherit' },
+  { label: '非流式：一次拿到完整回复', value: 'off' },
+  { label: '流式聚合：流式取回，整段投递', value: 'aggregate' },
+  { label: '逐步推送：边生成边改写同一条消息', value: 'incremental' }
+]
+
 const agentOptions = ref<AgentSummary[]>([])
 const resources = ref<ManagedResource[]>([])
 const form = ref<AgentConfigurationRequest>(emptyForm())
@@ -141,6 +155,7 @@ function emptyForm(): AgentConfigurationRequest {
     allow_tools: true,
     max_tool_iterations: 8,
     teammate_agent_ids: [],
+    reply_stream_mode: 'inherit',
     relations: emptyRelations()
   }
 }
@@ -175,6 +190,9 @@ function formFromAgent(agent: AgentSummary): AgentConfigurationRequest {
     max_tool_iterations: agent.max_tool_iterations,
     // 旧后端可能不返回该字段：缺省为空即「不启用」，而不是让表单变成 undefined。
     teammate_agent_ids: [...(agent.teammate_agent_ids ?? [])],
+    // 同理：早于分档流式的后端不返回它，缺省 `inherit` 即「跟随上层」，
+    // 与不声明这一层完全等价。缺省成 `off` 会让保存一次就把上层配置覆盖掉。
+    reply_stream_mode: agent.reply_stream_mode ?? 'inherit',
     relations: {
       channels: [...agent.relations.channels] as AgentChannel[],
       accounts: agent.relations.accounts.map((account) => ({ ...account })),
@@ -587,6 +605,33 @@ function shortSessionId(sessionId: string) {
           </div>
         </section>
 
+        <section class="editor-section" aria-labelledby="stream-heading">
+          <div class="section-heading">
+            <div>
+              <h3 id="stream-heading">回复取回方式</h3>
+              <p>
+                三层优先级：这里的设置覆盖「系统设置 → Agent 运行时」里的渠道默认与进程默认。
+                <strong>跟随上层</strong>等于不在这一层声明。
+              </p>
+            </div>
+          </div>
+          <div class="form-grid two-columns">
+            <label class="field">
+              <span>取回方式</span>
+              <n-select
+                v-model:value="form.reply_stream_mode"
+                :options="replyStreamModeOptions"
+                data-test="reply-stream-mode"
+              />
+            </label>
+            <p class="field-hint full-width">
+              <strong>逐步推送</strong>需要渠道能改写已交付出去的内容：Telegram 靠编辑已发消息，
+              WebUI 在线对话靠 SSE。QQ 与企业微信上它会自动<strong>退化成流式聚合</strong>——仍走
+              流式请求并保留首字节超时与故障转移，但用户端仍是一条完整回复。这不是故障，也不会报错。
+            </p>
+          </div>
+        </section>
+
         <section class="editor-section" aria-labelledby="teammates-heading">
           <div class="section-heading">
             <div>
@@ -867,6 +912,9 @@ h4 { margin: 0; font-size: var(--font-size-base); }
 .field, .switch-field { display: grid; align-content: start; gap: var(--space-2); min-width: 0; color: var(--text-color-secondary); font-size: var(--font-size-sm); }
 .switch-field { grid-template-columns: minmax(0, 1fr) auto; align-items: center; min-height: 34px; }
 .full-width { grid-column: 1 / -1; }
+/* 字段下方的说明文字。与 `.section-heading p` 同一视觉层级（次要色、小字号、
+   放松行高），因为它们承担同一件事：解释这一项在什么情况下才生效。 */
+.field-hint { margin: 0; color: var(--text-color-secondary); font-size: var(--font-size-sm); line-height: var(--line-height-relaxed); }
 .compact-top { margin-top: var(--space-4); }
 .ordered-list { display: grid; gap: var(--space-2); }
 .ordered-row { gap: var(--space-3); min-width: 0; }

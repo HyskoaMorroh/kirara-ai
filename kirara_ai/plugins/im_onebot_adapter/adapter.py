@@ -48,9 +48,19 @@ from kirara_ai.workflow.core.dispatch.dispatcher import WorkflowDispatcher
 
 from .config import OneBotConfig
 from kirara_ai.im.inbound_receipts import InboundReceiptService
-from kirara_ai.im.text_render import CODE_COPY_HINT, split_for_copyable_code
+from kirara_ai.im.text_render import (
+    MAX_PAGE_LABEL_BYTES,
+    PAGE_LABEL_PATTERN,
+    code_copy_hint,
+    page_label,
+    split_for_copyable_code,
+)
 
-from .render import paginate_onebot_text_or_truncate, render_onebot_text
+from .render import (
+    DEFAULT_MAX_BYTES,
+    paginate_onebot_text_or_truncate,
+    render_onebot_text,
+)
 from .outbox import OneBotDeliveryResult, OneBotOutboxService
 from .utils.media import (
     decode_inline_media,
@@ -79,6 +89,14 @@ class OneBotAdapter(
 ):
     """OneBot V11 adapter with reverse WebSocket and paginated QQ replies."""
 
+    #: 统一关系模型里的渠道类型（需求 10）。
+    #:
+    #: 显式声明而不是依赖 `ChannelContext.from_message` 的类名推导：推导今天
+    #: 恰好给出 `"onebot"`，但那是巧合而非契约。一次类名重构就会让本渠道所有
+    #: Agent 绑定**静默失效**（绑定表存旧值、运行时算新值，两边对不上，请求退回
+    #: 全局默认 Agent），会话键也跟着漂移使历史上下文断开——两者都不报错。
+    channel_type = "onebot"
+
     dispatcher: WorkflowDispatcher
     web_server: WebServer
     database_manager: DatabaseManager
@@ -104,6 +122,19 @@ class OneBotAdapter(
         self._mounted_route: Any = None
         self._started = False
         self._ever_started = False
+        #: 本进程内是否至少成功连上过一次上游。
+        #:
+        #: 「从未连上」与「连上后掉线」的处置完全不同：前者要查地址与令牌，
+        #: 后者通常只要等上游自己回连。没有这一位就无法区分二者。
+        self._ever_connected = False
+        #: 重连宽限期的起点；``None`` 表示当前不在宽限期内。
+        self._reconnect_window_opened_at: Optional[float] = None
+        #: 本次 ``start()`` 完成的单调时刻；``None`` 表示当前没有在跑。
+        #:
+        #: 用于区分「刚起来、上游还在冷启动 QQ」与「等了很久也没人连进来」。
+        #: 缺了这个基线，两者都是 `waiting`，而它们需要的处置正好相反：
+        #: 前者等就行，后者要去查地址与令牌。
+        self._start_monotonic: Optional[float] = None
         self._connection_status = "waiting"
         self._external_login_status = "unknown"
         self._last_disconnect_reason: Optional[str] = None
@@ -235,6 +266,7 @@ class OneBotAdapter(
             if not self.connections:
                 self._external_login_status = "upstream_reported_offline"
                 self._last_disconnect_reason = "upstream_lifecycle_disconnect"
+                self._note_upstream_disconnected()
             self.logger.warning("OneBot 连接已断开")
             return
         if meta_type in {"lifecycle", "heartbeat"}:
@@ -244,9 +276,75 @@ class OneBotAdapter(
             self._connection_status = "connected"
             self._external_login_status = "upstream_reported_online"
             self._clear_connection_failure()
+            self._clear_reconnect_window()
             if meta_type == "lifecycle" and sub_type == "connect":
                 self.logger.info("OneBot 连接已建立")
             self._schedule_outbox_resume()
+
+    def _note_upstream_disconnected(self, *, now: Optional[float] = None) -> None:
+        """Open the reconnect grace window after the upstream link dropped.
+
+        窗口只在**曾经连上过**之后才有意义：从未连上时不存在「重连」，
+        只有「还在等第一次连接」，两者的处置不同。
+        """
+        if not self._ever_connected:
+            return
+        self._reconnect_window_opened_at = (
+            time.monotonic() if now is None else now
+        )
+
+    def _clear_reconnect_window(self) -> None:
+        """Close the grace window; a live connection makes it meaningless."""
+        self._reconnect_window_opened_at = None
+
+    def _note_started(self, *, now: Optional[float] = None) -> None:
+        """Record when this run finished starting, opening the first-connect window."""
+        self._start_monotonic = time.monotonic() if now is None else now
+
+    def _note_stopped(self) -> None:
+        """Clear the start baseline so a stopped adapter is never "starting up".
+
+        留着基线会让下一次 ``start()`` 之前的快照落在旧窗口里——手动停掉的适配器
+        必须显示「已断开」，运维需要知道它是被停的。
+        """
+        self._start_monotonic = None
+
+    def _within_initial_connect_window(self, now: float) -> bool:
+        """Whether this run is still inside its first-connection grace period.
+
+        只在**从未连上过**时有意义：反向 WebSocket 由上游拨入，而上游要先冷启动
+        QQ 再完成登录（现场日志里这一段超过 90 秒）。这段时间里 Kirara 侧不可能
+        有连接，把它报成「等待连接」会让 readiness 给出「去查心跳」——那是这个
+        窗口里最不该给的建议。
+
+        配置为 0 时整体关闭，行为与本特性之前逐字节一致。
+        """
+        if self._ever_connected:
+            return False
+        opened_at = self._start_monotonic
+        if opened_at is None:
+            return False
+        grace = float(
+            getattr(self.config, "initial_connect_grace_seconds", 0.0) or 0.0
+        )
+        if grace <= 0.0:
+            return False
+        return (now - opened_at) < grace
+
+    def _within_reconnect_window(self, now: float) -> bool:
+        """Whether the upstream is still inside its own reconnect grace period.
+
+        宽限期有上限：连着十分钟「正在重连」的链路就是断了，
+        继续显示等待状态只是换个措辞掩盖故障。配置为 0 时该状态整体关闭，
+        行为与本特性之前逐字节一致。
+        """
+        opened_at = self._reconnect_window_opened_at
+        if opened_at is None:
+            return False
+        grace = float(getattr(self.config, "reconnect_grace_seconds", 0.0) or 0.0)
+        if grace <= 0.0:
+            return False
+        return (now - opened_at) < grace
 
     #: 会被记录的通知类型 → 可读说明。
     #:
@@ -359,6 +457,8 @@ class OneBotAdapter(
             self._ever_started = True
         if self.connections:
             self._prune_stale_connections(now)
+        if self.connections:
+            self._ever_connected = True
 
         if not self._started:
             # Distinguish "the container just came up" from "we stopped on
@@ -375,8 +475,16 @@ class OneBotAdapter(
             "upstream_refused",
         }:
             status = self._connection_status
+            # 「刚掉线、上游会自己回来」是全部非连接状态里唯一不需要动手的一个。
+            # 只覆盖 `disconnected`：凭据被拒与握手被拒都要求操作者去改配置，
+            # 盖成「正在重连」会让他一直等一件不会自己好的事。
+            if status == "disconnected" and self._within_reconnect_window(now):
+                status = "reconnecting"
         else:
-            status = "waiting"
+            # 「刚起来、上游还在冷启动 QQ」与「等了很久也没人连进来」需要的处置
+            # 正好相反：前者等就行，后者要去查地址与令牌。同一个 `waiting`
+            # 说不出这个区别，而现场报障恰恰落在前者。
+            status = "initializing" if self._within_initial_connect_window(now) else "waiting"
 
         heartbeat_times = [
             float(state.get("last_heartbeat", 0))
@@ -944,14 +1052,26 @@ class OneBotAdapter(
                 text = render_onebot_text(element.text)
                 if not text:
                     continue
-                for page, is_code in self._text_pages(text):
+                pages = self._text_pages(text)
+                for index, (page, is_code) in enumerate(pages):
                     segments = [*pending_special, MessageSegment.text(page)]
                     batches.append(segments)
                     pending_special = []
-                    if is_code:
-                        # 代码已单独成条；紧随其后给出一句复制指引，
-                        # 而不是画一个 QQ 根本点不动的「复制」按钮。
-                        batches.append([MessageSegment.text(CODE_COPY_HINT)])
+                    if not is_code:
+                        continue
+                    # 一个代码块跟**一条**复制指引，而不是每页一条：一段 5 页的
+                    # 代码后面跟 5 句同样的话是噪声，还会把页码序列撑长一倍。
+                    # 因此只在这一段代码的最后一页之后发，并把条数写进去——
+                    # 代码消息本身不能带页码（长按复制会把它一起复制走）。
+                    following = pages[index + 1][1] if index + 1 < len(pages) else False
+                    if following:
+                        continue
+                    run = 1
+                    cursor = index - 1
+                    while cursor >= 0 and pages[cursor][1]:
+                        run += 1
+                        cursor -= 1
+                    batches.append([MessageSegment.text(code_copy_hint(run))])
                 continue
 
             try:
@@ -981,6 +1101,11 @@ class OneBotAdapter(
 
         超出页数或总字节预算时**截断并提示**，而不是让 ``ValueError`` 穿出
         ``send_message``——后者的结果是用户什么都收不到，比收到被截断的内容更糟。
+
+        页码在这里**跨全部片段重新编号**：分页是按片段分别做的，各段各自从
+        「第 1 页」数起，于是一条「正文 + 代码 + 正文」的回复会出现两次「第 1 页 /
+        共 2 页」而实际发出 5 条消息。用户据此得出的结论只能是「内容不全」，
+        而内容一条都没少——页码在说谎。
         """
         # 兼容以 object.__new__ 构造的轻量适配器实例（既有测试与部分插件如此使用）：
         # 缺少 config 时按默认行为处理，而不是抛 AttributeError。
@@ -989,10 +1114,22 @@ class OneBotAdapter(
             return [(page, False) for page in pages]
 
         pages: list[tuple[str, bool]] = []
+        paginated = False
         for part in split_for_copyable_code(text):
-            part_pages, truncated = paginate_onebot_text_or_truncate(part.text)
+            # 分段时给页码预留固定空间：这里之后要重新编号，而重新编号后的
+            # 总页数可能比单段的更大（`共 9 页` → `共 12 页`），按单段长度预留
+            # 会让某一页刚好超出 QQ 的上限而被上游拒收。
+            part_pages, truncated = paginate_onebot_text_or_truncate(
+                part.text,
+                DEFAULT_MAX_BYTES - MAX_PAGE_LABEL_BYTES,
+            )
+            if len(part_pages) > 1:
+                paginated = True
             for page in part_pages:
-                pages.append((page, part.is_code))
+                # 先剥掉分段内部的页码，稍后统一编号。代码页不带页码：
+                # 长按复制会把页码一起复制走，粘进编辑器就是坏代码，
+                # 而代码单独成条的全部目的正是让它可以整段复制。
+                pages.append((PAGE_LABEL_PATTERN.sub("", page, count=1), part.is_code))
             if truncated:
                 self.logger.warning(
                     "OneBot 回复超过分页预算，已截断后发送；请检查上游回复长度。"
@@ -1002,7 +1139,32 @@ class OneBotAdapter(
             # 仍按原路径分页，避免把一条本该发出的消息静默吞掉。
             fallback, _ = paginate_onebot_text_or_truncate(text)
             return [(page, False) for page in fallback]
-        return pages
+        return self._number_pages(pages, paginated=paginated)
+
+    @staticmethod
+    def _number_pages(
+        pages: list[tuple[str, bool]], *, paginated: bool
+    ) -> list[tuple[str, bool]]:
+        """Renumber pages as one sequence across every part of the reply.
+
+        ``paginated`` 为假表示没有任何一段因为**长度**被切开——多条消息只是代码
+        单独成条的结果。这时不加页码：一条两句话的回复被标上「第 1 页 / 共 3 页」
+        会让人以为内容太长被截了，而紧随代码的那句复制指引已经解释了为什么有多条。
+
+        代码页参与计数但**不带页码文本**：它在序列里占一位（否则总数与用户收到的
+        条数不符），而页码不能进到那条可复制的消息里——长按复制会把它一起带走。
+        跳号是刻意的，缺的那个号就是那条代码。
+        """
+        if not paginated or len(pages) <= 1:
+            return pages
+        total = len(pages)
+        numbered: list[tuple[str, bool]] = []
+        for index, (page, is_code) in enumerate(pages, start=1):
+            if is_code:
+                numbered.append((page, True))
+                continue
+            numbered.append((page_label(index, total) + page, False))
+        return numbered
 
 
     def _send_pacing(self):
@@ -1042,26 +1204,34 @@ class OneBotAdapter(
         self,
         batches: list[list[MessageSegment]],
         recipient: ChatSender,
-    ) -> list[str]:
+    ) -> tuple[list[str], float]:
         """Send message elements in order; API failures intentionally propagate.
 
-        返回每一页的上游 `message_id`（上游未回报的页不产生条目）：
-        撤回接口一直可用，缺的一直是「撤谁」。
+        返回 ``(每一页的上游 message_id, 本次主动等待的总秒数)``。
+        前者供撤回与引用（撤回接口一直可用，缺的一直是「撤谁」）；
+        后者供投递时间线把「节流等待」与「上游真的慢」分开归因（需求 19.5）。
         """
         message_ids: list[str] = []
         pacing = self._send_pacing()
+        pacing_seconds = 0.0
         for page_index, segments in enumerate(batches):
             # 页与页之间主动等待，避免被判定为刷屏（需求 11）。
             # 与失败重试退避是两件事：那个是「发失败了再试」，这个是
             # 「发成功了也要等」，方向相反、不能互相替代。
-            await pacing.wait_before_page(
-                page_index, text_length=self._page_text_length(segments)
+            #
+            # `page_count` 必须传：缺了它，按长度追加的等待就按单页上界计费，
+            # 一条十几页的回复会累加到分钟级——现场报障正是「系统显示成功，
+            # QQ 却要等很久才收到」。
+            pacing_seconds += await pacing.wait_before_page(
+                page_index,
+                text_length=self._page_text_length(segments),
+                page_count=len(batches),
             )
             response = await self._send_segments(recipient, segments)
             message_id = self._response_message_id(response)
             if message_id is not None:
                 message_ids.append(message_id)
-        return message_ids
+        return message_ids, pacing_seconds
 
     @staticmethod
     def _response_message_id(response: Any) -> Optional[str]:
@@ -1104,7 +1274,7 @@ class OneBotAdapter(
         recipient: ChatSender,
         delivery_id: Optional[str],
         results: list[OneBotDeliveryResult],
-    ) -> int:
+    ) -> tuple[int, float]:
         if delivery_id is None:
             delivery_id = uuid.uuid4().hex
         if len(delivery_id) > 64:
@@ -1128,17 +1298,21 @@ class OneBotAdapter(
             )
 
         pacing = self._send_pacing()
+        pacing_seconds = 0.0
         for page_index, page_id in enumerate(page_ids):
             # 走 outbox 时同样要节流：风控与投递路径无关，而部署有没有配数据库
             # 决定走哪条——只修一条等于同一个账号换个部署形态又会被限制发言。
-            await pacing.wait_before_page(
-                page_index, text_length=self._page_text_length(batches[page_index])
+            # 总页数一并传入，否则两条路径的等待总额会不一样。
+            pacing_seconds += await pacing.wait_before_page(
+                page_index,
+                text_length=self._page_text_length(batches[page_index]),
+                page_count=len(batches),
             )
             result = await outbox.deliver(page_id)
             results.append(result)
             if result.status != "accepted":
                 raise self._delivery_error(result)
-        return sum(max(0, item.attempt_count - 1) for item in results)
+        return sum(max(0, item.attempt_count - 1) for item in results), pacing_seconds
 
     async def send_message(
         self,
@@ -1174,9 +1348,12 @@ class OneBotAdapter(
         results: list[OneBotDeliveryResult] = []
         retry_count = 0
         message_ids: list[str] = []
+        # 主动等待的总秒数。**发送失败时同样要记**：「等了 18 秒然后失败」与
+        #「上游 18 秒后拒了」是两个不同的故障，而它们的 `send_seconds` 相同。
+        pacing_seconds = 0.0
         try:
             if getattr(self, "database_manager", None) is not None:
-                retry_count = await self._send_via_outbox(
+                retry_count, pacing_seconds = await self._send_via_outbox(
                     batches,
                     recipient,
                     delivery_id,
@@ -1200,7 +1377,7 @@ class OneBotAdapter(
                 state.users += 1
                 try:
                     async with state.lock:
-                        message_ids = await self._send_message_unlocked(
+                        message_ids, pacing_seconds = await self._send_message_unlocked(
                             batches, recipient
                         )
                 finally:
@@ -1209,6 +1386,13 @@ class OneBotAdapter(
                         locks.pop(key, None)
         except Exception as exc:
             retry_count = sum(max(0, item.attempt_count - 1) for item in results)
+            # 顺序：节流先记，再记失败。时间线按记录顺序保存，
+            # 而 `delivery_durations()` 取 send_failed 作为发送段的终点。
+            message.record_delivery_stage(
+                "send_pacing_waited",
+                adapter="onebot",
+                pacing_seconds=pacing_seconds,
+            )
             message.record_delivery_stage(
                 "send_failed",
                 adapter="onebot",
@@ -1216,6 +1400,14 @@ class OneBotAdapter(
                 retry_count=retry_count,
             )
             raise
+        # 节流归因（需求 19.5）：把「我们为防刷屏主动等的时间」与「上游真的慢」
+        # 分开。`send_seconds` 仍然是整段（用户等了多久），
+        # 但 `send_pacing_seconds` / `send_upstream_seconds` 回答「该去查谁」。
+        message.record_delivery_stage(
+            "send_pacing_waited",
+            adapter="onebot",
+            pacing_seconds=pacing_seconds,
+        )
         message.record_delivery_stage(
             "send_succeeded",
             adapter="onebot",
@@ -1614,6 +1806,9 @@ class OneBotAdapter(
                     )
         self._started = True
         self._ever_started = True
+        # 启动基线：这一刻起进入首次连接宽限期。上游要先冷启动 QQ 再拨进来，
+        # 这段时间里「还没有连接」是正常的，不该报成需要动手的状态。
+        self._note_started()
         self._connection_status = "waiting"
         self._clear_connection_failure()
 
@@ -1661,6 +1856,9 @@ class OneBotAdapter(
         self._connection_status = "disconnected"
         self._external_login_status = "unknown"
         self._last_heartbeat_at = None
+        # 基线必须清掉：留着会让停机后的快照落在旧的首次连接宽限期里，
+        # 于是一个被手动停掉的适配器显示成「正在启动」。
+        self._note_stopped()
 
     async def query_user_profile(self, chat_sender: ChatSender) -> UserProfile:
         user_id = str(chat_sender.user_id)
@@ -1689,11 +1887,27 @@ class OneBotAdapter(
         self._profile_cache_time[cache_key] = now
         return profile
 
+    #: 群成员特有的描述字段，被融入项目在 `_convert_group_member_info` 里返回。
+    #:
+    #: 合并两个转换函数时这四个字段一度被丢掉。`role` 尤其不能少：它区分群主 /
+    #: 管理员 / 普通成员，而那正是「这条指令要不要执行」的判据。缺了它，
+    #: 「只让管理员触发某个动作」的工作流只能硬编码 QQ 号，而那份名单换个群就失效。
+    _GROUP_MEMBER_EXTRA_KEYS = ("role", "title", "join_time", "last_sent_time")
+
     @staticmethod
     def _profile_from_info(info: dict[str, Any], fallback_id: str) -> UserProfile:
         sex = info.get("sex")
         gender = Gender.MALE if sex == "male" else Gender.FEMALE if sex == "female" else Gender.UNKNOWN
         nickname = str(info.get("card") or info.get("nickname") or fallback_id)
+        # 只收上游真的报了的键。填 `None` 会让消费方分不清「上游没报」与
+        # 「上游报了空值」；而 `get_stranger_info` 压根与群无关，给它一个全 `None`
+        # 的字典等于回答一个没被问的问题。空串按缺失处理：上游普遍用空串表示
+        # 「没有头衔」，而不是省略这个键。
+        extra = {
+            key: info[key]
+            for key in OneBotAdapter._GROUP_MEMBER_EXTRA_KEYS
+            if info.get(key) not in (None, "")
+        }
         return UserProfile(
             user_id=str(info.get("user_id", fallback_id)),
             username=nickname,
@@ -1703,6 +1917,8 @@ class OneBotAdapter(
             age=info.get("age"),
             level=info.get("level"),
             avatar_url=info.get("avatar"),
+            # 全都没有时给 `None` 而不是空字典：后者读起来像「查过了，什么都没有」。
+            extra_info=extra or None,
         )
 
     async def get_bot_profile(self, self_id: Optional[str] = None) -> Optional[UserProfile]:

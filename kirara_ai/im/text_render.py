@@ -8,7 +8,8 @@ IM 消息文本排版工具。
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Iterable, List, Optional, Union
+from typing import (Callable, Iterable, List, Mapping, Optional, Sequence,
+                    Tuple, Union)
 
 # 需要按两列宽度显示的字符区间（CJK 表意文字、全角标点、假名、韩文等）
 _WIDE_RANGES = (
@@ -98,12 +99,73 @@ def parse_table_row(line: str) -> List[str]:
     ]
 
 
+#: 围栏代码块的起始行。
+#:
+#: CommonMark 允许两种围栏字符（`` ` `` 与 `~`）以及**三个以上**的重复：
+#: 模型展示 Markdown 时会用四个反引号包住三个反引号的内层块，这是标准写法。
+#: 此前全部判定都写成 ``startswith("```")``，于是：
+#:
+#: - ``~~~`` 围栏完全不被当成代码，里面的 ``**``、``$x$``、表格行会被当成
+#:   正文改写，代码内容被静默破坏；
+#: - 四反引号围栏被算成「进入」，内层三反引号又把状态翻转回「退出」，
+#:   之后的正文被当成代码、代码被当成正文。
+#:
+#: 语言标识只在**起始**行出现，且不含围栏字符本身（CommonMark 的规定）。
+_FENCE_START_PATTERN = re.compile(r"^(?P<fence>`{3,}|~{3,})[ \t]*(?P<language>[^`\n]*?)[ \t]*$")
+
+
+def fence_marker(line: str) -> Optional[str]:
+    """返回该行的围栏标记（例如 ``` 或 ~~~~），不是围栏行时返回 ``None``。"""
+    match = _FENCE_START_PATTERN.match(line.lstrip())
+    return match.group("fence") if match else None
+
+
+def fence_language(line: str) -> Optional[str]:
+    """返回围栏起始行声明的语言，未声明时返回 ``None``。"""
+    match = _FENCE_START_PATTERN.match(line.lstrip())
+    if match is None:
+        return None
+    return match.group("language") or None
+
+
+def closes_fence(line: str, opening: str) -> bool:
+    """判断该行是否闭合 ``opening`` 打开的围栏。
+
+    CommonMark 要求闭合围栏与起始围栏**同字符**且**不短于**它，并且不带
+    语言标识。这条规则正是嵌套围栏能成立的原因：四反引号打开的块里，
+    三反引号只是内容。
+    """
+    match = _FENCE_START_PATTERN.match(line.lstrip())
+    if match is None:
+        return False
+    fence = match.group("fence")
+    return (
+        fence[0] == opening[0]
+        and len(fence) >= len(opening)
+        and not match.group("language")
+    )
+
+
 #: 框线表格允许的最大显示宽度（以等宽字符计）。
 #:
 #: 超过这个宽度的表格在 QQ 这类没有等宽字体、也不能横向滚动的客户端上
 #: 会按窗口宽度随机折行：框线错位之后，读者根本分不清哪个值属于哪一列。
-#: 60 是常见移动端聊天气泡一行能容纳的中文字符数（30 个汉字）的两倍显示宽度。
-MAX_TABLE_DISPLAY_WIDTH = 60
+#:
+#: 取值按**手机气泡一行的实际容量**：375pt 宽的手机上 QQ 气泡的正文区约 280pt，
+#: 默认字号下一个汉字约 16pt，一行放得下 17–18 个汉字，即 35–37 显示列。
+#: 取 38 留一点余量。
+#:
+#: 此前是 60（注释里的依据是「30 个汉字的两倍显示宽度」，而 30 个汉字偏大）。
+#: 差别不是学术性的：一张 4 列中文参数表是 48 列、一张 3 列长键名配置表是 57 列，
+#: 两者在 60 之下都画框线，而它们都放不进手机一行——折行之后竖线错位，
+#: 而 `render_field_table` 的判据正是「错位的框线连『哪个值属于哪一列』都保证不了」。
+#:
+#: 还有一层无法靠计算修正的风险：U+2500–257F（制表符）的 East_Asian_Width 是
+#: **Ambiguous**，西文字体里占 1 列、中日韩字体里占 2 列，而 `display_width` 按 1 计。
+#: 边框行全由制表符组成、数据行是混排，因此在把 Ambiguous 当全角的客户端上
+#: 两者膨胀幅度不同（实测边框行 48→96、数据行 48→53），对齐彻底失效。
+#: 这让「窄表才画框线」从美观取舍变成正确性要求：越窄，出问题的概率越低。
+MAX_TABLE_DISPLAY_WIDTH = 38
 
 
 def render_box_table(rows: List[List[str]]) -> List[str]:
@@ -194,7 +256,8 @@ def convert_markdown_tables(text: str, fenced: bool = False) -> str:
     """
     将文本中的 Markdown 表格替换为等宽框线表格。
 
-    围栏代码块（```）内的内容原样保留，不会被误当成表格处理。
+    围栏代码块（``` 或 ~~~，允许三个以上）内的内容原样保留，
+    不会被误当成表格处理。
 
     :param text: 原始文本
     :param fenced: 是否用 ``` 围栏包裹渲染结果。Telegram 等平台需要围栏才会用
@@ -206,7 +269,10 @@ def convert_markdown_tables(text: str, fenced: bool = False) -> str:
     # 是否见过 `---` 分隔行。没有它就无法断言第一行是表头，
     # 降级时也就不能拿它当字段名。
     saw_separator = False
-    in_code_fence = False
+    # 当前打开的围栏标记；``None`` 表示不在围栏内。记标记而不是布尔值，
+    # 是因为闭合围栏必须与起始围栏同字符且不更短——四反引号块里的
+    # 三反引号是**内容**，不能把状态翻回来。
+    open_fence: Optional[str] = None
 
     def flush():
         nonlocal saw_separator
@@ -226,14 +292,17 @@ def convert_markdown_tables(text: str, fenced: bool = False) -> str:
         result.append("")
 
     for line in lines:
-        # 进入/退出围栏代码块，围栏内不做表格识别
-        if line.lstrip().startswith("```"):
-            flush()
-            in_code_fence = not in_code_fence
+        if open_fence is None:
+            marker = fence_marker(line)
+            if marker is not None:
+                flush()
+                open_fence = marker
+                result.append(line)
+                continue
+        else:
             result.append(line)
-            continue
-        if in_code_fence:
-            result.append(line)
+            if closes_fence(line, open_fence):
+                open_fence = None
             continue
         if is_table_separator(line):
             saw_separator = True
@@ -257,6 +326,70 @@ def convert_markdown_tables(text: str, fenced: bool = False) -> str:
 CODE_COPY_HINT = "↑ 代码已单独成条，长按可整段复制"
 
 
+def code_copy_hint(message_count: int) -> str:
+    """代码块的复制指引；跨多条消息时一并说明它被拆成了几条。
+
+    代码消息本身**不能**带页码：长按复制会把页码一起复制走，粘进编辑器就是坏
+    代码，而代码单独成条的全部目的正是让它可以整段复制。但一段被拆成 5 条的代码
+    同样要回答「我收齐了吗」，因此把条数放进紧随其后的这句指引里——它不参与复制。
+    """
+    if message_count <= 1:
+        return CODE_COPY_HINT
+    return f"{CODE_COPY_HINT}（这段代码共 {message_count} 条，请按顺序拼接）"
+
+
+#: 平台原生「复制」按钮能携带的最大文本长度。
+#:
+#: Telegram Bot API 的 ``CopyTextButton.text`` 上限是 256 字符；超过时整条
+#: sendMessage 会被拒绝。也就是说「顺手加个按钮」会把一条本来能发出去的回复
+#: 变成发不出去——那是负向调整。超限时退回没有按钮：代码正文照常送达，
+#: 用户仍可手动选中，只是少了一个便利。
+MAX_COPY_BUTTON_TEXT_LENGTH = 256
+
+
+def copyable_button_text(code: Optional[str]) -> Optional[str]:
+    """判断一段代码能否作为原生复制按钮的载荷，能则返回它本身。
+
+    返回 ``None`` 表示「这一段不挂按钮」，三种情况：没有代码、代码是空白、
+    代码超过平台上限。三者都不该退化成「挂一个空按钮」或「挂一个会让整条消息
+    被拒的按钮」——前者点了没反应，后者让整条回复发不出去。
+
+    调用方必须传**代码原文**，不是渲染/转义之后的文本：转义产生的反斜杠会被
+    一起复制走，粘进编辑器就是坏代码。
+    """
+    if not code:
+        return None
+    if not code.strip():
+        return None
+    if len(code) > MAX_COPY_BUTTON_TEXT_LENGTH:
+        return None
+    return code
+
+
+def oversized_code_copy_hint(code_length: int) -> Optional[str]:
+    """超过按钮载荷上限的代码该怎么复制；未超限返回 ``None``。
+
+    256 字符只够十来行代码，因此「超限」是常态而不是边缘情况。此前超限的处理是
+    **什么都不做**：那条代码消息一个按钮也没有，而它旁边一条更短的代码有一个显眼的
+    「复制代码」。两条消息看起来能力不同，实际都能复制——Telegram 客户端在
+    Markdown 代码块右上角自带复制图标。缺的不是复制途径，是**用户不知道有**。
+
+    因此给一句指引。它不是按钮的等价物，但它把「这条不能复制」纠正成
+    「这条这样复制」——后者是事实，前者不是。
+
+    文案刻意不含任何 MarkdownV2 需要转义的字符：这一句会与正文走同一个
+    ``parse_mode``，一个未转义的 ``_`` 会让整条消息被平台拒收，
+    于是一句「提示」把一条本来能发出去的回复变成发不出去。
+    """
+    if code_length <= MAX_COPY_BUTTON_TEXT_LENGTH:
+        return None
+    return (
+        f"这段代码有 {code_length} 个字符，超过按钮可携带的 "
+        f"{MAX_COPY_BUTTON_TEXT_LENGTH} 字符上限；"
+        "请长按上方代码块，或点它右上角的复制图标整段复制"
+    )
+
+
 @dataclass(frozen=True)
 class CopyablePart:
     """一段待发送内容；``is_code`` 为真时整条消息只有代码。"""
@@ -267,6 +400,9 @@ class CopyablePart:
     language: Optional[str] = None
 
 
+#: 三反引号围栏的起始/闭合行。保留为兼容入口：围栏识别已收敛到
+#: :func:`fence_marker` / :func:`closes_fence`（支持 ``~~~`` 与四个以上反引号），
+#: 这两个常量仍被外部插件按旧路径导入。
 _FENCE_OPEN_PATTERN = re.compile(r"^\s*```([\w+#.-]*)\s*$")
 _FENCE_CLOSE_PATTERN = re.compile(r"^\s*```\s*$")
 
@@ -277,6 +413,10 @@ def split_for_copyable_code(text: str) -> List[CopyablePart]:
     代码块单独成条，正文合并为相邻片段。未闭合的围栏不当作代码——
     截断的回复不能把后续正文一起吞进代码块里。空代码块直接丢弃，
     避免发出一条只有围栏的空消息。
+
+    围栏按 CommonMark 识别（``` 或 ~~~，三个以上），闭合围栏必须同字符
+    且不更短：四反引号块里的三反引号属于代码内容，整块必须成为**一条**
+    可复制的代码消息，而不是被内层围栏切成三段。
     """
     lines = text.splitlines()
     parts: List[CopyablePart] = []
@@ -292,7 +432,7 @@ def split_for_copyable_code(text: str) -> List[CopyablePart]:
             parts.append(CopyablePart(text=body))
 
     while index < len(lines):
-        opening = _FENCE_OPEN_PATTERN.match(lines[index])
+        opening = fence_marker(lines[index])
         if opening is None:
             prose.append(lines[index])
             index += 1
@@ -302,7 +442,7 @@ def split_for_copyable_code(text: str) -> List[CopyablePart]:
             (
                 cursor
                 for cursor in range(index + 1, len(lines))
-                if _FENCE_CLOSE_PATTERN.match(lines[cursor])
+                if closes_fence(lines[cursor], opening)
             ),
             None,
         )
@@ -312,13 +452,13 @@ def split_for_copyable_code(text: str) -> List[CopyablePart]:
             break
 
         flush_prose()
-        language = opening.group(1) or None
+        language = fence_language(lines[index])
         code = "\n".join(lines[index + 1 : closing_index])
         if code.strip():
-            fence = f"```{language}" if language else "```"
+            fence = f"{opening}{language}" if language else opening
             parts.append(
                 CopyablePart(
-                    text=f"{fence}\n{code}\n```",
+                    text=f"{fence}\n{code}\n{opening}",
                     is_code=True,
                     code=code,
                     language=language,
@@ -355,6 +495,25 @@ class TextBlock:
     level: Optional[int] = None
     rows: tuple[tuple[str, ...], ...] = ()
     language: Optional[str] = None
+    #: 代码块的围栏在源文本里有没有闭合。
+    #:
+    #: 只对 ``CODE`` 有意义。解析器把未闭合的围栏也收成一个代码块（否则后面的内容
+    #: 会散成正文），但**渲染时不能替它补上闭合**：下游的
+    #: ``split_for_copyable_code`` 按围栏配对判断「这一段是不是可复制的代码」，
+    #: 补一个闭合会把一条被截断的回复里剩下的正文变成「代码」，
+    #: 然后跟上一句「长按可整段复制」——而那不是代码。
+    #:
+    #: 默认 ``True``：既有构造点全部是闭合围栏，加这个字段不改变它们。
+    closed: bool = True
+    #: 这个代码块在源文本里**本来有没有围栏**。
+    #:
+    #: 只对 ``CODE`` 有意义。模型经常直接把代码贴在正文里（现场报障那段 QQ 回复
+    #: 就是一百行无围栏 Python），解析器把它也收成代码块，但渲染层需要知道差别：
+    #: 无围栏的块要**补**上围栏，才能进入「代码单独成条 + 可复制」的路径；
+    #: 而原本带围栏的块只是原样保留。
+    #:
+    #: 默认 ``True``：既有构造点都来自真实围栏，加这个字段不改变它们。
+    fenced: bool = True
 
 
 @dataclass(frozen=True)
@@ -375,21 +534,337 @@ def _links_in(text: str) -> tuple[TextLink, ...]:
     )
 
 
+#: 一行在「没有围栏的代码」探测里的角色。
+#:
+#: ``code`` 是单独就足以断言是代码的行；``neutral`` 是代码里常见但单独不足以
+#: 断言的行（注释、缩进续行、只有收尾符号的行、空行）；``prose`` 是自然语言。
+_LINE_CODE = "code"
+_LINE_NEUTRAL = "neutral"
+_LINE_PROSE = "prose"
+
+#: CJK 与全角标点。**一个 ``code`` 行不允许含 CJK**——这一条挡掉了整类误判：
+#: 中文技术散文里随处可见 `T = 100`、`Geman & Geman (1984)` 这种形状，
+#: 若不设这条限制，一段说明文字会被整段包进代码框并挂上「长按可整段复制」。
+#: 代码里的中文注释与中文字符串仍然成立：它们落到 ``neutral``，
+#: 由已经成立的代码run 吸收，而不是自己去开一个 run。
+_CJK_PATTERN = re.compile(
+    r"[　-〿぀-ヿ㐀-䶿一-鿿"
+    r"豈-﫿＀-￯]"
+)
+
+#: 缩进多少列起算「代码块的续行」。取 4 与 CommonMark 的缩进代码块一致。
+_CODE_INDENT_COLUMNS = 4
+
+#: 一个 run 里最多容忍几个连续空行。Python 的类内方法之间常有两个空行，
+#: 取 2 才不会把一个类切成两段。
+_MAX_BLANK_LINES_INSIDE_CODE = 2
+
+#: 一个 run 至少要有几个 ``code`` 行才成立。
+_MIN_CODE_LINES = 2
+
+_CODE_DEFINITION = re.compile(
+    r"^\s*(?:async\s+def|def|class|function|interface|struct|impl|fn|"
+    r"(?:public|private|protected|static|final)\s+[\w<>\[\]]+)\s+[\w$]"
+)
+_CODE_IMPORT = re.compile(
+    r"^\s*(?:import\s+\S|from\s+\S+\s+import\s|#include\s|using\s+\w|"
+    r"require\s*\(|package\s+\w)"
+)
+_CODE_ASSIGNMENT = re.compile(
+    r"^\s*(?:const |let |var |final |static )?[A-Za-z_$][\w$.]*"
+    r"(?:\[[^\]\n]*\])?(?:\s*:\s*[\w\[\]., |'\"<>]+)?\s*"
+    r"(?:\+|-|\*\*|\*|//|/|%|\||&|\^|>>|<<)?=\s*\S"
+)
+_CODE_DECORATOR = re.compile(r"^\s*@[A-Za-z_][\w.]*(?:\(.*\))?\s*$")
+#: 赋值语句的**右侧**看起来像自然语言时不算代码。
+#:
+#: `_CODE_ASSIGNMENT` 单看形状会把英文正文里的等式句判成代码——
+#: `Cost = benefit minus risk.` 三个裸词加一个句号，形状与 `x = y` 无异。
+#: 判据是「右侧是两个以上纯字母词、且没有任何代码标点」：真实代码的右侧几乎总带
+#: 括号、引号、数字、点号或运算符，而英文句子恰恰都没有。
+_PROSE_ASSIGNMENT_TAIL = re.compile(
+    r"=\s*[A-Za-z]+(?:\s+[A-Za-z]+){2,}\s*[.!?。！？]?\s*$"
+)
+#: 语句关键字只在**缩进之后**算代码：真实代码里的 `return` 一定在函数体内，
+#: 而顶格的 `return ...` 更可能是一句在讲 return 的话。
+_CODE_CONTROL = re.compile(
+    r"^\s+(?:return|raise|yield|pass|break|continue|assert|del|await|throw)\b"
+)
+_CODE_BLOCK_KEYWORD = re.compile(
+    r"^\s*(?:if|elif|else|for|while|try|except|finally|with|switch|case|do|match)"
+    r"\b.*[:{]\s*$"
+)
+_CODE_SHELL = re.compile(
+    r"^\s*(?:\$ |#!/|sudo |docker |docker-compose |npm |pnpm |yarn |pip3? |"
+    r"apt |apt-get |yum |dnf |git |curl |wget |cd |ls |mkdir |cp |mv |rm |"
+    r"chmod |chown |systemctl |kubectl |uv |cargo |go )\S"
+)
+_CODE_SQL = re.compile(
+    r"^\s*(?:SELECT|INSERT INTO|UPDATE|DELETE FROM|CREATE TABLE|ALTER TABLE|"
+    r"DROP TABLE|WITH)\b",
+    re.IGNORECASE,
+)
+#: SQL 语句的**续行**关键字。只算 ``neutral``——它们不足以独立断言是代码，
+#: 但必须能被已成立的 run 吸收，否则 ``SELECT ... / FROM ... / WHERE ...;``
+#: 会在第二行断开，整条语句凑不够强行数而被判成正文。
+#:
+#: 刻意**只匹配全大写**：SQL 写在代码里惯用大写，而英文正文里不会出现独立的
+#: 全大写 ``FROM`` / ``ON``（"On the other hand" 是 ``On``）。放开大小写会把
+#: 以 ``On`` / ``Set`` 开头的英文句子变成可被代码段吞掉的中性行。
+_CODE_SQL_CONTINUATION = re.compile(
+    r"^\s*(?:FROM|WHERE|GROUP BY|ORDER BY|HAVING|LIMIT|OFFSET|VALUES|SET|"
+    r"(?:INNER |LEFT |RIGHT |FULL |CROSS )?JOIN|ON|AND|OR|UNION(?: ALL)?)\b"
+)
+#: 语句形态的函数调用。标识符与左括号之间**不允许空格**：留了空格就会把
+#: `Note (1984)` 这类英文正文算成调用。
+_CODE_CALL = re.compile(r"^\s*[A-Za-z_$][\w$.]*\([^\n]*\)\s*;?\s*$")
+_CODE_TERMINATED = re.compile(r"[;{}]\s*$")
+_CODE_COMMENT = re.compile(r"^\s*(?:#|//|/\*|\*/|\*\s)")
+_CODE_PUNCT_ONLY = re.compile(r"^\s*[\)\]\}>,;:]+\s*$")
+
+_CODE_STRONG_PATTERNS = (
+    _CODE_DEFINITION,
+    _CODE_IMPORT,
+    _CODE_DECORATOR,
+    _CODE_SHELL,
+    _CODE_SQL,
+    _CODE_BLOCK_KEYWORD,
+    _CODE_CALL,
+    _CODE_ASSIGNMENT,
+    _CODE_CONTROL,
+)
+
+
+def _leading_indent(line: str) -> int:
+    """该行的缩进列数；制表符按 4 列算。"""
+    columns = 0
+    for character in line:
+        if character == " ":
+            columns += 1
+        elif character == "\t":
+            columns += _CODE_INDENT_COLUMNS
+        else:
+            break
+    return columns
+
+
+def _code_line_role(line: str) -> str:
+    """判定一行在代码探测里的角色。"""
+    stripped = line.strip()
+    if not stripped:
+        return _LINE_NEUTRAL
+    if _CJK_PATTERN.search(line):
+        # 含中文的行只能被已成立的 run 吸收，不能自己作为断言依据。
+        if _CODE_COMMENT.match(line) or _leading_indent(line) >= _CODE_INDENT_COLUMNS:
+            return _LINE_NEUTRAL
+        return _LINE_PROSE
+    for pattern in _CODE_STRONG_PATTERNS:
+        if pattern.match(line):
+            if pattern is _CODE_ASSIGNMENT and _PROSE_ASSIGNMENT_TAIL.search(stripped):
+                # `Cost = benefit minus risk.` 是一句话，不是一条赋值。
+                return _LINE_PROSE
+            return _LINE_CODE
+    if _CODE_TERMINATED.search(stripped):
+        return _LINE_CODE
+    if _CODE_COMMENT.match(line) or _CODE_PUNCT_ONLY.match(stripped):
+        return _LINE_NEUTRAL
+    if _CODE_SQL_CONTINUATION.match(line):
+        return _LINE_NEUTRAL
+    if _leading_indent(line) >= _CODE_INDENT_COLUMNS:
+        return _LINE_NEUTRAL
+    return _LINE_PROSE
+
+
+def _guess_code_language(body: str) -> Optional[str]:
+    """猜出代码块的语言标识。
+
+    19.3 要求「明确的语言标识」。猜不出时返回 ``None``——写一个错的语言标识
+    比不写更糟：Telegram 会按它高亮，标错的高亮让读者以为代码有语法错误。
+    """
+    if re.search(r"(?:=>|\bconsole\.log\b|\b(?:const|let)\s+\w+\s*=)", body):
+        return "javascript"
+    if re.search(
+        r"^\s*(?:from\s+\S+\s+import|import\s+\w+|def\s+\w+\s*\(|"
+        r"class\s+\w+\s*[:\(]|@\w+\s*$)",
+        body,
+        re.MULTILINE,
+    ) or "self." in body:
+        return "python"
+    if re.search(
+        r"^\s*(?:\$ |#!/bin/(?:ba)?sh|docker |npm |pip3? |git |sudo |apt |yum )",
+        body,
+        re.MULTILINE,
+    ):
+        return "bash"
+    if re.search(
+        r"^\s*(?:SELECT|INSERT INTO|CREATE TABLE)\b", body, re.IGNORECASE | re.MULTILINE
+    ):
+        return "sql"
+    return None
+
+
+def _fenced_line_indices(lines: Sequence[str]) -> set[int]:
+    """围栏代码块占据的行下标（含起始与闭合行）。
+
+    :func:`_detect_code_spans` 必须跳过它们：围栏里的内容已经是代码，
+    在里面再认一段「无围栏代码」会让 :func:`fence_unfenced_code` 往一个
+    已有围栏里塞第二层围栏，内层的三反引号又会把外层提前闭合。
+    """
+    inside: set[int] = set()
+    index = 0
+    while index < len(lines):
+        opening = fence_marker(lines[index])
+        if opening is None:
+            index += 1
+            continue
+        inside.add(index)
+        index += 1
+        while index < len(lines):
+            inside.add(index)
+            if closes_fence(lines[index], opening):
+                index += 1
+                break
+            index += 1
+    return inside
+
+
+def _detect_code_spans(lines: Sequence[str]) -> dict[int, int]:
+    """找出没有围栏的代码段，返回 ``{起始行下标: 结束行下标(不含)}``。
+
+    模型在对话里贴代码时**经常不加围栏**——现场报障那段 QQ 回复里整整一百行
+    Python 一个反引号都没有。此前这些行走的是正文规则，后果不是「少了个代码框」
+    而是代码被改坏：顶格的 `# ---- TSP 应用示例 ----` 被 ATX 标题规则吃成
+    `■ ---- TSP 应用示例 ----`，`_private_` 掉下划线，`` `SELECT 1` `` 变成
+    `「SELECT 1」`，`mask = a | b | c` 被画成框线表格。19.3 要求「代码必须保持
+    原始缩进和换行、有明确的语言标识和代码边界」，这些都不成立。
+
+    判据刻意保守，因为反向误判更严重：把一段中文说明当成代码，会给用户一段
+    带围栏的说明文字，还会把它送进「长按可整段复制」的路径。因此一个 run 必须
+    **以一个不含 CJK 的强代码行开头**，包含至少 :data:`_MIN_CODE_LINES` 个强行,
+    且中途不能出现任何自然语言行。中文注释与中文字符串落在 ``neutral``，
+    由已经成立的 run 吸收——它们从不自己开一个 run。
+    """
+    fenced = _fenced_line_indices(lines)
+    roles = [
+        _LINE_PROSE if index in fenced else _code_line_role(line)
+        for index, line in enumerate(lines)
+    ]
+    spans: dict[int, int] = {}
+    index = 0
+    while index < len(lines):
+        if roles[index] is not _LINE_CODE:
+            index += 1
+            continue
+        strong = 0
+        definition_seen = False
+        indented_body = 0
+        last_content = index
+        cursor = index
+        blank_run = 0
+        while cursor < len(lines):
+            role = roles[cursor]
+            if role is _LINE_PROSE:
+                break
+            if not lines[cursor].strip():
+                blank_run += 1
+                if blank_run > _MAX_BLANK_LINES_INSIDE_CODE:
+                    break
+                cursor += 1
+                continue
+            blank_run = 0
+            last_content = cursor
+            if role is _LINE_CODE:
+                strong += 1
+                if _CODE_DEFINITION.match(lines[cursor]) or _CODE_IMPORT.match(
+                    lines[cursor]
+                ):
+                    definition_seen = True
+            elif _leading_indent(lines[cursor]) >= _CODE_INDENT_COLUMNS:
+                indented_body += 1
+            cursor += 1
+        # 一个 `def`/`import` 加上缩进的（中文）函数体同样是代码，哪怕强行只有一个。
+        accepted = strong >= _MIN_CODE_LINES or (
+            strong >= 1 and definition_seen and indented_body >= 1
+        )
+        if accepted and last_content > index:
+            spans[index] = last_content + 1
+            index = last_content + 1
+            continue
+        index += 1
+    return spans
+
+
+def fence_unfenced_code(text: str) -> str:
+    """给正文里没有围栏的代码段补上 Markdown 围栏。
+
+    :func:`parse_text_document` 已经能把这些段落识别成 ``CODE`` 块，走块渲染的
+    平台（QQ、企业微信）因此自动受益。Telegram 不走块渲染——它的管线是
+    ``markdownify(convert_markdown_tables(degrade_math(text)))``，把源文本整体交给
+    MarkdownV2 转换器。于是同一段无围栏 Python 在 Telegram 上后果更重：
+    markdownify 会把每一行的前导空格当成排版空白吃掉，一段有缩进的函数体变成
+    全部顶格的一堆行——代码的语义（缩进即块结构）直接消失，而 QQ 侧至少还留着缩进。
+
+    19.1 要求「平台差异只放在渲染/发送层」。把「哪些行是代码」这个**判断**
+    收在这里，三个平台就共用同一个答案；各平台再按自己的符号表渲染。
+    补出的围栏同时让 :func:`split_for_copyable_code` 能把这段代码切成一条
+    可复制的消息——19.3 要求的复制路径正是靠围栏配对识别的。
+    """
+    lines = text.splitlines()
+    spans = _detect_code_spans(lines)
+    if not spans:
+        return text
+    output: list[str] = []
+    index = 0
+    while index < len(lines):
+        end = spans.get(index)
+        if end is None:
+            output.append(lines[index])
+            index += 1
+            continue
+        body = [line for line in lines[index:end]]
+        while body and not body[-1].strip():
+            body.pop()
+        language = _guess_code_language("\n".join(body))
+        # 围栏前后各留一个空行：紧贴正文时 CommonMark 仍然识别，但 markdownify
+        # 之类的转换器会把它当成同一段的续行。
+        if output and output[-1].strip():
+            output.append("")
+        output.append(f"```{language}" if language else "```")
+        output.extend(body)
+        output.append("```")
+        if end < len(lines) and lines[end : end + 1] != [""]:
+            output.append("")
+        index = end
+    return "\n".join(output)
+
+
 def parse_text_document(text: str) -> TextDocument:
     """Parse the Markdown structures that need consistent IM rendering."""
     lines = text.splitlines()
     blocks: list[TextBlock] = []
     index = 0
+    # 没有围栏的代码段先探测出来。必须在进入逐行分派**之前**做：一旦让
+    # `# 注释` 走到标题分支、`a | b | c` 走到表格分支，代码就已经被改写了。
+    code_spans = _detect_code_spans(lines)
 
     def starts_block(line: str) -> bool:
         stripped = line.strip()
         return bool(
-            line.lstrip().startswith("```")
+            fence_marker(line) is not None
             or _HEADING_PATTERN.match(line)
             or _LIST_PATTERN.match(line)
             or line.lstrip().startswith(">")
             or is_table_row(stripped)
         )
+
+    def opens_block(position: int) -> bool:
+        """该行是否开启一个新块——含无围栏代码段的起始行。
+
+        段落累积必须认得这个边界：`_detect_code_spans` 找到的起始行在
+        ``starts_block`` 眼里只是普通一行（`import numpy as np` 既不是标题
+        也不是列表），于是前一个段落会把它吞进去，整段代码再也走不到代码分支。
+        """
+        return position in code_spans or starts_block(lines[position])
 
     while index < len(lines):
         line = lines[index]
@@ -397,20 +872,42 @@ def parse_text_document(text: str) -> TextDocument:
             index += 1
             continue
 
-        if line.lstrip().startswith("```"):
-            opener = line.lstrip()[3:].strip()
+        # 无围栏代码段优先：它整段是代码，里面任何一行都不该再被正文规则解释。
+        end = code_spans.get(index)
+        if end is not None:
+            body = "\n".join(lines[index:end]).rstrip()
+            blocks.append(
+                TextBlock(
+                    TextBlockKind.CODE,
+                    body,
+                    language=_guess_code_language(body),
+                    closed=True,
+                    fenced=False,
+                )
+            )
+            index = end
+            continue
+
+        opening = fence_marker(line)
+        if opening is not None:
+            language = fence_language(line)
             index += 1
             body: list[str] = []
-            while index < len(lines) and not lines[index].lstrip().startswith("```"):
+            while index < len(lines) and not closes_fence(lines[index], opening):
                 body.append(lines[index])
                 index += 1
-            if index < len(lines):
+            # 走到文本末尾说明围栏没有闭合。记下来：渲染层不能替它补一个闭合，
+            # 否则一条被截断的回复里剩下的正文会变成「代码」并跟上一句
+            # 「长按可整段复制」。
+            closed = index < len(lines)
+            if closed:
                 index += 1
             blocks.append(
                 TextBlock(
                     TextBlockKind.CODE,
                     "\n".join(body),
-                    language=opener or None,
+                    language=language,
+                    closed=closed,
                 )
             )
             continue
@@ -476,7 +973,7 @@ def parse_text_document(text: str) -> TextDocument:
 
         values = [line]
         index += 1
-        while index < len(lines) and lines[index].strip() and not starts_block(lines[index]):
+        while index < len(lines) and lines[index].strip() and not opens_block(index):
             values.append(lines[index])
             index += 1
         source = "\n".join(values)
@@ -580,36 +1077,136 @@ _SIZED_DELIMITER_PATTERN = re.compile(
 #: LaTeX 的换行命令。保留为字面 `\\` 会被当成转义残片，正是 19.2 禁止的形态。
 _LINE_BREAK_PATTERN = re.compile(r"\\\\")
 
-#: 一段 `$...$` 只有在内容确实带 LaTeX 特征时才按公式处理。
+#: 分式的三种写法。`\dfrac` / `\tfrac` 只是 `\frac` 的显示尺寸变体，语义相同。
+#:
+#: 少了后两个，同一段公式里写 `\frac` 得到 `(a)/(b)`、写 `\dfrac` 得到
+#: `dfracab`——处理结果取决于作者选了哪个同义写法，这本身就是缺陷。
+_FRACTION_PATTERN = re.compile(r"\\[dt]?frac\{([^{}]*)\}\{([^{}]*)\}")
+
+#: 重音命令 → Unicode 组合记号。与已处理的 `\overline` 属于同一类：
+#: 缺了处理就只剩命令名（`\hat{x}` 变成 `hatx`）。
+#:
+#: 组合记号跟在基字符**之后**，这是 Unicode 的规则；顺序反了渲染出来是两个字符。
+_ACCENT_MARKS = {
+    "overline": "\u0304",
+    "bar": "\u0304",
+    "hat": "\u0302",
+    "tilde": "\u0303",
+    "dot": "\u0307",
+    "ddot": "\u0308",
+    "vec": "\u20d7",
+}
+
+#: 数学环境里的列分隔符。它是排版指令，不是内容。
+#:
+#: `_ENVIRONMENT_PATTERN` 删掉了 `\begin{cases}` 这类环境名，但 `&` 留着，
+#: 于是每一行都拖着一个孤零零的符号——现场报障贴出的
+#: `1, & \Delta E \le 0 \\` 正是这个形态。只在数学片段内部替换，
+#: 正文里的 `&`（`Tom & Jerry`）是内容，必须原样保留。
+#:
+#: 两侧只吃**空格与制表符**，不吃换行：`\\` 已经被换成换行，吃掉它会把
+#: 多行的 cases / matrix 压成一行，行与行的边界就此消失。
+_ALIGNMENT_SEPARATOR_PATTERN = re.compile(r"[ \t]*(?<!\\)&[ \t]*")
+
+#: 一段 `$...$` 带 LaTeX 特征时一定是公式。
 #:
 #: 旧规则只看 `$` 是否配对，于是 "price $5 and $7" 里两个货币符号恰好配对，
-#: 中间内容被当作公式剥离——金额的单位被静默删掉，只剩数字。判据改成内容里
-#: 必须出现反斜杠命令、上下标或分式，货币写法（`$5`、`$1,200`）不会命中。
+#: 中间内容被当作公式剥离——金额的单位被静默删掉，只剩数字。
+#: 反斜杠命令、上下标、分式出现即可确认是公式。
 _MATH_EVIDENCE_PATTERN = re.compile(r"\\[A-Za-z]|\\\\|[\^_]|\{|\}")
+
+#: 一段 `$...$` **必须**是金额而不是公式的形态。
+#:
+#: 只按 LaTeX 特征收纳是不够的：模型高频输出 `$x = 5$`、`$a + b = c$` 这类
+#: 纯符号公式，它们不带任何反斜杠命令，于是原样带着 `$` 送到 QQ——正是 19.2
+#: 点名禁止的「成片的 `$...$`」。判据因此反过来：**先确认不是金额**，
+#: 再按公式处理。
+#:
+#: 判据落在**开定界符的下一个字符**上：`$` 紧跟数字时它是货币符号，
+#: 于是 "price $5 and $7 total" 里那两个 `$` 只是恰好配对的两个货币符号，
+#: 中间的 " and " 不是公式内容。公式几乎总以变量、括号或运算符开头
+#: （`$x = 5$`、`$(a+b)^2$`），而不是以金额数字开头。
+_CURRENCY_LEAD_PATTERN = re.compile(r"^\d+(?:,\d{3})*(?:\.\d+)?")
+
+#: 以数字开头但仍然是公式的形态。
+#:
+#: `$2x + 1$`、`$3 = a$` 这类确实以金额数字开头，但出现了运算符或
+#: 紧贴的系数写法（`2x`），金额不会长这样。
+#:
+#: 「数字 + 空格 + 字母」**不算**系数：`$5 and $7` 里被捕获的内容是 `5 and `，
+#: 那是两个货币符号之间的正文，不是公式。系数写法一定紧贴（`2x` 而非 `2 x`）。
+_NUMERIC_MATH_PATTERN = re.compile(r"[=<>+/^~]|\d[A-Za-z]")
+
+#: 一段 `$...$` 里出现即说明它是**正文**而不是公式的标点。
+#:
+#: 公式不会包含中文句读。它们出现在被捕获的内容里，只能说明那两个 `$` 恰好
+#: 配成了一对，而中间是一句话——正文里出现一个落单的 `$`（金额、货币符号、
+#: 或者模型漏掉一个定界符）就是这个形态。此时把中间当公式剥掉，会把一整句话
+#: 的标点连同定界符一起搅乱，随后每个真公式的配对都错位一格。
+#:
+#: 只在**没有** LaTeX 特征时才参考它：`$$P(\text{接受}) = 1$$` 这类公式带着
+#: 中文却确实是公式，而它一定带反斜杠命令。
+_PROSE_PUNCTUATION_PATTERN = re.compile(r"[。，；！？、]")
+
 _MATH_PATTERN = re.compile(r"(?<!\\)(\${1,2})(.+?)(?<!\\)\1", re.DOTALL)
 _PAREN_MATH_PATTERN = re.compile(r"\\\((.+?)\\\)", re.DOTALL)
 _BRACKET_MATH_PATTERN = re.compile(r"\\\[(.+?)\\\]", re.DOTALL)
 
 
+def _looks_like_currency(expression: str) -> bool:
+    """Whether a `$...$` span opens with a currency amount rather than a formula."""
+    stripped = expression.lstrip()
+    if not _CURRENCY_LEAD_PATTERN.match(stripped):
+        return False
+    # 以数字开头，但带运算符或系数写法时仍是公式。
+    return not _NUMERIC_MATH_PATTERN.search(stripped)
+
+
 def _looks_like_math(expression: str) -> bool:
-    """Whether a `$...$` span really carries LaTeX rather than currency amounts."""
-    return bool(_MATH_EVIDENCE_PATTERN.search(expression))
+    """Whether a `$...$` span carries a formula rather than currency amounts.
+
+    带 LaTeX 特征的一律是公式；否则只要开头不是金额、且中间不是一句话，
+    就按公式处理——`$x = 5$`、`$a + b = c$` 这类纯符号公式必须剥掉定界符，
+    而 `$5 and $7` 这类恰好配对的货币符号必须原样保留。
+    """
+    if _MATH_EVIDENCE_PATTERN.search(expression):
+        return True
+    if not expression.strip():
+        return False
+    if _PROSE_PUNCTUATION_PATTERN.search(expression):
+        # 中文句读只出现在正文里。捕获到它说明这两个 `$` 是一个落单的定界符
+        # （金额、或模型漏写的一个 `$`）与后面某个真公式的开定界符凑成的对，
+        # 中间夹着一整句话。按公式处理会把那句话的定界符搅乱，并让后续每个
+        # 公式的配对都错位一格——现场那段回复的后半段就是这样全是 `$` 残片。
+        return False
+    return not _looks_like_currency(expression)
 
 
 
 def _clean_math_expression(text: str) -> str:
     # 嵌套分式要反复求解，否则 \frac{\frac{a}{b}}{c} 只有内层被处理，
     # 外层残留成 frac(...)。内层没有花括号时正则不再匹配，循环必然终止。
+    #
+    # `\dfrac` / `\tfrac` 只是 `\frac` 的显示尺寸变体，语义完全相同。少了它们，
+    # 同一段公式里写 `\frac` 得到 `(a)/(b)`、写 `\dfrac` 得到 `dfracab`——
+    # 处理结果不该取决于作者选了哪个同义写法。
     for _ in range(4):
-        replaced = re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"(\1)/(\2)", text)
+        replaced = _FRACTION_PATTERN.sub(r"(\1)/(\2)", text)
         if replaced == text:
             break
         text = replaced
     text = re.sub(r"\\sqrt\{([^{}]*)\}", r"√(\1)", text)
-    text = re.sub(r"\\overline\{([^{}]*)\}", r"\1̄", text)
+    # 重音符号：与已处理的 `\overline` 属于同一类，缺了就只剩命令名。
+    for command, mark in _ACCENT_MARKS.items():
+        text = re.sub(
+            rf"\\{command}\{{([^{{}}]*)\}}", lambda match, mark=mark: match.group(1) + mark, text
+        )
     text = _BRACED_PATTERN.sub(r"\1", text)
     text = _ENVIRONMENT_PATTERN.sub(" ", text)
     text = _LINE_BREAK_PATTERN.sub("\n", text)
+    # 列分隔符是排版指令而不是内容。环境名已经被删掉了，留着 `&` 会让每一行
+    # 都拖着一个孤零零的符号——现场报障里 `\begin{cases}` 那段正是这个形态。
+    text = _ALIGNMENT_SEPARATOR_PATTERN.sub(" ", text)
     text = _SIZED_DELIMITER_PATTERN.sub("", text)
     text = _SPACE_COMMAND_PATTERN.sub(" ", text)
     text = _COMMAND_PATTERN.sub(
@@ -629,17 +1226,47 @@ def _clean_math_expression(text: str) -> str:
 _ESCAPED_LITERAL_PATTERN = re.compile(r"\\([$_{}%&#~])")
 
 
+def _substitute_dollar_math(text: str) -> str:
+    """Replace every `$...$` span that really is a formula, leaving prose alone.
+
+    不能用 ``re.sub``：``$`` 的配对是从左到右贪心的，而正文里完全可能出现一个
+    **落单**的 ``$``（金额、货币符号，或者模型漏写了一个定界符）。它会与后面第一个
+    真公式的开定界符配成一对；``re.sub`` 即使原样返回这一段，扫描位置也已经越过
+    了那个闭定界符，于是从这里开始每个公式的配对都错位一格——现场那段回复的
+    后半段就是这样全是 ``$`` 残片。
+
+    因此拒绝一段时只跳过**开**定界符，让闭定界符有机会与后面的内容重新配对。
+    """
+    pieces: list[str] = []
+    position = 0
+    while True:
+        match = _MATH_PATTERN.search(text, position)
+        if match is None:
+            pieces.append(text[position:])
+            return "".join(pieces)
+        expression = match.group(2)
+        if _looks_like_math(expression):
+            pieces.append(text[position : match.start()])
+            pieces.append(_clean_math_expression(expression))
+            position = match.end()
+            continue
+        # 这一对不是公式：连定界符一起原样保留，但只前进到开定界符之后。
+        resume = match.start() + len(match.group(1))
+        pieces.append(text[position:resume])
+        position = resume
+
+
 def _clean_latex(text: str) -> str:
     def _math_span(match: "re.Match[str]", group: int) -> str:
         expression = match.group(group)
-        # 货币金额也能凑出配对的 `$`；没有 LaTeX 特征就原样保留整段，
-        # 包括定界符本身，否则 "$5" 会变成 "5"。
         if not _looks_like_math(expression):
             return match.group(0)
         return _clean_math_expression(expression)
 
+    # `$...$` 单独处理：它的定界符与正文共用一个字符，配对可能失败并需要重试。
+    # `\(...\)` 与 `\[...\]` 的定界符不会出现在正文里，没有这个问题。
+    text = _substitute_dollar_math(text)
     for pattern, group in (
-        (_MATH_PATTERN, 2),
         (_PAREN_MATH_PATTERN, 1),
         (_BRACKET_MATH_PATTERN, 1),
     ):
@@ -670,18 +1297,30 @@ def _split_fenced_sections(text: str) -> Iterable[tuple[bool, str]]:
         yield False, text
         return
     buffer: list[str] = []
-    in_fence = False
+    open_fence: Optional[str] = None
     for line in lines:
-        if line.lstrip().startswith("```"):
+        if open_fence is None:
+            marker = fence_marker(line)
+            if marker is not None:
+                if buffer:
+                    yield False, "".join(buffer)
+                    buffer = []
+                yield True, line
+                open_fence = marker
+                continue
+            buffer.append(line)
+            continue
+        # 围栏内：内容与闭合行都属于代码，一律原样让出。
+        if closes_fence(line, open_fence):
             if buffer:
-                yield in_fence, "".join(buffer)
+                yield True, "".join(buffer)
                 buffer = []
             yield True, line
-            in_fence = not in_fence
-        else:
-            buffer.append(line)
+            open_fence = None
+            continue
+        buffer.append(line)
     if buffer:
-        yield in_fence, "".join(buffer)
+        yield open_fence is not None, "".join(buffer)
 
 
 def _drop_unpaired_backticks(text: str) -> str:
@@ -750,6 +1389,50 @@ def render_plain_text(
     """Degrade unsupported formulas and tables without altering fenced code."""
     source = document.source if isinstance(document, TextDocument) else document
     return convert_markdown_tables(degrade_math(source), fenced=fenced_tables)
+
+
+#: 平台的行内标记符号表：`(正则, 替换)`，按顺序应用。
+InlineRules = Tuple[Tuple["re.Pattern[str]", str], ...]
+
+#: 平台的块渲染器表：块类型 → 一个把 `TextBlock` 变成文本的函数。
+BlockRenderers = Mapping[TextBlockKind, Callable[[TextBlock], str]]
+
+
+def render_rich_text(
+    document: Union[TextDocument, str],
+    *,
+    inline_rules: InlineRules,
+    block_renderers: BlockRenderers,
+) -> str:
+    """按平台符号表渲染块结构；未登记的块类型只做行内替换。
+
+    这是 `render_plain_text` 的**块级**对应物。后者只取 `document.source`，
+    于是标题、强调、列表、引用、链接的标记原样送到用户眼前——企业微信早就有一套
+    符号表（`━━` / `「」` / `┃` / `•` / `『』`），而 QQ 什么都没接，
+    同一段回复在两个平台上一个可读、一个满是 `##` 与 `**`。
+
+    平台差异只体现在传进来的两张表上；解析（`parse_text_document`）与结构处理
+    （表格降级、数学降级）由共享实现完成。项目的约定是「不允许各平台各写一套
+    Markdown 解析」，而这个函数是那条约定在块级上的落点。
+
+    块之间留一个空行：表格与代码块因此自然带上前后空行。三个以上连续换行压成两个,
+    否则源文本里的空行会在渲染后叠加。
+    """
+    if isinstance(document, str):
+        document = parse_text_document(document)
+
+    def _inline(text: str) -> str:
+        rendered = degrade_math(text)
+        for pattern, replacement in inline_rules:
+            rendered = pattern.sub(replacement, rendered)
+        return rendered
+
+    rendered_blocks: list[str] = []
+    for block in document.blocks:
+        renderer = block_renderers.get(block.kind)
+        rendered_blocks.append(renderer(block) if renderer else _inline(block.text))
+    joined = "\n\n".join(part for part in rendered_blocks if part.strip())
+    return re.sub(r"\n{3,}", "\n\n", joined).strip()
 
 
 Measure = Callable[[str], int]
@@ -863,14 +1546,41 @@ def _split_text_preserving(text: str, limit: int, measure: Measure) -> list[str]
     return chunks
 
 
-def _code_line_kind(line: str, code_style: str) -> tuple[bool, bool]:
-    stripped = line.rstrip("\r\n")
+def _code_fence_open(line: str, code_style: str) -> Optional[str]:
+    """返回该行打开的代码围栏标记，不是起始行时返回 ``None``。
+
+    Markdown 侧返回真实的围栏串（``` 或 ~~~~ 等），因为闭合围栏必须同字符
+    且不更短——分页时把四反引号块的内层三反引号当成闭合，会切出两个都不
+    成立的残块。WeCom 侧只有一种标记，返回哨兵值即可。
+    """
     if code_style == "markdown":
-        fence = line.lstrip().startswith("```")
-        return fence, fence
+        return fence_marker(line)
     if code_style == "wecom":
-        return stripped.startswith("［代码"), stripped == "［/代码］"
+        return "［代码" if line.rstrip("\r\n").startswith("［代码") else None
     raise ValueError(f"不支持的代码围栏样式：{code_style}")
+
+
+def _code_fence_closes(line: str, opening: str, code_style: str) -> bool:
+    """判断该行是否闭合 ``opening`` 打开的代码围栏。"""
+    if code_style == "markdown":
+        return closes_fence(line, opening)
+    if code_style == "wecom":
+        return line.rstrip("\r\n") == "［/代码］"
+    raise ValueError(f"不支持的代码围栏样式：{code_style}")
+
+
+def _code_line_kind(line: str, code_style: str) -> tuple[bool, bool]:
+    """该行是否是代码围栏的起始行 / 闭合行。
+
+    保留为兼容入口：成对判断已收敛到 :func:`_code_fence_open` 与
+    :func:`_code_fence_closes`，因为「能否闭合」取决于起始围栏，
+    单看一行无法回答。
+    """
+    opening = _code_fence_open(line, code_style)
+    if code_style == "markdown":
+        # Markdown 围栏行既可能是起始也可能是闭合，取决于上下文。
+        return opening is not None, opening is not None
+    return opening is not None, _code_fence_closes(line, "［代码", code_style)
 
 
 def _split_code_block(
@@ -882,9 +1592,8 @@ def _split_code_block(
     lines = block.splitlines(keepends=True)
     if len(lines) < 2:
         return _split_text_preserving(block, limit, measure)
-    is_open, _ = _code_line_kind(lines[0], code_style)
-    _, is_close = _code_line_kind(lines[-1], code_style)
-    if not is_open or not is_close:
+    opening = _code_fence_open(lines[0], code_style)
+    if opening is None or not _code_fence_closes(lines[-1], opening, code_style):
         return _split_text_preserving(block, limit, measure)
 
     opener = lines[0].rstrip("\r\n")
@@ -934,6 +1643,37 @@ def _split_box_table(lines: list[str], limit: int, measure: Measure) -> list[str
     return pages
 
 
+def _backfill_chunks(chunks: list[str], limit: int, measure: Measure) -> list[str]:
+    """把相邻的、合起来还装得下的小块并进同一页。
+
+    `_split_structured_body` 在每个代码围栏与每个框线表处 flush，然后把那个块的
+    分页结果直接 extend 进结果列表——**从不回填**。于是一段「标题 + 正文 + 代码 +
+    表格」× N 的技术回答，每个块各占一页而每页只有几十字节。实测 5.8 KB 的回复
+    变成 40 条消息（页利用率 2.5%），8.7 KB 的直接撞满 100 页上限被截断——
+    而它离「单页上限 × 页数上限」差两个数量级。
+
+    19.4 要求「按平台安全长度拆分」与「全部发送、内容不得丢失」，上面两个后果
+    正好各违反一条：每页 96 字节不是「安全长度」的意思，而截断就是丢内容。
+
+    块边界因此从**强制**切点降为**优先**切点：装得下就合并，装不下才切。
+    合并的是「已经完整的块」（围栏成对、表格带边框），不是把两个块的内部拼在一起,
+    所以结构完整性不受影响；顺序也不动——只合并相邻项，不重排。
+    """
+    if len(chunks) <= 1:
+        return chunks
+    merged: list[str] = []
+    for chunk in chunks:
+        if not merged:
+            merged.append(chunk)
+            continue
+        candidate = f"{merged[-1]}\n\n{chunk}"
+        if measure(candidate) <= limit:
+            merged[-1] = candidate
+            continue
+        merged.append(chunk)
+    return merged
+
+
 def _split_structured_body(
     text: str,
     limit: int,
@@ -955,16 +1695,16 @@ def _split_structured_body(
 
     while index < len(lines):
         line = lines[index]
-        is_open, _ = _code_line_kind(line, code_style)
-        if is_open:
+        opening = _code_fence_open(line, code_style)
+        if opening is not None:
             flush_regular()
             block = [line]
             index += 1
             while index < len(lines):
                 block.append(lines[index])
-                _, is_close = _code_line_kind(lines[index], code_style)
+                closes = _code_fence_closes(lines[index], opening, code_style)
                 index += 1
-                if is_close:
+                if closes:
                     break
             chunks.extend(
                 _split_code_block("".join(block), limit, measure, code_style)
@@ -987,7 +1727,11 @@ def _split_structured_body(
         regular.append(line)
         index += 1
     flush_regular()
-    return chunks or [""]
+    if not chunks:
+        return [""]
+    # 块边界是优先切点而不是强制切点：相邻的小块合起来还装得下时应留在同一页，
+    # 否则「块多」本身就会把一条几 KB 的回复拆成上百条消息并撞上页数上限。
+    return _backfill_chunks(chunks, limit, measure)
 
 
 #: 全渠道统一的页码格式。
@@ -997,9 +1741,26 @@ def _split_structured_body(
 #: 该正则同时供测试与调用方识别、剥离页码，避免各处再写一份字面量。
 PAGE_LABEL_PATTERN = re.compile(r"^第 \d+ 页 / 共 \d+ 页\n?", re.MULTILINE)
 
+#: 一条页码最多占多少字节。
+#:
+#: 页数上限是 100，所以两个数字各至多 3 位。重新编号的调用方需要预留这么多
+#: 空间：按「当前这一段的页码长度」预留会在总页数进位时（`共 9 页` → `共 10 页`）
+#: 让某一页刚好超出平台上限，而那一页会被上游拒收。
+MAX_PAGE_LABEL_BYTES = len("第 100 页 / 共 100 页\n".encode("utf-8"))
+
+
+def page_label(page: int, total: int) -> str:
+    """全渠道统一的页码文本，含结尾换行。
+
+    公开导出供需要**重新编号**的调用方使用（OneBot 把代码块拆成独立消息之后，
+    页码必须跨这些消息连成一个序列）。格式只在这里定义一次：写成两份时，
+    同一个机器人迟早在同一条回复里给出两种页码。
+    """
+    return f"第 {page} 页 / 共 {total} 页\n"
+
 
 def _page_label(page: int, total: int) -> str:
-    return f"第 {page} 页 / 共 {total} 页\n"
+    return page_label(page, total)
 
 
 #: 内容被截断时追加的提示。

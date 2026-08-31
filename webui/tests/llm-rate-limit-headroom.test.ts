@@ -8,7 +8,7 @@ import { dirname, resolve } from 'node:path'
 /**
  * 需求 9：上游限额余量必须在容错面板上看得到。
  *
- * cc-switch 的额度面板回答「这个上游还剩多少可用」（进度条 + 重置倒计时）。
+ * 桌面端参考实现的额度面板回答「这个上游还剩多少可用」（进度条 + 重置倒计时）。
  * 后端已按本项目的落点实现——从每个响应的限额头采集余量，随
  * `GET /llm/resilience/status` 的行返回（见
  * `tests/llm/test_rate_limit_integration.py`）。

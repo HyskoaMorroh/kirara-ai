@@ -121,8 +121,20 @@ class OneBotConfig(BaseModel):
         le=120,
         title="页间最大等待",
         description=(
-            "上界。风控看的是频率而不是「等得够不够久」，"
+            "单个间隙的上界。风控看的是频率而不是「等得够不够久」，"
             "超过某个点再等只是在惩罚用户。"
+        ),
+    )
+    send_pacing_maximum_total_seconds: float = Field(
+        default=6.0,
+        ge=0,
+        le=300,
+        title="整次回复的节流总额",
+        description=(
+            "一条多页回复里，按长度追加的等待总共不超过这么久。"
+            "只有页间最小等待是每一页都要付的硬保证，其余按页数摊分——"
+            "缺了这一层，一条十几页的回复会把节流累加到分钟级，"
+            "表现为「系统显示成功，QQ 却很久才收到」。"
         ),
     )
 
@@ -171,6 +183,34 @@ class OneBotConfig(BaseModel):
             "超出部分会明确标注被省略，而不是静默截断。"
         ),
     )
+    initial_connect_grace_seconds: float = Field(
+        default=180.0,
+        ge=0.0,
+        le=3600.0,
+        title="首次连接宽限期（秒）",
+        description=(
+            "适配器启动后多少秒内，「还没有上游连进来」报成「正在启动」而不是"
+            "「等待连接」。反向 WebSocket 由 OneBot 实现主动拨入，而它要先冷启动"
+            "QQ 再完成登录——现场日志里这一段超过 90 秒。这段时间里 Kirara 侧"
+            "不可能有连接，此时提示「检查登录状态和连接心跳」是这个窗口里最不该给"
+            "的建议：心跳与令牌都没有问题，上游还没起来而已。"
+            "超过这个时长仍然没有任何上游连进来才转为「等待连接」。"
+            "与「重连宽限期」是两件事：那个的前提是曾经连上过。填 0 关闭。"
+        ),
+    )
+    reconnect_grace_seconds: float = Field(
+        default=45.0,
+        ge=0.0,
+        le=3600.0,
+        title="重连宽限期（秒）",
+        description=(
+            "上游反向 WebSocket 掉线后，多少秒内把状态报成「正在重连」而不是"
+            "「未连接」。OneBot 实现自己会回连，这段时间内操作者不需要做任何事；"
+            "报成未连接会让人去重查地址与令牌，而那两项并没有错。"
+            "超过这个时长仍未连上就转为「未连接」——一直显示等待状态"
+            "只是换个措辞掩盖真实故障。填 0 关闭该状态，拿回旧行为。"
+        ),
+    )
     qr_login_log_path: Optional[str] = Field(
         default=None,
         title="OneBot 实现日志路径",
@@ -208,7 +248,7 @@ class OneBotConfig(BaseModel):
     def build_send_pacing(self) -> "SendPacing":
         """把配置映射成运行时那份 `SendPacing`。
 
-        由这里统一转换，而不是让适配器各自读五个字段：参数名在两处各写一份时，
+        由这里统一转换，而不是让适配器各自读六个字段：参数名在两处各写一份时，
         迟早出现「界面调了但运行时没变」，而那种不一致没有任何症状——
         只表现为账号又被限制发言。
         """
@@ -222,6 +262,7 @@ class OneBotConfig(BaseModel):
             maximum_seconds=max(
                 self.send_pacing_maximum_seconds, self.send_pacing_minimum_seconds
             ),
+            maximum_total_seconds=self.send_pacing_maximum_total_seconds,
         )
 
     @property

@@ -206,3 +206,94 @@ async def test_the_endpoints_report_503_when_the_store_is_absent(api_without_sto
 
     assert summary.status_code == 503
     assert recent.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_the_comparison_requires_authentication(api):
+    client, _ = api
+
+    response = await client.get("/api/tracing/delivery/compare")
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_the_comparison_returns_one_row_per_channel(api):
+    """需求 19.5：必须给出三个渠道的**可比**链路耗时。
+
+    此前只能靠切换 `?channel=` 查三次，对比被推给读者的短期记忆。
+    """
+    client, store = api
+    add(store, channel="onebot", durations={
+        "queue_seconds": 0.1, "llm_generation_seconds": 8.0,
+        "send_seconds": 4.0, "total_seconds": 12.1,
+    })
+    add(store, channel="telegram", durations={
+        "queue_seconds": 0.1, "llm_generation_seconds": 8.0,
+        "send_seconds": 0.4, "total_seconds": 8.5,
+    })
+
+    response = await client.get("/api/tracing/delivery/compare", headers=headers())
+
+    assert response.status_code == 200
+    payload = await response.get_json()
+    rows = {row["channel"]: row for row in payload["channels"]}
+    assert set(rows) == {"onebot", "telegram"}
+    # 生成段相同、发送段差 10 倍——这正是单渠道视图看不出来的那个事实。
+    assert rows["onebot"]["phases"]["llm_generation_seconds"]["avg_seconds"] == 8.0
+    assert rows["telegram"]["phases"]["llm_generation_seconds"]["avg_seconds"] == 8.0
+    assert rows["onebot"]["phases"]["send_seconds"]["avg_seconds"] == 4.0
+    assert rows["telegram"]["phases"]["send_seconds"]["avg_seconds"] == 0.4
+
+
+@pytest.mark.asyncio
+async def test_the_comparison_never_leaks_conversation_content(api):
+    """会话键只以摘要形式落库，对比响应里连摘要都不该出现。"""
+    client, store = api
+    add(store, conversation_key="c2c:一位真实用户")
+
+    response = await client.get("/api/tracing/delivery/compare", headers=headers())
+
+    body = await response.get_data()
+    assert "一位真实用户".encode("utf-8") not in body
+    assert b"conversation_digest" not in body
+
+
+@pytest.mark.asyncio
+async def test_the_comparison_rejects_a_malformed_time_range(api):
+    client, _ = api
+
+    response = await client.get(
+        "/api/tracing/delivery/compare?start_time=not-a-date", headers=headers()
+    )
+
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_the_comparison_reports_a_missing_store_as_not_configured(
+    api_without_store,
+):
+    """没启用计时存储不是错误，只是没开这个功能——503 而不是 500。"""
+    response = await api_without_store.get(
+        "/api/tracing/delivery/compare", headers=headers()
+    )
+
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_the_comparison_marks_an_unmeasured_phase_as_null(api):
+    """非流式请求没有首字节。写 0 在对比视图里会看起来「快得多」。"""
+    client, store = api
+    add(store, channel="onebot", durations={
+        "queue_seconds": 0.1, "llm_generation_seconds": 8.0,
+        "send_seconds": 1.0, "total_seconds": 9.1,
+    })
+
+    response = await client.get("/api/tracing/delivery/compare", headers=headers())
+
+    payload = await response.get_json()
+    phase = payload["channels"][0]["phases"]["llm_first_byte_seconds"]
+    assert phase["avg_seconds"] is None
+    assert phase["samples"] == 0

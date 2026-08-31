@@ -78,6 +78,12 @@ const emit = defineEmits<{
    * happens so it can capture the pre-edit state for undo/redo.
    */
   'before-node-mutation': []
+  /**
+   * The editing gesture is over (panel closed, node switched, panel unmounted).
+   * 一段连续输入必须只产生一个撤销步骤，所以画布需要知道手势在哪里结束——
+   * 否则合并窗口只能退回按防抖间隔切分，输入 4 秒就会拆成 7 步。
+   */
+  'node-mutation-committed': []
 }>()
 
 const {
@@ -203,6 +209,8 @@ const closeNodeConfig = () => {
   // 关闭前先把 Monaco 的防抖尾巴落盘，否则最后几个字符会丢
   flushPendingCodeConfig()
   applyNodeConfig()
+  // 编辑手势在这里结束：画布据此收拢这一段的撤销检查点。
+  emit('node-mutation-committed')
   emit('close')
 }
 
@@ -261,6 +269,9 @@ const applyCodeConfigDebounced = () => {
 
 onBeforeUnmount(() => {
   flushPendingCodeConfig()
+  // 面板被卸载也是手势结束。不发这条，画布的合并窗口会一直开着，
+  // 下一次无关编辑会被并进上一段配置编辑的检查点里。
+  emit('node-mutation-committed')
 })
 
 // 切换到别的节点前，先把上一个节点尚未落盘的代码写回，避免编辑内容丢失。
@@ -269,6 +280,8 @@ watch(
   () => props.selectedNode?.id,
   () => {
     flushPendingCodeConfig()
+    // 换节点意味着上一段编辑结束：两个节点的编辑不能并成一个撤销步骤。
+    emit('node-mutation-committed')
   }
 )
 
@@ -373,7 +386,14 @@ const removeInputPort = (name: string) => {
   if (props.selectedNode && isCodeNode.value) {
     const updatedData = {
       ...props.selectedNode.data,
-      inputs: props.selectedNode.data.inputs?.filter((input: any) => input.name !== name)
+      inputs: props.selectedNode.data.inputs?.filter((input: any) => input.name !== name),
+      // config 必须复制后再写。原地写入发生在 `updateSelectedNodeData` 触发
+      // `before-node-mutation`（历史快照）**之前**，于是快照里已经是新值：
+      // 撤销拿回旧的 `inputs` 数组，而 `config.inputs` 停在新值上。后端
+      // `CodeBlock` 的端口正是从 config 读的，结果是画布显示旧端口、保存的是新端口。
+      config: {
+        ...(props.selectedNode.data.config || {})
+      }
     }
     updatedData.config.inputs = updatedData.inputs
     updateSelectedNodeData(updatedData)
@@ -392,7 +412,10 @@ const addOutputPort = () => {
           label: newOutputData.value.label || newOutputData.value.name,
           type: newOutputData.value.type
         }
-      ]
+      ],
+      config: {
+        ...(props.selectedNode.data.config || {})
+      }
     }
     updatedData.config.outputs = updatedData.outputs
     updateSelectedNodeData(updatedData)
@@ -405,7 +428,10 @@ const removeOutputPort = (name: string) => {
   if (props.selectedNode && isCodeNode.value) {
     const updatedData = {
       ...props.selectedNode.data,
-      outputs: props.selectedNode.data.outputs?.filter((output: any) => output.name !== name)
+      outputs: props.selectedNode.data.outputs?.filter((output: any) => output.name !== name),
+      config: {
+        ...(props.selectedNode.data.config || {})
+      }
     }
     updatedData.config.outputs = updatedData.outputs
     updateSelectedNodeData(updatedData)

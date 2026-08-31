@@ -241,7 +241,7 @@ def _agent(lifecycle):
 @pytest.mark.asyncio
 @pytest.mark.integration
 @pytest.mark.usefixtures("creator_principal")
-async def test_persisted_ccswitch_resources_drive_one_real_agent_turn(tmp_path: Path):
+async def test_persisted_catalog_resources_drive_one_real_agent_turn(tmp_path: Path):
     lifecycle = ResourceLifecycleService(tmp_path / "vps-data")
     catalog = ResourceCatalogService(lifecycle)
     _ensure_builtins_after_legacy_prompt(lifecycle, catalog)
@@ -633,7 +633,7 @@ async def test_real_downloaded_agent_browser_skill_enters_persistent_runtime(tmp
             "qa-fallback",
         ]
         system = llm.requests[1].messages[0].content[0].text
-        # 渐进披露（需求 10，与 cc-switch / Claude Code 同一原理）：真实下载的这份
+        # 渐进披露（需求 10，与主流 Agent 客户端同一原理）：真实下载的这份
         # SKILL.md 带前置元数据，因此系统提示词里只有一行目录，正文由
         # `skill_<id>` 工具在模型真的要用时取回——而不是每一轮都整篇塞进上下文。
         #

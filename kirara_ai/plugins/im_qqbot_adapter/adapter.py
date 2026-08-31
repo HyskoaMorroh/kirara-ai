@@ -25,7 +25,10 @@ from kirara_ai.im.message import (FileMessage, ImageMessage, IMMessage, MentionE
 from kirara_ai.im.profile import UserProfile
 from kirara_ai.im.inbound_receipts import InboundReceiptService
 from kirara_ai.im.sender import ChatSender, ChatType
-from kirara_ai.im.text_render import paginate_with_truncation_notice, render_plain_text
+from kirara_ai.im.text_render import paginate_with_truncation_notice
+# 官方 QQ 机器人与 OneBot 面对的是同一个 QQ 客户端，因此共用同一张符号表：
+# 同一段回复在两条接入方式上给出两种排版，用户会以为是两个不同的机器人。
+from kirara_ai.plugins.im_onebot_adapter.render import render_onebot_text
 from kirara_ai.logger import get_logger
 from kirara_ai.web.app import WebServer
 from kirara_ai.workflow.core.dispatch import WorkflowDispatcher
@@ -146,6 +149,11 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
     """
     QQBot Adapter，包含 QQBot Bot 的所有逻辑。
     """
+
+    #: 统一关系模型里的渠道类型（需求 10）。显式声明的理由见
+    #: `im_onebot_adapter/adapter.py` 上同名属性的注释：类名推导是巧合，
+    #: 一次重命名会让本渠道的 Agent 绑定与会话键同时静默漂移。
+    channel_type = "qqbot"
 
     dispatcher: WorkflowDispatcher
     web_server: WebServer
@@ -359,7 +367,7 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
         def append_text(text: str) -> None:
             if not text:
                 return
-            rendered = replace_url_dots(render_plain_text(text))
+            rendered = replace_url_dots(render_onebot_text(text))
             # 超出页数或总字节预算时截断并附提示，而不是让 ValueError 穿出
             # send_message 把整条回复吞掉——OneBot 已经是这个语义，
             # 四个渠道必须一致（需求 19.4「全部发送、内容不得丢失」）。

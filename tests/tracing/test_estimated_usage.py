@@ -70,8 +70,35 @@ def test_an_unmeasurable_response_keeps_usage_unknown():
 
 
 def test_mark_provider_usage_still_promotes_unknown_to_provider():
+    """上游回报过的用量不能停在 UNKNOWN——它会被读成「这条没有用量」。
+
+    档位取决于**维度是否齐全**（见 `mark_provider_usage`）：这里只报了三维，
+    缓存两维缺失，因此是 `PROVIDER_PARTIAL`。本用例钉住的是「不再是 UNKNOWN
+    且被认定为上游回报」，而不是具体落在哪一档——后者由
+    `tests/llm/test_usage_source_partial.py` 逐档覆盖。
+    """
     reported = Usage(prompt_tokens=5, completion_tokens=5, total_tokens=10)
     assert reported.source is UsageSource.UNKNOWN
+
+    marked = mark_provider_usage(response(reported))
+
+    assert marked.usage is not None
+    assert marked.usage.source in {
+        UsageSource.PROVIDER,
+        UsageSource.PROVIDER_PARTIAL,
+    }
+    assert marked.usage.source is UsageSource.PROVIDER_PARTIAL
+
+
+def test_a_fully_reported_usage_is_provider_not_partial():
+    """四维齐全时必须是 `PROVIDER`：那份账单可以直接采信。"""
+    reported = Usage(
+        prompt_tokens=5,
+        completion_tokens=5,
+        total_tokens=10,
+        cached_tokens=0,
+        cache_write_tokens=0,
+    )
 
     marked = mark_provider_usage(response(reported))
 

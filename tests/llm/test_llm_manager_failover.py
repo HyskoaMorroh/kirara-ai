@@ -313,6 +313,9 @@ def test_execute_chat_persists_final_provider_and_frozen_cost_snapshot():
     usage = Usage(
         prompt_tokens=1_000_000,
         completion_tokens=500_000,
+        # 四维齐全（含 total）才是「上游完整回报」；缺任意一维会落到
+        # `PROVIDER_PARTIAL`，那表示缺失维度按 0 计价、总额是补出来的。
+        total_tokens=1_500_000,
         cached_tokens=200_000,
         cache_write_tokens=100_000,
     )
@@ -548,7 +551,15 @@ def test_execute_stream_persists_one_logical_trace_with_final_provider_and_usage
     secondary = StreamingAdapter([
         response(
             "backup",
-            usage=Usage(prompt_tokens=4, completion_tokens=2, total_tokens=6),
+            # 缓存两维显式给 0（报了、确实没命中），代表「上游完整回报」。
+            # 留空是「上游没报」，那会落到 `PROVIDER_PARTIAL` 档。
+            usage=Usage(
+                prompt_tokens=4,
+                completion_tokens=2,
+                total_tokens=6,
+                cached_tokens=0,
+                cache_write_tokens=0,
+            ),
         )
     ])
     manager = make_manager([
@@ -568,6 +579,8 @@ def test_execute_stream_persists_one_logical_trace_with_final_provider_and_usage
                 prompt_tokens=4,
                 completion_tokens=2,
                 total_tokens=6,
+                cached_tokens=0,
+                cache_write_tokens=0,
                 source=UsageSource.PROVIDER,
             ),
         )
@@ -755,7 +768,15 @@ def test_execute_chat_marks_usage_estimated_when_the_provider_reports_none():
 
 def test_execute_chat_never_relabels_a_real_provider_usage_as_estimated():
     """供应商给了 usage 就必须原样保留，绝不能被估算值覆盖。"""
-    reported = Usage(prompt_tokens=11, completion_tokens=7, total_tokens=18)
+    reported = Usage(
+        prompt_tokens=11,
+        completion_tokens=7,
+        total_tokens=18,
+        # 缓存两维显式给 0（报了、确实没命中）：本用例验的是「实测值不被估算
+        # 覆盖」，因此用完整回报这个基准形态，避免与档位判定纠缠。
+        cached_tokens=0,
+        cache_write_tokens=0,
+    )
     provider = FakeAdapter(response("measured", usage=reported))
     manager = make_manager([("primary", 1, provider)])
 

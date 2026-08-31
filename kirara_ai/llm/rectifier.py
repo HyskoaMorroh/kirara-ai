@@ -1,7 +1,7 @@
 """请求整流器：上游因参数约束拒绝时，按白名单修一次再重试（需求 8）。
 
-需求 8 最后一句点名「如果整流器能够一起融入进来到本项目最优」。cc-switch 里
-它是两个具体模块（`thinking_rectifier.rs` / `thinking_budget_rectifier.rs`）：
+需求 8 最后一句点名「如果整流器能够一起融入进来到本项目最优」。参考实现里
+它是两个专用模块（thinking 整流与 thinking 预算整流）：
 Anthropic 拒绝请求时，按错误文本判断是哪一类参数违规，改掉那一处再重试一次。
 
 它修的不是「我们猜错了」，而是**同一个 API 在不同模型上的约束不同**：
@@ -41,7 +41,7 @@ from typing import Any, Mapping, Optional
 #: Claude 要求的 thinking 预算下限。低于它等于没开思考。
 MIN_THINKING_BUDGET = 1024
 
-#: 整流后采用的 thinking 预算。与 cc-switch 的 `MAX_THINKING_BUDGET` 对齐。
+#: 整流后采用的 thinking 预算。与参考实现的预算上限取值一致。
 RECTIFIED_THINKING_BUDGET = 32000
 
 #: 整流后 `max_tokens` 的取值，必须大于预算。
@@ -57,6 +57,29 @@ _SIGNATURE_MARKERS = ("signature", "thinking")
 
 #: `budget_tokens` 违规的特征串。
 _BUDGET_MARKERS = ("budget_tokens",)
+
+#: 上游不认识 `reasoning_effort` 时的特征串。
+#:
+#: 大量 OpenAI 兼容网关只实现了 chat/completions 的核心字段，收到这个键直接 400。
+#: 这类失败**换供应商也没用**：同一个不合法请求发给备用上游同样会被拒，
+#: 正确处置是去掉那一个字段再重试一次。
+_REASONING_EFFORT_MARKERS = ("reasoning_effort",)
+
+#: 与 `_REASONING_EFFORT_MARKERS` 同时要求出现的「不认识 / 不支持」类词。
+#:
+#: 只匹配字段名会把「reasoning_effort 取值非法」（例如上游只认 low/medium/high
+#: 而我们发了 max）也当成「字段不支持」，然后把整个字段删掉——那会让一个
+#: 只需降档的请求彻底失去思考能力。
+_UNRECOGNIZED_MARKERS = (
+    "unrecognized",
+    "unsupported",
+    "not supported",
+    "does not support",
+    "unknown",
+    "unexpected",
+    "extra inputs",
+    "additional propert",
+)
 
 #: 图片不受支持的特征串。任一命中即可：各家措辞差别很大。
 _IMAGE_MARKERS = (
@@ -78,7 +101,7 @@ _UNSUPPORTED_MARKERS = (
 
 @dataclass(frozen=True)
 class RectifierConfig:
-    """整流器开关。默认全开，与 cc-switch 一致。
+    """整流器开关。默认全开，与参考实现一致。
 
     分成总开关 + 三个子开关，而不是一个布尔：三类整流的风险不同。
     签名整流丢掉的是上一轮的思考过程（本来也已失效），预算整流改的是数值，
@@ -89,6 +112,11 @@ class RectifierConfig:
     request_thinking_signature: bool = True
     request_thinking_budget: bool = True
     request_media_fallback: bool = True
+    #: 上游不认识 `reasoning_effort` 时删掉该字段再重试一次。
+    #:
+    #: 与前三项同为「改一处就能成功、不改就必然失败」，而且换供应商帮不上忙：
+    #: 备用上游收到同一个不合法字段同样会拒。
+    request_reasoning_effort_unsupported: bool = True
 
     def allows(self, kind: str) -> bool:
         if not self.enabled:
@@ -276,6 +304,37 @@ def rectify_media(body: dict[str, Any]) -> RectifyRecord:
     return record
 
 
+def should_rectify_reasoning_effort(error: Any, config: RectifierConfig) -> bool:
+    """上游明确表示不认识 `reasoning_effort` 这个字段时才命中。
+
+    要求「字段名」与「不认识/不支持类词」**同时**出现。只匹配字段名会把
+    「取值非法」（上游只认 low/medium/high 而我们发了 max）也判成
+    「字段不支持」，然后把整个字段删掉——那会让一个只需降档的请求
+    彻底失去思考能力。
+    """
+    if not config.allows("reasoning_effort_unsupported"):
+        return False
+    text = _error_text(error)
+    if not any(marker in text for marker in _REASONING_EFFORT_MARKERS):
+        return False
+    return any(marker in text for marker in _UNRECOGNIZED_MARKERS)
+
+
+def rectify_reasoning_effort(body: dict[str, Any]) -> RectifyRecord:
+    """删掉上游不认识的 `reasoning_effort` 字段，其余字段一个都不动。
+
+    没有这个字段时 `applied` 为假：重试一个逐字节相同的请求只会得到同一个
+    错误，白花一次调用。
+    """
+    record = RectifyRecord(kind="reasoning_effort_unsupported")
+    if "reasoning_effort" not in body:
+        return record
+    removed = body.pop("reasoning_effort")
+    record.applied = True
+    record.details = {"removed_reasoning_effort": removed}
+    return record
+
+
 def rectify_request(
     body: Mapping[str, Any],
     error: Any,
@@ -300,6 +359,13 @@ def rectify_request(
         ("thinking_signature", should_rectify_thinking_signature, rectify_thinking_signature),
         ("thinking_budget", should_rectify_thinking_budget, rectify_thinking_budget),
         ("media_fallback", should_rectify_media, rectify_media),
+        # 排在最后：前三类都是「改一个值」，这一类是「删一个字段」。
+        # 顺序只在一次错误同时命中多条特征时才有意义，那时优先改值而不是删字段。
+        (
+            "reasoning_effort_unsupported",
+            should_rectify_reasoning_effort,
+            rectify_reasoning_effort,
+        ),
     )
     for kind, should, apply in checks:
         if kind in already_applied:

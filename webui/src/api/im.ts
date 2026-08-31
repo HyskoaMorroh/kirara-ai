@@ -68,6 +68,14 @@ export interface QRLoginSnapshot {
     | 'unknown'
     | 'pending'
     | 'waiting_scan'
+    /**
+     * 有二维码，但上游日志那几行没有时间戳，无法判断它是否还有效。
+     *
+     * 与 `waiting_scan` 分开是必须的：该状态下 `remaining_seconds` 为 `null`，
+     * 任何显示出来的秒数都是编的，而编出来的那个数恰好是最乐观的
+     * 「还剩 120 秒」——用户照它去扫一张可能早就死掉的码。
+     */
+    | 'age_unknown'
     | 'scanned'
     | 'expired'
     | 'succeeded'
@@ -77,7 +85,12 @@ export interface QRLoginSnapshot {
   generated_at: string | null
   expires_at: string | null
   validity_seconds: number | null
-  /** 距失效剩余秒数；已失效为 0，无二维码为 null。 */
+  /**
+   * 距失效剩余秒数；已失效为 0，无二维码或无法判断时为 `null`。
+   *
+   * 这是**取快照那一刻**的值，不会自己减少。界面必须按 `expires_at` 自行倒数，
+   * 否则一个 120 秒有效期的数字会在屏幕上一直停在打开页面时的那个读数。
+   */
   remaining_seconds: number | null
   latest_qr_path: string | null
   refresh_count: number
@@ -90,6 +103,49 @@ export interface QRLoginSnapshot {
   last_event_at: string | null
   /** 可直接展示的一句处置建议。 */
   remediation: string | null
+  /**
+   * QQ **自身**的热更新状态；日志里没有任何热更新行时为 `null`。
+   *
+   * 与扫码是两条独立的线：热更新在后台拉一个几十 MB 的包，占带宽、可能拖慢登录
+   * 与消息投递，但它不影响「这张二维码还能不能扫」。需求 19.5 要求它不能与
+   * 「LLM 慢」「发送限流」混成一个「QQ 慢」——而混淆的第一步就是让它在面板上
+   * 根本不存在。
+   */
+  hot_update: HotUpdateSnapshot | null
+}
+
+/**
+ * QQ 自身热更新的一轮。全部字段脱敏，不含实例标识或账号信息。
+ */
+export interface HotUpdateSnapshot {
+  state:
+    /** 已开始检查，还没有结论。 */
+    | 'checking'
+    /** 检查过、无需更新。与「从没检查过」（整个对象为 `null`）处置不同。 */
+    | 'up_to_date'
+    /** 正在下载：占带宽，是「这条回复为什么慢」的候选原因。 */
+    | 'downloading'
+    /** 包已下载完，尚未就绪；带宽占用已结束。 */
+    | 'downloaded'
+    /** 包已就绪，下次重启生效；此刻不再占带宽。 */
+    | 'ready'
+    | 'failed'
+  /** 目标版本号；日志没给出时为 `null`（不猜）。 */
+  target_version: string | null
+  /**
+   * 本轮开始 / 下载完成时刻。
+   *
+   * 上游这些日志行只有 `HH:MM:SS.mmm`，没有日期，因此它们只承诺**时分秒可比**，
+   * 不承诺是墙上时间——不要拿它们去格式化成某年某月某日。
+   */
+  started_at: string | null
+  completed_at: string | null
+  /**
+   * 下载窗口长度（秒）。**还在进行时为 `null` 而不是 0**——
+   * 0 会被读成「瞬间完成」，正好与「它正在占着带宽」相反。
+   */
+  duration_seconds: number | null
+  remediation: string | null
 }
 
 export interface IMAdapterHealth {
@@ -99,6 +155,15 @@ export interface IMAdapterHealth {
     | 'disconnected'
     | 'stale'
     | 'initializing'
+    /**
+     * 上游刚断开，仍在自己的重连宽限期内。
+     *
+     * 这是全部非连接状态里唯一一个「什么都不用做」的状态：其余每一个都
+     * 要求操作者去改点什么。把它显示成「未连接」正是「compose 重启后
+     * QQ 显示未连接」这个报障——读到未连接的人会去重查地址与令牌，
+     * 而那两项从来没错。
+     */
+    | 'reconnecting'
     | 'credential_rejected'
     | 'upstream_refused'
     /**
@@ -232,6 +297,24 @@ export const imApi = {
    */
   deleteAdapter(adapterId: string) {
     return http.delete<void>(`/im/adapters/${adapterId}`)
+  },
+
+  /**
+   * 重新读取上游实现的日志，立刻取回最新的扫码登录状态。
+   *
+   * 二维码有效期实测 120 秒，远短于「看一眼、去拿手机、回来扫」这个动作序列。
+   * 没有这个入口时，面板上的数字是上一次列表轮询的快照，用户因此总在扫一张
+   * 屏幕上还在、上游其实已经换掉的码。
+   *
+   * **它只重读，不让上游重新生成。** 二维码由 LLOneBot / PMHQ 在自己的容器里
+   * 生成并在过期时自行重新请求；把「重新生成」写进文案是对所有权的谎报。
+   */
+  refreshQRLogin(adapterId: string) {
+    return http.post<{
+      supported: boolean
+      qr_login: QRLoginSnapshot | null
+      remediation: string | null
+    }>(`/im/adapters/${adapterId}/qr-login`)
   },
 
   /**

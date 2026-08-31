@@ -1389,21 +1389,21 @@ cd webui && npx vue-tsc --noEmit
 
 ## 九、供应商级请求策略：哪些开关有真实语义，哪些没有
 
-需求里点名了 cc-switch 的四个供应商开关。它们在 cc-switch 里配置的是
-**Claude Code CLI 进程**（commit 署名、实验性 agent teams、tool search、
+需求里点名了桌面端参考实现的四个供应商开关。它们在那里配置的是
+**编码 CLI 进程**（commit 署名、实验性 agent teams、tool search、
 CLI 自动更新器），不是「向某个模型上游发请求时的参数」。把字段名照抄过来只会
 得到永远没人读的死配置——本项目已经吃过这个亏：`UsageSource.ESTIMATED` 曾经
 有定义、有测试、主链路零调用，最终表现为一批「0 token、0 成本」的假免费请求。
 
 因此四个开关**全部按语义落地**，每一个都有真实执行链路：
 
-| cc-switch 开关 | 它在 cc-switch 里改的东西 | 本项目的落点 | 生效位置 |
+| 参考实现的开关 | 它在参考实现里改的东西 | 本项目的落点 | 生效位置 |
 | --- | --- | --- | --- |
-| Tool Search 最大强度思考 | `env.CLAUDE_CODE_EFFORT_LEVEL="max"`、`env.ENABLE_TOOL_SEARCH` | `LLMBackendConfig.reasoning_effort`（四档） | 各适配器翻译成自家字段后发出 |
-| 禁用自动升级 | `env.DISABLE_AUTOUPDATER="1"`（CLI 自更新器） | `update.disable_auto_check` | 启动时与每次打开 WebUI 时都不再探测 PyPI / npm；手动检查照常 |
-| 隐藏 AI 署名 | `attribution.commit=""`、`attribution.pr=""`（不写 `Co-Authored-By`） | `LLMBackendConfig.hide_ai_attribution` | 在**投递给用户的回复文本**上移除 AI 自我署名 |
-| Teammates 模式 | `env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS="1"`（CLI 多 agent 协作） | `AgentDefinition.teammate_agent_ids` | 模型获得 `delegate_to_<id>` 工具，可把子任务交给队友 |
-| 整流器 | `thinking_rectifier.rs` / `thinking_budget_rectifier.rs` + `RectifierConfig` 四开关 | `LLMBackendConfig.rectifier_enabled` 等四项 → `LLMChatRequest.rectifier` | 上游拒绝时按白名单改一处并重试一次，见 9.4 |
+| Tool Search 最大强度思考 | 编码 CLI 的推理强度与 tool search 环境变量 | `LLMBackendConfig.reasoning_effort`（四档） | 各适配器翻译成自家字段后发出 |
+| 禁用自动升级 | CLI 自更新器的禁用环境变量 | `update.disable_auto_check` | 启动时与每次打开 WebUI 时都不再探测 PyPI / npm；手动检查照常 |
+| 隐藏 AI 署名 | commit / PR 署名尾注置空（不写 `Co-Authored-By`） | `LLMBackendConfig.hide_ai_attribution` | 在**投递给用户的回复文本**上移除 AI 自我署名 |
+| Teammates 模式 | CLI 多 agent 协作的实验开关 | `AgentDefinition.teammate_agent_ids` | 模型获得 `delegate_to_<id>` 工具，可把子任务交给队友 |
+| 整流器 | 两个 thinking 整流模块 + 四个整流开关 | `LLMBackendConfig.rectifier_enabled` 等四项 → `LLMChatRequest.rectifier` | 上游拒绝时按白名单改一处并重试一次，见 9.4 |
 
 后两项**不是同名字段的照搬，而是同一用户意图在本项目里的确切落点**：
 

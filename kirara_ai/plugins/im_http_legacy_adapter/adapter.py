@@ -81,6 +81,15 @@ class V2Request:
 class HttpLegacyAdapter(IMAdapter):
     """HTTP Legacy API适配器"""
 
+    #: 统一关系模型里的渠道类型。
+    #:
+    #: 不声明时 `ChannelContext.from_message` 会退回类名推导，得到
+    #: `"httplegacy"`——那个值不在 `SUPPORTED_CHANNEL_TYPES` 里，于是渠道级与
+    #: 账号级 Agent 绑定全部被拒，HTTP 入口只能退到全局默认 Agent；
+    #: 而下面的路由用 `require_agent=True` 派发，没有默认 Agent 的部署直接失败。
+    #: 需求 10 要求 Agent 不能只服务某几个入口，HTTP 也要能单独绑定。
+    channel_type = "http"
+
     dispatcher: WorkflowDispatcher
     web_server: WebServer
 

@@ -482,7 +482,7 @@ async def create_server():
             return jsonify({"message": f"服务器ID '{request_data.id}' 已存在或服务器正在运行"}), 409
 
         # Normalize once at the API boundary.  Runtime code only receives the
-        # same canonical shape that CC Switch exports.
+        # same canonical shape that interoperable managers export.
         new_server_config = normalize_mcp_server_entry(request_data.to_config())
 
         # 添加到全局配置中

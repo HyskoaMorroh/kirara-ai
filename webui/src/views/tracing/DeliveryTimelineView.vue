@@ -21,6 +21,7 @@ import {
   DELIVERY_PHASES,
   DELIVERY_PHASE_LABELS,
   tracingApi,
+  type DeliveryChannelComparison,
   type DeliveryCountKey,
   type DeliveryRecord,
   type DeliverySummary
@@ -30,6 +31,7 @@ import {
 const DELIVERY_COUNT_KEYS: DeliveryCountKey[] = ['segment_count', 'retry_count']
 
 const summary = ref<DeliverySummary | null>(null)
+const comparison = ref<DeliveryChannelComparison[]>([])
 const records = ref<DeliveryRecord[]>([])
 const channels = ref<string[]>([])
 const selectedChannel = ref<string | null>(null)
@@ -44,6 +46,30 @@ const channelOptions = computed(() => [
   { label: '全部渠道', value: '' },
   ...channels.value.map((channel) => ({ label: channel, value: channel }))
 ])
+
+/**
+ * 对比视图里「哪个渠道这一段最慢」。
+ *
+ * 只在**至少两个渠道都测到该阶段**时才标注：一个渠道独有的数字不构成对比，
+ * 把它标成「最慢」会让读者以为已经比过了。
+ */
+const slowestByPhase = computed(() => {
+  const result: Record<string, string> = {}
+  for (const phase of DELIVERY_PHASES) {
+    const measured = comparison.value.filter(
+      (row) => (row.phases?.[phase]?.samples ?? 0) > 0
+    )
+    if (measured.length < 2) continue
+    let worst = measured[0]
+    for (const row of measured) {
+      const current = row.phases[phase].avg_seconds ?? 0
+      const best = worst.phases[phase].avg_seconds ?? 0
+      if (current > best) worst = row
+    }
+    result[phase] = worst.channel
+  }
+  return result
+})
 
 /** 只有真正测到过的阶段才参与「最慢阶段」判断：null 阶段不能参与比较。 */
 const slowestPhase = computed(() => {
@@ -91,11 +117,14 @@ async function load(showSpinner = false) {
   if (showSpinner) loading.value = true
   const channel = selectedChannel.value || undefined
   try {
-    const [summaryResponse, recentResponse] = await Promise.all([
+    const [summaryResponse, compareResponse, recentResponse] = await Promise.all([
       tracingApi.getDeliverySummary({ channel }),
+      // 对比视图**不带** channel：一次只看一个渠道正是它要解决的问题。
+      tracingApi.compareDeliveryChannels(),
       tracingApi.getRecentDeliveries({ channel, limit: 50 })
     ])
     summary.value = summaryResponse
+    comparison.value = compareResponse.channels || []
     channels.value = summaryResponse.channels || []
     records.value = recentResponse.items || []
     lastUpdated.value = new Date()
@@ -275,6 +304,82 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
+      <!--
+        跨渠道对比（需求 19.5 的最后一句）。
+        上面两节是**单渠道**视角，回答「这个渠道慢在哪一段」；这一节回答的是
+        另一个问题：「QQ 慢，是 QQ 这条链路慢，还是模型本来就慢」。
+        没有对照组时后者无法回答，而切换筛选器查三次不构成对照——
+        对比被推给了读者的短期记忆。
+      -->
+      <section
+        v-if="comparison.length > 1"
+        class="compare-section"
+        aria-label="跨渠道链路耗时对比"
+      >
+        <div class="section-heading">
+          <h2>跨渠道对比</h2>
+          <span>同一时间范围、同一套阶段命名，因此可以直接横向比较</span>
+        </div>
+        <div class="compare-scroll">
+          <table class="compare-table" data-test="compare-table">
+            <caption class="visually-hidden">
+              各渠道链路各阶段的平均耗时对比，括号内为样本数
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">阶段</th>
+                <th v-for="row in comparison" :key="row.channel" scope="col">
+                  {{ row.channel }}
+                  <small>{{ row.deliveries }} 次投递</small>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="phase in DELIVERY_PHASES"
+                :key="phase"
+                :class="{ total: phase === 'total_seconds' }"
+                data-test="compare-phase-row"
+              >
+                <th scope="row">{{ DELIVERY_PHASE_LABELS[phase] }}</th>
+                <td
+                  v-for="row in comparison"
+                  :key="`${row.channel}-${phase}`"
+                  :class="{ slowest: slowestByPhase[phase] === row.channel }"
+                  :data-test="`compare-${row.channel}-${phase}`"
+                >
+                  <b>{{ formatSeconds(row.phases?.[phase]?.avg_seconds ?? null) }}</b>
+                  <!-- 样本数与平均值同等重要，对比时更是：一个渠道 3 次采样、
+                       另一个 300 次，两个平均值不能等量齐观。 -->
+                  <small>{{ row.phases?.[phase]?.samples ?? 0 }} 样本</small>
+                </td>
+              </tr>
+              <tr
+                v-for="key in DELIVERY_COUNT_KEYS"
+                :key="key"
+                data-test="compare-count-row"
+              >
+                <th scope="row">{{ DELIVERY_COUNT_LABELS[key] }}</th>
+                <td v-for="row in comparison" :key="`${row.channel}-${key}`">
+                  <b>{{ formatCount(row.counts?.[key]?.avg ?? null) }}</b>
+                  <small>{{ row.counts?.[key]?.samples ?? 0 }} 样本</small>
+                </td>
+              </tr>
+              <tr data-test="compare-failed-row">
+                <th scope="row">失败投递</th>
+                <td v-for="row in comparison" :key="`${row.channel}-failed`">
+                  <b>{{ row.failed_deliveries }}</b>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="compare-note">
+          高亮的格子是该阶段最慢的渠道，只在**至少两个渠道都测到**这一阶段时标注——
+          一个渠道独有的数字不构成对比。「未测到」不参与比较：它不是 0。
+        </p>
+      </section>
+
       <section class="records-section" aria-label="最近投递记录">
         <div class="section-heading">
           <h2>最近投递</h2>
@@ -346,6 +451,23 @@ h1, h2, p { margin-top: 0; } h1 { margin-bottom: 8px; font-size: 28px; } h2 { ma
 .record-main small { color: var(--text-color-2); overflow-wrap: anywhere; }
 .record-metrics time { margin-left: auto; color: var(--text-color-3, var(--text-color-2)); }
 .empty-inline { padding: 32px 0; color: var(--text-color-2); }
+/* 跨渠道对比表。列数随渠道数变化，因此横向可滚动而不是压缩列宽——
+   压到 40px 的一列数字读不出量级。 */
+.compare-scroll { overflow-x: auto; border-top: 1px solid var(--border-color); }
+.compare-table { width: 100%; min-width: 480px; border-collapse: collapse; }
+.compare-table th, .compare-table td { padding: 12px 14px; border-bottom: 1px solid var(--border-color); text-align: left; vertical-align: baseline; }
+.compare-table thead th { color: var(--text-color-2); font-size: 13px; font-weight: 500; }
+.compare-table thead th small { display: block; margin-top: 2px; font-weight: 400; }
+.compare-table tbody th { font-weight: 400; }
+.compare-table b { display: block; font-size: 13px; font-variant-numeric: tabular-nums; }
+.compare-table small { color: var(--text-color-3, var(--text-color-2)); font-size: 11px; }
+.compare-table tr.total { font-weight: 600; }
+/* 最慢的那一格：用底色而不是红色文字——它是「相对更慢」，不是错误。
+   同时保留一个字重差，避免仅靠颜色传递信息。 */
+.compare-table td.slowest { background: color-mix(in srgb, var(--warning-color, #d89614) 12%, transparent); font-weight: 600; }
+.compare-note { margin: 10px 0 0; color: var(--text-color-2); font-size: 12px; line-height: 1.7; }
+/* 表格标题给读屏用户，视觉上不占位。 */
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 @media (max-width: 768px) {
   .delivery-view { padding: 20px 16px 40px; }
   .page-header { align-items: stretch; flex-direction: column; }

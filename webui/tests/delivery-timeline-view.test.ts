@@ -85,9 +85,57 @@ const records = {
   ]
 }
 
+/**
+ * 跨渠道对比的响应（需求 19.5 的「可比」）。
+ *
+ * 刻意让三个渠道的**模型生成段相同、发送段差 10 倍**：这正是单渠道视图看不出来
+ * 的那个事实——运维在那里没有对照组，无法回答「是 QQ 这条链路慢，还是模型本来
+ * 就慢」。`wecom` 的首字节有样本而另两个没有，用来钉住「只有两个以上渠道都测到
+ * 才标注最慢」这条规则。
+ */
+const comparison = {
+  channels: [
+    {
+      channel: 'onebot',
+      deliveries: 12,
+      failed_deliveries: 1,
+      phases: {
+        queue_seconds: phase(0.12, 0.4, 12),
+        llm_first_byte_seconds: phase(null, null, 0),
+        llm_generation_seconds: phase(8.0, 12.0, 12),
+        formatting_seconds: phase(0.03, 0.1, 12),
+        send_seconds: phase(4.0, 9.0, 12),
+        total_seconds: phase(12.15, 21.5, 12)
+      },
+      counts: {
+        segment_count: { avg: 6, max: 9, samples: 12 },
+        retry_count: { avg: null, max: null, samples: 0 }
+      }
+    },
+    {
+      channel: 'telegram',
+      deliveries: 30,
+      failed_deliveries: 0,
+      phases: {
+        queue_seconds: phase(0.1, 0.3, 30),
+        llm_first_byte_seconds: phase(null, null, 0),
+        llm_generation_seconds: phase(8.0, 11.5, 30),
+        formatting_seconds: phase(0.02, 0.08, 30),
+        send_seconds: phase(0.4, 1.2, 30),
+        total_seconds: phase(8.52, 13.0, 30)
+      },
+      counts: {
+        segment_count: { avg: 1, max: 2, samples: 30 },
+        retry_count: { avg: 0, max: 0, samples: 30 }
+      }
+    }
+  ]
+}
+
 function mockOk() {
   httpGet.mockImplementation((url: string) => {
     if (url.startsWith('/tracing/delivery/summary')) return Promise.resolve(summary)
+    if (url.startsWith('/tracing/delivery/compare')) return Promise.resolve(comparison)
     if (url.startsWith('/tracing/delivery/recent')) return Promise.resolve(records)
     throw new Error(`unexpected url ${url}`)
   })
@@ -99,7 +147,7 @@ describe('DeliveryTimelineView', () => {
     httpGet.mockReset()
   })
 
-  it('calls both delivery endpoints', async () => {
+  it('calls all three delivery endpoints', async () => {
     mockOk()
     const wrapper = mount(DeliveryTimelineView)
     await flushPromises()
@@ -107,6 +155,121 @@ describe('DeliveryTimelineView', () => {
     const urls = httpGet.mock.calls.map((call) => String(call[0]))
     expect(urls.some((url) => url.startsWith('/tracing/delivery/summary'))).toBe(true)
     expect(urls.some((url) => url.startsWith('/tracing/delivery/recent'))).toBe(true)
+    expect(urls.some((url) => url.startsWith('/tracing/delivery/compare'))).toBe(true)
+
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('renders one comparison column per channel', async () => {
+    // 需求 19.5：可比。切三次下拉框不构成对比——对比被推给读者的短期记忆。
+    mockOk()
+    const wrapper = mount(DeliveryTimelineView)
+    await flushPromises()
+
+    const table = wrapper.get('[data-test="compare-table"]')
+    const headers = table.findAll('thead th').map((node) => node.text())
+    expect(headers[0]).toContain('阶段')
+    expect(headers.join(' ')).toContain('onebot')
+    expect(headers.join(' ')).toContain('telegram')
+
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('makes the slow stage attributable across channels', async () => {
+    // 生成段相同、发送段差 10 倍：这就是 19.5 要回答的问题。
+    mockOk()
+    const wrapper = mount(DeliveryTimelineView)
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="compare-onebot-send_seconds"]').text()).toContain('4.00 s')
+    expect(wrapper.get('[data-test="compare-telegram-send_seconds"]').text()).toContain('400 ms')
+    expect(wrapper.get('[data-test="compare-onebot-llm_generation_seconds"]').text()).toContain('8.00 s')
+    expect(wrapper.get('[data-test="compare-telegram-llm_generation_seconds"]').text()).toContain('8.00 s')
+
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('highlights the slowest channel only where two channels measured it', async () => {
+    mockOk()
+    const wrapper = mount(DeliveryTimelineView)
+    await flushPromises()
+
+    // 发送段两个渠道都测到，onebot 更慢 → 标注它。
+    expect(
+      wrapper.get('[data-test="compare-onebot-send_seconds"]').classes()
+    ).toContain('slowest')
+    expect(
+      wrapper.get('[data-test="compare-telegram-send_seconds"]').classes()
+    ).not.toContain('slowest')
+    // 首字节两个渠道都没测到 → 不构成对比，一个都不标。
+    expect(
+      wrapper.get('[data-test="compare-onebot-llm_first_byte_seconds"]').classes()
+    ).not.toContain('slowest')
+
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('shows sample counts in every comparison cell', async () => {
+    // 一个渠道 12 次采样、另一个 30 次，两个平均值不能等量齐观。
+    mockOk()
+    const wrapper = mount(DeliveryTimelineView)
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="compare-onebot-send_seconds"]').text()).toContain('12 样本')
+    expect(wrapper.get('[data-test="compare-telegram-send_seconds"]').text()).toContain('30 样本')
+
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('renders 未测到 rather than 0 in the comparison too', async () => {
+    // 对比视图里这个错误更严重：一个渠道显示 0 ms、另一个显示 2 s，
+    // 看起来是前者快得多，而事实是前者根本没测。
+    mockOk()
+    const wrapper = mount(DeliveryTimelineView)
+    await flushPromises()
+
+    expect(
+      wrapper.get('[data-test="compare-onebot-llm_first_byte_seconds"]').text()
+    ).toContain('未测到')
+
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('hides the comparison when only one channel has data', async () => {
+    // 一个渠道自己跟自己比没有意义，一张只有一列的「对比表」是噪声。
+    httpGet.mockImplementation((url: string) => {
+      if (url.startsWith('/tracing/delivery/summary')) return Promise.resolve(summary)
+      if (url.startsWith('/tracing/delivery/compare')) {
+        return Promise.resolve({ channels: [comparison.channels[0]] })
+      }
+      if (url.startsWith('/tracing/delivery/recent')) return Promise.resolve(records)
+      throw new Error(`unexpected url ${url}`)
+    })
+    const wrapper = mount(DeliveryTimelineView)
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="compare-table"]').exists()).toBe(false)
+
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('does not filter the comparison by the selected channel', async () => {
+    // 对比请求必须**不带** channel：一次只看一个渠道正是它要解决的问题。
+    mockOk()
+    const wrapper = mount(DeliveryTimelineView)
+    await flushPromises()
+
+    const compareUrls = httpGet.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.startsWith('/tracing/delivery/compare'))
+    expect(compareUrls.every((url) => !url.includes('channel='))).toBe(true)
 
     wrapper.unmount()
     vi.useRealTimers()

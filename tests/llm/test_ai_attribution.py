@@ -1,7 +1,7 @@
 """隐藏 AI 署名：真实的执行链路，不是一个没人读的开关（需求 8）。
 
-cc-switch 的「隐藏 AI 署名」写的是 `attribution.commit=""` / `attribution.pr=""`，
-作用对象是 Claude Code 写 git commit 时的 `Co-Authored-By`。本项目不代写 commit，
+参考实现的「隐藏 AI 署名」把 commit / PR 的署名尾注置空，
+作用对象是编码客户端写 git commit 时的 `Co-Authored-By`。本项目不代写 commit，
 但**同一个用户意图**在聊天场景里有确切的落点：模型经常在回复里自报身份
 （「作为一个 AI 助手，我……」「本回复由 AI 生成」），QQ / 企业微信这类面向真人的
 渠道里这类句子既占篇幅又暴露实现细节。

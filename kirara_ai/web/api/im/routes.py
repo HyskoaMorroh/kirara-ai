@@ -430,6 +430,80 @@ async def stop_adapter(adapter_id: str):
         return jsonify({"error": str(e)}), 500
 
 
+@im_bp.route("/adapters/<adapter_id>/qr-login", methods=["POST"])
+@require_auth
+async def refresh_qr_login(adapter_id: str):
+    """Re-read the upstream implementation's log and return the newest QR state.
+
+    需求 18.4 点名「刷新动作」。此前扫码状态只随整份适配器信息返回，
+    而二维码的有效期实测 120 秒——远短于操作者「看一眼、去拿手机、回来扫」
+    这个动作序列。他因此总在扫一张屏幕上还在、上游其实已经换掉的码，
+    这正是「二维码总是过期，无法登录」的形态。
+
+    **刷新的语义只到重读为止。** Kirara 不生成二维码，LLOneBot / PMHQ 在自己
+    的容器里生成并在过期时自行重新请求。这个动作做的是「立刻重读那份日志，
+    给出最新一张码的状态」，不是「让上游重新生成一张」——把后者写进按钮文案
+    是对所有权的谎报：点了没反应时操作者会去排查 Kirara，而要看的是上游容器。
+
+    三种「拿不到」严格分开，因为处置完全不同：
+
+    - 适配器不存在 → 404；
+    - 适配器没有扫码这回事（Telegram / WeCom）→ ``supported: false``；
+    - 支持但没配日志路径 → ``supported: true`` 且给出要填哪个配置项。
+      把「没开这个功能」显示成「读不到事件」会让人去查挂载，
+      而要做的只是填一个配置项。
+
+    响应里没有二维码内容，只有路径：二维码是登录凭据材料，
+    状态面板不该成为它流经的地方；扫码在上游自己的 WebUI 完成。
+    """
+    manager: IMManager = g.container.resolve(IMManager)
+    adapter = manager.adapters.get(adapter_id)
+    if adapter is None:
+        return jsonify({"error": "Adapter not found"}), 404
+
+    reader = getattr(adapter, "_read_qr_login_snapshot", None)
+    if not callable(reader):
+        return jsonify(
+            {
+                "supported": False,
+                "qr_login": None,
+                "remediation": "该适配器没有扫码登录环节，无需刷新。",
+            }
+        )
+
+    try:
+        snapshot = reader()
+    except Exception as exc:  # noqa: BLE001 - 观测不能成为新的失败点
+        logger.warning(f"Failed to refresh QR login state for {adapter_id}: {exc}")
+        return jsonify(
+            {
+                "supported": True,
+                "qr_login": None,
+                "remediation": "读取 OneBot 实现日志失败；确认该路径在容器内可读。",
+            }
+        )
+
+    if snapshot is None:
+        return jsonify(
+            {
+                "supported": True,
+                "qr_login": None,
+                "remediation": (
+                    "未配置 qr_login_log_path；填入 OneBot 实现（LLOneBot / PMHQ）"
+                    "的日志文件路径后即可看到扫码生命周期。"
+                ),
+            }
+        )
+
+    return jsonify(
+        {
+            "supported": True,
+            "qr_login": snapshot.model_dump(mode="json"),
+            "remediation": snapshot.remediation,
+        }
+    )
+
+
 @im_bp.route("/types/<adapter_type>/config-schema", methods=["GET"])
 @require_auth
 async def get_adapter_config_schema(adapter_type: str):

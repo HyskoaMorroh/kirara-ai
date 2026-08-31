@@ -29,9 +29,29 @@ from kirara_ai.web.auth.principal import get_runtime_principal
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9._:@/-]+$")
 _RESOURCE_TYPES = frozenset({"prompt", "skill", "memory", "mcp", "hook"})
 SUPPORTED_CHANNEL_TYPES = frozenset(
-    {"webui", "onebot", "qqbot", "telegram", "wecom"}
+    # `http` 是 `HttpLegacyAdapter` 的渠道类型。它此前不在这里，也不在适配器上
+    # 声明，于是 `from_message` 退回类名推导得到 `"httplegacy"`：渠道级与账号级
+    # Agent 绑定全部被 `_normalize_channel_type` 拒绝，HTTP 入口只能退到全局
+    # 默认 Agent，而它的路由用 `require_agent=True` 派发——没有默认 Agent 的
+    # 部署会直接失败。需求 10 要求每个入口都落在同一条关系链上，HTTP 也是入口。
+    {"webui", "http", "onebot", "qqbot", "telegram", "wecom"}
 )
 _AGENT_REGISTRY_FORMAT_VERSION = 1
+
+#: 取回模型回复的方式（需求 4）。
+#:
+#: * ``off``：非流式请求。
+#: * ``aggregate``：以流式向上游取回，聚合后整段投递。买到的是首字节超时、
+#:   静默超时与「首字节之前可安全切换 Provider」，用户端仍是一条完整消息。
+#: * ``incremental``：在 ``aggregate`` 之上，把逐步生成的内容**真的推给用户**。
+#:   需要渠道能改写已经交付出去的内容：Telegram 靠 `editMessageText`，
+#:   WebUI 的在线对话靠 SSE（一条事件就是一次追加）。QQ / OneBot 与企业微信没有
+#:   等价能力，在那些渠道上自动退化成 ``aggregate``——逐字发新消息会变成几十条
+#:   碎片，那比不流式更糟。
+#: * ``inherit``：跟随上层（渠道默认 → 进程默认）。它与「没设置」不同：
+#:   它表示「我明确要求跟随」，因此能把一个曾被显式设成 ``off`` 的 Agent
+#:   改回跟随，而不必先查上层是什么。
+REPLY_STREAM_MODES = frozenset({"off", "aggregate", "incremental", "inherit"})
 
 
 def _clean_identifier(value: Any, fallback: str) -> str:
@@ -520,12 +540,22 @@ class AgentDefinition:
     max_tool_iterations: int = 8
     #: 可被本 Agent 作为工具委派的队友 Agent。
     #:
-    #: 对应需求 8 的「Teammates 模式」。cc-switch 那个开关配置的是 Claude Code
-    #: CLI 的多 agent 协作；本项目的等价物在 Agent 层而不是供应商层——供应商是
+    #: 对应需求 8 的「Teammates 模式」。参考实现里那个开关配置的是编码 CLI
+    #: 的多 agent 协作；本项目的等价物在 Agent 层而不是供应商层——供应商是
     #: 「上游模型」，不是「协作单元」。打开后模型会额外获得
     #: ``delegate_to_<agent_id>`` 工具，队友用自己的模型链、Prompt、Skill 与
     #: MCP 白名单执行子任务。为空表示不启用，与此前行为一致。
     teammate_agent_ids: tuple[str, ...] = ()
+    #: 本 Agent 取回模型回复的方式（需求 4）。
+    #:
+    #: ``inherit`` 表示跟随上层（渠道默认 → 进程默认），是缺省值——早于本特性的
+    #: `registry.json` 没有这个键，缺省必须是跟随，否则升级会把所有既有 Agent
+    #: 的取回方式改掉。``off`` / ``aggregate`` / ``incremental`` 是显式声明。
+    #:
+    #: 为什么要按 Agent 配：同一部署里一个接了慢上游的 Agent 需要流式带来的首字节
+    #: 超时保护，而另一个走本地小模型、毫秒级返回的 Agent 打开它只是白付一次握手。
+    #: 原本只有一个进程级开关，运维只能二选一，而两种选择都对一部分入口是错的。
+    reply_stream_mode: str = "inherit"
 
     def __post_init__(self) -> None:
         agent_id = _clean_identifier(self.agent_id, "agent")
@@ -540,6 +570,12 @@ class AgentDefinition:
             raise ValueError("Agent must define at least one model candidate")
         if self.max_tool_iterations < 0:
             raise ValueError("max_tool_iterations must be non-negative")
+        # 在定义期就拒绝不合法的取回方式，而不是等某一轮对话才发现：静默忽略会让
+        # 运维以为流式已经开了，然后去排查一个不存在的上游问题。
+        if self.reply_stream_mode not in REPLY_STREAM_MODES:
+            raise ValueError(
+                "reply_stream_mode must be one of " + ", ".join(sorted(REPLY_STREAM_MODES))
+            )
         object.__setattr__(self, "agent_id", agent_id)
         object.__setattr__(self, "owner_subject", owner_subject)
         object.__setattr__(self, "model_priority", _as_tuple(self.model_priority))
@@ -1086,6 +1122,11 @@ class AgentRegistry:
             "allow_tools": agent.allow_tools,
             "max_tool_iterations": agent.max_tool_iterations,
             "teammate_agent_ids": list(agent.teammate_agent_ids),
+            # 落盘这一项，否则 `resolve_reply_stream_mode` 的最上面那一层
+            # （Agent 声明 > 渠道默认 > 进程默认）只在内存里生效：运维设过它、
+            # 看到生效了，重启之后 dataclass 默认值把它变回 `inherit`，
+            # 而界面上没有任何痕迹。一个重启即丢的配置项比没有这个配置项更糟。
+            "reply_stream_mode": agent.reply_stream_mode,
         }
 
     @classmethod
@@ -1137,6 +1178,10 @@ class AgentRegistry:
         # 早于 Teammates 模式的注册表没有这个键；缺省为空即「不启用」，
         # 既有部署升级后行为不变。
         values.setdefault("teammate_agent_ids", ())
+        # 早于分档流式的注册表也没有这个键。缺省 `inherit` 表示「跟随上层」，
+        # 与既有行为逐字一致；缺省成 `off` 会让已经配了渠道级流式的部署
+        # 在升级后悄悄退回非流式。
+        values.setdefault("reply_stream_mode", "inherit")
         for field_name, resource_type in (
             ("prompt_bindings", "prompt"),
             ("skill_bindings", "skill"),

@@ -40,14 +40,31 @@
 
 它不主动调用远端 LLM 来证明模型可回答，也不保证 MCP 远端持续可用。未配置 MCP 为 `skip`，部分 MCP 不可用通常为 `warn`。它需要 Bearer 鉴权，因此不能直接替代容器的匿名 TCP healthcheck。
 
-`im_available` 的 evidence 分两层：**连接层**（`connected_count`、`waiting_count`、
+`im_available` 的 evidence 分三层：**连接层**（`connected_count`、`waiting_count`、
 `credential_rejected_count`、`upstream_refused_count`、`initializing_count`、
-`stale_count`、`disconnected_count`）说的是 Kirara 与 OneBot 实现之间的连接；
+`reconnecting_count`、`stale_count`、`disconnected_count`、
+`storage_unavailable_count`）说的是 Kirara 与 OneBot 实现之间的连接；
 **登录层**（`qr_waiting_scan`、`qr_expired`、`qr_scanned`、`qr_succeeded` 等，
-仅在适配器配置了上游日志路径时出现）说的是 OneBot 实现与 QQ 之间的登录。
+仅在适配器配置了上游日志路径时出现）说的是 OneBot 实现与 QQ 之间的登录；
+**投递层**（`outbox_ambiguous_count`、`outbox_dead_letter_count`）说的是有没有
+被隔离的出站投递。
 只差扫码时 remediation 直接指向「去扫码」而不是「查连接」——两者处置相反，
 合并成一个数字会让人查错方向。详见
 [`QQ_ONEBOT_OPERATIONS.md`](QQ_ONEBOT_OPERATIONS.md) 第六节。
+
+> **投递层那两个数只要大于 0 就说明有人收不到消息**，值得单独接告警。
+> 同一收件人序列里存在更早的 `ambiguous` 或 `dead_letter` 时，后面所有投递会被
+> 直接跳过而不发送——于是链路显示 `connected`、日志里没有错误、投递接口每次都
+> 「成功返回」，而某个群从此收不到任何回复。用户看到「机器人不理我了」，
+> 运维看到一切正常。
+>
+> `ambiguous` 多半来自一次 `docker compose down`：进程被杀时留在 `sending` 的投递
+> 结果未知，启动恢复把它们隔离而不是重发（重发可能造成重复消息，那个代价更高）。
+> 处置是去 QQ 客户端确认那一页到底有没有送达，再决定人工补发或忽略——
+> **不要重试**，那正是这个状态被刻意隔离要避免的事。
+>
+> 队列计数一直在采集（健康快照的 `outbox` 字段，同时充当存储写入探针），
+> 此前没有任何消费方读它——一个采集了却无人消费的指标，与没有采集没有区别。
 
 ---
 
@@ -66,26 +83,47 @@
 `trace_id`、`correlation_id`、`model_id`、`backend_name`、`provider`、
 `request_time` / `response_time` / `duration`、
 `prompt_tokens` / `completion_tokens` / `total_tokens` / `cached_tokens` / `cache_write_tokens`、
-`usage_source`（`provider` / `estimated` / `unknown`）、`ttft_ms`（首字节毫秒数）、
+`usage_source`（`provider` / `provider_partial` / `estimated` / `unknown`）、
+`ttft_ms`（首字节毫秒数）、
 `attempt_count` 与 `attempts_json`（每次 Provider 尝试的顺序与失败原因）、
 `cost_snapshot_json`（请求当时的价格快照）、`status`（`pending` / `success` / `failed`）、
 `error`、`error_category`，以及可选的 `request_json` / `response_json`。
 
 关于其中三个容易误读的字段：
 
-- `usage_source` 区分三种来源：`provider`（供应商返回的用量）、
+- `usage_source` 区分四种来源：`provider`（供应商回报了**全部四个维度**）、
+  `provider_partial`（供应商确实回报了，但**不是全部维度**）、
   `estimated`（供应商没返回，由本地估算器按脚本感知的字符与图片常量估算）、
   `unknown`（连估算所需的可测内容都没有）。**估算值不是账单依据**：
   它存在的意义是让这类请求不再显示成 0 token、0 成本的「免费请求」——
-  「0」是一个断言，「未知」不是，前者更糟。做成本核对时按 `usage_source`
+  「0」是一个断言，「未知」不是，前者更糟。做严格成本核对时按 `usage_source`
   过滤出 `provider` 那一部分。
 
-  > **为什么是三类而不是四类**：常见的分法会把「真实 Token」与「供应商返回的
-  > Token」并列成两类。本项目的数据链路里这两者无法区分——我们能拿到的唯一
-  > 「真实」就是供应商在响应里回报的那份，没有第二个独立信源可以交叉验证。
-  > 硬拆成两个枚举值只会多出一个永远没有生产者的取值（`estimated` 曾经正是
-  > 这样：有定义、有测试、主链路零调用）。因此 `provider` 同时承担这两个语义。
+  > **`provider_partial` 为什么必须单列**：多数 OpenAI 兼容端点只回报
+  > `prompt_tokens` / `completion_tokens`，不报缓存两维。这类响应的总额是
+  > **补出来的**（缺失维度按 0 计价），而缓存读取的单价通常只有输入 Token 的
+  > 1/5 到 1/10、缓存写入往往更贵。与四维齐全的请求显示成同一个词时，
+  > 一份在缓存密集部署上系统性偏低的账单看起来与完全可信的账单毫无区别。
+  >
+  > 判据是**维度是否齐全**，不是「值是否为 0」：上游明确报 0 是一个事实
+  > （报了、确实没命中），没报是一个空缺。把前者也标成 partial 会让绝大多数
+  > 请求挂上一个没有意义的标记。
+
+  > **「真实 Token」与「供应商返回的 Token」仍是同一类**：本项目的数据链路里
+  > 这两者无法区分——我们能拿到的唯一「真实」就是供应商在响应里回报的那份，
+  > 没有第二个独立信源可以交叉验证。按「是否经过独立核对」硬拆只会多出一个
+  > 永远没有生产者的取值（`estimated` 曾经正是这样：有定义、有测试、主链路零调用）。
   > 若将来接入独立计量来源（例如网关侧旁路计数），再新增一个成员才有意义。
+  > 四类里真正可分的那一刀落在「维度齐不齐」上，因此那才是 `provider_partial`。
+
+  > **流式请求的用量按维度合并，不是取最后一片**。OpenAI 兼容端点常把用量拆在
+  > 多个分片里回报：`prompt_tokens` 只在第一个带 usage 的分片出现（提示词在请求时
+  > 就已确定），`completion_tokens` / `total_tokens` 要等生成结束才有值。
+  > 此前聚合写的是整体替换，于是最后那片抹掉先前那份，**输入 Token 变成「未上报」**
+  > ——而 `usage_source` 仍是 `provider`，界面上没有任何「数据不完整」的迹象，
+  > 它看起来是一条正常的、便宜的请求。现在按字段合并：后到的非 `null` 值优先，
+  > 后到的 `null` 不覆盖已有值（`null` 是「这片没提」，`0` 是「报了，确实没有」），
+  > `source` 只升不降（不让一个没写 source 的收尾分片把请求打进「不明」）。
 - `ttft_ms` 只有在真的观测到首字节时才有值。非流式请求没有首字节概念，
   该字段为空而**不是 0**——把「没测到」写成 0 会被读成「极快」。
 - `cost_snapshot_json` 是请求完成时冻结的价格快照。后来改价**不会**改写历史账单。
@@ -95,6 +133,21 @@
   统计必须把筛选后的每一行取回内存逐条解析，六个索引全部帮不上忙——
   而请求日志有分页保护、统计页没有。快照仍是权威来源，两列不参与任何计算。
   `NULL` 表示「没有定价证据」，与 `0`（定价过且确实免费）严格区分。
+- **供应商没回报的维度不参与合计，也不阻断合计。** 一次请求的成本按四个维度
+  分别计价（输入、输出、缓存读、缓存写），而各家回报的维度并不一样：Claude
+  会给出缓存读与缓存写，OpenAI 只在有缓存命中时给缓存读，Gemini 与 Ollama
+  两个缓存维度都不给。此前 `total_cost` 要求四个维度**全部**有值才求和，
+  于是除 Claude 之外的供应商全部落入「有输入成本、有输出成本、总额为空」——
+  单请求成本、成本汇总与趋势图一起空着，而定价页明明填好了，
+  用户只会怀疑是自己没配对。现在的口径是：
+  - 供应商回报了该维度 → 计价并计入合计；
+  - 供应商**没回报**该维度（字段为 `None`）→ 该维度成本为 `NULL`，不计入合计；
+  - 供应商回报的是 `0` → 计价为 0 并计入合计（「用了 0 个」是一个断言）；
+  - 四个维度**一个都没有** → `total_cost` 仍为 `NULL`，即「没有定价证据」。
+
+  换句话说，缺一个维度会让那一维的金额是「未知」，但不会把整张账单变成未知。
+  想知道某一维到底是「0」还是「未回报」，看 `cost_snapshot_json` 里对应的
+  `*_cost` 字段：`NULL` 是未回报，`0` 是回报了 0。
 - **不同货币不相加。** 汇总按 `cost_currency` 分组，`overview.total_cost`
   只是金额最大的那个币种的合计，其余在 `overview.cost_by_currency` 里逐一列出。
   把两种货币加进同一个数字不会报错，得到的却是一个没有单位的数——
@@ -188,6 +241,23 @@
 趋势分桶里缓存两项按 0 累加而非 `null`——折线中间出现 `null` 会断开，
 而「这个小时没有上游报缓存」在趋势图上与「报了 0」没有不同的处置。
 
+#### 趋势分桶的取数规模
+
+日 / 时分桶在 **SQL 侧**聚合：按 15 分钟槽 × 状态 × 币种 `GROUP BY`，
+取回的行数由**时间跨度**决定而不是请求数。此前是把区间内每一行的十列 SELECT
+回来再用 Python 累加——默认视图看不出问题（只取近 30 天与近 24 小时），
+但调用方传入显式时间范围时那两个兜底过滤器被跳过，「导出全年趋势」
+等于一次全区间物化，行数与内存、与响应时间线性相关。
+
+槽长取 15 分钟而不是整小时，因为它是所有 IANA 时区偏移的公约数
+（含印度 +05:30、尼泊尔 +05:45）：按整小时分槽会把这些时区的一个槽劈到两个
+本地小时里，趋势图上表现为两根都偏低的柱子。**日界仍在 Python 里用真正的
+`astimezone` 换算**——只有它认得 DST 与半小时偏移；数据库按存储值截断再搬时区
+会让跨时区对账整体错一天，而那种错误不会报错，只会给出一个看起来正常的数字。
+
+响应形状与字段语义逐字段不变：`daily_stats` / `hourly_stats` 仍是按时间升序的
+列表，每项带 `date` / `hour` 键。
+
 #### 分组成功率
 
 `providers` / `models` / `backends` 等分组各自带
@@ -256,6 +326,7 @@
 | `GET /backend-api/api/tracing/llm/statistics` | 总览（含成本）+ 首字节/尝试次数摘要 + 每日与每小时分桶 + 按模型/后端/供应商/用量来源/失败类型分组，支持同一套筛选参数与 `timezone` |
 | `POST /backend-api/api/tracing/llm/export` | 导出筛选结果，`format` 为 `json` 或 `csv`，`limit` 1–10000 |
 | `GET /backend-api/api/llm/resilience/status` | 各 Provider 的熔断状态、最近尝试、最近状态迁移与上游限额余量 |
+| `POST /backend-api/api/llm/backends/<name>/circuit/reset` | 手动把一个 Provider 的熔断器清回 `closed` 并撤销持久化隔离（创建者身份，需确认） |
 | `WS /tracing/ws` | 实时推送新的追踪事件 |
 
 #### 熔断的触发与恢复证据`resilience/status` 的每一行除了当前状态，还给出 `recent_transitions`
@@ -278,6 +349,28 @@
 只能用来算「多久以前」，不能当墙上时间格式化。
 历史按 Provider 保留最近 64 条并覆盖写：它活在内存里，
 一个持续抖动的上游不该把内存吃掉。
+
+#### 手动把一个被误隔离的上游放回队列
+
+`POST /backend-api/api/llm/backends/<name>/circuit/reset`（创建者身份，
+请求体 `{"confirmed": true}`）把该供应商清回 `closed`，并**同时删掉
+`data/llm/circuit-state.json` 里那条记录**。两件事必须一起做：
+
+- 只清内存的话，下一次状态重建会从文件里把 open 原地读回来——
+  接口返回成功、面板显示已重置，而下一个请求仍然跳过这个供应商，
+  日志里既没有错误也没有重置痕迹；
+- 只删文件的话，本进程内仍在隔离期。
+
+只重置指定的那一家。顺手清空整个状态文件等于把「重置一家」变成「取消所有隔离」，
+而其余供应商可能正因真实故障被隔离着。撤销时保留文件原有的 `saved_at`：
+重写成新时间戳会把其余供应商的「已经开了多久」清零，
+让本该很快进半开的熔断器重新等满整个恢复窗口。
+
+未知的后端名返回 404 而不是 200：重置一个已被删掉的供应商本身不算错，
+但如果接口对拼错的名字也回 200，那么「重置成功」和「什么都没发生」看起来一模一样。
+
+没有这个接口时唯一的办法是等满恢复窗口或重启进程，而重启会一并中断
+所有正在进行的对话。
 
 #### 上游限额余量：撞上限之前的唯一信号
 
@@ -335,6 +428,20 @@ LLM 追踪只覆盖模型调用那一段。一条回复从收到消息到发出�
 **缺少证据的阶段不会输出**，不会用 0 顶替。四个渠道使用同一套阶段命名，
 可以横向比较同一问题在 QQ、Telegram、WeCom 上的耗时分布。
 
+> **`send_seconds` 在 QQ 上包含发送节流**，这一点必须知道，否则会把自家的
+> 主动等待读成网络慢。多页回复的页与页之间会主动等待以避开 QQ 风控
+> （`send_pacing_*`，见 QQ 专项文档），而那段等待发生在 `send_started` 与
+> `send_succeeded` 之间。判断方法：一次投递的节流总额有上界
+> （页间最小等待 × 间隙数 + `send_pacing_maximum_total_seconds`），
+> `send_seconds` 明显超出这个上界才说明是真实的上游往返慢。
+>
+> Telegram 与 WeCom 没有节流（那是 OneBot 私有的），所以同一条回复在这三家上的
+> `send_seconds` 天然不可直接相减——这也是「只有 QQ 慢」这类报障的常见来源。
+>
+> **增量投递成功时这两个阶段仍然会记**，标 `delivery=incremental`。那条路径不走
+> 适配器的 `send_message`（内容已经写在被改写的那条消息上），如果不补记，
+> 投递耗时看板上这一轮会凭空消失。
+
 > **首字节需要开流式**：`llm_first_byte` 由流式聚合路径在收到第一个非空文本
 > 片段时记录。把 `reply_stream_mode` 设为 `aggregate` 才会有这一项，
 > 因此 `llm_first_byte_seconds` 与 `llm_generation_seconds` 也只在流式下出现。
@@ -358,8 +465,17 @@ QQ 侧的具体排查顺序见 [`QQ_ONEBOT_OPERATIONS.md`](QQ_ONEBOT_OPERATIONS.
 
 | 接口 | 用途 |
 | --- | --- |
-| `GET /backend-api/api/tracing/delivery/summary` | 按渠道聚合各阶段平均值、最大值与样本数，以及分段数量与重试次数的平均/最大/样本数，支持 `channel`、`start_time`、`end_time`（带时区的 ISO-8601） |
+| `GET /backend-api/api/tracing/delivery/summary` | **单渠道**视角：聚合各阶段平均值、最大值与样本数，以及分段数量与重试次数的平均/最大/样本数，支持 `channel`、`start_time`、`end_time`（带时区的 ISO-8601） |
+| `GET /backend-api/api/tracing/delivery/compare` | **跨渠道**视角：所有渠道的同一组阶段并排返回，支持 `start_time` / `end_time`（不接受 `channel`） |
 | `GET /backend-api/api/tracing/delivery/recent` | 最近若干条逐条耗时，支持 `channel` 与 `limit`（1–1000） |
+
+界面在**「可观测性 → 投递时间线」**，一页里同时给出单渠道明细与跨渠道对比表。
+
+**为什么需要 `compare` 而不是切换 `summary` 的 `channel`。** 19.5 要回答的问题是对比
+式的：「QQ 慢，是 QQ 这条链路慢，还是模型本来就慢（三个渠道一样慢）」。切三次下拉
+框得到的是三次独立查询，对比这件事被推给了读者的短期记忆——而三个渠道 × 六个阶段
+的数字没有人能靠记忆比对。对比表里高亮该阶段最慢的渠道，且只在**至少两个渠道都
+测到**这一阶段时标注：一个渠道独有的数字不构成对比。
 
 三条约束是这张表能用且能放心用的前提：
 
@@ -367,6 +483,14 @@ QQ 侧的具体排查顺序见 [`QQ_ONEBOT_OPERATIONS.md`](QQ_ONEBOT_OPERATIONS.
   会话摘要让「这个会话是不是一直慢」可查，但无法反推原始会话。
 - **没测到的阶段存 NULL，不存 0。** 平均值只对「测到该阶段」的行求平均，
   并同时给出样本数：非流式请求没有首字节，把它们按 0 计入会得到一个不存在的数字。
+- **发送段拆成三个数。** `send_seconds` 是整段（用户等了多久），
+  `send_pacing_seconds` 是我们为防刷屏**主动等**的时间，
+  `send_upstream_seconds` 是上游**真的慢**的时间。19.5 点名「发送限流」不能与
+  「LLM 慢」混成一个「QQ 慢」，而这两件事的处置相反：前者调 `send_pacing` 配置，
+  后者查上游。不拆开时，一条十页回复因节流等了 20 秒会显示成「平台发送 20 秒」，
+  运维去查 QQ 而 QQ 什么问题都没有。这两列上 **`0` 与 `NULL` 含义相反**：
+  `0` 是「测了，这次没等」，`NULL` 是「这条链路没测量节流」（Telegram / WeCom
+  没有节流概念、第三方适配器不上报）。
 - **保留期有界。** 默认 30 天，与 LLM 追踪一致，启动时清理，不会无限增长。
 
 需求 19.5 的九项里，前七项是时间戳（折算成 `phases` 下的阶段耗时），
@@ -383,8 +507,13 @@ QQ 侧的具体排查顺序见 [`QQ_ONEBOT_OPERATIONS.md`](QQ_ONEBOT_OPERATIONS.
 第三方适配器不带 details 时该值为 NULL，不参与平均。
 
 ```bash
+# 单渠道明细
 curl -H "Authorization: Bearer <token>" \
   "http://127.0.0.1:8080/backend-api/api/tracing/delivery/summary?channel=onebot"
+
+# 跨渠道对比（19.5 的「可比链路耗时」）
+curl -H "Authorization: Bearer <token>" \
+  "http://127.0.0.1:8080/backend-api/api/tracing/delivery/compare"
 ```
 
 ### 追踪覆盖不到的部分
@@ -570,7 +699,7 @@ curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/js
 | `GET /backend-api/api/mcp/statistics` | MCP 服务器总数、stdio/sse 各多少、已连接/已断开/错误各多少、工具总数 |
 | `GET /backend-api/api/mcp/servers` | 每台服务器的连接状态（`disconnected`/`connecting`/`connected`/`disconnecting`/`error`） |
 | `GET /backend-api/api/mcp/tools` | 当前所有可用工具及其 JSON Schema |
-| `GET /backend-api/api/llm/auto-detect-schedule` | 各后端的检测间隔、上次执行时间、当前模型数 |
+| `GET /backend-api/api/llm/auto-detect-schedule` | 各后端的检测间隔、上次执行时间、当前模型数、调度循环是否在运行（界面：**模型 → 自动检测计划**） |
 | `GET /backend-api/api/plugin/plugins` | 每个插件的名称、包名、版本、是否内置、是否启用、是否需要重启 |
 | `GET /backend-api/api/block/types` | 全部区块类型及其端口、配置项、颜色、说明（下拉框候选项在这里被求值） |
 | `GET /backend-api/api/dispatch/types` | 全部可用的规则类型名 |

@@ -156,6 +156,29 @@ class ReleaseVersion(NamedTuple):
     number: int
 
 
+class OccupancyReport(NamedTuple):
+    """Which release versions are taken, and *why* each one is taken.
+
+    需求 23.2 点名「不得把离线候选当作正式发布版本」。碰撞判定对两类占用是
+    一样的（都不能重用），但处置完全不同：
+
+    - ``released``：远端已有这个 Tag，它已经发布过，接着往下找号；
+    - ``reserved_locally``：只有本地有——一次没推成功的打标。它占住了一个号，
+      而**没有任何发布产物与它对应**，删掉那个本地 Tag 再重试往往才是对的。
+
+    把两者显示成同一个词的后果是版本号被无谓地跳过：一次失败的打标之后每次
+    重跑计划都会跳过那个号，几次之后版本号里出现空洞，而没有任何地方记录
+    那些号去哪了。
+    """
+
+    #: 全集，与 `occupied_git_versions()` 的返回内容一致（按发布顺序排序）。
+    all_versions: tuple[str, ...]
+    #: 远端已有 → 已发布。
+    released: tuple[str, ...]
+    #: 仅本地有 → 已占号但未发布。
+    reserved_locally: tuple[str, ...]
+
+
 class ReleasePlan(NamedTuple):
     """One read-only release decision derived from source metadata and Git tags."""
 
@@ -167,6 +190,10 @@ class ReleasePlan(NamedTuple):
     remote: str | None
     local_only: bool
     occupied: tuple[str, ...]
+    #: `occupied` 里已经发布过的那部分（远端有 Tag）。
+    released: tuple[str, ...] = ()
+    #: `occupied` 里仅本地打过标、从未发布的那部分。
+    reserved_locally: tuple[str, ...] = ()
 
 
 class TagIdentity(NamedTuple):
@@ -1476,27 +1503,68 @@ def _remote_git_tags(root: Path, remote: str) -> set[str]:
     return tags
 
 
+def _normalized_versions(tags: set[str]) -> set[str]:
+    """Keep only tags that name a recognized release version."""
+    return {
+        normalized
+        for tag in tags
+        if (normalized := _normalize_candidate_version(tag)) is not None
+    }
+
+
+def _sorted_versions(versions: set[str]) -> tuple[str, ...]:
+    """Sort by release order, not lexically.
+
+    字典序会把 `b9` 排在 `b10` 之后，读起来像「最高版本是 b9」。
+    """
+    return tuple(sorted(versions, key=lambda value: _release_sort_key(parse_version(value))))
+
+
+def occupied_release_versions(
+    root: Path,
+    remote: str | None = None,
+    *,
+    local_only: bool = False,
+) -> OccupancyReport:
+    """Return every taken release version, split by whether it was published.
+
+    与 `occupied_git_versions()` 读同一批 Tag，只是不再把来源丢掉。
+    两侧都有的版本记为 ``released``——推成功之后本地那份不再是「仅本地」，
+    而「已发布」是更强的论断。
+
+    ``local_only=True`` 时远端集合为空而不是未知：那是显式声明「不查远端」。
+    """
+    root = Path(root)
+    if remote and local_only:
+        raise ValueError("--remote and --local-only cannot be used together")
+    if remote:
+        remote = _validate_remote_name(remote)
+    local = _normalized_versions(_local_git_tags(root))
+    published: set[str] = set()
+    if not local_only:
+        remote = remote or resolve_release_remote(root)
+        published = _normalized_versions(_remote_git_tags(root, remote))
+    return OccupancyReport(
+        all_versions=_sorted_versions(local | published),
+        released=_sorted_versions(published),
+        reserved_locally=_sorted_versions(local - published),
+    )
+
+
 def occupied_git_versions(
     root: Path,
     remote: str | None = None,
     *,
     local_only: bool = False,
 ) -> set[str]:
-    """Return recognized local and optional remote release versions."""
-    root = Path(root)
-    if remote and local_only:
-        raise ValueError("--remote and --local-only cannot be used together")
-    if remote:
-        remote = _validate_remote_name(remote)
-    tags = _local_git_tags(root)
-    if not local_only:
-        remote = remote or resolve_release_remote(root)
-        tags.update(_remote_git_tags(root, remote))
-    return {
-        normalized
-        for tag in tags
-        if (normalized := _normalize_candidate_version(tag)) is not None
-    }
+    """Return recognized local and optional remote release versions.
+
+    保留为全集：既有调用方与 JSON 消费者不受 `OccupancyReport` 的引入影响。
+    需要知道「为什么被占用」时用 `occupied_release_versions()`。
+    """
+    return set(
+        occupied_release_versions(root, remote, local_only=local_only).all_versions
+    )
 
 
 def _build_release_plan_unlocked(
@@ -1514,11 +1582,14 @@ def _build_release_plan_unlocked(
         _validate_remote_name(remote) if remote else resolve_release_remote(root)
     )
     current_version = _read_project_version(root)
-    occupied = occupied_git_versions(
+    # 读一次 Tag 就同时拿到「占用全集」与「为什么被占用」。碰撞判定只看全集，
+    # 因此行为与本改动之前逐字节一致；来源信息只是不再被丢掉（需求 23.2）。
+    occupancy = occupied_release_versions(
         root,
         remote=resolved_remote,
         local_only=local_only,
     )
+    occupied = set(occupancy.all_versions)
     candidate = next_version(
         current_version,
         kind=kind,
@@ -1533,7 +1604,9 @@ def _build_release_plan_unlocked(
         kind=canonical_kind or "auto",
         remote=resolved_remote,
         local_only=local_only,
-        occupied=tuple(sorted(occupied, key=lambda value: _release_sort_key(parse_version(value)))),
+        occupied=occupancy.all_versions,
+        released=occupancy.released,
+        reserved_locally=occupancy.reserved_locally,
     )
 
 
@@ -1991,6 +2064,11 @@ def _run_cli_command(args: argparse.Namespace) -> int:
                 "remote",
                 "local_only",
                 "occupied",
+                # 「已发布」与「仅本地占号」必须分开打印：后者往往是上一次发布
+                # 中断留下的残留，处置是删掉那个本地 Tag 再重试，
+                # 而不是把版本号一路往上跳。
+                "released",
+                "reserved_locally",
             ):
                 value = payload[key]
                 if isinstance(value, tuple):

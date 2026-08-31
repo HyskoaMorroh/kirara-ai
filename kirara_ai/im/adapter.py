@@ -1,5 +1,6 @@
 import asyncio
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Dict, Literal, Optional, Protocol
 
 from pydantic import BaseModel, Field
@@ -98,6 +99,11 @@ class AdapterHealthSnapshot(BaseModel):
         "disconnected",
         "stale",
         "initializing",
+        # 上游刚断开、仍在自己的重连窗口内。这是全部非连接状态里唯一一个
+        # 「什么都不用做」的状态：其余每一个都要求操作者去动手改点什么。
+        # 把它显示成 ``disconnected`` 正是「重启后 QQ 显示未连接」这个报障——
+        # 读到未连接的人会去重查地址与 Token，而那两项从来没错。
+        "reconnecting",
         "credential_rejected",
         "upstream_refused",
         "storage_unavailable",
@@ -158,6 +164,60 @@ class EditStateAdapter(Protocol):
         :param chat_sender: 对话的发送者
         :param is_editing: True 表示正在编辑，False 表示取消编辑状态
         """
+
+
+@dataclass
+class IncrementalReplyHandle:
+    """一次增量投递的位置句柄。
+
+    只保存定位那条消息所需的最小信息，不保存文本内容：内容的唯一真相在平台上，
+    在这里再存一份会产生「我们以为显示的」与「实际显示的」两个版本。
+    """
+
+    #: 平台侧的消息标识。
+    message_id: str
+    #: 会话标识（Telegram 的 chat_id 等）。
+    chat_id: str
+    #: 已经成功写入平台的字符数，用于跳过无变化的改写。
+    delivered_length: int = 0
+
+
+@runtime_checkable
+class IncrementalDeliveryAdapter(Protocol):
+    """能把生成中的回复**逐步推给用户**的渠道（需求 4）。
+
+    只有具备「编辑已发出消息」能力的平台才能实现它。Telegram 有
+    `editMessageText`：先发一条占位消息，随生成不断改写同一条。
+    QQ / OneBot、企业微信没有等价能力——在那些渠道上逐步推送只能变成几十条
+    碎片消息，比一条完整回复更糟，因此它们**不实现**这个协议，
+    运行时据此自动退回整段投递。
+
+    三条契约：
+
+    * ``begin_incremental_reply`` 返回一个句柄；返回 ``None`` 表示这一次不做增量
+      （例如平台临时不可用）。调用方必须能接受 ``None`` 并退回整段投递。
+    * ``update_incremental_reply`` 传入的是**到目前为止的完整文本**，不是增量片段。
+      传增量会把「编辑同一条消息」变成需要调用方自己拼接，而拼接状态一旦与平台上
+      的实际内容不一致，用户看到的就是一段错乱的文本。
+    * ``finish_incremental_reply`` 收尾，交出最终文本。它必须让那条消息的最终内容
+      与整段投递路径**逐字一致**：否则同一个机器人在同一渠道上给出两种排版，
+      而差别只取决于当时走了哪条路。
+    """
+
+    async def begin_incremental_reply(
+        self, recipient: ChatSender
+    ) -> Optional[IncrementalReplyHandle]:
+        """发一条占位消息并返回可继续改写它的句柄；不可用时返回 ``None``。"""
+
+    async def update_incremental_reply(
+        self, handle: IncrementalReplyHandle, text: str
+    ) -> None:
+        """把那条消息改写成 ``text``（到目前为止的完整内容）。"""
+
+    async def finish_incremental_reply(
+        self, handle: IncrementalReplyHandle, text: str
+    ) -> None:
+        """收尾：让那条消息的最终内容与整段投递路径逐字一致。"""
 
 
 @runtime_checkable

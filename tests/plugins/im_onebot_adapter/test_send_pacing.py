@@ -143,17 +143,30 @@ class TestPageToPageOnly:
         assert slept == []
 
     @pytest.mark.asyncio
-    async def test_it_uses_asyncio_sleep_by_default(self):
-        """默认必须真的让出事件循环，否则「节流」只是算了个数字。"""
+    async def test_it_uses_asyncio_sleep_by_default(self, monkeypatch):
+        """默认必须真的让出事件循环，否则「节流」只是算了个数字。
+
+        断言的是「调用了 `asyncio.sleep` 且时长正确」，而不是墙钟差：Windows 的
+        事件循环时钟粒度约 15.6ms，用 10ms 的阈值去量一次 10ms 的等待，约一成
+        的运行会量到 0.000 秒——那是计时器分辨率，不是产品行为。
+        """
         pacing = SendPacing(
             enabled=True, minimum_seconds=0.01, jitter_seconds=0.0, per_character_seconds=0.0
         )
+        requested: list[float] = []
+        real_sleep = asyncio.sleep
 
-        started = asyncio.get_event_loop().time()
+        async def _spy(delay, *args, **kwargs):
+            requested.append(delay)
+            return await real_sleep(0, *args, **kwargs)
+
+        monkeypatch.setattr(
+            "kirara_ai.plugins.im_onebot_adapter.pacing.asyncio.sleep", _spy
+        )
+
         await pacing.wait_before_page(1, text_length=0)
-        elapsed = asyncio.get_event_loop().time() - started
 
-        assert elapsed >= 0.005
+        assert requested == [pytest.approx(0.01)]
 
 
 class TestTheAdapterActuallyPaces:

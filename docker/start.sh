@@ -33,4 +33,15 @@ fi
 
 # activate venv
 source /app/data/venv/bin/activate
-python -m kirara_ai
+
+# `exec` 是必须的：不用它时容器里 PID 1 是这个 bash，而 bash 在等待子进程期间
+# 不转发信号，于是 `docker stop` / `docker compose down` 发来的 SIGTERM 被它吞掉，
+# 10 秒宽限期后整个容器被 SIGKILL。后果不是「关得不优雅」而是 `entry.py` 的
+# 整段 finally 一次都不跑：记忆的异步写队列没 flush、出站队列里 `sending` 状态的
+# 投递没被隔离成 `ambiguous`（下次启动恢复面对的是不完整现场）、适配器不走
+# `stop()` 因此反向 WebSocket 被硬切。而「重启后无缝恢复」整个前提是
+# 「上一次是干净停下的」。
+#
+# 换成 exec 之后 Python 直接成为 PID 1，`signal.signal(SIGTERM, ...)` 收到的就是
+# Docker 发的那个信号。这里到这一行 bash 已无事可做，继续存在只是挡住信号。
+exec python -m kirara_ai

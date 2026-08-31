@@ -99,6 +99,9 @@ describe('QR login rendering', () => {
   })
 
   it('shows remaining seconds only while the code is still scannable', () => {
-    expect(viewSource).toMatch(/qr\.state === 'waiting_scan'[\s\S]{0,120}remaining_seconds/)
+    // 剩余秒数由 `expires_at` 自行倒数（见 im-qr-countdown.test.ts），
+    // 但门槛不变：只有 `waiting_scan` 才拼这个数字。
+    expect(viewSource).toMatch(/qr\.state === 'waiting_scan' \? qrRemainingSeconds/)
+    expect(viewSource).toMatch(/state === 'waiting_scan' && remaining !== null/)
   })
 })

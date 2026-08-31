@@ -108,6 +108,8 @@ import {
   type WorkflowConnectionRejectionReason
 } from './workflow-data'
 import { createUniqueNodeName } from './workflow-node-utils'
+import { runGraphBatch } from './workflow-canvas-batch'
+import { CanvasHistoryGesture } from './workflow-canvas-history-gesture'
 import {
   createWorkflowCanvasInitializationGuard,
   getWorkflowCanvasInitializationKey
@@ -239,7 +241,7 @@ const {
   setNodes,
   setEdges,
   addNodes,
-  project,
+  screenToFlowCoordinate,
   getSelectedNodes,
   removeSelectedNodes,
   addSelectedNodes,
@@ -260,17 +262,41 @@ const selectedNode = computed(() =>
 )
 
 let graphHistoryReady = false
-let graphHistoryPending = false
 let restoringGraph = false
 
 /**
- * 将一次用户操作前的状态写入历史。图形数据会在 debounce 后同步到 store，
- * 所以一次连续拖拽、配置编辑或删改连线只会产生一个可撤销的检查点。
+ * 撤销检查点的合并窗口。
+ *
+ * 原实现用一个 `graphHistoryPending` 布尔值，并由写回 store 的 500ms 防抖回调
+ * 清除它，于是**合并窗口等于防抖间隔，而不是手势时长**：一次持续 3 秒的拖拽
+ * 跨过 6 个窗口就压 6 个检查点，用户要连按 6 次 Ctrl+Z 才能退回拖拽前。
+ * 现在窗口由手势边界界定（见 `workflow-canvas-history-gesture.ts`），
+ * 没有手势时退回原来的一窗口一记。
+ */
+const historyGesture = new CanvasHistoryGesture({
+  saveToHistory: () => intent.saveToHistory(),
+  flush: () => flushGraphData()
+})
+
+/**
+ * 将一次用户操作前的状态写入历史。手势内共用一个检查点；手势外则由
+ * 图形数据写回 store 的防抖窗口合并，所以删改节点、连线各自只产生一步。
  */
 const recordHistoryBeforeCanvasMutation = () => {
-  if (!graphHistoryReady || restoringGraph || graphHistoryPending) return
-  intent.saveToHistory()
-  graphHistoryPending = true
+  if (!graphHistoryReady || restoringGraph) return
+  historyGesture.record()
+}
+
+/** 手势开始：整段手势只记一个检查点。 */
+const beginHistoryGesture = (name: string) => {
+  if (!graphHistoryReady || restoringGraph) return
+  historyGesture.begin(name)
+}
+
+/** 手势结束：同步写回一次并释放合并窗口。 */
+const endHistoryGesture = () => {
+  if (!graphHistoryReady || restoringGraph) return
+  historyGesture.end()
 }
 
 let lastCompatibilityNoticeAt = 0
@@ -627,7 +653,9 @@ const updateBlocks = debounce(() => {
   intent.updateBlocks(blocks)
   lastEmittedBlocks = blocks
   emit('update:blocks', blocks)
-  graphHistoryPending = false
+  // 手势内不释放合并窗口：否则手势时长一旦超过防抖间隔，
+  // 下一次坐标变更就会再记一个检查点。
+  historyGesture.releaseAfterFlush()
 }, 500)
 
 // 更新连线数据
@@ -636,7 +664,7 @@ const updateWires = debounce(() => {
   intent.updateWires(wires)
   lastEmittedWires = wires
   emit('update:wires', wires)
-  graphHistoryPending = false
+  historyGesture.releaseAfterFlush()
 }, 500)
 
 /**
@@ -667,8 +695,34 @@ const handleEdgesChange = (changes: EdgeChange[]) => {
 }
 
 const handleNodeConfigMutation = () => {
-  recordHistoryBeforeCanvasMutation()
+  // 配置编辑同样是一段连续手势（在输入框里连续打字），此前跨过 500ms 防抖
+  // 窗口就会拆成多个撤销步骤——输入 4 秒得到 7 步。开一个手势把整段收成一步，
+  // 面板关闭或切换节点时（`handleNodeConfigCommit`）才结束。
+  beginHistoryGesture('config-edit')
   updateBlocks()
+}
+
+/** 配置编辑手势结束：面板关闭、切换节点或失焦时调用。 */
+const handleNodeConfigCommit = () => {
+  endHistoryGesture()
+}
+
+/**
+ * 拖拽开始 / 结束：把整段手势收成一个撤销步骤。
+ *
+ * vue-flow 在拖动过程中持续发 `nodes-change`，此前这些变更由 500ms 防抖窗口
+ * 合并——一次 3 秒的拖拽因此产生 6 个检查点。改由手势边界界定后，
+ * 无论拖多久都只有一个，一次 Ctrl+Z 即退回拖拽前。
+ *
+ * 多选拖动时 vue-flow 会为每个节点各发一次 `node-drag-start`，
+ * `CanvasHistoryGesture.begin` 对同名手势是幂等的。
+ */
+const handleNodeDragStart = () => {
+  beginHistoryGesture('node-drag')
+}
+
+const handleNodeDragStop = () => {
+  endHistoryGesture()
 }
 
 /**
@@ -690,7 +744,7 @@ const flushGraphData = () => {
   lastEmittedWires = wires
   emit('update:blocks', blocks)
   emit('update:wires', wires)
-  graphHistoryPending = false
+  historyGesture.releaseAfterFlush()
 }
 
 // 恢复图形
@@ -728,6 +782,11 @@ const restoreGraph = () => {
             inputs: data.inputs || [],
             outputs: data.outputs || [],
             configs: data.blockType?.configs || [],
+            // 代码节点的预览区高度随脚本行数变化。这条路径上 DOM 还没渲染，
+            // 尺寸 100% 来自估算，漏传脚本会让一个 6 行预览的节点少算约 85px，
+            // 而 60px 的分隔吸收不了这个误差——布局算出「不重叠」，
+            // 渲染出来重叠。
+            code: data.config?.code,
             position: blocksById.get(node.id)?.position
           }
         }),
@@ -935,15 +994,26 @@ const getOccupiedBoxes = (excludeIds: Set<string> = new Set()) =>
  * 与 500ms 防抖窗口去合并：只要这组改动跨过窗口，就会被拆成多个撤销步骤，
  * 用户得连按好几次 Ctrl+Z 才能退回操作前。`performBatchAction` 一直存在但没有调用方；
  * 这里把它接上——由 store 在最外层批次捕获操作前快照，无论耗时多久都只产生一个检查点。
+ *
+ * 关键在于 `flush`：`setNodes()` 只改 Vue Flow 自己的 store（连 `nodesChange`
+ * 都不触发），而 `updateBlocks()` 是防抖的，于是批次关闭那一刻 store 里什么都
+ * 还没变，`performBatchAction` 的比对结果是「无变化」，检查点不被压栈；而批次
+ * 期间合并窗口被占用，逐次记录那条路也被抑制。两条路都不写历史，
+ * 改动却在防抖到期后落进 store——撤销栈栈顶仍是**上一次**编辑的快照，
+ * 一次 Ctrl+Z 会直接毁掉那次编辑且无法重做。`runGraphBatch` 在批次关闭前
+ * 同步写回一次，把这个相位错配消掉。
  */
 const runCanvasBatch = <T,>(action: () => T): T => {
   if (!graphHistoryReady || restoringGraph) return action()
   // 批次自己负责写历史，避免与逐次记录重复压栈。
-  graphHistoryPending = true
+  historyGesture.hold()
   try {
-    return intent.performBatchAction(action)
+    return runGraphBatch(action, {
+      performBatchAction: intent.performBatchAction,
+      flush: flushGraphData
+    })
   } finally {
-    graphHistoryPending = false
+    historyGesture.release()
   }
 }
 
@@ -1613,7 +1683,7 @@ const initGraphData = () => {
     // 同一 Canvas 实例切换工作流时，旧工作流的延迟写回不能污染新工作流。
     updateBlocks.cancel()
     updateWires.cancel()
-    graphHistoryPending = false
+    historyGesture.release()
     lastEmittedBlocks = null
     lastEmittedWires = null
     // 更新 viewState
@@ -1837,8 +1907,15 @@ const onDrop = (event: DragEvent) => {
   try {
     const blockType = JSON.parse(data) as BlockType
 
-    // 获取画布上的位置
-    const { x, y } = project({ x: event.clientX, y: event.clientY })
+    // 获取画布上的位置。
+    //
+    // 必须用 `screenToFlowCoordinate` 而不是 `project`：两者只差一步——
+    // `project` 假设画布原点就是浏览器视口的 (0, 0)，而 `event.clientX/clientY`
+    // 是视口坐标。今天画布恰好是 `position: fixed; top: 0; left: 0`，偏移为 0，
+    // 两者结果相同；一旦画布被放进带侧栏或顶栏的容器，`project` 会让拖入的节点
+    // 整体偏移，偏移量正好等于画布左上角的位置。而它不报错——节点确实生成了，
+    // 只是位置不对，用户会以为自己没拖准。
+    const { x, y } = screenToFlowCoordinate({ x: event.clientX, y: event.clientY })
 
     // 生成唯一 ID，和复制节点使用同一条命名规则。
     const newId = createUniqueNodeName(
@@ -1891,6 +1968,10 @@ const onDrop = (event: DragEvent) => {
       @nodes-initialized="handleNodesInitialized"
       @nodes-change="handleNodesChange"
       @edges-change="handleEdgesChange"
+      @node-drag-start="handleNodeDragStart"
+      @node-drag-stop="handleNodeDragStop"
+      @selection-drag-start="handleNodeDragStart"
+      @selection-drag-stop="handleNodeDragStop"
       @edge-update="handleEdgeUpdate"
       @connect="handleConnect"
       @connect-start="handleConnectStart"
@@ -1912,6 +1993,22 @@ const onDrop = (event: DragEvent) => {
         <CodeNode v-bind="codeNdoeProps" :isValidConnection="isValidConnection" />
       </template>
       <Background :pattern-color="canvasDotColor" :gap="LAYOUT_GRID_SIZE" />
+      <!--
+        零节点时的空状态。一张只有点阵的空画布无法回答「现在该做什么」：
+        左侧节点面板可能是收起的，拖放这个交互本身也没有任何视觉暗示。
+        新建工作流是每个用户的第一屏，把它留白等于让第一步全靠猜。
+
+        用 `pointer-events: none` 让它不挡住拖放——提示本身不能成为障碍。
+      -->
+      <div v-if="!nodes.length" class="canvas-empty-state" data-test="canvas-empty-state">
+        <strong>这是一张空工作流</strong>
+        <p>从左侧节点面板把区块拖进画布即可开始。落点会自动对齐网格并避开已有节点。</p>
+        <ul>
+          <li>连线：把一个节点的输出端口拖到另一个节点的输入端口</li>
+          <li>自动排布：<kbd>Ctrl</kbd> + <kbd>L</kbd> 按连线关系重排并消除重叠</li>
+          <li>撤销 / 重做：<kbd>Ctrl</kbd> + <kbd>Z</kbd> / <kbd>Ctrl</kbd> + <kbd>Y</kbd>，一次连续手势算一步</li>
+        </ul>
+      </div>
       <!--
         在 vue-flow 自带控件里再挂两个按钮：
         「自动排布」原先只有 Ctrl+L 和顶部工具栏图标，放在这里是因为缩放控件
@@ -2238,6 +2335,7 @@ const onDrop = (event: DragEvent) => {
           :selected-node="selectedNode"
           @close="closeNodeConfig"
           @before-node-mutation="handleNodeConfigMutation"
+          @node-mutation-committed="handleNodeConfigCommit"
           :block-types="props.blockTypes"
           :type-compatibility="typeCompatibility"
         />
@@ -2421,6 +2519,54 @@ const onDrop = (event: DragEvent) => {
   left: 0;
   background: var(--canvas-bg-color, var(--background-color));
   z-index: 2;
+}
+
+/* 零节点空状态。居中但不拦交互：`pointer-events: none` 让拖放能穿过去，
+   否则这段提示自己会变成第一步的障碍。 */
+.canvas-empty-state {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 4;
+  box-sizing: border-box;
+  max-width: min(520px, 82%);
+  padding: 24px 28px;
+  border: 1px dashed var(--border-color);
+  border-radius: 12px;
+  color: var(--text-color-secondary, #6b7280);
+  background: color-mix(in srgb, var(--card-bg-color, #fff) 88%, transparent);
+  text-align: left;
+  pointer-events: none;
+  user-select: none;
+}
+
+.canvas-empty-state strong {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--text-color, #111827);
+  font-size: 16px;
+}
+
+.canvas-empty-state p {
+  margin: 0 0 12px;
+  line-height: 1.6;
+}
+
+.canvas-empty-state ul {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.9;
+  font-size: 13px;
+}
+
+.canvas-empty-state kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text-color, #111827) 6%, transparent);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
 }
 
 .vue-flow-canvas {

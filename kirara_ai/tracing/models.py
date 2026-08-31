@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 from sqlalchemy import Column, DateTime, Float, Index, Integer, Numeric, String, Text
 from sqlalchemy.orm import validates
 
+from kirara_ai.credential_keys import is_credential_key
 from kirara_ai.events.tracing import LLMRequestCompleteEvent, LLMRequestFailEvent, LLMRequestStartEvent
 from kirara_ai.tracing.core import TraceEvent, TraceRecord
 
@@ -22,6 +23,12 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
+#: 历史名称，保留为兼容入口：判定已统一到 `kirara_ai.credential_keys`。
+#:
+#: 这份表与 `kirara_ai/web/api/llm/routes.py` 的 `SENSITIVE_CONFIG_KEYS`
+#: 曾各自演化，于是同一对凭据里只有一半被识别（`access_key_secret` 命中
+#: `_secret` 后缀，`access_key_id` 两处都不命中）。共享判定覆盖两份表的
+#: 全部字段名，并额外识别 `secret_id`、`session_key`、`api-key` 这类写法。
 _SENSITIVE_KEYS = frozenset({
     "password",
     "passwd",
@@ -75,11 +82,11 @@ _AUTH_SCHEME_PATTERN = re.compile(
 
 def _redact_trace_value(value: Any, key: str = "") -> Any:
     """Recursively remove credentials before trace data reaches storage or APIs."""
-    snake_key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
-    normalized_key = re.sub(r"[^a-zA-Z0-9]+", "_", snake_key).strip("_").lower()
-    if normalized_key in _SENSITIVE_KEYS or normalized_key.endswith(
-        _SENSITIVE_KEY_SUFFIXES
-    ):
+    # 判定统一到 `kirara_ai.credential_keys`：这份表与 API 侧的
+    # `SENSITIVE_CONFIG_KEYS` 曾各自演化，导致同一对凭据只有一半被识别
+    # （`access_key_secret` 命中、`access_key_id` 漏掉）。上面两个常量
+    # 保留为兼容入口，仍然覆盖它们各自声明的全部字段名。
+    if is_credential_key(key):
         return "[redacted]"
     if isinstance(value, dict):
         return {

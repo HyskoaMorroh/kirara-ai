@@ -20,7 +20,16 @@ class TestLLMAdapter(LLMBackendAdapter, LLMChatProtocol):
         return LLMChatResponse(
             model="test-model",
             message=Message(role="assistant", content=[LLMChatTextContent(text="test response")]),
-            usage=Usage(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+            # 缓存两维显式给 0（报了、确实没命中）：这个 stub 代表「上游回报了
+            # 全部维度」这个基准场景。留空表示上游没报，会落到
+            # `PROVIDER_PARTIAL` 档，那是另一条用例要覆盖的形态。
+            usage=Usage(
+                prompt_tokens=1,
+                completion_tokens=2,
+                total_tokens=3,
+                cached_tokens=0,
+                cache_write_tokens=0,
+            ),
         )
 
 class TestTraceDecorator(TracingTestBase):

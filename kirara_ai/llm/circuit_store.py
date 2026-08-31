@@ -88,6 +88,36 @@ class CircuitBreakerStore:
                 result[name] = state
         return result
 
+    def forget(self, provider_name: str) -> bool:
+        """Drop one provider's stored state. Returns whether anything was removed.
+
+        手动重置一个 Provider 的熔断器时必须一并删掉它的持久化记录，否则下一次
+        进程启动（或同一进程内的一次状态重建）会把刚被重置的隔离原样恢复回来，
+        表现为「重置按钮没有作用」，而日志里既没有错误也没有重置痕迹。
+
+        只删指定的那一个：顺手清空整个文件等于把「重置一家」变成「取消所有隔离」，
+        而那是一次没人要求的放行——其余上游可能正因为真实故障被隔离着。
+        """
+        with self._lock:
+            if not self.path.is_file():
+                return False
+            try:
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                # 文件已经不可读，`load()` 本来就会整体丢弃它，无需再改写。
+                return False
+            if not isinstance(raw, dict):
+                return False
+            breakers = raw.get("breakers")
+            if not isinstance(breakers, dict) or str(provider_name) not in breakers:
+                return False
+            breakers.pop(str(provider_name), None)
+        # 保留 format_version 与 saved_at：重写成新的时间戳会把其余 Provider 的
+        # 「已经开了多久」清零，让一个本该很快进半开的熔断器重新等满整个恢复窗口。
+        raw["breakers"] = breakers
+        self._atomic_write(raw)
+        return True
+
     def restore(
         self,
         breakers: Mapping[str, CircuitBreaker],

@@ -17,9 +17,11 @@
  *    否则用户会看到两段重复回复。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { NAlert, NButton, NCard, NTag } from 'naive-ui'
+import { NAlert, NButton, NCard, NPopconfirm, NTag, useMessage } from 'naive-ui'
 
 import { llmApi, type ProviderResilienceRow } from '@/api/llm'
+
+const message = useMessage()
 
 const rows = ref<ProviderResilienceRow[]>([])
 const loading = ref(true)
@@ -217,6 +219,33 @@ async function load(showSpinner = false) {
   }
 }
 
+/** 正在重置的供应商名；用名字而不是布尔，多行才不会一起转圈。 */
+const resettingProvider = ref('')
+
+/**
+ * 把一个 Provider 的熔断清回 `closed`，并撤销持久化的隔离。
+ *
+ * 没有这个动作时，一次上游抖动打开的熔断只能等满恢复窗口，或者重启整个
+ * 进程——而重启会一并中断所有正在进行的对话。面板显示「已熔断」却没有任何
+ * 动作能改变它，正是这个按钮要解决的问题。
+ *
+ * 成功后立刻重取状态，不等下一次轮询：等 10 秒会让用户以为按钮没生效。
+ */
+async function resetCircuit(row: ProviderResilienceRow) {
+  resettingProvider.value = row.provider
+  try {
+    await llmApi.resetProviderCircuit(row.provider)
+    message.success(`已把 ${row.provider} 放回队列`)
+    await load(false)
+  } catch (error) {
+    message.error(
+      error instanceof Error ? error.message : `重置 ${row.provider} 的熔断失败`
+    )
+  } finally {
+    resettingProvider.value = ''
+  }
+}
+
 function toggleAutoRefresh() {
   autoRefresh.value = !autoRefresh.value
   if (autoRefresh.value) {
@@ -338,6 +367,30 @@ onBeforeUnmount(() => {
             <span v-if="row.recent_error_category" class="metric">
               最近失败<b>{{ errorCategoryLabel(row.recent_error_category) }}</b>
             </span>
+
+            <!--
+              重置只在真的被隔离时出现：`closed` 上它无事可做，
+              而一个永远无效的按钮会让人怀疑它是不是坏了。
+            -->
+            <n-popconfirm
+              v-if="row.state !== 'closed'"
+              @positive-click="resetCircuit(row)"
+              positive-text="放回队列"
+              negative-text="取消"
+            >
+              <template #trigger>
+                <n-button
+                  size="tiny"
+                  quaternary
+                  data-test="reset-circuit"
+                  :loading="resettingProvider === row.provider"
+                >
+                  重置熔断
+                </n-button>
+              </template>
+              把 {{ row.provider }} 清回正常并撤销持久化隔离。它会立刻回到<b>真实流量</b>里；
+              若上游仍未恢复，下一次失败会重新打开熔断。只影响这一家，其余正被隔离的供应商不变。
+            </n-popconfirm>
           </div>
 
           <details v-if="row.recent_transitions?.length" class="transitions">

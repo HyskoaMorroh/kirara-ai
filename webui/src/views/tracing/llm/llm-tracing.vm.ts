@@ -160,8 +160,17 @@ export interface LLMStatistics {
 }
 
 /** Token 用量来源的中文标签：估算与未知必须与供应商实测区分开。 */
+/**
+ * 与 `kirara_ai/llm/format/response.py` 的 `UsageSource` 一一对应。
+ *
+ * `provider_partial` 必须与 `provider` 分开显示：前者的总额是**补出来的**
+ * （上游没报缓存维度，缺失维度按 0 计价），而缓存读取的单价通常只有输入
+ * Token 的 1/5 到 1/10。两者显示成同一个词时，一份系统性偏低的账单看起来
+ * 与完全可信的账单毫无区别。
+ */
 const USAGE_SOURCE_LABELS: Record<string, string> = {
   provider: '供应商返回',
+  provider_partial: '供应商部分回报',
   estimated: '本地估算',
   unknown: '未知'
 }

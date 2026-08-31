@@ -45,6 +45,11 @@ const menuOptions = computed<MenuOption[]>(() => {
           label: () => '容错状态',
           key: 'llm-resilience',
           path: '/llm/resilience'
+        },
+        {
+          label: () => '自动检测计划',
+          key: 'llm-auto-detect',
+          path: '/llm/auto-detect'
         }
       ]
     case 'workflow':

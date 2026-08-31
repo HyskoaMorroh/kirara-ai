@@ -6,22 +6,49 @@
 >
 > 本表不把旧计划的勾选状态当作证据。每次补实现或运行门禁后，必须回填具体文件、测试命令和结果。
 
-## 本轮门禁实测（2026-08-30）
+## 本轮门禁实测（2026-08-30 第二轮）
 
 | 门禁 | 命令 | 结果 |
 | --- | --- | --- |
-| 后端全量 | `.venv\Scripts\python.exe -m pytest ./tests -q` | `2250 passed, 1 skipped` |
+| 后端全量 | `.venv-win\Scripts\python.exe -m pytest ./tests -q` | `2354 passed, 1 skipped` |
 | WebUI 类型 | `npm run type-check` | 通过（无输出即无错） |
-| WebUI 单元 | `npx vitest run --config vitest.config.ts` | `68 files, 474 passed` |
+| WebUI 单元 | `npm run test:unit` | `70 files, 499 passed` |
 | WebUI lint | `npm run lint:check` | `0 error, 131 warning`（均为既有未使用导入告警） |
-| WebUI 生产构建 | `npm run build` | `built in 45.41s` |
+| WebUI 生产构建 | `npm run build` | 通过 |
 | 版本同步 | `python scripts/version.py check` | `version artifacts synchronized: 3.3.0b11` |
 | 空白字符 | `git diff --check` | 无输出 |
 
-> 工作区里普遍是 CRLF，那是 `core.autocrlf=true` 的检出形态；`.gitattributes`
-> 声明 `* text=auto eol=lf`，仓库内存 LF，`git diff --check` 干净。不是缺陷。
+> 版本门禁在本轮**先失败后通过**，而且失败得有价值：`webui/src/utils/version.ts`
+> 的新注释里写了 `3.3.0b8`/`3.3.0b11` 做说明，扫描器判为「源码里的硬编码版本载体」
+> 并报 stale。这正是需求 23.1 要拦的形态——注释里的版本号同样会过期、同样会
+> 与唯一版本源漂移。改成 `<base>a<n>` 占位写法后通过。
 
 ### 本轮修正的缺陷（每条都有先失败的回归测试）
+
+八条全部满足「有 file:line 证据 + 能构造失败用例 + 先 RED 后 GREEN」。
+其中五条属于最难自查的形态——**功能看起来在工作，实际给出的是反向结果或空结果**：
+
+| 缺陷 | 为什么危险 | 证据 |
+| --- | --- | --- |
+| 前端版本比较把 `b8` 判为大于 `b11`（16、23.2） | semver 按字典序比字母数字标识符。序号进入两位数后「检查更新」**反向**：装 b11 的用户被劝降级到 b8，b10 这类真新版反而不提示。后端 `packaging` 是对的，于是两侧结论矛盾 | `webui/tests/version.test.ts`（新增 9 条，含两位数序号与阶段序） |
+| 非 Claude 供应商的成本永远为空（9、22.2） | `total_cost` 要求四个维度全部非 `None`，而只有 Claude 回报缓存写入量。OpenAI/Gemini/Ollama 形态永远缺两维 → 单请求成本、成本汇总、趋势图全为空。而**定价页填得好好的**，用户只会怀疑自己没配对 | `tests/llm/test_cost_dimension_coverage.py`（7 项） |
+| 批量画布操作的撤销点丢失（20.3） | `runCanvasBatch` 里 `setNodes()` 只改 vue-flow，`updateBlocks()` 是 500ms 防抖：批次关闭那刻 store 还没变，比对结果「无变化」→ 不压栈；而批次期间逐次记录也被抑制。两条路都不写历史，改动却在防抖到期后落库 → **一次 Ctrl+Z 直接毁掉上一次编辑且无法重做** | `webui/tests/workflow-canvas-batch.test.ts`（8 项，含无 flush 时丢历史的守卫用例） |
+| 一次连续拖拽产生 6~7 个撤销步骤（20.3） | 防抖窗口一到就清 `graphHistoryPending`，而拖拽还在继续。注释承诺「一次连续拖拽只产生一个检查点」，实际按 500ms 切片 | `webui/tests/workflow-canvas-history-gesture.test.ts`（8 项） |
+| `~~~` 与四反引号围栏不被识别为代码（19.1、19.3） | CommonMark 合法围栏。不识别的后果是**代码块内部被当正文处理**：数学降级改写代码里的 `$x$`、表格渲染器改写代码里的 `|`、分页把代码劈开且不补围栏、复制隔离失效。四反引号块里的三反引号还会把整块切成三段 | `tests/test_fence_and_platform_parity.py`（21 项） |
+| WeCom 走的是另一套正则链（19.1） | 需求明确「平台差异只放在渲染层，不能各平台各写一套 Markdown 解析」。WeCom 的独立链条对四反引号块产出 `『［代码］…』`（行内码包住块级码），对 `~~~` 完全不识别 | 同上 + `tests/plugins/im_wecom_adapter/`（54 项回归） |
+| 纯符号公式 `$x = 5$` 不降级（19.2） | 判据是「有反斜杠命令/上下标/花括号才算公式」，于是不带命令的公式原样把 `$` 发给 QQ——正是 19.2 点名禁止的形态。改成按货币形态排除（`$5`、`$1,200` 仍完整保留） | 同上（含货币与公式共存用例） |
+| 供应商凭据只脱敏了成对凭据的一半（21.1） | `access_key_id` 参与 HMAC 签名，是凭据的另一半，但两张关键词表都漏了它：接口明文返回、**导出文件里也是明文**，而同一对里 `access_key_secret` 确实打了码——看到打码的那半会让人相信整条路径是安全的。`secret_key`/`private_key`/`x_api_key`/`api-key`/`session_key` 同缺 | `tests/llm/test_credential_redaction_coverage.py`（35 项）；新增 `kirara_ai/credential_keys.py` 单一词表 |
+
+另两条一并修掉的安全边界：
+
+| 缺陷 | 为什么危险 | 证据 |
+| --- | --- | --- |
+| 远程安装路由把请求体整体 `**payload` 展开（10、22.3） | 客户端可注入 `source_key` 覆盖服务端生成的资源身份，或用未知键触发 `TypeError` 500 | `tests/plugin_manager/test_remote_install_validation.py`（21 项） |
+| `"."` 目录绕过全部形态校验（22.3） | `_validate_directory` 在所有判据**之前**就把 `"."` 原样返回。直接请求它会把整个仓库（上限 4096 成员 / 128 MB）当一个 Skill 装进来，`source_key` 退化成 `owner/repo:.`，重复安装检测失效。它本是内部结果值，不是用户可请求的输入——现已分离为 `resolved_source_key()` | 同上 |
+| rtk 探针无法区分同名的另一个工具（12） | 文档写明「以 `rtk gain` 是否可用为准」，探针却只跑 `--version`：装错工具时界面显示「就绪」，实际所有过滤都不生效 | `tests/plugin_manager/test_dependency_probe_discriminator.py`（5 项） |
+| HTTP 入口无法绑定 Agent（10） | `SUPPORTED_CHANNEL_TYPES` 漏了 HTTP，且类名推导出 `httplegacy`。需求 10 要求「WeCom、QQ、Telegram 等入口统一映射到渠道身份 → Agent」，而这个入口的绑定请求直接被拒，只能退到全局默认 Agent | `tests/agent_runtime/test_http_channel_identity.py`（11 项） |
+
+### 上一轮修正的缺陷（2026-08-30 第一轮）
 
 | 缺陷 | 为什么危险 | 证据 |
 | --- | --- | --- |
@@ -86,7 +113,7 @@ OneBot 标准消息段与 `send_message` 返回 `message_id`、申请处置出�
 | 10. 创建者权限与服务器副作用 | `principal_can_control_agent`；command Hook 要求创建者；`creator.subject` 单一生效位置 + 继承；依赖目录补齐 rtk / memsearch / context-mode / caveman 并区分「可服务器侧安装」与「Claude 插件」 | `test_creator_identity.py`、`test_host_authorization.py`（agent + mcp）、`test_dependency_catalog_coverage.py`、`test_creator_channel_identity.py`、`test_hook_context_injection.py` | `AGENTS_SKILLS_HOOKS_MCP_GUIDE.md` 第 6、8 节 | 未验证 | 代码完成 | 新增 `creator_channel_identities`：声明后创建者可从 IM 渠道使用受保护能力，默认空表、群聊默认不生效、已有 HTTP 身份绝不被替换；工具轮 Hook 的 `additionalContext` 现在真的进模型 |
 | 11. 外部项目全部功能细节对照 | 内置适配器 + 统一渲染 + 双向幂等；补 8 类标准消息段；`send_message` 返回 `message_id`；好友/入群申请有 approve/reject 出口；**补回被融入项目的发送节流**（防 QQ 风控，直发与 outbox 两条路径） | `test_standard_segments.py`、`test_send_result.py`、`test_request_actions.py`、`test_forward_expansion.py`、`test_send_pacing.py`（16 项）+ 既有兼容测试 | README、QQ 运维第九节（逐段对照表 + 转发展开 + 申请处置）、第七节新增「发送节流」 | 未验证 | 代码完成 | 本轮逐条比对被融入项目：A 在转发展开、入站媒体限额、outbox 持久化、QR 登录快照上均超出原项目；唯一实质缺口是发送节流，已补。「完全代替」仍需实机逐功能证据 |
 | 12. 子代理、context-mode、graphify、memsearch、质量约束 | 探针确认 `rtk 0.45.0`、`graphify 0.9.43`；context-mode 处理大输出 | 全量门禁 + 图谱刷新 | 本矩阵与计划 | 不适用 | **已验证** | — |
-| 13. 同类开源项目和官方文档调研 | 参考 cc-switch UI 清单与 Claude Code Hook 声明形态 | 不适用 | 计划与本矩阵 | 网络变化 | **已验证（范围内）** | 参考实现不等于当前项目证据 |
+| 13. 同类开源项目和官方文档调研 | 参考实现的 UI 清单与主流 Agent 客户端 Hook 声明形态 | 不适用 | 计划与本矩阵 | 网络变化 | **已验证（范围内）** | 参考实现不等于当前项目证据 |
 | 14. 重构质量与教程 | 本轮全部改动 | 功能/构建/安全测试 | 新增 `QQ_ONEBOT_OPERATIONS.md`；重写 OBSERVABILITY 第 2 节；扩写扩展指南 3/6/7 节；QUICKSTART 补流式模式 | 未验证 | **已验证** | 文档与实现同轮更新；本轮补齐「首次上手」最弱一环：就绪自检从「只能 curl」变成引导页可见，且步骤完成状态改由真实就绪推导而非点击痕迹 |
 | 15. 所有相关文件同步 | README（含新增 REST 管理接口一节与依赖可见性特性）、CHANGELOG、四份专题文档、`.gitignore`/`.dockerignore`、版本索引 | 文档引用与契约测试 | 同左 | 不适用 | **已验证** | 已形成实际 diff |
 | 16. 自动版本及发布缺陷 | 修正版本审计把 `.playwright-cli/`、`.playwright-mcp/` 当版本载体导致 `check` 失败；**镜像带 OCI `revision`/`version`/`source`**；**升级包安装前校验 registry 摘要**（摘要缺失即拒绝安装） | `version.py check` 通过；契约测试 36 项（含两条 revision 契约）；`test_update_integrity.py` 19 项 | README 发布章节（新增两段：revision 的作用、摘要校验口径） | 未执行发布 | **已验证** | 三处忽略规则保持一致；四项声明的能力逐一排查，两处真实缺陷已修 |

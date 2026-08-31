@@ -1,6 +1,6 @@
 """Skill 要能被模型调用，而不只是整篇塞进系统提示词（需求 10）。
 
-需求 10 要求「跟 cc switch 实现的原理是一样的」。cc-switch / Claude Code 的 Skill
+需求 10 要求采用同一原理。主流 Agent 客户端的 Skill
 是**渐进披露**：前置元数据（name + description）常驻上下文作为一句廉价广告，
 正文只在模型决定用它的那一轮才载入。
 

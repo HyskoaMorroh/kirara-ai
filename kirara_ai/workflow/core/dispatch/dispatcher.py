@@ -154,6 +154,7 @@ class WorkflowDispatcher:
         message: IMMessage,
         *,
         require_agent: bool = False,
+        reply_stream_mode: str | None = None,
     ):
         """
         根据消息内容选择第一个匹配的规则进行处理。
@@ -161,6 +162,10 @@ class WorkflowDispatcher:
         ``require_agent`` 用于已经声明为 Agent 入口的调用方（例如 WebUI
         统一对话入口）。这类入口不能在 Agent 未配置时静默降级到旧工作流；
         传统 IM 适配器保持默认的兼容行为。
+
+        ``reply_stream_mode`` 由**按流式协议接住回复的入口**声明（目前是 WebUI 的
+        SSE 路由），原样下传给 Agent 运行时。不传时行为与此前逐字节一致：
+        取回方式仍按「Agent > 渠道 > 进程默认」解析。
         """
         # 渠道身份到创建者 principal 的桥。
         #
@@ -177,6 +182,7 @@ class WorkflowDispatcher:
                 source,
                 message,
                 require_agent=require_agent,
+                reply_stream_mode=reply_stream_mode,
             )
         principal = self._creator_principal(ChannelContext.from_message(source, message))
         if principal is None:
@@ -184,12 +190,14 @@ class WorkflowDispatcher:
                 source,
                 message,
                 require_agent=require_agent,
+                reply_stream_mode=reply_stream_mode,
             )
         with runtime_principal_context(principal):
             return await self._dispatch_within_principal(
                 source,
                 message,
                 require_agent=require_agent,
+                reply_stream_mode=reply_stream_mode,
             )
 
     async def _dispatch_within_principal(
@@ -198,6 +206,7 @@ class WorkflowDispatcher:
         message: IMMessage,
         *,
         require_agent: bool = False,
+        reply_stream_mode: str | None = None,
     ):
         with self.container.scoped() as scoped_container:
             scoped_container.register(IMAdapter, source)
@@ -237,6 +246,7 @@ class WorkflowDispatcher:
                                 source,
                                 message,
                                 agent_id,
+                                reply_stream_mode=reply_stream_mode,
                             )
 
                         self.logger.debug(f"Matched rule {rule}, executing workflow")
@@ -274,7 +284,12 @@ class WorkflowDispatcher:
                     require_agent=True,
                 )
                 if agent_id is not None:
-                    return await self._dispatch_agent(source, message, agent_id)
+                    return await self._dispatch_agent(
+                        source,
+                        message,
+                        agent_id,
+                        reply_stream_mode=reply_stream_mode,
+                    )
             self.logger.debug("No matching rule found for message")
             return None
 
@@ -335,6 +350,8 @@ class WorkflowDispatcher:
         source: IMAdapter,
         message: IMMessage,
         agent_id: str,
+        *,
+        reply_stream_mode: str | None = None,
     ):
         """Run a selected Agent and deliver exactly one channel response."""
 
@@ -348,6 +365,13 @@ class WorkflowDispatcher:
             context,
             message,
             session_agent_id=agent_id,
+            # 把投递用的适配器交给运行时：它实现「编辑已发出消息」且本轮解析出的
+            # 取回方式是 incremental 时，生成中的内容会边生成边推给用户（需求 4）。
+            # 不支持的适配器上整条增量链路是空操作。
+            incremental_channel=source,
+            # 由按流式协议接住回复的入口声明（WebUI 的 SSE 路由）。
+            # 不传时取回方式仍按「Agent > 渠道 > 进程默认」解析。
+            reply_stream_mode=reply_stream_mode,
         )
         self._record_model_stages(message, result)
 
@@ -483,6 +507,24 @@ class WorkflowDispatcher:
 
         if result.status is RuntimeStatus.COMPLETED:
             if result.text:
+                if getattr(result, "delivered_incrementally", False):
+                    # 增量投递已经把最终文本写到那条消息上了，与这里会发出的内容
+                    # 逐字相同。再发一次就是同一段回复出现两遍——开着 incremental
+                    # 反而比关掉更糟。
+                    #
+                    # 判据只看「收尾确实成功」（`IncrementalReplyDelivery.delivered`）：
+                    # 占位失败、改写被限流、渠道不支持编辑时它是 False，于是仍然
+                    # 走下面的整段投递兜底。
+                    #
+                    # 阶段照记：`send_succeeded` 平时由适配器在 `send_message` 里补，
+                    # 跳过它就没人补，投递耗时看板上这一轮会凭空消失。
+                    self._record_stage(
+                        message, "send_started", delivery="incremental"
+                    )
+                    self._record_stage(
+                        message, "send_succeeded", delivery="incremental"
+                    )
+                    return result
                 reply = IMMessage(
                     sender=ChatSender.get_bot_sender(),
                     message_elements=[TextMessage(result.text)],

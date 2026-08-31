@@ -5,10 +5,10 @@ import re
 
 from wechatpy.messages import BaseMessage
 
-from kirara_ai.im.text_render import (degrade_math, display_width, is_table_row,
-                                      is_table_separator,
+from kirara_ai.im.text_render import (TextBlock, TextBlockKind, degrade_math,
+                                      display_width, is_table_separator,
                                       paginate_with_truncation_notice,
-                                      parse_table_row, render_table)
+                                      parse_text_document, render_table)
 from kirara_ai.logger import get_logger
 
 if TYPE_CHECKING:
@@ -34,102 +34,121 @@ def _render_table(rows: list[list[str]], has_header: bool = True) -> list[str]:
     return render_table(rows, has_header=has_header)
 
 
+#: 企业微信侧的行内标记映射。
+#:
+#: 只做「标记 → 企业微信可显示的替代符号」这一件事，**不解析块结构**：
+#: 块结构由共享的 ``parse_text_document`` 负责，这里拿到的一定是一段
+#: 非代码正文，因此不需要再防守围栏内的字符被误伤。
+_INLINE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    # 粗体：**文本** → 「文本」
+    (re.compile(r"\*\*(.+?)\*\*"), r"「\1」"),
+    # 斜体/强调：*文本* 或 _文本_ → 文本（企业微信不支持样式，仅去掉标记）
+    (re.compile(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])"), r"\1"),
+    (re.compile(r"(?<![\w_])_(?!\s)([^_\n]+?)(?<!\s)_(?![\w_])"), r"\1"),
+    # 删除线：~~文本~~ → 文本
+    (re.compile(r"~~(.+?)~~"), r"\1"),
+    # 行内代码：`代码` → 『代码』
+    (re.compile(r"`([^`\n]+)`"), r"『\1』"),
+    # 链接：[文本](url) → 文本 (url)
+    (re.compile(r"\[([^\]]+)\]\(([^\)]+)\)"), r"\1 (\2)"),
+)
+
+
+def _render_inline(text: str) -> str:
+    """把一段正文的行内 Markdown 标记换成企业微信可显示的写法。
+
+    数学降级走共享实现。此前 WeCom 路径完全跳过这一步，于是同一段模型回复
+    在 QQ 上是 `T → 0`、在企业微信上是原始的 `$T \\to 0$`——平台差异应该只在
+    渲染层，不该表现为「有的平台处理了、有的没有」。
+    """
+    rendered = degrade_math(text)
+    for pattern, replacement in _INLINE_RULES:
+        rendered = pattern.sub(replacement, rendered)
+    return rendered
+
+
+def _render_heading(block: TextBlock) -> str:
+    """标题按层级换成企业微信的分隔线写法。"""
+    content = _render_inline(block.text)
+    level = block.level or 1
+    if level >= 3:
+        return f"▸ {content}"
+    if level == 2:
+        return f"━━ {content} ━━"
+    return f"━━━ {content} ━━━"
+
+
+def _render_code(block: TextBlock) -> str:
+    """代码块换成企业微信的方框围栏，逐行缩进原样保留。
+
+    企业微信渲染不了 Markdown 围栏，所以用 ``［代码］`` 标记；这是**渲染差异**，
+    不是第二套解析流程——语言标识、块边界与正文都来自共享解析结果。
+
+    未闭合的围栏不补 ``［/代码］``：解析器把它也收成代码块（否则后面的内容会散成
+    正文），但补一个闭合标记等于宣称「这段代码到这里结束」，而事实是上游回复被截断了。
+    读者据此以为拿到了完整的代码。
+    """
+    header = f"［代码 {block.language}］" if block.language else "［代码］"
+    body = block.text.rstrip("\n")
+    if not block.closed:
+        return f"{header}\n{body}"
+    return f"{header}\n{body}\n［/代码］"
+
+
+def _render_table_block(block: TextBlock) -> str:
+    """表格走共享渲染：宽表自动降级成纵向字段布局。"""
+    rows = [list(row) for row in block.rows]
+    if not rows:
+        return _render_inline(block.text)
+    # 有 `---` 分隔行才能断言第一行是表头；没有它，降级时不能拿它当字段名。
+    has_header = any(is_table_separator(line) for line in block.text.split("\n"))
+    return "\n".join(_render_table(rows, has_header=has_header))
+
+
+def _render_list(block: TextBlock) -> str:
+    """无序列表项换成 `•`，保留原有层级缩进；有序列表保留原本的序号。"""
+    rendered = _render_inline(block.text)
+    return re.sub(r"^(\s*)[-*+]\s+", r"\1• ", rendered, flags=re.MULTILINE)
+
+
+def _render_quote(block: TextBlock) -> str:
+    """引用块换成 `┃` 前缀。"""
+    rendered = _render_inline(block.text)
+    return re.sub(r"^\s{0,3}>\s?", "┃ ", rendered, flags=re.MULTILINE)
+
+
+_BLOCK_RENDERERS: dict[TextBlockKind, Any] = {
+    TextBlockKind.HEADING: _render_heading,
+    TextBlockKind.CODE: _render_code,
+    TextBlockKind.TABLE: _render_table_block,
+    TextBlockKind.LIST: _render_list,
+    TextBlockKind.QUOTE: _render_quote,
+}
+
+
 def markdown_to_plain_text(text: str) -> str:
     """
     将 Markdown 格式转换为适合企业微信显示的纯文本格式
     保留结构但去除 Markdown 语法标记
 
-    处理顺序很关键：先把围栏代码块摘出来占位，避免代码内部的
-    #、**、-、` 等字符被后续的 Markdown 规则误替换、破坏缩进。
+    块结构由共享的 ``parse_text_document`` 解析，企业微信只提供**渲染层**的
+    符号表（``━━`` / ``「」`` / ``┃`` / ``•`` / ``『』`` / ``［代码］``）。
+
+    此前这里是一条自己的正则链：先用 ``` ```([\\w+-]*)\\n(.*?)``` ``` 摘出围栏，
+    再逐条替换标题、粗体、行内代码。那条链在两种标准写法上会破坏代码——
+    四个反引号的围栏（模型展示 Markdown 时的标准形态）只匹配到内层的一对，
+    残留的反引号又被行内代码规则包成 ``『』``；``~~~`` 围栏根本不被识别，
+    里面的 ``**``、``-``、``$x$`` 会被当成正文改写。19.1 要求平台差异只放在
+    渲染层，不允许各平台各写一套 Markdown 解析，这正是原因。
     """
-    # 第一步：摘出围栏代码块（```lang ... ```），原样保留内部缩进
-    code_blocks: list[str] = []
-
-    def _stash_code_block(match: re.Match) -> str:
-        lang = (match.group(1) or "").strip()
-        body = match.group(2)
-        # 去掉代码块整体的公共缩进前先保留原样，仅去掉结尾多余换行
-        body = body.rstrip("\n")
-        header = f"［代码 {lang}］" if lang else "［代码］"
-        code_blocks.append(f"{header}\n{body}\n［/代码］")
-        return f"\x00CODE{len(code_blocks) - 1}\x00"
-
-    text = re.sub(r'```([\w+-]*)\n(.*?)```', _stash_code_block, text, flags=re.DOTALL)
-
-    # 数学降级走共享实现。此前 WeCom 路径完全跳过这一步，于是同一段模型回复
-    # 在 QQ 上是 `T → 0`、在企业微信上是原始的 `$T \to 0$`——平台差异应该只在
-    # 渲染层，不该表现为「有的平台处理了、有的没有」。
-    # 代码块此时已被占位符替换，因此不会被波及。
-    text = degrade_math(text)
-
-    # 标题转换：## 标题 → ━━ 标题 ━━
-    text = re.sub(r'^### (.+)$', r'▸ \1', text, flags=re.MULTILINE)
-    text = re.sub(r'^## (.+)$', r'\n━━ \1 ━━', text, flags=re.MULTILINE)
-    text = re.sub(r'^# (.+)$', r'\n━━━ \1 ━━━', text, flags=re.MULTILINE)
-
-    # 粗体：**文本** → 「文本」
-    text = re.sub(r'\*\*(.+?)\*\*', r'「\1」', text)
-
-    # 斜体/强调：*文本* 或 _文本_ → 文本（企业微信不支持样式，仅去掉标记）
-    text = re.sub(r'(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])', r'\1', text)
-    text = re.sub(r'(?<![\w_])_(?!\s)([^_\n]+?)(?<!\s)_(?![\w_])', r'\1', text)
-
-    # 删除线：~~文本~~ → 文本
-    text = re.sub(r'~~(.+?)~~', r'\1', text)
-
-    # 引用块：> 文本 → ┃ 文本
-    text = re.sub(r'^\s{0,3}>\s?', '┃ ', text, flags=re.MULTILINE)
-
-    # 表格转换为带边框的对齐文本表格
-    lines = text.split('\n')
-    result: list[str] = []
-    table_rows: list[list[str]] = []
-    # 是否见过 `---` 分隔行：没有它就不能断言第一行是表头，
-    # 宽表降级时也就不能拿它当字段名。
-    saw_separator = False
-
-    def flush_table():
-        nonlocal saw_separator
-        if table_rows:
-            result.append('')  # 表格前空行
-            result.extend(_render_table(table_rows, has_header=saw_separator))
-            result.append('')  # 表格后空行
-            table_rows.clear()
-        saw_separator = False
-
-    for line in lines:
-        stripped = line.strip()
-        # 分隔行（|---|---|）只用于标记表头，不参与渲染
-        if is_table_separator(stripped):
-            saw_separator = True
-            continue
-        # 检测表格行（含 | 且不是代码占位）
-        if is_table_row(stripped) and '\x00CODE' not in stripped:
-            table_rows.append(parse_table_row(stripped))
-        else:
-            flush_table()
-            result.append(line)
-    flush_table()
-
-    text = '\n'.join(result)
-
-    # 列表项：- 项目 → • 项目（保留原有层级缩进）
-    text = re.sub(r'^(\s*)[-*+]\s+', r'\1• ', text, flags=re.MULTILINE)
-
-    # 行内代码：`代码` → 『代码』（此时围栏代码块已被占位，不会被误伤）
-    text = re.sub(r'`([^`\n]+)`', r'『\1』', text)
-
-    # 链接：[文本](url) → 文本 (url)
-    text = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', r'\1 (\2)', text)
-
-    # 删除多余空行（超过2个连续换行压缩为2个）
-    text = re.sub(r'\n{3,}', '\n\n', text)
-
-    # 最后一步：还原代码块，保持原始缩进
-    for index, block in enumerate(code_blocks):
-        text = text.replace(f"\x00CODE{index}\x00", block)
-
-    return text.strip()
+    document = parse_text_document(text)
+    rendered: list[str] = []
+    for block in document.blocks:
+        renderer = _BLOCK_RENDERERS.get(block.kind)
+        rendered.append(renderer(block) if renderer else _render_inline(block.text))
+    # 块之间留一个空行；表格与代码块因此自然带上前后空行。
+    joined = "\n\n".join(part for part in rendered if part.strip())
+    return re.sub(r"\n{3,}", "\n\n", joined).strip()
 
 
 def _split_table_block(lines: list[str], max_length: int) -> list[str]:

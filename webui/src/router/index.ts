@@ -72,6 +72,12 @@ const router = createRouter({
           meta: { title: '容错状态', requiresAuth: true }
         },
         {
+          path: '/llm/auto-detect',
+          name: 'llm-auto-detect',
+          component: () => import('@/views/llm/AutoDetectScheduleView.vue'),
+          meta: { title: '自动检测计划', requiresAuth: true }
+        },
+        {
           path: '/workflow',
           name: 'workflow',
           component: () => import('@/views/workflow/WorkflowList.vue')

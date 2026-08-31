@@ -1,8 +1,9 @@
-"""CC Switch-compatible MCP configuration boundaries.
+"""MCP configuration boundaries for the interoperable entry shape.
 
-The canonical Kirara representation intentionally matches CC Switch's public
-entry shape.  This module owns format conversion at import/export boundaries so
-the runtime and API do not need to understand several competing schemas.
+The canonical Kirara representation intentionally matches the public entry
+shape used by mainstream MCP desktop managers.  This module owns format
+conversion at import/export boundaries so the runtime and API do not need to
+understand several competing schemas.
 """
 
 from __future__ import annotations
@@ -146,8 +147,8 @@ def parse_mcp_json(text: str) -> List[MCPServerConfig]:
     if {"id", "server"}.issubset(parsed):
         return [normalize_mcp_server_entry(parsed)]
 
-    # A CC Switch export is an id -> canonical entry map.  A direct client
-    # export is an id -> transport map; both are accepted for migration.
+    # A desktop-manager export is an id -> canonical entry map.  A direct
+    # client export is an id -> transport map; both are accepted for migration.
     return list(_canonical_map_entries(parsed))
 
 
@@ -155,7 +156,7 @@ def parse_codex_toml(text: str) -> MCPServerConfig:
     """Parse one Codex ``[mcp_servers.<id>]`` entry.
 
     ``[mcp.servers.<id>]`` is accepted only as a migration convenience, just
-    as CC Switch does when importing older malformed files.
+    as desktop managers do when importing older malformed files.
     """
     try:
         root = tomli.loads(text)
@@ -168,7 +169,7 @@ def parse_codex_toml(text: str) -> MCPServerConfig:
         servers = nested.get("servers") if isinstance(nested, Mapping) else None
     if not isinstance(servers, Mapping) or not servers:
         # A single direct server configuration is useful in the advanced
-        # editor and mirrors CC Switch's form parser.
+        # editor and mirrors the desktop managers' form parser.
         servers = {"server": root} if any(key in root for key in ("type", "command", "url", "args")) else None
     if not isinstance(servers, Mapping) or not servers:
         raise ValueError("Codex TOML must contain [mcp_servers.<id>]")
@@ -234,9 +235,10 @@ def _transport_dict(entry: MCPServerConfig) -> Dict[str, Any]:
         for key, value in raw.items()
         if key in keys and value not in ({}, [])
     }
-    # CC Switch explicitly keeps extension fields (for example timeout_ms) so
-    # they survive an import/edit/export cycle.  They are carried after the
-    # known transport fields and are not used for secret-value search.
+    # Interoperable managers explicitly keep extension fields (for example
+    # timeout_ms) so they survive an import/edit/export cycle.  They are
+    # carried after the known transport fields and are not used for
+    # secret-value search.
     known.update(
         {
             key: value

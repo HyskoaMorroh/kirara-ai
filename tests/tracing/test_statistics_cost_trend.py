@@ -50,6 +50,21 @@ def tracer(tmp_path):
     return instance
 
 
+#: 写入与断言共用的参照时刻，整个模块只取一次时钟。
+#:
+#: 此前 `add_trace` 用 `now() - 5 分钟` 写行、`_today()` 用 `now()` 算日期——
+#: **各取一遍时钟**。UTC 午夜后的头 5 分钟里这两个 `now()` 落在不同的日期上：
+#: 行进了昨天的分桶，而断言去找今天的分桶，于是 `_bucket` 抛「没有该日期的分桶」。
+#:
+#: 这不是理论风险，实测撞过：一次完整跑跨过 00:00–00:07 UTC，
+#: `TestDailyCostTrend` 的前 4 个用例失败、后 3 个通过，边界恰好在 00:05。
+#: 分桶按日期分组是产品的正确行为，会飘的是测试自己的时钟。
+#:
+#: 5 分钟的回拨保留：`request_time` 必须落在过去，否则统计的 30 天窗口
+#: （`llm_tracer.py:722-724`）可能把它筛掉。
+_REFERENCE_TIME = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+
 def add_trace(
     tracer: LLMTracer,
     *,
@@ -58,9 +73,7 @@ def add_trace(
     currency: str = "USD",
     days_ago: int = 0,
 ) -> None:
-    request_time = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
-        days=days_ago, minutes=5
-    )
+    request_time = (_REFERENCE_TIME - timedelta(days=days_ago)).replace(tzinfo=None)
     with tracer.db_manager.get_session() as session:
         row = LLMRequestTrace(
             trace_id=trace_id,
@@ -93,11 +106,16 @@ def _bucket(daily: list[dict], date: str) -> dict:
 
 
 def _today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """`days_ago=0` 的那一行落在哪个日期分桶里。
+
+    名字保留「today」是因为它就是 `add_trace` 默认写入的那一天；取值必须来自
+    `_REFERENCE_TIME` 而不是重新读一次时钟，否则跨午夜时两者会不一致。
+    """
+    return _REFERENCE_TIME.strftime("%Y-%m-%d")
 
 
 def _yesterday() -> str:
-    return (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    return (_REFERENCE_TIME - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 class TestDailyCostTrend:

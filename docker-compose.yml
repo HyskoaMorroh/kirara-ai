@@ -13,6 +13,12 @@ services:
     ports:
       - "8759:8080"
 
+    # 收尾要做的事不少：flush 记忆的异步写队列、把 `sending` 状态的投递隔离成
+    # `ambiguous`、关数据库、有序断开每个适配器的反向 WebSocket。Docker 默认只给
+    # 10 秒，超时直接 SIGKILL——那样 start.sh 里的 `exec` 就白加了：信号到了，
+    # 但没时间用完。60 秒对适配器数量正常的部署足够，且它是上界而不是固定等待。
+    stop_grace_period: 60s
+
     # 匿名 HTTP liveness；认证后的 readiness 由发布门禁单独验证。
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3).read(1)"]

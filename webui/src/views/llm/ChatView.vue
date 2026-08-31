@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   NAlert,
   NButton,
@@ -10,6 +10,7 @@ import {
 } from 'naive-ui'
 import {
   CheckmarkCircleOutline,
+  CopyOutline,
   GitNetworkOutline,
   PaperPlaneOutline,
   PersonCircleOutline,
@@ -21,6 +22,8 @@ import { llmApi } from '@/api/llm'
 import type { WebUIChatRequest, WebUIChatResponse } from '@/api/llm'
 import { listAgents } from '@/api/agent'
 import type { AgentSummary } from '@/api/agent'
+import { readChatStream } from './chat-stream'
+import { copyTextToClipboard, splitMessageSegments } from './message-segments'
 
 type ChatType = 'c2c' | 'group'
 type MessageRole = 'user' | 'assistant'
@@ -32,6 +35,8 @@ interface ChatMessage {
   agentId?: string | null
   status?: WebUIChatResponse['status']
   confirmationId?: string | null
+  /** 这条气泡是否还在流式接收中。为真时显示光标动画。 */
+  streaming?: boolean
 }
 
 const agents = ref<AgentSummary[]>([])
@@ -48,6 +53,15 @@ const sending = ref(false)
 const errorMessage = ref('')
 const pendingConfirmationId = ref<string | null>(null)
 const transcript = ref<HTMLElement | null>(null)
+/**
+ * 是否走 SSE。默认开：需求 4 要的就是「看得见的流式」，而这条渠道天生支持。
+ *
+ * 仍然留一个开关而不是硬编码，因为两条路径都必须存在（需求 4 的原文是「流式
+ * **和**非流式」），而且这是唯一能在同一界面上核对「两条路径给出同一段回复」
+ * 的地方——反向代理关掉分块传输时，也需要能立刻切回去确认问题在代理而不在项目。
+ */
+const streamingEnabled = ref(true)
+let streamAbort: AbortController | null = null
 let messageSequence = 0
 
 const selectedAgent = computed(() =>
@@ -141,6 +155,11 @@ const submit = async (overrideText?: string) => {
   appendMessage({ role: 'user', text })
   if (overrideText === undefined) messageInput.value = ''
 
+  if (streamingEnabled.value) {
+    await submitStreaming(text)
+    return
+  }
+
   try {
     const response = await llmApi.chat(buildRequest(text))
     // Keep the canonical session identity returned by the dispatcher so a
@@ -161,6 +180,105 @@ const submit = async (overrideText?: string) => {
   }
 }
 
+/**
+ * 走 SSE 的那一条。
+ *
+ * 先插入一条空的 assistant 气泡，随 `delta` 就地追加——这条气泡就是需求 4 要的
+ * 「用户看得见的流式」。它必须**先**出现：等第一个 delta 到达才插入的话，
+ * 首字节之前界面上什么都没有，与非流式毫无区别。
+ *
+ * 三件必须成对的事：
+ *
+ * - `done` 之后用它的 `text` 覆盖气泡（而不是保留累积值）。两者正常情况下逐字
+ *   相同，但供应商的回复策略（例如隐去 AI 署名）是在聚合之后执行的，只有 `done`
+ *   带的是最终那一版。
+ * - `error` 之后气泡不能停在半句话上而没有任何说明：把已收到的部分留下，
+ *   另外给出错误——删掉已生成内容会让用户以为什么都没发生。
+ * - 无论哪条路径，`sending` 都要落回 false，否则输入框永久锁死。
+ */
+const submitStreaming = async (text: string) => {
+  const placeholderId = ++messageSequence
+  messages.value.push({ id: placeholderId, role: 'assistant', text: '', streaming: true })
+  void scrollToLatest()
+
+  const patch = (mutate: (message: ChatMessage) => void) => {
+    const target = messages.value.find((item) => item.id === placeholderId)
+    if (target) mutate(target)
+  }
+
+  streamAbort = new AbortController()
+  try {
+    await readChatStream(
+      '/llm/chat/stream',
+      buildRequest(text),
+      {
+        signal: streamAbort.signal,
+        onEvent: (event) => {
+          if (event.event === 'delta' && typeof event.data.text === 'string') {
+            patch((message) => {
+              message.text += event.data.text as string
+            })
+            void scrollToLatest()
+            return
+          }
+          if (event.event === 'reset' && typeof event.data.text === 'string') {
+            patch((message) => {
+              message.text = event.data.text as string
+            })
+            return
+          }
+          if (event.event === 'done') {
+            const finalText = typeof event.data.text === 'string' ? event.data.text : ''
+            if (typeof event.data.session_id === 'string') sessionId.value = event.data.session_id
+            const confirmationId =
+              typeof event.data.confirmation_id === 'string' ? event.data.confirmation_id : null
+            pendingConfirmationId.value = confirmationId
+            patch((message) => {
+              message.streaming = false
+              message.text =
+                finalText ||
+                message.text ||
+                (event.data.status === 'awaiting_confirmation' ? '需要确认后才能继续' : '已完成')
+              message.agentId =
+                typeof event.data.agent_id === 'string' ? event.data.agent_id : null
+              message.status = event.data.status as WebUIChatResponse['status']
+              message.confirmationId = confirmationId
+            })
+            return
+          }
+          if (event.event === 'error') {
+            const detail = typeof event.data.error === 'string' ? event.data.error : '未知错误'
+            errorMessage.value = `生成失败：${detail}`
+            patch((message) => {
+              message.streaming = false
+              // 已收到的部分留着：删掉会让用户以为什么都没发生过。
+              if (!message.text) message.text = '（生成失败，未收到内容）'
+            })
+          }
+        }
+      }
+    )
+  } catch (error) {
+    if (!(error instanceof DOMException && error.name === 'AbortError')) {
+      errorMessage.value = `消息发送失败：${error instanceof Error ? error.message : '未知错误'}`
+    }
+    patch((message) => {
+      message.streaming = false
+      if (!message.text) message.text = '（生成中断，未收到内容）'
+    })
+  } finally {
+    streamAbort = null
+    sending.value = false
+    // 无论走哪条路径都要清掉进行标记。只在 done / error 分支里清是不够的：
+    // 一条被上游或代理提前关掉的流不会送来任何终局事件，那时光标会永远闪，
+    // 而实际上已经没有人在生成了。
+    patch((message) => {
+      message.streaming = false
+      if (!message.text) message.text = '（生成结束，未收到内容）'
+    })
+  }
+}
+
 const confirmPending = async () => {
   const confirmationId = pendingConfirmationId.value
   if (!confirmationId || sending.value) return
@@ -173,6 +291,44 @@ const handleComposerKeydown = (event: KeyboardEvent) => {
     if (canSend.value) void submit()
   }
 }
+
+/**
+ * 每条消息的片段。按代码围栏切开，代码走代码框 + 复制按钮那条渲染路径。
+ *
+ * 用 computed 而不是在模板里逐条调用：切分是纯函数，但模板里的调用会在
+ * 每次任意响应式变化时对**所有**消息重跑一遍（发送状态一变就是一次全量），
+ * 而一条长回复的切分不该被输入框的每次按键带着算。
+ */
+const messageSegments = computed(() =>
+  new Map(messages.value.map((item) => [item.id, splitMessageSegments(item.text)]))
+)
+
+/** 刚复制成功的代码块，用于给按钮一个短暂的「已复制」反馈。 */
+const copiedCodeKey = ref<string | null>(null)
+let copiedResetTimer: ReturnType<typeof setTimeout> | null = null
+
+const copyCode = async (key: string, code: string) => {
+  const copied = await copyTextToClipboard(code)
+  if (!copied) {
+    // 剪贴板不可用（非 HTTPS、权限被关、旧浏览器）时给一句可执行的话，
+    // 而不是一个用户无法处置的失败提示。代码本身仍然在框里可以手动选中。
+    errorMessage.value = '浏览器未授权剪贴板，请手动选中代码复制'
+    return
+  }
+  errorMessage.value = ''
+  copiedCodeKey.value = key
+  if (copiedResetTimer) clearTimeout(copiedResetTimer)
+  copiedResetTimer = setTimeout(() => {
+    copiedCodeKey.value = null
+  }, 1600)
+}
+
+onBeforeUnmount(() => {
+  if (copiedResetTimer) clearTimeout(copiedResetTimer)
+  // 离开页面时中止仍在读的流：不中止的话那次上游请求会跑到底，费用照付而没有人
+  // 会收到结果，而读循环还持有一个 reader 不放。
+  streamAbort?.abort()
+})
 
 onMounted(() => {
   void loadAgentRelations()
@@ -252,6 +408,29 @@ onMounted(() => {
         <n-tag :type="selectedAgent?.enabled ? 'success' : 'default'">
           {{ selectedAgent?.enabled ? '运行中' : '待配置' }}
         </n-tag>
+        <!--
+          流式开关。需求 4 要求两条路径都存在，因此这里是一个可切换项而不是硬编码：
+          它也是唯一能在同一界面上核对「两条路径给出同一段回复」的地方，
+          并且在反向代理关掉分块传输时可以立刻切回去，确认问题在代理而不在项目。
+        -->
+        <div class="segmented" role="group" aria-label="回复取回方式">
+          <button
+            type="button"
+            :class="{ active: streamingEnabled }"
+            data-test="stream-mode-on"
+            :aria-pressed="streamingEnabled"
+            :disabled="sending"
+            @click="streamingEnabled = true"
+          >流式</button>
+          <button
+            type="button"
+            :class="{ active: !streamingEnabled }"
+            data-test="stream-mode-off"
+            :aria-pressed="!streamingEnabled"
+            :disabled="sending"
+            @click="streamingEnabled = false"
+          >非流式</button>
+        </div>
       </header>
 
       <div ref="transcript" class="transcript" role="log" aria-live="polite" aria-relevant="additions">
@@ -265,7 +444,36 @@ onMounted(() => {
             <span>{{ item.role === 'user' ? username : (item.agentId || 'Agent') }}</span>
             <n-tag v-if="item.status === 'awaiting_confirmation'" size="small" type="warning">等待确认</n-tag>
           </div>
-          <p>{{ item.text }}</p>
+          <div class="message-body">
+            <template v-for="(segment, index) in messageSegments.get(item.id) || []" :key="`${item.id}-${index}`">
+              <p v-if="segment.kind === 'text'">{{ segment.text }}</p>
+              <figure v-else class="code-block">
+                <figcaption>
+                  <span class="code-language">{{ segment.language || '代码' }}</span>
+                  <n-button
+                    size="tiny"
+                    quaternary
+                    :data-test="`copy-code-${item.id}-${index}`"
+                    :aria-label="`复制${segment.language || ''}代码`"
+                    @click="copyCode(`${item.id}-${index}`, segment.code)"
+                  >
+                    <template #icon><n-icon aria-hidden="true"><copy-outline /></n-icon></template>
+                    {{ copiedCodeKey === `${item.id}-${index}` ? '已复制' : '复制' }}
+                  </n-button>
+                </figcaption>
+                <pre><code>{{ segment.code }}</code></pre>
+              </figure>
+            </template>
+            <!--
+              流式气泡的进行提示。首字节之前没有任何片段，此时必须有东西说明
+              「在生成」——否则这条空气泡看起来像一次失败的发送。
+              aria-live 在外层 .transcript 上，这里只需要一句可读的文本。
+            -->
+            <p v-if="item.streaming" class="streaming-indicator" data-test="streaming-indicator">
+              <span class="streaming-cursor" aria-hidden="true"></span>
+              <span class="visually-hidden">正在生成回复</span>
+            </p>
+          </div>
           <div v-if="item.role === 'assistant' && item.status === 'completed'" class="response-status">
             <n-icon aria-hidden="true"><checkmark-circle-outline /></n-icon>主模型链已返回
           </div>
@@ -354,7 +562,33 @@ dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .user .message-meta { justify-content: flex-end; }
 .message-row p { box-sizing: border-box; margin: 0; padding: var(--space-3) var(--space-4); border: 1px solid var(--border-color); border-radius: var(--radius-sm); white-space: pre-wrap; overflow-wrap: anywhere; line-height: var(--line-height-relaxed); background: var(--card-bg-color); }
 .message-row.user p { border-color: var(--primary-color); color: white; background: var(--primary-color); }
+/* 一条回复里正文与代码块交替出现时用同一间距，否则代码框会贴在段落上，
+   看起来像正文的一部分——而那正是修这一处之前的样子。 */
+.message-body { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.code-block { margin: 0; border: 1px solid var(--border-color); border-radius: var(--radius-sm); overflow: hidden; background: var(--code-bg-color, color-mix(in srgb, var(--text-color) 4%, var(--card-bg-color))); }
+.code-block figcaption { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3); border-bottom: 1px solid var(--border-color); background: color-mix(in srgb, var(--text-color) 6%, transparent); }
+.code-language { color: var(--text-color-secondary); font-size: var(--font-size-sm); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+/* 代码横向自己滚，不让整页出现横向滚动条：一行很长的命令是常态，
+   而页面级横向滚动会把左侧关系面板也推出视口。 */
+.code-block pre { margin: 0; padding: var(--space-3); overflow-x: auto; }
+.code-block code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--font-size-sm); line-height: var(--line-height-relaxed); white-space: pre; }
+/* 用户气泡是实心主色底，代码框在其中要恢复成可读的浅底，否则深底叠深底
+   会让代码几乎看不见。 */
+.message-row.user .code-block { border-color: color-mix(in srgb, white 40%, var(--primary-color)); color: var(--text-color); background: var(--card-bg-color); }
+.message-row.user .code-block figcaption { background: color-mix(in srgb, var(--text-color) 6%, transparent); }
 .response-status { display: flex; align-items: center; gap: var(--space-1); margin-top: var(--space-2); color: var(--success-color-text); font-size: var(--font-size-sm); }
+/* 流式进行提示。首字节之前气泡里没有任何片段，此时这个光标是唯一说明
+   「在生成」的东西——没有它，一条空气泡看起来像一次失败的发送。 */
+.streaming-indicator { display: flex; align-items: center; margin: 0; min-height: 1.2em; }
+.streaming-cursor { display: inline-block; width: 2px; height: 1.1em; background: var(--primary-color); animation: streaming-blink 1s steps(2, start) infinite; }
+/* 屏幕阅读器专用文本：光标是纯装饰，读屏用户需要一句真正的话。
+   不用 display:none —— 那会让它同时对辅助技术消失。 */
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+@keyframes streaming-blink { to { opacity: 0; } }
+/* 尊重系统的减少动效偏好：闪烁光标是前庭/注意力敏感人群最常点名的一类动效。 */
+@media (prefers-reduced-motion: reduce) {
+  .streaming-cursor { animation: none; opacity: .6; }
+}
 .confirmation-box { gap: var(--space-3); margin-top: var(--space-2); padding: var(--space-3); border-left: 3px solid var(--warning-color); color: var(--warning-color-text); background: color-mix(in srgb, var(--warning-color) 9%, var(--card-bg-color)); }
 .confirmation-box span { min-width: 0; overflow-wrap: anywhere; }
 .pending { width: 72px; }

@@ -1,6 +1,6 @@
 """Hook event declarations need a matcher and a per-event switch.
 
-Claude Code and CC Switch both let one hook declaration say *which* tools an
+Mainstream Agent clients let one hook declaration say *which* tools an
 event applies to, and let an event be turned off without deleting the hook. This
 project dispatched every bound hook on every declared event with no filter, so:
 

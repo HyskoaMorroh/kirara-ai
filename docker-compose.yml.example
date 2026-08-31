@@ -88,6 +88,11 @@ services:
       - ./data:/app/data
     ports:
       - "8759:8080"
+    # 收尾要做的事不少：flush 记忆的异步写队列、把 `sending` 状态的投递隔离成
+    # `ambiguous`、关数据库、有序断开每个适配器的反向 WebSocket。Docker 默认只给
+    # 10 秒，超时直接 SIGKILL——那样容器里 `exec` 换来的 PID 1 就白费了：
+    # 信号到了，但没时间用完。而「重启后无缝恢复」的前提正是「上一次干净停下」。
+    stop_grace_period: 60s
     # 匿名 HTTP liveness；认证后的 readiness 由发布门禁单独验证。
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3).read(1)"]
@@ -124,3 +129,18 @@ services:
 #
 # 启动顺序不影响结果：Kirara 先起就等待接入；LLOneBot 先起就按自身间隔重连
 # 直到 Kirara 就绪。
+#
+# 但**重启后不会立刻显示「已连接」**，这是正常的：LLOneBot 要先冷启动 QQ 再完成
+# 登录，实测这一段超过 90 秒（QQ 版本变化时可能几分钟）。反向 WebSocket 由它主动
+# 拨入 Kirara，所以这段时间 Kirara 侧不可能有连接——面板上会显示「正在启动」，
+# readiness 给出「等待上游完成 QQ 冷启动与登录」。宽限期由适配器配置的
+# `initial_connect_grace_seconds` 控制（默认 180 秒），超过它仍无接入才转
+# 「等待连接」——那时才需要去查反向地址与 Token。
+#
+# 判断登录是否真的成功，看 LLOneBot 的日志而不是 Kirara 的面板：
+#
+#     docker compose logs -f llonebot | grep -E "QQ 登录成功|onQRCodeGetPicture|quickLoginWithUin"
+#
+# `quickLoginWithUin` 表示走了免扫码（`./QQ` 里有历史登录态）；
+# 出现 `onQRCodeGetPicture` 则需要去 8888 / 8889 的 WebUI 扫码，
+# 而那张码只有 120 秒有效期——先打开 WebUI 再看码，不要反过来。

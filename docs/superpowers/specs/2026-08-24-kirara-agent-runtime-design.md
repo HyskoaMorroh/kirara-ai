@@ -159,7 +159,7 @@ Provider 的输出；取消、总超时和静默超时必须停止当前请求�
 
 ## 6. Session、恢复点与审计
 
-Kirara 原生 Session 不等同于 CC Switch 的外部客户端会话浏览器。每个 Session 至少保存：
+Kirara 原生 Session 不等同于桌面端参考实现的外部客户端会话浏览器。每个 Session 至少保存：
 
 - 规范化渠道身份摘要、Agent、Workflow 和所有权；
 - 用户、助手、工具调用、工具结果和确认事件消息；
