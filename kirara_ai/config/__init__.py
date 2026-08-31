@@ -36,7 +36,14 @@ def ensure_data_directories(paths) -> None:
                 hint = "所在卷已无可用空间，请清理磁盘或更换挂载卷"
             elif error.errno == errno.EROFS:
                 hint = "所在卷为只读挂载，请以可写方式重新挂载"
-            elif error.errno in (errno.ENOTDIR, errno.EEXIST):
+            elif error.errno in (errno.ENOTDIR, errno.EEXIST, errno.ENOENT):
+                # 三个 errno 指向同一件事：路径中的某一级不是目录。
+                #
+                # 平台给的码不同：Linux 在「用文件当父目录」时给 ENOTDIR，
+                # Windows 给的是 **ENOENT**（它先解析整条路径，父级不是目录时
+                # 报「找不到路径」）。少了 ENOENT，同一个部署错误在 Windows 上
+                # 只会得到兜底的「请授予写权限」——那句建议指向一个不存在的
+                # 权限问题，操作者会去改 ACL，而要做的是移走那个同名文件。
                 hint = "路径中的某一级已被同名文件占用，请检查该路径"
             raise RuntimeError(
                 f"无法创建持久化目录 {path}：{error.strerror or error}；{hint}。"

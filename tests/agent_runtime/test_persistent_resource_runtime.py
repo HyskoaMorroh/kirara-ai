@@ -503,23 +503,54 @@ async def test_persisted_hook_can_block_context7_before_transport_call(tmp_path:
     assert not mcp.calls
 
 
+#: 一次真实下载留下的 Skill 产物根目录。
+#:
+#: 这份产物**刻意不进仓库**（`.gitignore` 的 `/.qa-*/`）：它是从真实来源下载的
+#: 第三方内容，体积与许可都不该由本仓库承担。因此下面两条用例依赖一个
+#: 「可能不存在」的路径，而它们**必须**在缺失时跳过而不是失败——
+#: 硬断言它存在等于要求每一台 CI runner 和每一个 clone 都先手工下载一遍，
+#: 而这两条用例真正要证明的事（真实下载的 Skill 能进运行时、正文能到达模型）
+#: 在没有那份下载物时根本无从证明。跳过是诚实的，失败是误报。
+#:
+#: 本机有产物时照常运行，因此这个证据链并没有消失，只是不再要求它无条件在场。
+_REAL_SKILL_ROOT = (
+    Path(__file__).resolve().parents[2]
+    / ".qa-real-agent-browser-20260827"
+    / "resources"
+    / "installed"
+    / "skill.c914025169da0bca"
+    / "1.0.0"
+)
+
+
+def _require_real_downloaded_skill() -> Path:
+    """返回真实下载的 Skill 目录；不存在时跳过本用例。
+
+    两个文件都要在：`manifest.json` 给出来源与内容摘要，`SKILL.md` 是正文。
+    只有一个在说明那次下载没写完，那种半份产物同样不能用来断言任何事。
+    """
+    missing = [
+        name
+        for name in ("manifest.json", "SKILL.md")
+        if not (_REAL_SKILL_ROOT / name).is_file()
+    ]
+    if missing:
+        pytest.skip(
+            "缺少真实下载的 Skill 产物"
+            f"（{_REAL_SKILL_ROOT} 下没有 {', '.join(missing)}）。"
+            "该目录按 .gitignore 的 /.qa-*/ 刻意不随仓库分发；"
+            "需要这条证据时先在本机走一次真实下载。"
+        )
+    return _REAL_SKILL_ROOT
+
+
 @pytest.mark.asyncio
 @pytest.mark.integration
 @pytest.mark.usefixtures("creator_principal")
 async def test_real_downloaded_agent_browser_skill_enters_persistent_runtime(tmp_path: Path):
     """Prove the server-downloaded Skill, rather than a test stub, reaches the model."""
 
-    repo_root = Path(__file__).resolve().parents[2]
-    downloaded_root = (
-        repo_root
-        / ".qa-real-agent-browser-20260827"
-        / "resources"
-        / "installed"
-        / "skill.c914025169da0bca"
-        / "1.0.0"
-    )
-    assert (downloaded_root / "manifest.json").is_file()
-    assert (downloaded_root / "SKILL.md").is_file()
+    downloaded_root = _require_real_downloaded_skill()
 
     downloaded_manifest = json.loads(
         (downloaded_root / "manifest.json").read_text(encoding="utf-8")
@@ -696,16 +727,7 @@ async def test_calling_the_real_skill_tool_returns_the_downloaded_body(tmp_path:
     并断言第二轮请求的 tool 消息里出现了正文中的具体命令。
     """
 
-    repo_root = Path(__file__).resolve().parents[2]
-    downloaded_root = (
-        repo_root
-        / ".qa-real-agent-browser-20260827"
-        / "resources"
-        / "installed"
-        / "skill.c914025169da0bca"
-        / "1.0.0"
-    )
-    assert (downloaded_root / "SKILL.md").is_file()
+    downloaded_root = _require_real_downloaded_skill()
     downloaded_skill = (downloaded_root / "SKILL.md").read_text(encoding="utf-8")
 
     lifecycle = ResourceLifecycleService(tmp_path / "vps-data")

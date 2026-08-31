@@ -1454,7 +1454,13 @@ def test_set_rolls_back_version_targets_but_preserves_unrelated_files_when_uv_lo
     def destructive_uv_lock(*args, **kwargs):
         (tmp_path / "uv.lock").write_text("rewritten\n", encoding="utf-8")
         (tmp_path / "README.md").unlink()
-        (tmp_path / "generated-by-uv.txt").write_text("new\n", encoding="utf-8")
+        # `newline=""` 关掉文本模式的换行转换：不加它时 Windows 会把 LF 写成
+        # CRLF，Linux 不会，于是下面那个期望值只能对一个平台成立。这条用例要
+        # 证明的是「回滚不动无关的新文件」，不是换行处理——让写入跨平台一致，
+        # 期望值就不必猜平台。
+        (tmp_path / "generated-by-uv.txt").write_text(
+            "new\n", encoding="utf-8", newline=""
+        )
         return type("Result", (), {"returncode": 9})()
 
     monkeypatch.setattr(version_script.subprocess, "run", destructive_uv_lock)
@@ -1468,7 +1474,10 @@ def test_set_rolls_back_version_targets_but_preserves_unrelated_files_when_uv_lo
         if path.is_file() and path.name != version_script.VERSION_LOCK_NAME
     }
     expected = dict(originals)
-    expected[tmp_path / "generated-by-uv.txt"] = b"new\r\n"
+    # 写入用了 `newline=""`，因此两个平台上都是单个 LF。早前这里硬写 CRLF，
+    # 那个等式只在 Windows 的换行转换下成立，Linux CI 上必然失败——
+    # 而失败点与这条用例要验的东西毫无关系。
+    expected[tmp_path / "generated-by-uv.txt"] = b"new\n"
     assert restored == expected
 
 

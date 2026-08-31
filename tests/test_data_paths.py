@@ -49,8 +49,17 @@ def test_ensure_data_directories_is_idempotent(tmp_path: Path):
 
 
 def test_ensure_data_directories_reports_the_path_and_a_remediation(tmp_path: Path):
-    # A file where a directory is expected is the portable stand-in for
-    # "this path cannot be created", and reproduces on Windows too.
+    """失败必须说清「哪个路径」与「下一步做什么」。
+
+    「用文件当父目录」是「这个路径建不出来」的可移植替身，但**平台给的 errno
+    不同**：Linux 报 `ENOTDIR`，Windows 报 `ENOENT`（它先解析整条路径，父级不是
+    目录时说「找不到路径」）。因此这里断言的是**处置内容**而不是某一个平台的
+    错误码分支——早前断言「权限」或「写」在 Linux 上必然失败：那条路径根本不是
+    权限问题，而兜底文案恰好只提权限。
+
+    断言「同名文件占用」是两个平台上都成立的那句话，也正是操作者该做的事
+    （移走那个文件），而不是去改 ACL。
+    """
     blocker = tmp_path / "data"
     blocker.write_text("not a directory", encoding="utf-8")
 
@@ -59,8 +68,10 @@ def test_ensure_data_directories_reports_the_path_and_a_remediation(tmp_path: Pa
 
     message = str(error.value)
     assert str(blocker) in message
-    # The message has to say what to do, not just that something failed.
-    assert "权限" in message or "写" in message
+    # 说清下一步动作，而不只是「出错了」。
+    assert "同名文件占用" in message
+    # 绝不能落到兜底的权限建议上：那会把人指向一个不存在的权限问题。
+    assert "请为该路径授予当前用户的写权限" not in message
 
 
 def test_ensure_data_directories_rejects_a_path_that_exists_as_a_file(tmp_path: Path):
