@@ -117,7 +117,16 @@ class CircuitBreaker:
         error_rate_threshold: float = 0.5,
         min_requests: int = 10,
         recovery_timeout_seconds: float = 30.0,
-        recovery_success_threshold: int = 1,
+        # 与 `LLMBackendConfig.circuit_recovery_success_threshold` 的默认值对齐。
+        #
+        # 此前这里是 1，而配置字段是 2。正常路径上不冲突（`_initialize_resilience_state`
+        # 按配置显式构造），但 `get_resilience_status()` 的
+        # `setdefault(name, CircuitBreaker())` 无参兜底拿到的是 1——同一个参数在同一个
+        # 进程里有两个值，而读面板的人无从判断哪个在生效。
+        #
+        # 一个参数只能有一个默认值，且该由配置模型持有（那是用户看得见、改得到的
+        # 地方）；构造函数与它对齐，不各自留一份。
+        recovery_success_threshold: int = 2,
         history_size: int = 20,
         clock: Callable[[], float] = time.monotonic,
     ):
@@ -141,6 +150,13 @@ class CircuitBreaker:
         self._opened_at: Optional[float] = None
         self._half_open_probe_in_flight = False
         self._recovery_successes = 0
+        # 已 acquire 但还没记录结果的请求数——即「活跃连接」。
+        #
+        # 需求 8 要求队列下方汇总活跃连接数。它必须在这里计，不能靠「配置了几个
+        # 供应商」推断：那个数字是静态的，回答不了「此刻有多少请求正在路上」。
+        # 三个记录方法（成功 / 失败 / 取消）都要递减，漏一个就会单调上涨，
+        # 而面板上那会表现为「连接数只增不减」——看起来像连接泄漏。
+        self._in_flight = 0
         self._transitions: Deque[dict[str, Any]] = deque(
             maxlen=CIRCUIT_TRANSITION_HISTORY
         )
@@ -213,6 +229,9 @@ class CircuitBreaker:
                 if self._half_open_probe_in_flight:
                     return False
                 self._half_open_probe_in_flight = True
+            # 只在真的放行之后才计入在途：被熔断挡回的请求从未发出，
+            # 把它算进活跃连接会让一个完全被跳过的供应商显示成正在承载流量。
+            self._in_flight += 1
             return True
 
     def _should_open(self) -> bool:
@@ -226,6 +245,7 @@ class CircuitBreaker:
     def record_success(self, now: Optional[float] = None) -> None:
         with self._lock:
             timestamp = self._now(now)
+            self._release_in_flight()
             current = self._refresh_state(timestamp)
             if current == CircuitState.OPEN:
                 return
@@ -255,6 +275,7 @@ class CircuitBreaker:
     def record_failure(self, now: Optional[float] = None) -> None:
         with self._lock:
             timestamp = self._now(now)
+            self._release_in_flight()
             previous = self._state
             self._outcomes.append(False)
             self._consecutive_failures += 1
@@ -274,7 +295,24 @@ class CircuitBreaker:
     def record_cancelled(self) -> None:
         """Release an acquired probe without changing health statistics."""
         with self._lock:
+            self._release_in_flight()
             self._half_open_probe_in_flight = False
+
+    def _release_in_flight(self) -> None:
+        """Drop one in-flight request, never below zero.
+
+        钳到 0 而不是允许负数：调用方多记一次结果（重试路径上很容易发生）
+        会让计数变成负值，而「活跃连接 -1」在面板上无法解释。
+        少记一次的后果是计数偏高，那至少还是一个可信的方向。
+        """
+        if self._in_flight > 0:
+            self._in_flight -= 1
+
+    @property
+    def in_flight(self) -> int:
+        """Requests acquired but not yet resolved."""
+        with self._lock:
+            return self._in_flight
 
     def snapshot(self, now: Optional[float] = None) -> dict[str, Any]:
         with self._lock:
@@ -473,3 +511,82 @@ class FailoverExecutionError(RuntimeError):
         self.attempts = list(attempts)
         self.cause = cause
         super().__init__(message)
+
+
+@dataclass(frozen=True)
+class ResilienceSummary:
+    """Queue-level runtime figures shown under the failover queue (需求 8).
+
+    参考界面在队列下方汇总活跃连接、总请求数、成功率与运行时间，理由是修改策略时
+    要同步观察服务表现——逐行健康状态回答不了「刚把 P1 换掉之后整体好了没」。
+
+    四条呈现纪律，每条都对应一种会误导读者的写法：
+
+    * **成功率没有样本时是 ``None``，不是 1.0 也不是 0。** 刚启动时写 100% 会让人
+      以为链路已经验证过；写 0% 更糟，看起来像全线故障。
+    * **``total_requests`` 是熔断器窗口内的样本数，不是历史总量。** 窗口有界
+      （至少容纳 ``min_requests``），因此 ``sample_window`` 一并给出——不说明的话
+      读者会拿它与 LLM 追踪页的请求总数对比，然后认为其中一个错了。
+    * **降级与熔断分开计数。** 半开是「正在试探、仍在服务」，熔断是「被跳过」；
+      合并成一个「不正常」计数之后，运维无法判断此刻还有几家在真的承接流量。
+    * **``uptime_seconds`` 是进程运行时长**，与「这个供应商健康多久了」不是一回事。
+    """
+
+    active_connections: int
+    total_requests: int
+    success_rate: Optional[float]
+    uptime_seconds: float
+    total_providers: int
+    healthy_providers: int
+    probing_providers: int
+    tripped_providers: int
+    sample_window: int
+
+    @classmethod
+    def from_breakers(
+        cls,
+        breakers: Mapping[str, "CircuitBreaker"],
+        *,
+        uptime_seconds: float,
+        now: Optional[float] = None,
+    ) -> "ResilienceSummary":
+        """Aggregate one summary across every provider's breaker."""
+        active = 0
+        requests = 0
+        successes = 0
+        healthy = probing = tripped = 0
+        window = 0
+        for breaker in breakers.values():
+            snapshot = breaker.snapshot(now)
+            active += breaker.in_flight
+            sampled = int(snapshot.get("requests") or 0)
+            requests += sampled
+            # 成功数由错误率反推：熔断器只保留结果窗口，不单独记成功计数。
+            # 反推而不是新增一个计数器，是为了让这两个数字**永远同源**——
+            # 各记一份迟早出现「成功数 + 失败数 ≠ 总数」。
+            error_rate = float(snapshot.get("error_rate") or 0.0)
+            successes += round(sampled * (1.0 - error_rate))
+            state = str(snapshot.get("state") or "")
+            if state == CircuitState.OPEN.value:
+                tripped += 1
+            elif state == CircuitState.HALF_OPEN.value:
+                probing += 1
+            else:
+                healthy += 1
+            window = max(window, breaker.min_requests)
+        return cls(
+            active_connections=active,
+            total_requests=requests,
+            # 没有样本时不给数字。这一条是整个汇总里最容易写错的地方。
+            success_rate=(successes / requests) if requests else None,
+            uptime_seconds=max(0.0, float(uptime_seconds)),
+            total_providers=len(breakers),
+            healthy_providers=healthy,
+            probing_providers=probing,
+            tripped_providers=tripped,
+            sample_window=window,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize with stable keys; renaming one is an API break."""
+        return asdict(self)

@@ -30,6 +30,7 @@ import {
 import {
   ArchiveOutline,
   BuildOutline,
+  CheckmarkCircleOutline,
   CloudDownloadOutline,
   CloudUploadOutline,
   EyeOutline,
@@ -282,6 +283,37 @@ const enable = (resource: ManagedResource) => {
         await run(() => enableResource(resource.resource_id, true), '启用资源失败')
         message.success('资源已启用')
         await loadResources()
+      } finally {
+        busyResourceId.value = ''
+      }
+    }
+  })
+}
+
+/**
+ * 从目录页直接启用一个刚装好的资源。
+ *
+ * 复用 `enable()` 的确认与刷新流程，只是入口在目录页——用户装完就在原地完成
+ * 第二步，不必自己想起「还要去资源列表点启用」。此前那一步没有任何指引，
+ * 而绑定区的灰按钮提示又在另一个页面上，两处不连通就是现场那个「全是灰的」。
+ *
+ * 启用之后重取目录：`installed_resource_id` 与 `enabled` 都来自服务端，
+ * 本地改一个布尔会让界面与真实状态短暂不符，而那个不符恰好发生在用户
+ * 最想确认「到底成没成」的时刻。
+ */
+const enableInstalledCatalogItem = (item: CatalogItem) => {
+  const resourceId = item.installed_resource_id
+  if (!resourceId) return
+  ask({
+    title: '确认启用资源',
+    content: `启用 ${resourceId} 后，Agent 可能在后续对话中读取它的固定版本和权限。`,
+    positiveText: '启用',
+    onPositiveClick: async () => {
+      busyResourceId.value = resourceId
+      try {
+        await run(() => enableResource(resourceId, true), '启用资源失败')
+        message.success('资源已启用，现在可以在 Agent 里绑定它')
+        await Promise.all([loadResources(), searchRemote(remoteOffset.value)])
       } finally {
         busyResourceId.value = ''
       }
@@ -1547,7 +1579,26 @@ onBeforeUnmount(() => {
             </div>
             <n-space class="catalog-result-actions">
               <n-button quaternary circle aria-label="查看目录资源" @click="openCatalogDetail(item)"><template #icon><n-icon aria-hidden="true"><eye-outline /></n-icon></template></n-button>
-              <n-button type="primary" size="small" :disabled="item.installed" :aria-label="item.installed ? '资源已安装' : '安装目录资源'" @click="installCatalog(item)"><template #icon><n-icon aria-hidden="true"><cloud-download-outline /></n-icon></template>{{ item.installed ? (item.enabled ? '已启用' : '已安装') : '安装' }}</n-button>
+              <!--
+                「已安装但未启用」必须给出下一步动作，而不是一个灰按钮。
+
+                安装后资源一律是 `enabled=false, confirmation_required=true`
+                （见 `resource_lifecycle.install_archive`），这是刻意的安全设计：
+                装包不自动跑脚本，启用要显式确认。但此前这里只把按钮置灰改成
+                「已安装」，而「请先在资源管理中启用并确认」这句提示出现在
+                **另一个页面**（Agent 编辑器的绑定区）。两处不连通，用户装完就卡住，
+                以为功能没做——现场报障正是「五个添加按钮全是灰的」。
+              -->
+              <n-button
+                v-if="item.installed && !item.enabled && item.installed_resource_id"
+                type="warning"
+                size="small"
+                :loading="busyResourceId === item.installed_resource_id"
+                data-test="catalog-enable"
+                aria-label="启用已安装的目录资源"
+                @click="enableInstalledCatalogItem(item)"
+              ><template #icon><n-icon aria-hidden="true"><checkmark-circle-outline /></n-icon></template>启用</n-button>
+              <n-button v-else type="primary" size="small" :disabled="item.installed" :aria-label="item.installed ? '资源已启用' : '安装目录资源'" @click="installCatalog(item)"><template #icon><n-icon aria-hidden="true"><cloud-download-outline /></n-icon></template>{{ item.installed ? '已启用' : '安装' }}</n-button>
             </n-space>
           </article>
         </div>

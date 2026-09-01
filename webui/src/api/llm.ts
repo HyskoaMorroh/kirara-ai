@@ -221,6 +221,41 @@ export interface AutoDetectScheduleResponse {
   backends: AutoDetectScheduleRow[]
 }
 
+/**
+ * 故障转移队列的运行态汇总（需求 8）。
+ *
+ * 逐行健康状态回答不了「刚把 P1 换掉之后整体好了没」，这份汇总回答那个问题。
+ * 与逐行数据在**同一次响应**里返回，因此两者永远同源——分两次请求会让页面上出现
+ * 「队列有 3 行、汇总说 2 家」这种自相矛盾的瞬间。
+ */
+export interface ResilienceSummary {
+  /** 已发出但还没有结果的请求数。被熔断挡回的请求不计入。 */
+  active_connections: number
+  /**
+   * 熔断器窗口内的样本数，**不是历史总量**。
+   *
+   * 窗口有界（至少容纳 `sample_window`），它回答「最近的表现」；
+   * 历史总量在 LLM 追踪页。两者不相等是正常的，界面必须说清这一点，
+   * 否则读者会认为其中一个是错的。
+   */
+  total_requests: number
+  /**
+   * 成功率。**没有样本时是 `null`，不是 1 也不是 0。**
+   *
+   * 刚启动时显示 100% 会让人以为链路已经验证过；显示 0% 更糟，看起来像全线故障。
+   */
+  success_rate: number | null
+  /** 进程运行时长（秒）。与「某个供应商健康了多久」不是一回事。 */
+  uptime_seconds: number
+  total_providers: number
+  /** 三态分开计数：半开是「正在试探、仍在服务」，熔断是「被跳过」，处置不同。 */
+  healthy_providers: number
+  probing_providers: number
+  tripped_providers: number
+  /** `total_requests` 的窗口容量，用于说明那个数字的口径。 */
+  sample_window: number
+}
+
 export interface ProviderResilienceRow {
   model: string
   provider: string
@@ -463,7 +498,10 @@ export const llmApi = {
    * 由模型管理页的容错状态面板消费。
    */
   getResilienceStatus(signal?: AbortSignal) {
-    return http.get<{ data: ProviderResilienceRow[] }>('/llm/resilience/status', { signal })
+    return http.get<{
+      data: ProviderResilienceRow[]
+      summary: ResilienceSummary
+    }>('/llm/resilience/status', { signal })
   },
 
   /**

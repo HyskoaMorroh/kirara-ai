@@ -64,6 +64,11 @@ _BUILTINS: tuple[dict[str, Any], ...] = (
         "entry": "server.json",
         "source": "catalog://mcp/context7",
         "tags": ["documentation", "debugging", "stdio"],
+        # 与其余 stdio 预设同一条纪律：说清靠什么拉起。
+        # context7 是一个 npm 包，运行时镜像不装 Node——缺这条声明时，
+        # 用户点「启用」只会得到「连接失败 / 已连接 0 / 工具数 0」，
+        # 而界面上没有任何线索指向真正的原因。
+        "runtime_dependency": "npx",
         "content": {
             "id": "context7",
             "name": "Context7",
@@ -181,7 +186,332 @@ _BUILTINS: tuple[dict[str, Any], ...] = (
             }
         },
     },
+    {
+        "catalog_id": "mcp:fetch",
+        "type": "mcp",
+        "name": "Fetch",
+        "description": "抓取网页并转成适合模型阅读的文本，用于让 AI 读取在线内容。",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "server.json",
+        "source": "catalog://mcp/fetch",
+        "tags": ["web", "fetch", "stdio"],
+        # 这台机器上靠什么把它拉起来。
+        #
+        # **预置一个模板不等于那个 MCP 能跑起来**：`uvx` 与 `npx` 都不是本项目的
+        # 依赖，运行时镜像两个都没装。界面据此显示「模板已填好，但这台机器缺 uvx」,
+        # 而不是让用户点了启用之后看到一个连不上的服务器——现场那句
+        # 「连接失败 / 已连接 0 / 工具数 0」正是缺这条说明的形态。
+        "runtime_dependency": "uvx",
+        "content": {
+            "id": "fetch",
+            "name": "Fetch",
+            "server": {
+                "type": "stdio",
+                "command": "uvx",
+                "args": ["mcp-server-fetch"],
+                # env 一律留空：模板会被写进 `data/resources/` 并可能随备份导出，
+                # 预填一个 token 会跟着走。需要密钥的服务器在描述里说明要填什么。
+                "env": {},
+            },
+            "apps": {
+                "claude": False,
+                "claude-desktop": False,
+                "codex": True,
+                "gemini": False,
+                "grokbuild": False,
+                "opencode": False,
+                "openclaw": False,
+                "hermes": False,
+            },
+            "description": "抓取网页并转成适合模型阅读的文本，用于让 AI 读取在线内容。",
+            "tags": ["web", "fetch", "stdio"],
+            "homepage": "https://github.com/modelcontextprotocol/servers",
+            "metadata": {"catalog_id": "mcp:fetch", "managed": True},
+        },
+    },
+    {
+        "catalog_id": "mcp:time",
+        "type": "mcp",
+        "name": "Time",
+        "description": "提供当前时间与时区换算，避免模型凭训练数据猜测日期。",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "server.json",
+        "source": "catalog://mcp/time",
+        "tags": ["time", "timezone", "stdio"],
+        # 这台机器上靠什么把它拉起来。
+        #
+        # **预置一个模板不等于那个 MCP 能跑起来**：`uvx` 与 `npx` 都不是本项目的
+        # 依赖，运行时镜像两个都没装。界面据此显示「模板已填好，但这台机器缺 uvx」,
+        # 而不是让用户点了启用之后看到一个连不上的服务器——现场那句
+        # 「连接失败 / 已连接 0 / 工具数 0」正是缺这条说明的形态。
+        "runtime_dependency": "uvx",
+        "content": {
+            "id": "time",
+            "name": "Time",
+            "server": {
+                "type": "stdio",
+                "command": "uvx",
+                "args": ["mcp-server-time"],
+                # env 一律留空：模板会被写进 `data/resources/` 并可能随备份导出，
+                # 预填一个 token 会跟着走。需要密钥的服务器在描述里说明要填什么。
+                "env": {},
+            },
+            "apps": {
+                "claude": False,
+                "claude-desktop": False,
+                "codex": True,
+                "gemini": False,
+                "grokbuild": False,
+                "opencode": False,
+                "openclaw": False,
+                "hermes": False,
+            },
+            "description": "提供当前时间与时区换算，避免模型凭训练数据猜测日期。",
+            "tags": ["time", "timezone", "stdio"],
+            "homepage": "https://github.com/modelcontextprotocol/servers",
+            "metadata": {"catalog_id": "mcp:time", "managed": True},
+        },
+    },
+    {
+        "catalog_id": "mcp:memory",
+        "type": "mcp",
+        "name": "Knowledge Graph Memory",
+        "description": "以知识图谱形式保存与检索长期事实，跨会话可用。",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "server.json",
+        "source": "catalog://mcp/memory",
+        "tags": ["memory", "knowledge-graph", "stdio"],
+        # 这台机器上靠什么把它拉起来。
+        #
+        # **预置一个模板不等于那个 MCP 能跑起来**：`uvx` 与 `npx` 都不是本项目的
+        # 依赖，运行时镜像两个都没装。界面据此显示「模板已填好，但这台机器缺 npx」,
+        # 而不是让用户点了启用之后看到一个连不上的服务器——现场那句
+        # 「连接失败 / 已连接 0 / 工具数 0」正是缺这条说明的形态。
+        "runtime_dependency": "npx",
+        "content": {
+            "id": "memory",
+            "name": "Knowledge Graph Memory",
+            "server": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-memory"],
+                # env 一律留空：模板会被写进 `data/resources/` 并可能随备份导出，
+                # 预填一个 token 会跟着走。需要密钥的服务器在描述里说明要填什么。
+                "env": {},
+            },
+            "apps": {
+                "claude": False,
+                "claude-desktop": False,
+                "codex": True,
+                "gemini": False,
+                "grokbuild": False,
+                "opencode": False,
+                "openclaw": False,
+                "hermes": False,
+            },
+            "description": "以知识图谱形式保存与检索长期事实，跨会话可用。",
+            "tags": ["memory", "knowledge-graph", "stdio"],
+            "homepage": "https://github.com/modelcontextprotocol/servers",
+            "metadata": {"catalog_id": "mcp:memory", "managed": True},
+        },
+    },
+    {
+        "catalog_id": "mcp:sequential-thinking",
+        "type": "mcp",
+        "name": "Sequential Thinking",
+        "description": "把复杂问题拆成可回溯的思考步骤，用于多步推理调试。",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "server.json",
+        "source": "catalog://mcp/sequential-thinking",
+        "tags": ["reasoning", "debugging", "stdio"],
+        # 这台机器上靠什么把它拉起来。
+        #
+        # **预置一个模板不等于那个 MCP 能跑起来**：`uvx` 与 `npx` 都不是本项目的
+        # 依赖，运行时镜像两个都没装。界面据此显示「模板已填好，但这台机器缺 npx」,
+        # 而不是让用户点了启用之后看到一个连不上的服务器——现场那句
+        # 「连接失败 / 已连接 0 / 工具数 0」正是缺这条说明的形态。
+        "runtime_dependency": "npx",
+        "content": {
+            "id": "sequential-thinking",
+            "name": "Sequential Thinking",
+            "server": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+                # env 一律留空：模板会被写进 `data/resources/` 并可能随备份导出，
+                # 预填一个 token 会跟着走。需要密钥的服务器在描述里说明要填什么。
+                "env": {},
+            },
+            "apps": {
+                "claude": False,
+                "claude-desktop": False,
+                "codex": True,
+                "gemini": False,
+                "grokbuild": False,
+                "opencode": False,
+                "openclaw": False,
+                "hermes": False,
+            },
+            "description": "把复杂问题拆成可回溯的思考步骤，用于多步推理调试。",
+            "tags": ["reasoning", "debugging", "stdio"],
+            "homepage": "https://github.com/modelcontextprotocol/servers",
+            "metadata": {"catalog_id": "mcp:sequential-thinking", "managed": True},
+        },
+    },
+    {
+        "catalog_id": "mcp:filesystem",
+        "type": "mcp",
+        "name": "Filesystem",
+        "description": "读写指定目录下的文件。启用前必须在 args 末尾追加允许访问的目录。",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "server.json",
+        "source": "catalog://mcp/filesystem",
+        "tags": ["filesystem", "files", "stdio"],
+        # 这台机器上靠什么把它拉起来。
+        #
+        # **预置一个模板不等于那个 MCP 能跑起来**：`uvx` 与 `npx` 都不是本项目的
+        # 依赖，运行时镜像两个都没装。界面据此显示「模板已填好，但这台机器缺 npx」,
+        # 而不是让用户点了启用之后看到一个连不上的服务器——现场那句
+        # 「连接失败 / 已连接 0 / 工具数 0」正是缺这条说明的形态。
+        "runtime_dependency": "npx",
+        "content": {
+            "id": "filesystem",
+            "name": "Filesystem",
+            "server": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+                # env 一律留空：模板会被写进 `data/resources/` 并可能随备份导出，
+                # 预填一个 token 会跟着走。需要密钥的服务器在描述里说明要填什么。
+                "env": {},
+            },
+            "apps": {
+                "claude": False,
+                "claude-desktop": False,
+                "codex": True,
+                "gemini": False,
+                "grokbuild": False,
+                "opencode": False,
+                "openclaw": False,
+                "hermes": False,
+            },
+            "description": "读写指定目录下的文件。启用前必须在 args 末尾追加允许访问的目录。",
+            "tags": ["filesystem", "files", "stdio"],
+            "homepage": "https://github.com/modelcontextprotocol/servers",
+            "metadata": {"catalog_id": "mcp:filesystem", "managed": True},
+        },
+    },
+    {
+        "catalog_id": "mcp:chrome-devtools",
+        "type": "mcp",
+        "name": "Chrome DevTools",
+        "description": "驱动 Chrome 检查 DOM、控制台与网络请求，用于前端调试。",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "server.json",
+        "source": "catalog://mcp/chrome-devtools",
+        "tags": ["browser", "devtools", "stdio"],
+        # 这台机器上靠什么把它拉起来。
+        #
+        # **预置一个模板不等于那个 MCP 能跑起来**：`uvx` 与 `npx` 都不是本项目的
+        # 依赖，运行时镜像两个都没装。界面据此显示「模板已填好，但这台机器缺 npx」,
+        # 而不是让用户点了启用之后看到一个连不上的服务器——现场那句
+        # 「连接失败 / 已连接 0 / 工具数 0」正是缺这条说明的形态。
+        "runtime_dependency": "npx",
+        "content": {
+            "id": "chrome-devtools",
+            "name": "Chrome DevTools",
+            "server": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "chrome-devtools-mcp@latest"],
+                # env 一律留空：模板会被写进 `data/resources/` 并可能随备份导出，
+                # 预填一个 token 会跟着走。需要密钥的服务器在描述里说明要填什么。
+                "env": {},
+            },
+            "apps": {
+                "claude": False,
+                "claude-desktop": False,
+                "codex": True,
+                "gemini": False,
+                "grokbuild": False,
+                "opencode": False,
+                "openclaw": False,
+                "hermes": False,
+            },
+            "description": "驱动 Chrome 检查 DOM、控制台与网络请求，用于前端调试。",
+            "tags": ["browser", "devtools", "stdio"],
+            "homepage": "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+            "metadata": {"catalog_id": "mcp:chrome-devtools", "managed": True},
+        },
+    },
+    {
+        "catalog_id": "mcp:playwright",
+        "type": "mcp",
+        "name": "Playwright",
+        "description": "以可访问性树驱动浏览器，完成导航、填表与截图。",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "server.json",
+        "source": "catalog://mcp/playwright",
+        "tags": ["browser", "automation", "stdio"],
+        # 这台机器上靠什么把它拉起来。
+        #
+        # **预置一个模板不等于那个 MCP 能跑起来**：`uvx` 与 `npx` 都不是本项目的
+        # 依赖，运行时镜像两个都没装。界面据此显示「模板已填好，但这台机器缺 npx」,
+        # 而不是让用户点了启用之后看到一个连不上的服务器——现场那句
+        # 「连接失败 / 已连接 0 / 工具数 0」正是缺这条说明的形态。
+        "runtime_dependency": "npx",
+        "content": {
+            "id": "playwright",
+            "name": "Playwright",
+            "server": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "@playwright/mcp@latest"],
+                # env 一律留空：模板会被写进 `data/resources/` 并可能随备份导出，
+                # 预填一个 token 会跟着走。需要密钥的服务器在描述里说明要填什么。
+                "env": {},
+            },
+            "apps": {
+                "claude": False,
+                "claude-desktop": False,
+                "codex": True,
+                "gemini": False,
+                "grokbuild": False,
+                "opencode": False,
+                "openclaw": False,
+                "hermes": False,
+            },
+            "description": "以可访问性树驱动浏览器，完成导航、填表与截图。",
+            "tags": ["browser", "automation", "stdio"],
+            "homepage": "https://github.com/microsoft/playwright-mcp",
+            "metadata": {"catalog_id": "mcp:playwright", "managed": True},
+        },
+    },
+    {
+        "catalog_id": "skill:agent-browser",
+        "type": "skill",
+        "name": "Agent Browser",
+        "description": "浏览器自动化技能：导航、填表、点击、截图与数据提取。",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "https://github.com/vercel-labs/agent-browser",
+        # skill 不走内置文件写入，而是从 GitHub 真实下载（见 `install()`）。
+        # 格式必须是 `owner/repo:directory`——`install()` 直接 split，
+        # 格式不对会在用户点了安装之后才抛 ValueError。
+        "source_key": "vercel-labs/agent-browser:skills/agent-browser",
+        "tags": ["browser", "automation", "skill"],
+        "installs": 763401,
+    },
 )
+
 
 
 class ResourceCatalogError(ResourceStateError):

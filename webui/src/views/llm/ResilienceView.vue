@@ -19,11 +19,18 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { NAlert, NButton, NCard, NPopconfirm, NTag, useMessage } from 'naive-ui'
 
-import { llmApi, type ProviderResilienceRow } from '@/api/llm'
+import { llmApi, type ProviderResilienceRow, type ResilienceSummary } from '@/api/llm'
 
 const message = useMessage()
 
 const rows = ref<ProviderResilienceRow[]>([])
+/**
+ * 队列运行态汇总（需求 8）。
+ *
+ * `null` 表示还没读到——与「读到了但全是 0」必须分开：后者是一个论断
+ *（「没有任何请求」），前者只是还没有数据。
+ */
+const summary = ref<ResilienceSummary | null>(null)
 const loading = ref(true)
 const errorMessage = ref('')
 const lastUpdated = ref<Date | null>(null)
@@ -68,6 +75,27 @@ const queues = computed(() => {
       })
     }))
     .sort((a, b) => (a.model < b.model ? -1 : a.model > b.model ? 1 : 0))
+})
+
+/**
+ * 成功率文本。
+ *
+ * `null` 显示成「暂无样本」而不是 0% 或 100%：前者看起来像全线故障，
+ * 后者让人以为链路已经验证过，而事实是还没有任何请求。
+ */
+const successRateText = computed(() => {
+  const rate = summary.value?.success_rate
+  if (rate === null || rate === undefined) return '暂无样本'
+  return `${Math.round(rate * 100)}%`
+})
+
+/** 运行时长。取整到最大的有意义单位，避免「10920 秒」这种读不出量级的数字。 */
+const uptimeText = computed(() => {
+  const seconds = summary.value?.uptime_seconds ?? 0
+  if (seconds < 60) return `${Math.round(seconds)} 秒`
+  if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟`
+  if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} 小时`
+  return `${(seconds / 86400).toFixed(1)} 天`
 })
 
 const degradedCount = computed(
@@ -209,6 +237,7 @@ async function load(showSpinner = false) {
   try {
     const response = await llmApi.getResilienceStatus()
     rows.value = response.data || []
+    summary.value = response.summary ?? null
     lastUpdated.value = new Date()
     errorMessage.value = ''
   } catch (error) {
@@ -309,6 +338,59 @@ onBeforeUnmount(() => {
     >
       有 {{ degradedCount }} 个供应商不处于正常状态；熔断期间该供应商会被跳过。
     </n-alert>
+
+    <!--
+      队列运行态汇总（需求 8）。
+      放在队列**上方**而不是下方：改策略的人先看整体表现，再决定动哪一行；
+      放下方要滚过整张队列才看到，而队列在多模型部署上很长。
+    -->
+    <section
+      v-if="summary && !loading"
+      class="summary-strip"
+      aria-label="队列运行态汇总"
+      data-test="resilience-summary"
+    >
+      <div class="summary-item">
+        <span class="summary-label">活跃连接</span>
+        <strong class="summary-value" data-test="summary-active">
+          {{ summary.active_connections }}
+        </strong>
+        <small>已发出未返回的请求</small>
+      </div>
+      <div class="summary-item">
+        <span class="summary-label">窗口内请求</span>
+        <strong class="summary-value" data-test="summary-requests">
+          {{ summary.total_requests }}
+        </strong>
+        <!-- 必须说明口径：它与 LLM 追踪页的总数不相等是正常的，
+             不说明的话读者会认为其中一个是错的。 -->
+        <small>最近 {{ summary.sample_window }} 条采样窗口，非历史总量</small>
+      </div>
+      <div class="summary-item">
+        <span class="summary-label">成功率</span>
+        <strong class="summary-value" data-test="summary-success-rate">
+          {{ successRateText }}
+        </strong>
+        <small>{{ summary.total_requests ? '按窗口内样本计算' : '尚无样本' }}</small>
+      </div>
+      <div class="summary-item">
+        <span class="summary-label">运行时间</span>
+        <strong class="summary-value" data-test="summary-uptime">
+          {{ uptimeText }}
+        </strong>
+        <small>进程运行时长</small>
+      </div>
+      <div class="summary-item">
+        <span class="summary-label">供应商三态</span>
+        <strong class="summary-value" data-test="summary-states">
+          {{ summary.healthy_providers }} 正常 ·
+          {{ summary.probing_providers }} 试探 ·
+          {{ summary.tripped_providers }} 熔断
+        </strong>
+        <!-- 三态分开显示：半开仍在服务、熔断被跳过，处置相反。 -->
+        <small>共 {{ summary.total_providers }} 家</small>
+      </div>
+    </section>
 
     <section v-if="loading" class="loading-state" aria-busy="true">
       正在读取供应商容错状态...
@@ -459,6 +541,24 @@ h1, h2, p { margin-top: 0; } h1 { margin-bottom: 8px; font-size: 28px; } h2 { ma
 .header-actions { flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .updated { padding: 6px 10px; color: var(--text-color-2); font-size: 13px; white-space: nowrap; }
 .notice { margin-bottom: 16px; }
+/* 队列运行态汇总条。
+   auto-fit + minmax 而不是固定列数：五项在窄屏上自然折行，
+   固定列数会把「3 正常 · 1 试探 · 0 熔断」这类长文本挤成两行半。 */
+.summary-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px 20px;
+  margin-bottom: 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius, 8px);
+  background: var(--card-bg-color, transparent);
+}
+.summary-item { display: grid; gap: 3px; min-width: 0; }
+.summary-label { color: var(--text-color-2); font-size: 12px; }
+/* tabular-nums：数字每秒刷新，等宽才不会让整条汇总左右跳动 */
+.summary-value { font-size: 19px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.summary-item small { color: var(--text-color-3, var(--text-color-2)); font-size: 11px; line-height: 1.5; }
 .loading-state, .empty-state { padding: 64px 24px; text-align: center; border: 1px dashed var(--border-color); border-radius: var(--radius-sm); }
 .empty-state h2 { margin-bottom: 8px; } .empty-state p { color: var(--text-color-2); }
 .queue-section { margin-top: 28px; }

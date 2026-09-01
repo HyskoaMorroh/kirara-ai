@@ -23,6 +23,10 @@ def test_circuit_breaker_opens_and_allows_one_half_open_probe():
         error_rate_threshold=1.0,
         min_requests=10,
         recovery_timeout_seconds=10,
+        # 显式写 1：这条用例的主题是「打开之后只放一个半开探测」，
+        # 恢复要几次成功是另一回事。依赖构造默认值会让它在默认值改动时
+        # 以一个与主题无关的理由失败——默认值现已与配置字段对齐为 2。
+        recovery_success_threshold=1,
     )
 
     assert breaker.acquire(now=0) is True

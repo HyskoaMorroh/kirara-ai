@@ -174,11 +174,44 @@ def test_a_restored_breaker_can_still_close_after_a_success(tmp_path: Path):
     store.save({"provider-a": opened_breaker(recovery_timeout_seconds=10.0)})
     now[0] += 60.0
 
-    fresh = CircuitBreaker(failure_threshold=1, recovery_timeout_seconds=10.0)
+    # 恢复阈值显式写成 1：这条用例验的是「恢复后的熔断器仍能闭合」，
+    # 而不是「闭合需要几次成功」。依赖构造默认值会让它在默认值改动时
+    # 以一个与主题无关的理由失败——默认值现已与配置字段对齐为 2。
+    fresh = CircuitBreaker(
+        failure_threshold=1,
+        recovery_timeout_seconds=10.0,
+        recovery_success_threshold=1,
+    )
     store.restore({"provider-a": fresh})
     assert fresh.acquire() is True
     fresh.record_success()
 
+    assert fresh.state() == CircuitState.CLOSED
+
+
+def test_the_configured_recovery_threshold_is_honoured_after_restore(tmp_path: Path):
+    """恢复阈值为 2 时，一次成功**不足以**闭合。
+
+    与上一条配对：那条固定阈值验「能闭合」，这条验「阈值真的被遵守」。
+    只留前者时，把阈值读成 1 的实现也能通过。
+    """
+    now = [1000.0]
+    store = CircuitBreakerStore(tmp_path / "circuit.json", clock=lambda: now[0])
+    store.save({"provider-a": opened_breaker(recovery_timeout_seconds=10.0)})
+    now[0] += 60.0
+
+    fresh = CircuitBreaker(
+        failure_threshold=1,
+        recovery_timeout_seconds=10.0,
+        recovery_success_threshold=2,
+    )
+    store.restore({"provider-a": fresh})
+    assert fresh.acquire() is True
+    fresh.record_success()
+    assert fresh.state() == CircuitState.HALF_OPEN
+
+    assert fresh.acquire() is True
+    fresh.record_success()
     assert fresh.state() == CircuitState.CLOSED
 
 

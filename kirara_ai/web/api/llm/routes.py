@@ -1034,10 +1034,21 @@ async def get_backend(backend_name: str):
 @llm_bp.route("/resilience/status", methods=["GET"])
 @require_auth
 async def get_resilience_status():
-    """Return sanitized provider health for the operational status view."""
+    """Return sanitized provider health plus queue-level totals（需求 8）.
+
+    ``data`` 是逐行健康状态，``summary`` 是队列汇总（活跃连接、窗口内总请求数、
+    成功率、运行时间、三态计数）。两者在**同一次响应**里给出而不是各开一个端点：
+    分两次请求会让页面上出现「队列有 3 行、汇总说 2 家」这种自相矛盾的瞬间，
+    而那个矛盾只在极短的时间窗里成立，最难复现也最难解释。
+    """
     try:
         manager: LLMManager = g.container.resolve(LLMManager)
-        return jsonify({"data": manager.get_resilience_status()})
+        return jsonify(
+            {
+                "data": manager.get_resilience_status(),
+                "summary": manager.get_resilience_summary(),
+            }
+        )
     except Exception as e:
         logger.opt(exception=e).error("Failed to get LLM resilience status")
         return jsonify({"error": "Failed to get LLM resilience status"}), 500

@@ -25,8 +25,9 @@ from kirara_ai.llm.format.response import LLMChatResponse, Message
 from kirara_ai.llm.pricing import CostSnapshot, PriceCatalog, calculate_cost_snapshot
 from kirara_ai.llm.resilience import (ChatExecutionResult, CircuitBreaker, CircuitState, ErrorCategory,
                                       FailoverExecutionError, ProviderAttempt, RequestCancelledError,
-                                      RETRYABLE_ERROR_CATEGORIES, StreamExecutionResult,
-                                      StreamInterruptedError, classify_llm_error, sanitize_error_summary)
+                                      RETRYABLE_ERROR_CATEGORIES, ResilienceSummary,
+                                      StreamExecutionResult, StreamInterruptedError,
+                                      classify_llm_error, sanitize_error_summary)
 from kirara_ai.logger import get_logger
 from kirara_ai.tracing import LLMTracer
 from kirara_ai.tracing.decorator import (
@@ -68,6 +69,12 @@ class LLMManager:
         self._resilience_breakers: Dict[str, CircuitBreaker] = {}
         self._resilience_attempts: Dict[str, List[ProviderAttempt]] = {}
         self._resilience_initialized = False
+        # 进程内运行起点，供故障转移队列的「运行时间」汇总使用（需求 8）。
+        #
+        # 用 `time.time()` 而不是熔断器的单调时钟：这个数字要显示给人看
+        # （「已运行 3 小时」），而单调时钟的零点没有意义。它回答的是
+        # 「这套策略跑了多久」，与「某个供应商健康了多久」是两个问题。
+        self._started_at = time.time()
 
     def _backend_config(self, backend_name: str):
         return next((backend for backend in self.config.llms.api_backends if backend.name == backend_name), None)
@@ -1033,6 +1040,22 @@ class LLMManager:
             attempts=attempts,
             cause=last_error,
         ) from last_error
+
+    def get_resilience_summary(self) -> Dict[str, Any]:
+        """Aggregate queue-level runtime figures (需求 8).
+
+        逐行健康状态回答不了「刚把 P1 换掉之后整体好了没」，这份汇总回答那个问题：
+        活跃连接、窗口内总请求数、成功率、进程运行时长，以及三态各有几家。
+
+        与 :meth:`get_resilience_status` 共用同一批熔断器实例，因此两者永远同源——
+        各自统计会让「三态计数之和 ≠ 队列行数」这种矛盾出现在同一个页面上。
+        """
+        if not self._resilience_initialized:
+            self._initialize_resilience_state()
+        return ResilienceSummary.from_breakers(
+            self._resilience_breakers,
+            uptime_seconds=time.time() - self._started_at,
+        ).to_dict()
 
     def get_resilience_status(self) -> List[Dict[str, Any]]:
         """Return provider health and sanitized recent attempts for operational UI."""
