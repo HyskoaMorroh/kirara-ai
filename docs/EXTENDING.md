@@ -1192,7 +1192,7 @@ def on_started(event: ApplicationStarted):
 
 ### 6.4 事件监听与 permissioned lifecycle 的边界
 
-`3.3.0b13` 另提供 extension manifest lifecycle：`startup_completed`、`shutdown_requested`、`workflow_before`、`workflow_after`、`workflow_error`、`dispatch_preview`、`model_catalog_refreshed`、`mcp_operation`。插件必须声明 `lifecycle_hooks` capability 和具体 hook；未知或未声明注册会被拒绝并审计。它只约束框架注入的 host facade，不能把进程内 Python 变成 sandbox。
+`3.3.0b14` 另提供 extension manifest lifecycle：`startup_completed`、`shutdown_requested`、`workflow_before`、`workflow_after`、`workflow_error`、`dispatch_preview`、`model_catalog_refreshed`、`mcp_operation`。插件必须声明 `lifecycle_hooks` capability 和具体 hook；未知或未声明注册会被拒绝并审计。它只约束框架注入的 host facade，不能把进程内 Python 变成 sandbox。
 
 如果你需要的是这些能力：
 
