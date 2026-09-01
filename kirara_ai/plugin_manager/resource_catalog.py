@@ -15,9 +15,13 @@ from typing import Any, Mapping
 
 from packaging.version import Version
 
+from kirara_ai.logger import get_logger
+
 from .resource_lifecycle import ResourceLifecycleService, ResourceStateError
 from .resource_sources import ResourceSourceService
 from .system_dependencies import SystemDependencyService, dependency_ids_for_resource
+
+logger = get_logger("ResourceCatalog")
 
 
 OFFICE_RESEARCH_PROMPT = """我是上班族，偏学术研究。我经常要处理【邮件、会议、表格、文档等】。我偶尔兼职程序员。
@@ -639,10 +643,35 @@ class ResourceCatalogService:
         return self._install_builtin(item)
 
     def ensure_builtins(self) -> None:
-        """Install or safely advance built-ins to the bundled version."""
+        """Install or safely advance built-ins to the bundled version.
 
+        这个方法跑在启动路径上（`entry.py`），因此它对失败的处理是**降级而非抛出**：
+        目录里的 skill 条目要出网到 GitHub 才能装，而「预置一条可选技能」不该让
+        「服务能不能启动」取决于 github.com 此刻可不可达。离线部署、公司代理、
+        上游抽风都会走到这里。跳过的条目记进 `_builtin_skips`，界面据此说明
+        「这条内置还没装上，原因是 X」，而不是让它静默消失。
+        """
+
+        skips: list[dict[str, str]] = []
         for item in _BUILTINS:
-            self.install(str(item["catalog_id"]))
+            catalog_id = str(item["catalog_id"])
+            try:
+                self.install(catalog_id)
+            except Exception as error:  # noqa: BLE001 - 启动路径只降级，不阻断
+                skips.append({"catalog_id": catalog_id, "reason": str(error) or type(error).__name__})
+                logger.warning(
+                    "内置资源 %s 预置失败，已跳过（不影响启动）：%s", catalog_id, error
+                )
+        self._builtin_skips = skips
+
+    def builtin_provisioning_report(self) -> list[dict[str, str]]:
+        """返回上一次 `ensure_builtins()` 跳过的内置条目及原因。
+
+        只读快照。没跑过 `ensure_builtins()` 时是空列表——那与「全部装成功」
+        在这个返回值上同形，判断「是否装全」要看资源列表，不要看这里为空。
+        """
+
+        return [dict(entry) for entry in getattr(self, "_builtin_skips", ())]
 
     def project_dependencies(self, item: Mapping[str, Any]) -> dict[str, Any]:
         """Project persisted VPS readiness without probing or mutating resources."""
@@ -745,9 +774,40 @@ class ResourceCatalogService:
             }
         raise ResourceCatalogError("catalog item is not available")
 
+    @staticmethod
+    def _skill_coordinates(item: Mapping[str, Any]) -> dict[str, Any]:
+        """把 skill 条目的 owner / repository / directory 归一成同一种形状。
+
+        内置条目只声明 `source_key`（`owner/repo:directory`），而 `_find()` 为
+        在线搜索结果补出的条目声明的是拆开的四个键。`_installed_for_catalog`
+        原先只读拆开的那四个键，于是内置 skill 永远匹配不上已装资源——每次启动
+        都重新下载一遍，第二次撞「resource ID is already installed」。
+        这里补齐缺失的那半边，两种来源走同一条比对。
+        """
+
+        coordinates = {
+            key: item.get(key) for key in ("owner", "repository", "branch", "directory")
+        }
+        if coordinates["owner"] and coordinates["repository"]:
+            return coordinates
+        source_key = item.get("source_key")
+        if not isinstance(source_key, str) or ":" not in source_key:
+            return coordinates
+        owner_repo, _, directory = source_key.partition(":")
+        if "/" not in owner_repo:
+            return coordinates
+        owner, repository = owner_repo.split("/", 1)
+        coordinates["owner"] = coordinates["owner"] or owner
+        coordinates["repository"] = coordinates["repository"] or repository
+        coordinates["directory"] = coordinates["directory"] or directory
+        return coordinates
+
     def _installed_for_catalog(self, item: Mapping[str, Any]) -> dict[str, Any] | None:
         source_key = item.get("catalog_id") or item.get("source_key")
         candidates: list[dict[str, Any]] = []
+        coordinates = (
+            self._skill_coordinates(item) if item.get("type") == "skill" else {}
+        )
         for resource in self.lifecycle.list_resources():
             if resource.get("source_key") == source_key:
                 return resource
@@ -759,20 +819,26 @@ class ResourceCatalogService:
             if metadata.get("provider") != "github":
                 continue
             if any(
-                not isinstance(item.get(key), str)
-                or metadata.get(key) != item.get(key)
+                not isinstance(coordinates.get(key), str)
+                or metadata.get(key) != coordinates.get(key)
                 for key in ("owner", "repository")
             ):
                 continue
-            requested_branch = item.get("branch")
+            requested_branch = coordinates.get("branch")
             if requested_branch and metadata.get("branch") != requested_branch:
                 continue
-            requested_directory = str(item.get("directory") or "").strip("/")
+            requested_directory = str(coordinates.get("directory") or "").strip("/")
             installed_directory = str(metadata.get("directory") or "").strip("/")
             if not requested_directory or not installed_directory:
                 continue
             if requested_directory == installed_directory:
                 return resource
+            # 上游把 Skill 放在仓库根时，`_fetch_skill_files` 解析出的目录是
+            # `REPOSITORY_ROOT_MARKER`（`"."`），与请求目录必然不同字符串。
+            # 同一个 owner/repo 下这类资源只会有一份，所以按仓库归属认定即可。
+            if installed_directory == ResourceSourceService.REPOSITORY_ROOT_MARKER:
+                candidates.append(resource)
+                continue
             if (
                 requested_directory.rsplit("/", 1)[-1].casefold()
                 == installed_directory.rsplit("/", 1)[-1].casefold()

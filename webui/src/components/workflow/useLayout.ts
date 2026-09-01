@@ -501,7 +501,7 @@ export function findFreeNodePosition(
   const stepY = Math.max(grid, snapToGrid(size.height / 2, grid))
 
   const index = new GridSpatialIndex()
-  occupied.forEach((box) => index.insert(box))
+  occupied.forEach((box, i) => index.insert({ ...box, id: `occupied-${i}` }))
   const collides = (x: number, y: number) =>
     index.query({
       id: '__candidate__',

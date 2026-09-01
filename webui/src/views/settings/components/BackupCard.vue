@@ -19,7 +19,13 @@ const canRestore = computed(() => Boolean(selectedFile.value && inspection.value
 
 const formatBytes = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(2)} MB`
 const formatDate = (seconds: number) => new Date(seconds * 1000).toLocaleString()
-const getAuthHeaders = () => { const token = http.getAuthToken(); return token ? { Authorization: `Bearer ${token}` } : {} }
+// 返回类型显式标成 Record<string, string>：不标时 TS 推出的是
+// `{Authorization: string} | {Authorization?: undefined}` 这个联合，
+// 而后半支不满足 HeadersInit 的索引签名，三处 fetch 都会报 TS2322。
+const getAuthHeaders = (): Record<string, string> => {
+  const token = http.getAuthToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
 const readError = async (response: Response) => { const payload = await response.json().catch(() => null); return payload?.error || payload?.message || `HTTP ${response.status}` }
 const saveFile = (blob: Blob, filename: string) => { const anchor = document.createElement('a'); const url = URL.createObjectURL(blob); anchor.href = url; anchor.download = filename; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 0) }
 

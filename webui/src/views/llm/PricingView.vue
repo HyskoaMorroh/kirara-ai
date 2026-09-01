@@ -1,8 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { NAlert, NButton, NCard, NTag, useDialog, useMessage } from 'naive-ui'
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NInputNumber,
+  NTag,
+  useDialog,
+  useMessage
+} from 'naive-ui'
 
-import { llmApi, type PricingVersion } from '@/api/llm'
+import { llmApi, type PriceSyncState, type PricingVersion } from '@/api/llm'
 import { HttpRequestError } from '@/utils/http'
 import {
   defaultEffectiveFrom,
@@ -23,6 +31,16 @@ const savedMessage = ref('')
 const editingId = ref<string | null>(null)
 const editorOpen = ref(false)
 const form = ref<PricingVersion>(emptyVersion())
+const syncing = ref(false)
+const syncMessage = ref('')
+// 与后端 `LLMConfig.price_sync_interval_days` 同一个默认值；0 表示关闭。
+// 只是首屏渲染前的占位——真实值由 `loadSyncState()` 从后端取回后覆盖，否则
+// 用户把间隔改成 30 天、刷新页面又看到 7，会以为没保存住。
+const syncIntervalDays = ref(7)
+/** 调度器汇报的同步运行态；`null` 表示还没取到（不是"没开启"）。 */
+const syncState = ref<PriceSyncState | null>(null)
+/** 后台调度循环是否在跑。为 false 时间隔配置写进去也不会被执行。 */
+const schedulerRunning = ref(true)
 
 function emptyVersion(): PricingVersion {
   return {
@@ -54,6 +72,102 @@ async function loadCatalog() {
     errorMessage.value = error instanceof Error ? error.message : '成本定价目录加载失败'
   } finally {
     loading.value = false
+  }
+}
+
+/**
+ * 取回定价自动同步的运行态。
+ *
+ * 与模型自动检测共用一个调度接口，因为它们本来就由同一个循环驱动：循环没起来时，
+ * 间隔配置写得再对也不会执行，界面必须能把这种情况说出来，否则用户只会看到
+ * "已启用、每 7 天一次"，然后困惑为什么价格半个月没动过。
+ *
+ * 失败不写 `errorMessage`：这是页面上的一条辅助信息，取不到时留空即可，不该把
+ * 整个定价表格的错误位置占掉，让用户以为价格加载失败了。
+ */
+async function loadSyncState() {
+  try {
+    // 后端是 `jsonify(scheduler.get_status())`，响应平铺、没有 `data` 包装。
+    // `AutoDetectScheduleView.vue` 也是这么读的——同一个接口两种读法，
+    // 必然有一处是错的，而错的那处被 catch 吞掉就再也查不出来。
+    const response = await llmApi.getAutoDetectSchedule()
+    schedulerRunning.value = response.running
+    syncState.value = response.price_sync ?? null
+    if (response.price_sync) {
+      syncIntervalDays.value = response.price_sync.interval_days
+    }
+  } catch (error) {
+    // 不写 errorMessage（那是定价表格的错误位），但必须留痕：
+    // 裸 `catch {}` 正是上面那个 `response.data` 缺陷藏住的原因。
+    console.warn('读取定价同步状态失败', error)
+    syncState.value = null
+  }
+}
+
+/** 上次同步的人读描述。三态各自成句，不能塌成"成功/失败"两种。 */
+const syncStateLabel = computed(() => {
+  const state = syncState.value
+  if (!state) return ''
+  if (!state.enabled) return '自动同步已关闭'
+  if (state.last_ok === null) return '尚未同步过'
+  const when = state.last_run ? formatTimestamp(state.last_run) : '时间未知'
+  return state.last_ok ? `上次同步成功 ${when}` : `上次同步失败 ${when}`
+})
+
+/** 同步态标签的配色：失败要显眼，未跑过只是中性信息。 */
+const syncStateType = computed<'success' | 'error' | 'warning' | 'default'>(() => {
+  const state = syncState.value
+  if (!state || !state.enabled) return 'default'
+  if (state.last_ok === null) return 'warning'
+  return state.last_ok ? 'success' : 'error'
+})
+
+/**
+ * 把后端的 ISO 时间戳转成本地可读串。
+ *
+ * 后端统一发 UTC，直接显示会让用户按本地时间读，差出整个时区。
+ */
+function formatTimestamp(value: string): string {
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString()
+}
+
+/**
+ * 从公开定价目录拉一轮单价。
+ *
+ * 结果要把 `skipped_manual` 一起说出来：只报「导入 N 条」会让用户以为自己改
+ * 过的价格也被这次同步覆盖了，而实际上手工版本是被保护的。
+ */
+async function syncFromUpstream() {
+  syncing.value = true
+  syncMessage.value = ''
+  errorMessage.value = ''
+  try {
+    const report = await llmApi.syncPricing()
+    const parts = [`更新 ${report.imported} 条`, `未变 ${report.unchanged} 条`]
+    if (report.skipped_manual > 0) {
+      parts.push(`保留手工价 ${report.skipped_manual} 条`)
+    }
+    syncMessage.value = parts.join('，')
+    message.success(syncMessage.value)
+    await Promise.all([loadCatalog(), loadSyncState()])
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '定价同步失败'
+  } finally {
+    syncing.value = false
+  }
+}
+
+async function saveSyncInterval(value: number | null) {
+  const days = Math.max(0, Math.trunc(value ?? 0))
+  syncIntervalDays.value = days
+  try {
+    await llmApi.updatePricingSyncSchedule(days)
+    message.success(days === 0 ? '已关闭定价自动同步' : `每 ${days} 天自动同步一次`)
+    await loadSyncState()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '同步间隔保存失败'
   }
 }
 
@@ -239,7 +353,10 @@ async function exportPricing() {
 
 const isEditing = computed(() => editingId.value !== null)
 
-onMounted(loadCatalog)
+onMounted(() => {
+  void loadCatalog()
+  void loadSyncState()
+})
 </script>
 
 <template>
@@ -252,6 +369,44 @@ onMounted(loadCatalog)
       </div>
       <div class="header-actions">
         <span class="revision">修订 {{ revision }}</span>
+        <span class="sync-interval">
+          自动同步
+          <n-input-number
+            data-test="pricing-sync-interval"
+            :value="syncIntervalDays"
+            :min="0"
+            :max="90"
+            size="small"
+            style="width: 110px"
+            @update:value="saveSyncInterval"
+          />
+          天（0 关闭）
+        </span>
+        <n-tag
+          v-if="syncStateLabel"
+          data-test="pricing-sync-state"
+          :type="syncStateType"
+          size="small"
+          :bordered="false"
+        >
+          {{ syncStateLabel }}
+        </n-tag>
+        <n-tag
+          v-if="!schedulerRunning"
+          data-test="pricing-scheduler-stopped"
+          type="error"
+          size="small"
+          :bordered="false"
+        >
+          调度循环未运行，间隔配置不会生效
+        </n-tag>
+        <n-button
+          data-test="sync-pricing"
+          :loading="syncing"
+          @click="syncFromUpstream"
+        >
+          同步上游价格
+        </n-button>
         <n-button data-test="export-pricing" @click="exportPricing">导出</n-button>
         <label class="file-button">
           导入
@@ -342,6 +497,7 @@ h1, h2, p { margin-top: 0; } h1 { margin-bottom: 8px; font-size: 28px; } h2 { ma
 .subtitle { margin-bottom: 0; max-width: 660px; line-height: 1.6; }
 .header-actions { flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .revision { padding: 6px 10px; color: var(--text-color-2); font-size: 13px; white-space: nowrap; }
+.sync-interval { display: inline-flex; align-items: center; gap: 6px; color: var(--text-color-2); font-size: 13px; white-space: nowrap; }
 .file-button { display: inline-flex; align-items: center; min-height: 34px; padding: 0 14px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); cursor: pointer; }
 .file-button input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
 .notice { margin-bottom: 16px; }

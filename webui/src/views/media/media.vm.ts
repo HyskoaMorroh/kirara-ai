@@ -82,7 +82,11 @@ export function useMediaViewModel() {
   })
 
   // 日期范围
-  const dateRange = ref<[string, string] | null>(null)
+  // n-date-picker 的 daterange 模式写回的是毫秒时间戳区间（`[number, number]`），
+  // 不是字符串。此前声明成 `[string, string]` 与实际流动的值不符：类型层报
+  // TS2322，运行时则把毫秒数字塞进声明为 string 的查询字段——后端 pydantic
+  // 恰好能把毫秒解析成 datetime，所以筛选看起来正常，实为两处错误互相抵消。
+  const dateRange = ref<[number, number] | null>(null)
 
   const message = useMessage()
   const dialog = useDialog()
@@ -213,8 +217,10 @@ export function useMediaViewModel() {
     try {
       // 转换日期
       if (dateRange.value) {
-        searchParams.start_date = dateRange.value[0]
-        searchParams.end_date = dateRange.value[1]
+        // 转成 ISO 8601 再发：查询字段声明为 string，后端是 Optional[datetime]。
+        // 直接发毫秒数字虽然 pydantic 也能解析，但会让声明与实际值长期不符。
+        searchParams.start_date = new Date(dateRange.value[0]).toISOString()
+        searchParams.end_date = new Date(dateRange.value[1]).toISOString()
       } else {
         searchParams.start_date = undefined
         searchParams.end_date = undefined

@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
 import {
+  NAlert,
   NButton,
   NCard,
+  NCheckbox,
   NForm,
   NFormItem,
   NInput,
@@ -12,7 +14,10 @@ import {
   NSpin,
   NText
 } from 'naive-ui'
-import { useAgentRuntimeViewModel } from '../viewmodels/agent-runtime.vm'
+import {
+  CREATOR_CHANNEL_TYPES,
+  useAgentRuntimeViewModel
+} from '../viewmodels/agent-runtime.vm'
 
 const {
   loading,
@@ -21,8 +26,16 @@ const {
   fetchConfig,
   addChannelRow,
   removeChannelRow,
+  addCreatorIdentity,
+  removeCreatorIdentity,
   handleSubmit
 } = useAgentRuntimeViewModel()
+
+/** 渠道下拉选项。后端只接受这六个，写错会静默匹配不上任何消息。 */
+const creatorChannelOptions = CREATOR_CHANNEL_TYPES.map((value) => ({
+  label: value,
+  value
+}))
 
 /**
  * 三档取回方式。`inherit` 刻意不在其中：它只在 Agent 层有意义
@@ -153,6 +166,86 @@ onMounted(() => {
             </n-text>
           </template>
         </n-form-item>
+
+        <n-form-item label="创建者渠道身份">
+          <div class="creator-identities">
+            <!--
+              这不是普通配置项：它授予的是宿主操作权限。默认空表的含义是
+              「聊天侧谁都拿不到创建者身份」——MCP 工具列表恒空、command Hook
+              恒被拒，包括创建者本人。不把这一点说出来，用户会在 QQ 里对着自己的
+              机器人说「帮我装个 skill」，得到一次正常回复、工具一个没生效，
+              而界面上没有任何地方解释为什么。
+            -->
+            <n-alert type="warning" :show-icon="true" class="creator-warning">
+              声明之后，来自这些身份的消息可以在 IM 渠道上调用 MCP 工具与
+              command Hook —— 也就是能通过对话修改服务器内容。只填你自己的账号。
+              未声明时聊天侧不授予任何人，包括你本人。
+            </n-alert>
+            <div
+              v-for="(identity, index) in formData.creator_channel_identities"
+              :key="index"
+              class="creator-identity-row"
+            >
+              <n-select
+                v-model:value="identity.channel_type"
+                class="creator-channel"
+                :options="creatorChannelOptions"
+                :input-props="{ 'aria-label': `第 ${index + 1} 条身份的渠道类型` }"
+              />
+              <n-input
+                v-model:value="identity.sender_scope"
+                class="creator-sender"
+                placeholder="你的用户标识，如 QQ 号"
+                :input-props="{ 'aria-label': `第 ${index + 1} 条身份的发送者标识` }"
+              />
+              <n-input
+                v-model:value="identity.account_scope"
+                class="creator-optional"
+                placeholder="机器人账号（可留空）"
+                :input-props="{ 'aria-label': `第 ${index + 1} 条身份的机器人账号` }"
+              />
+              <n-checkbox
+                :checked="identity.allow_group_chat"
+                @update:checked="(value: boolean) => (identity.allow_group_chat = value)"
+              >
+                群聊也生效
+              </n-checkbox>
+              <n-button
+                quaternary
+                type="error"
+                data-test="remove-creator-identity"
+                :aria-label="`移除第 ${index + 1} 条身份`"
+                @click="removeCreatorIdentity(index)"
+              >
+                移除
+              </n-button>
+            </div>
+            <n-button
+              dashed
+              class="add-row"
+              data-test="add-creator-identity"
+              @click="addCreatorIdentity"
+            >
+              添加创建者身份
+            </n-button>
+            <n-text
+              v-if="!formData.creator_channel_identities.length"
+              depth="3"
+              class="empty-hint"
+            >
+              未声明任何身份：IM 渠道上的 MCP 工具与 command Hook 对所有人不可用。
+            </n-text>
+          </div>
+          <template #feedback>
+            <n-text depth="3">
+              渠道与发送者标识<strong>一起比对</strong>：QQ 号和 Telegram 用户 ID
+              可能撞号，只比一个等于把另一个渠道的同号用户也放进来。
+              <strong>「群聊也生效」默认关闭</strong>——群里所有人都看得到你发的
+              指令并照抄，照抄的人发送者标识不同因而拿不到身份，但把宿主操作暴露在
+              多人可见的会话里是另一回事。改完<strong>需要重启服务</strong>才生效。
+            </n-text>
+          </template>
+        </n-form-item>
       </n-form>
 
       <div class="actions">
@@ -170,6 +263,53 @@ onMounted(() => {
 .settings-card {
   max-width: 800px;
   margin: 0 auto;
+}
+
+/* 创建者身份编辑区。一行一条身份，窄屏时改为纵向堆叠，
+   否则四个控件挤在一行会让发送者标识只剩几十像素。 */
+.creator-identities {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+.creator-warning {
+  margin-bottom: 4px;
+}
+
+.creator-identity-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.creator-channel {
+  width: 130px;
+}
+
+.creator-sender {
+  flex: 1 1 180px;
+  min-width: 150px;
+}
+
+.creator-optional {
+  flex: 1 1 160px;
+  min-width: 140px;
+}
+
+@media (max-width: 720px) {
+  .creator-identity-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .creator-channel,
+  .creator-sender,
+  .creator-optional {
+    width: 100%;
+  }
 }
 
 .card-intro {

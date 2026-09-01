@@ -22,6 +22,105 @@
 
 ### Added
 
+- **创建者渠道身份可从界面声明：`creator_channel_identities` 接进配置读写**（需求 10）：
+  需求 10 的前半句「只有创建者能通过插件修改服务器内容」在默认部署下**此前无法成立**。
+  `global_config.py` 里那段类注释自己承认了这个形态：「结果不是『非创建者不行』，
+  而是『所有人都不行』，包括创建者本人：MCP 工具列表恒空、command Hook 恒被拒」。
+  桥（`creator_channel_identities`）早已架好，运行时也真的在读它——断的是**配置入口**：
+  `GET /system/config` 不返回这个字段，`POST /system/config/agent-runtime` 的可写键
+  集合里没有它，WebUI 里搜不到任何编辑处。唯一的配置方式是登服务器手改 `config.yaml`
+  再重启。用户在 QQ 里对自己的机器人说「帮我装个 skill」，得到一次正常回复、
+  工具一个没生效，而界面上没有任何地方解释为什么。
+  现在可读、可写、可在「Agent 运行时」面板逐条增删。五项边界校验：
+  渠道名必须在 `SUPPORTED_CHANNEL_TYPES` 内（写错会静默匹配不上任何消息）、
+  发送者标识非空（空标识会匹配上谁？这个问题不该留给运行时回答）、
+  两个可选字段要么省略要么非空、`allow_group_chat` 必须布尔、多余字段直接拒绝
+  而不是忽略（静默丢弃拼错的键会让用户以为设置生效了）。
+  三处刻意保留的语义：**空数组是有效值**（撤销全部声明）而不是「没填」；
+  **没提交这个键时保留原值**（与该端点其余字段的 `exclude_unset` 一致——把创建者
+  身份清空的后果是聊天侧插件能力全废）；**`allow_group_chat` 缺省 `False`**
+  （群里所有人都看得到创建者发的指令并照抄，把宿主操作暴露在多人可见会话里要显式打开）。
+
+- **`SessionEnd` / `SubagentStart` / `SubagentStop` 三个 Hook 事件真的被派发**（需求 10）：
+  `HOOK_EVENTS` 声明 11 个事件，executor 此前只派发 8 个。剩下三个通过了声明校验、
+  落了盘、在界面上显示为「已启用」，运行时一次都不触发——而 `hooks.py` 甚至专门为
+  `SubagentStop` 写了 `decision: block` 的解析分支，代码本身认为这个事件会来。
+  用户挂一个 `SessionEnd` 钩子做清理、挂 `SubagentStop` 审计队友委派，
+  调试到最后才发现钩子从来没跑过，没有任何一处提示过他。
+  `SubagentStart` / `SubagentStop` 派发在 `_delegate_to_teammate` **内部**而不是调用处：
+  这样无论将来从哪条分支触发委派，两个事件都必然成对出现；`Stop` 放在 `finally` 里，
+  委派失败、队友无输出、异常三条路径都会闭合，不会在审计里留下一个永不结束的
+  `SubagentStart`。`agent` / `snapshot` 由调用处传入而不是方法内重新解析——
+  重新解析会拿到与本轮快照不同的资源版本，Hook 看到的就不是这一轮真正生效的绑定。
+  新增 `tests/agent_runtime/test_hook_event_contract.py` 双向锁住契约：声明了必须能派发，
+  派发了必须已声明（后者缺失时声明校验会拒绝用户为它写钩子，于是那个派发点永远没有消费者）。
+
+- **会话渠道身份持久化，`SessionEnd` 才有真实的 `ChannelContext`**（需求 10）：
+  会话文件按 `[session_key, agent_id]` 的 SHA-256 摘要命名，**原始渠道身份从未存进文件**。
+  而 Hook 需要一个真实的 `ChannelContext`。两条错误的走法都被排除：用占位 context 派发
+  会让 Hook 拿到虚构的渠道身份写进审计——比缺一个事件更糟，审计记录从此不可信；
+  把 `SessionEnd` 从契约里删掉是把「没实现」改写成「不支持」，而三处代码都为它留了位置。
+  选的是让会话文件记住自己的身份：`save_history` 落盘五个标识，
+  新增 `read_session_metadata` 供清理路由反查。旧文件读不到就跳过派发，
+  但**清理照常成功**——因为拿不到身份就拒绝清理，等于让用户永远删不掉升级前的会话。
+  `clear_history` 保留身份：丢了的后果是这个会话从此再也派发不出 `SessionEnd`。
+
+- **`runtime_dependency` 声明被真正消费，界面能说出「缺 uvx」**（需求 10）：
+  8 个 stdio MCP 预设各自声明了需要什么运行时（`mcp:fetch` / `mcp:time` 是 `uvx`，
+  其余 6 个是 `npx`），但这个字段**从来没有人读**。三层都断：
+  ① `uvx` 连登记项都没有——登记表里只有 `uv --version` 的 `python-tooling`，
+  而 `uv` 装了不等于 `uvx` 可用（uvx 是 uv 0.3 起才分发的独立入口）；
+  ② `dependency_ids_for_resource` 硬编码只认 `mcp:context7` / `agent-browser` / `graphify`
+  三个名字，其余 7 个预设一律返回空列表，而空列表的含义是「这个资源不需要任何系统依赖」；
+  ③ 前端从不渲染后端 `project_dependencies` 已投影的四个字段，`CatalogItem` 的 TS 类型里
+  一个都没有。净效果：装 `mcp:fetch`、启用、绑定全部成功，机器上没有 uvx，
+  界面唯一的线索是 MCP 面板显示「连接失败 / 工具数 0」——没有一处说缺什么，
+  用户会去查网络、查配置、查 API Key。
+  新增 `uvx-runtime` / `npx-runtime` 两条登记项与 `_RUNTIME_DEPENDENCY_IDS` 映射，
+  前端抽出 `ResourceDependencyProjection` 共享接口并在资源表格状态列渲染提示。
+  一处刻意的区分：**`unknown` 与 `missing` 不合并**——前者是「还没探测过」，
+  下一步是去检查；后者是「探测过、确实没有」，下一步是去安装。混成一句会让用户
+  去装一个本来就在的东西。`dependency_status` 为 `undefined`（老后端不提供该字段）时
+  不显示任何提示，那与「不需要依赖」不是一回事，但都不该占用界面。
+
+- **readiness 报出「静态构建与后端版本不一致」**（需求 14）：
+  `app.py:71` 把 `$PWD/web` 作为静态目录，而 `webui/` 才是源码，两者版本各走各的：
+  仓库根 `web/version.json` 是 `0.1.1-beta.3`，`webui/package.json` 是 `3.3.0-b14`，
+  差了整整一个大版本。直接跑本地源码起服务时，浏览器看到的是那份旧界面——
+  没有 skills.sh 来源选择器、没有依赖提示、没有本轮改的任何东西。
+  失败形态是最难查的一类：**后端是新的，前端是旧的**。用户按新文档去点一个按钮，
+  按钮不存在，他会以为文档写错了或功能没做，而 API 探针、健康检查、版本一致性检查
+  全都通过——因为它们查的是后端。Docker 部署不受影响（`Dockerfile` 重新拷贝
+  `webui/dist`），所以这个陷阱只在本地开发与源码部署时出现，恰好是最不容易被 CI
+  覆盖到的路径。新增 `static_build_freshness()` 与 readiness 检查项 `static_build_current`。
+  三条判定纪律：**不一致是 warn 不是 fail**（服务确实在正常响应，只是界面旧了；
+  fail 会让健康检查把一个可用实例摘下线）；**读不到版本是 skip 不是 warn**
+  （纯 API 部署没有静态目录，那是合法形态，报 warn 会让运维去修一个不存在的故障）；
+  **修复建议给具体动作**——「在 webui/ 下重新构建并把 dist 拷到静态目录」，
+  而不是复述「版本不一致」这个现象。
+
+- **成本定价自动同步上游公开价目：`POST /llm/pricing/sync` + 调度器周期任务**（需求 9）：
+  价格此前只能手工填或导入 JSON。`PriceCatalog.refresh()` 的语义是「重读本地文件
+  以感知别的进程写入」，不拉远端，全文件没有任何 http 调用，也没有任何调度任务
+  引用它做定时同步。用户新增一个上游后得自己去翻官网价目表，逐个模型敲四个数字，
+  一旦记错单位（每千 vs 每百万），成本统计会整体偏一千倍且界面上没有任何提示。
+  新增 `kirara_ai/llm/pricing_sync.py`，锁住四条容易悄悄错掉的行为：
+  **不换算单位**（上游本身就是每百万，再乘一次就是前面说的千倍偏差）；
+  **缺失字段按 0 而不是跳过整条**（真实响应里 openai 条目没有 `cache_write`，
+  按「字段不全就丢弃」处理会让整个 OpenAI 系列没有价格）；
+  **没有任何价格的条目要跳过**（否则落一堆 0 元模型，成本统计显示"免费"）；
+  **网络失败不能污染既有价格**（同步是"读远端 + 写本地"两步，第一步失败时若已清空
+  本地就等于一次网络抖动删掉了用户全部手工价）。
+  手工价优先：已存在的手工版本不被自动同步覆盖。数字没变时不落盘，避免每轮同步都
+  推高 revision 让乐观锁误判冲突。
+  调度器复用模型自动检测那套状态与到期判定（`kirara_ai/scheduler/scheduler.py`），
+  但**同步结果刻意不并入 `run_once` 的返回值**：那份映射的契约是「后端名 -> 检测
+  是否成功」，调用方按后端名遍历它，塞一个 `__price_sync__` 进去会让界面上多出一行
+  叫这个名字的"模型后端"。结果改由 `get_status()` 汇报，并把**「本进程还没同步过」
+  与「同步过但失败了」分成 `null` 和 `false` 两种取值** —— 合成一个值会让界面把
+  「刚启动」画成「上游挂了」。失败不打时间戳，否则要再等一个完整间隔才重试。
+  前端 `webui/src/views/llm/PricingView.vue` 加手动同步按钮与间隔设置（0 天=关闭）。
+
 - **WebUI 在线对话真流式：`POST /llm/chat/stream`（SSE）**（需求 4）：
   项目自己的 WebUI 在线对话此前是一次性 `POST /llm/chat`，后端没有任何聊天 SSE
   路由——四个入口里唯一连技术可行性都没有的一个。而这不是平台限制而是缺口：
@@ -166,6 +265,220 @@
 
 本轮修正的缺陷有一个共同形态：**功能看起来在工作，实际给出反向或空白的结果**。
 每条都先有一个失败的回归测试，再改最小范围代码。
+
+- **流式路径不整流：同一个请求换成流式就失去容错**（需求 8）：
+  `rectify_request` 修的是「上游因参数约束拒绝、而这个约束不在用户能改的地方」这类
+  硬失败——不支持的图片、上游不认识的 thinking 字段、超范围的 budget、
+  不支持的 `reasoning_effort`。非流式路径（`chat`）已经在整流，
+  但 `stream_chat` 里 `raise_for_status()` 失败后**直接抛**。
+  产品上的后果：`reply_stream_mode` 配成 `aggregate` 或 `incremental` 之后
+  （文档推荐这么配，因为流式超时与首字节前的故障转移才生效），
+  供应商编辑页上的四个整流开关对这条路径**从未参与任何决策**。
+  用户看到「请求失败」，而真正的原因是一张图或一个上游不认识的字段——
+  两者都不是他能自己改的。而十个 OpenAI 兼容适配器全部继承
+  `OpenAIAdapterChatBase`，所以这一个缺口覆盖绝大多数部署。
+  已按非流式同一套语义接入：只对真实的上游拒绝生效、每类最多改一次、
+  改完仍失败抛原始错误。流式路径额外关掉失败连接再重试——不关会让失败的响应体
+  一直占着连接池，而流式请求本来就持有连接更久。
+  新增 `tests/llm/test_rectifier_adapter_coverage.py` 双向锁住：已接线的适配器
+  两条路径都不能悄悄退出整流，未接线的（Gemini / Ollama，载荷形状不同）
+  必须在 README 里显式记录这个边界。
+
+- **`npm run type-check` 是一个恒绿的空壳门禁，掩盖了 37 条真实类型错误**（需求 12）：
+  `tsconfig.json` 是 solution-style 配置（`"files": []` + `references`），而脚本写的是
+  裸 `vue-tsc --noEmit`——不带 `-p` 也不带 `--build`。这种组合下 TS 只加载根配置，
+  `files: []` 意味着**零个输入文件**，references 不会被跟随。命令秒退、退出码 0、
+  什么都没检查。实测确认：在 `src/` 下写入 `const probe: number = 'not a number'`，
+  `npm run type-check` 通过；加 `-p tsconfig.app.json` 立刻报 TS2322。
+  严重性不在「少检查了一点」：`release-preflight.yml` 与 `quickstart-windows.yml`
+  都把 `yarn type-check` 当作发布门禁。**一个永远不会失败的门禁比没有门禁更糟**——
+  它让每次发布都带着「类型检查已通过」的记录，而实际从未执行。本仓库真实存在的
+  37 条类型错误（含两个会在运行时抛 `ReferenceError` 的未定义名）就是这样长期通过
+  发布检查的。改为显式指定两个真实项目并实测门禁能拒绝（exit=2），
+  同时清零全部 37 条（详见下列各条）。
+
+- **`ResourceView.vue` 用了两个没 import 的名字，「发现并安装」点下去直接抛异常**（需求 10）：
+  远程安装的确认回调里调 `installRemoteSkill(...)`，但该函数从未从 `@/api/resource` 引入——
+  点「安装」抛 `ReferenceError: installRemoteSkill is not defined`，**在线发现的资源
+  一个都装不上**。`ImportableArchive` 同样用到未引入。两者在 API 层都存在且已导出，
+  纯属漏了 import 清单。补 `tests/resource-view-imports.test.ts`：把 `@/api/resource`
+  的导出名与本页实际 import 的名字对表，凡在 script 正文里作为独立标识符出现却没引入的
+  一律报出（先抹掉 template、注释与字符串字面量再匹配，避免把中文文案里的词误判成标识符）。
+
+- **MCP 列表的分页与筛选完全失效**（需求 10）：`mcp.vm.ts` 调用
+  `http.get(path, { params })`，但第二个参数是 `Omit<RequestInit, 'method'>`——原生 fetch
+  配置，**没有 `params` 这一项**。对象被原样展开给 fetch，fetch 忽略未知字段。
+  后端 `page` 默认 1、`page_size` 默认 20，`type` / `status` / `query` 全为 None：
+  翻到第 2 页看到的还是第 1 页，输入关键词搜索没有任何变化，而请求成功、控制台干净、
+  后端日志干净。改为 `URLSearchParams` 拼进 URL，可选筛选项只在有值时才拼——
+  `String(undefined)` 会得到字面量 `"undefined"`，后端会把它当成有效筛选值。
+
+- **两处界面按钮放在 naive-ui 不存在的 `#action` 插槽里，从来没有渲染出来**（需求 9、8）：
+  `LLMStatistics.vue` 统计加载失败时的「重试」、`LLMView.vue` 导入冲突时的
+  「确认覆盖 / 取消」，都写在 `<template #action>` 里。但 naive-ui 的 `AlertSlots`
+  只声明 `default | icon | header`（`Alert.d.ts:219`），运行时 `Alert.mjs` 也只消费这三个。
+  实测确认：真实 `NAlert` 下 `#action` 的内容**完全不渲染**——正文出现，按钮不出现。
+  后果是功能缺失而非样式偏差：统计加载失败后没有任何重试入口，只能刷新整页；
+  导入冲突时看不到「确认覆盖」，整条供应商导入流程在这一步断掉。
+  它长期没被发现的原因值得单记：`tests/llm-statistics.test.ts` 的 naive-ui mock 里
+  手写了 `<slot name="action" />`——**stub 比被替代的真实组件更宽容**，于是测试点得到
+  按钮、断言通过，真实界面上什么都没有。按钮已移到默认插槽（实测可渲染、
+  `data-test` 可选中），并删掉 stub 里那个伪造的 slot。
+
+- **`ConfigurationList.vue` 用数组下标索引按属性名的 Record，表单读写全程错位**（需求 12）：
+  `v-for` 拿到的 `j` 是数组下标（number），而配置值 `editableConfigurationValue` 是
+  `Record<string, any>`——键是属性名。九处 `editableConfigurationValue[j]` 读到的永远是
+  `undefined`，用户填的内容写进 `"0"` / `"1"` / `"2"` 这种键，保存后与后端期望的属性名
+  毫无关系。**打开能填、保存后配置全丢。** 七个对象操作函数的首参也都声明成
+  `arr: number`。对照同仓已在服役的 `DynamicConfigForm.vue`：它用
+  `for (const key in props.schema.properties)` 全程按属性名索引——那份是对的。
+  已把 `ConfigurationGroup.properties` 改为 `Record<string, Configuration>` 与配置值同构，
+  加 `groupProperties()` 单点兼容旧数组形态。顺带修 `createHash`：`CryptoJS[hashFunc]`
+  是 `unknown`，收窄成 `resolveHashFn()` 并在算法名不合法时抛错，而不是把 vendor shim
+  放宽成 `any`——那会让 CryptoJS 的其余误用一起失去检查。
+  另修同文件三处：`saveToServer` 用字符串索引数组导致**所有密码字段以明文提交**
+  （`form_type == 'password'` 判断永远不成立）、引用 `Configuration` 上不存在的
+  `password` 字段、`$event.target.innerText` 未收窄事件目标。
+
+- **引了一个既没声明也没安装的包，重新引用即构建失败**（需求 12）：
+  `ConfigurationList.vue` 里 `import Markdown from 'vue3-markdown-it'`——该包既不在
+  `package.json` 里，也不在 `node_modules` 里。它至今没炸只因为那个组件已经没人引用；
+  一旦被重新接上，Vite 解析失败是**构建错误**，不是类型告警。改用仓库已声明的
+  `markdown-it`（与 `IMAdapterDetail.vue` 渲染适配器说明走同一个库）。
+  顺带补齐 5 个靠间接依赖碰巧能解析的包（`highlight.js` / `semver` / `date-fns` /
+  `vscode-languageclient` / `@codingame/monaco-vscode-configuration-service-override`）
+  的显式声明——今天能跑，上游哪天不再传递就断在构建期。
+  新增 `tests/imports-are-declared-dependencies.test.ts` 锁住「所有裸包 import 都要在
+  package.json 声明且真的装得上」。
+
+- **撤销栈用了超出构建基线的 `Array.prototype.at`，基线浏览器上画布整体打不开**（需求 20）：
+  `vite.config.ts` 没设 `build.target`，走 Vite 默认的 `'modules'` 基线
+  （Chrome 87 / Safari 14），而 `.at` 要 Chrome 92 / Safari 15.4。关键在于
+  **Vite/esbuild 只降级语法、不给内置方法注入 polyfill**：`undoStack.at(-1)` 会原样
+  出现在产物里，在基线浏览器上抛 `TypeError: undoStack.at is not a function`。
+  而 `pushHistoryState` 是画布每一次改动的必经路径，所以后果不是某个边角功能失效，
+  是**工作流画布整体打不开**。把 `lib` 抬到 es2022 能让 4 条 TS2550 消失，
+  但那是把真实的兼容性问题消音——产物不会因此多出 polyfill。改为加 `peek()` 工具函数，
+  并加测试锁住「不要用它」，另附一条活文档断言：一旦有人显式设了 `build.target`，
+  说明基线被重新声明过，该约束要重新评估而不是继续盲目禁用。
+
+- **`vite.config.ts` 从未被类型检查，3 条错误里有 2 条会影响产物**（需求 16）：
+  修好 type-check 门禁后 `tsconfig.node.json` 暴露 3 条。`resolveJsonModule` 缺失
+  让 `import packageJson from './package.json'` 报错——而它是版本号注入的唯一来源
+  （`VITE_APP_VERSION` 与 `version.json` 都从它取）；插件返回值未标 rollup `Plugin`
+  类型让 `this.emitFile` 报 TS2339，缺它 `version.json` 不会产出。
+  esbuild 双版本（顶层 0.25.x 被 @codingame 插件要求，vite 4 内嵌 0.18.x）的
+  `Plugin` 类型冲突用收窄到单个值的转换处理，不用 `as any`——那会把将来真正的签名
+  变化也一起吞掉；并加自检断言：两份 esbuild 对齐后应删掉该转换。
+  实测 `vite build` 通过，`dist/version.json` 正确产出。
+
+- **媒体日期筛选两处类型错误互相抵消，筛选「碰巧能工作」**（需求 12）：
+  `n-date-picker` 的 `value` 是毫秒时间戳，而 `dateRange` 声明成 `[string, string]`。
+  组件写回数字，被塞进声明为 `string` 的查询字段——后端 pydantic 恰好能把毫秒解析成
+  datetime（已实测），所以筛选**碰巧能工作**。这比单纯的错更危险：一旦有人按声明
+  把它当字符串处理（`.slice(0, 10)` 之类），就会拿到静默错值。已改为按真实类型声明 +
+  显式 `toISOString()`。同文件另修 `n-switch` 直接绑 `boolean | null`——`null` 表示
+  「配置还没加载回来」，语义要保留，但模板层必须落到 `false`。
+
+- **状态栏内存兜底赋成标量，后端不可达时整条状态栏消失**（需求 12）：
+  `memoryUsage` 在 store 里是 `{ percent, total, used, free }`，模板按
+  `memoryUsage.used.toFixed(2)` 渲染。但 `onMounted` 的初始赋值与请求失败的 catch
+  分支都写成 `memoryUsage: 0`——数字没有 `.used`，取到 `undefined` 再调 `.toFixed`
+  直接抛 TypeError，**Vue 的渲染在这里中断，整条状态栏消失**。挂载即赋值，
+  所以后端不可达时这是必然路径，不是边角情况。同处另修：`onMounted` 那次赋值漏了
+  `platform` / `cpuInfo` / `pythonVersion` / `hasProxy` 四个字段（store 里变 undefined），
+  以及 `fetchStatus` 拿 store 的 camelCase 内部类型去标注 snake_case HTTP 响应
+  （12 条误报——运行时其实是对的，函数体做的正是 snake→camel 转换，错的是拿内部形状
+  去描述外部载荷：后端加字段或改名时类型这层照不出来）。
+
+- **`@click="createRule"` 把 MouseEvent 当参数传进去**（需求 2）：
+  `createRule(workflowId = '')` 首参可选，但**默认值只在实参为 `undefined` 时才顶上**，
+  而 MouseEvent 是个真对象。于是「创建规则」建出来的草稿 `workflow_id` 不是空串
+  而是一个 MouseEvent，落到后端就是一条 workflow_id 不合法的规则，界面上看不出
+  哪里错——用户只看到保存失败。补 `tests/click-handler-arity.test.ts` 拦这一类：
+  只查**首参可选**的函数，零参函数裸绑是安全且惯用的，一起禁掉只会逼着到处加
+  无意义的 `()`。
+
+- **定价页手工同步成功后调用了一个不存在的函数，成功被显示成失败**（需求 9）：
+  `syncFromUpstream()` 末尾调 `load()` 刷新列表，但组件里没有这个名字，只有
+  `loadCatalog()`。这一行必抛 `ReferenceError`，又正好落在 `try` 里被 `catch` 成
+  「定价同步失败」。实际后果是**同步已经写盘了，界面却报错并且继续显示旧价格**：
+  用户看到失败会重试，每次重试都"再次失败"，而价格其实一直在正确更新。
+  一条既有测试本该拦住它——「同步后要刷新列表」断言的却是 `/load\(\)/`，
+  钉住了那个错名字，于是长期为一个运行时错误打绿灯。改为断言真实存在的
+  `loadCatalog()`，并修正调用点。
+
+- **`ResourceView.vue` 用了两个没 import 的名字，「发现并安装」点下去直接炸**
+  （需求 10）：远程安装的确认回调里调 `installRemoteSkill(...)`，但该函数从未从
+  `@/api/resource` 引入——点「安装」抛 `ReferenceError: installRemoteSkill is not
+  defined`，在线发现的资源一个都装不上。`ImportableArchive` 同样用到未引入
+  （类型缺失只影响编译期）。两者在 API 层都存在且已导出，纯属漏了 import 清单。
+  补 `tests/resource-view-imports.test.ts`：把 `@/api/resource` 的导出名与本页
+  实际 import 的名字对表，凡在 script 正文里作为独立标识符出现却没引入的一律报出。
+  规则先抹掉 template、注释与字符串字面量再匹配，避免把中文文案里的词误判成标识符；
+  另有两条自检确认两份文件真的读到了（否则空集合互比会永远绿）。
+
+- **`@click="createRule"` 把 MouseEvent 当参数传进去，新建规则的 `workflow_id`
+  是个事件对象**：`createRule(workflowId = '')` 首参可选，但默认值只在实参为
+  `undefined` 时才顶上，而 MouseEvent 是个真对象。于是「创建规则」建出来的草稿
+  `workflow_id` 不是空串而是一个 MouseEvent，落到后端就是一条 workflow_id 不合法的
+  规则，界面上看不出哪里错——用户只看到保存失败。改为 `@click="createRule()"`。
+  补 `tests/click-handler-arity.test.ts` 拦这一类：只查**首参可选**的函数，零参函数
+  裸绑是安全且惯用的，一起禁掉只会逼着到处加无意义的 `()`。该规则扫全仓 `.vue`，
+  当前精确命中且仅命中这一处。
+
+- **`TopBar.vue` 的 `<script>` 漏了 `lang="ts"`，掩盖了全部 78 条既有类型错误**：
+  缺少 `lang="ts"` 时 `vue-tsc` 把它当 JS 虚拟文件 `TopBar.vue.js`，撞上
+  `allowJs: false` 报 TS6504。TS6504 是**致命错**，类型检查停在那一步就不再往下走，
+  于是 `npx vue-tsc` 长期只报这一条、看着像"只有一个小问题"，实际后面还压着 77 条
+  ——包括上面那两个会真正在运行时炸的未定义名。补上 `lang="ts"` 后错误全部显形，
+  本轮修掉其中会导致运行时失败的部分（TS2304 已清零），其余 75 条为既有类型精度
+  问题（`any` 隐式推导、naive-ui 组件 prop 联合类型收窄等），不改变运行行为，
+  单独一轮处理。
+
+- **`UsageRangePresetOption` 写成 `interface` 导致 `n-select :options` 报 TS2322**：
+  naive-ui 的 `SelectMixedOption` 带索引签名 `[k: string]: unknown`，而 TS 只对
+  type alias 做隐式索引签名匹配，`interface` 不做。改为 `type`。没有走"把 `value`
+  放宽成 `string | number`"那条路——那样也能过检，但会丢掉「只有这六个预设键合法」
+  的约束，预设键写错时就从编译期报错退化成运行时静默落进 `custom`。
+
+- **调度器汇报的定价自动同步运行态前端读不到**（需求 9）：
+  后端 `price_sync` 一直带 `interval_days` / `enabled` / `last_run` / `last_ok`，
+  但前端类型只声明了 `running` 与 `backends`，定价页也只有一个手工同步按钮。
+  界面上看不出缺口——手工点一次会成功，功能像是齐全的；丢掉的是**自动同步到底
+  有没有在跑**：间隔设成 7 天后，用户无法从任何地方确认它生效了没有、上次何时跑、
+  上次成功还是失败。价格静止不动时，「上游没调价」和「同步半个月前就失败了」
+  在界面上完全同形。补 `PriceSyncState` 类型并在定价页渲染这份状态，其中
+  `last_ok` 保持三态（`null` = 从未同步过），避免把「没跑过」显示成「失败」
+  引来无意义排查。同一次加载顺带解决间隔输入框的问题：它此前是 `ref(7)` 硬编码
+  初值、从不向后端读实际值，用户改成 30 天后刷新页面又看回 7 天。
+
+- **定价同步的 API 测试会打真实网络，一条用例把整文件拖到超时**（需求 9）：
+  `POST /llm/pricing/sync` 里 `UpstreamPriceSyncer()` 用的是默认 fetch，测试若不打
+  monkeypatch 就真的向外发请求：整个测试文件从 7.5 秒变成 300 秒以上。危险的地方
+  不是慢，而是**这条用例在有网时会"通过"**——它测的其实是上游可用性，不是本项目
+  的路由行为，断网或上游改版时才突然变红，看起来像自己的代码坏了。改为在测试里注入
+  固定文档，同步器的网络路径单独用假 fetch 覆盖。
+
+- **超时默认值偏紧，且运行时兜底常数与配置默认值各写一份**（需求 8）：
+  首字节 15s、流式静默 30s、非流式 60s 对开了最大强度思考的上游来说不够——一段长
+  推理前缀就会被判成超时，用户看到的是"上游没响应"而不是"还在想"。放宽为
+  60 / 120 / 600s。同时 `llm_manager.py` 与 `resilience.py` 里有三处硬编码兜底、
+  熔断五参数另有一份独立常数：**放宽配置默认值不会改到它们**，于是同一个字段在
+  "用户没填"和"配置对象没建起来"两条路径上取到不同的值。改为统一从
+  `LLMBackendConfig` 的字段默认值派生，并加测试锁住「运行时兜底 == 配置默认值」。
+
+- **前端手抄了一份超时默认值，从界面新建供应商会把旧值写回去**（需求 8）：
+  `webui/src/api/llm.ts` 的 `resilienceDefaults()` 是照抄后端的字面量。后端放宽后
+  它仍是 15/30/60，于是**从界面新建一个供应商，会把已经放宽的默认值盖回紧的那套**
+  —— 而用户没有碰过任何超时输入框，界面上也不显示这是"默认值"还是"我填的"。
+  改为解析后端模型，并加测试守住这 6 个字段的一致性。
+
+- **「禁用自动检查」开关渲染了两遍，拨一个另一个跟着动**（需求 16）：
+  `UpdateRegistryCard.vue` 里同一个 `disable_auto_check` 有两个 `n-form-item`、
+  两个同名 `data-test`、两套不一致的标签文案，还共用一个 `v-model`。用户会读成
+  "改了一个，另一个没保存住"。它同时制造假绿：按 `data-test` 取控件的测试拿到的是
+  长度 2 的集合，断言"存在"永远成立。删掉重复块并修正随之失真的注释。
 
 - **Claude 与 Gemini 收不到系统提示词——前者必然报错，后者静默降级**（需求 7）：
   第 7 条原文点名的 `Object of type LLMChatTextContent is not JSON serializable`

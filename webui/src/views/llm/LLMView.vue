@@ -537,14 +537,18 @@ onBeforeUnmount(() => {
         >
           以下供应商已存在，导入会用文件内容替换它们：{{ importConflicts.join('、') }}。
           空白的凭据字段会保留现有值。
-          <template #action>
+          <!--
+            按钮放默认插槽：naive-ui 的 AlertSlots 没有 action，`#action` 的内容
+            不会渲染——「确认覆盖」看不见，整条导入流程会在冲突这一步断掉。
+          -->
+          <div class="alert-actions">
             <n-button size="small" data-test="confirm-overwrite" @click="confirmOverwriteImport">
               确认覆盖
             </n-button>
             <n-button size="small" data-test="cancel-overwrite" @click="cancelOverwriteImport">
               取消
             </n-button>
-          </template>
+          </div>
         </n-alert>
 
         <LLMAdapterConfig
@@ -613,6 +617,13 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* n-alert 正文内的操作区：与提示文案留出间距，按钮之间留空隙 */
+.alert-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .llm-container {
   display: grid;
   grid-template-columns: 280px 1fr;

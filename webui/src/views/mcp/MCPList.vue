@@ -672,8 +672,12 @@ const formatConnectionState = (state: string) => {
 }
 
 // 获取状态对应的类型
-const getStateType = (state: string) => {
-  const typeMap: Record<string, string> = {
+// 返回值收窄为 n-tag 接受的字面量联合（与 MCPDetail.vue 的同名函数一致）。
+// 宽 string 会在 `:type` 上报 TS2322——n-tag 只认这几个取值。
+const getStateType = (
+  state: string
+): 'success' | 'warning' | 'error' | 'info' | 'default' => {
+  const typeMap: Record<string, 'success' | 'warning' | 'error' | 'info' | 'default'> = {
     connected: 'success',
     connecting: 'info',
     disconnected: 'warning',

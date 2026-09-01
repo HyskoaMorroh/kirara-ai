@@ -105,7 +105,7 @@ onMounted(() => {
           </template>
         </n-form-item>
         <!--
-          放在镜像源之后：这三项都属于「启动时要不要去外网、去哪里」这一件事。
+          放在镜像源之后：它和镜像源同属「启动时要不要去外网、去哪里」这一件事。
           默认关闭——静默停掉版本检查会让用户长期停在旧版本而不自知。
         -->
         <n-form-item label="禁用自动检查更新" path="disable_auto_check">
@@ -115,24 +115,6 @@ onMounted(() => {
               打开后不再自动向 PyPI 与 npm 询问版本：启动时不问，打开页面时也不问。
               离线或内网部署既查不到注册表，又要为此等一次超时，这个开关把那些等待一起去掉。
               这不是「禁用升级」——下方「立即检查更新」由你主动发起，任何时候都照常可用。
-            </n-text>
-          </template>
-        </n-form-item>
-        <!--
-          禁用自动升级：`entry.py::check_update` 打开时**完全不发起请求**。
-          说明里必须写清「检查更新按钮仍可用」——不写，用户会把
-          「禁用自动升级」读成「禁用升级」，从而不敢开这个他最需要的开关。
-        -->
-        <n-form-item label="禁用自动检查" path="disable_auto_check">
-          <n-switch
-            v-model:value="formData.disable_auto_check"
-            data-test="disable-auto-check"
-          />
-          <template #feedback>
-            <n-text depth="3">
-              开启后启动时不再探测新版本，且完全不发起请求。适合离线或内网部署——
-              这类环境既查不到注册表，又要为此等一次超时。
-              设置页与关于页的「检查更新」按钮不受影响，仍可随时手动检查
             </n-text>
           </template>
         </n-form-item>

@@ -24,6 +24,8 @@ from kirara_ai.workflow.core.workflow import WorkflowRegistry
 from kirara_ai.workflow.core.workflow.builder import WorkflowBuilder
 from kirara_ai.workflow.core.workflow.validation import validate_workflow_definition
 
+from kirara_ai.web.utils import get_installed_webui_version, static_build_freshness
+
 from .models import ReadinessCheck, ReadinessResponse, ReadinessStatus
 
 CHECK_IDS = (
@@ -34,6 +36,7 @@ CHECK_IDS = (
     "im_available",
     "llm_available",
     "mcp_health",
+    "static_build_current",
 )
 
 READINESS_WORKERS = 4
@@ -365,6 +368,52 @@ def _mcp_health(config: GlobalConfig, manager: MCPServerManager) -> ReadinessChe
     )
 
 
+def _static_build_current(*, installed: str, expected: str) -> ReadinessCheck:
+    """Report a served static build that does not match the backend version.
+
+    `app.py` 把 `$PWD/web` 当静态目录，而 `webui/` 才是源码——两者版本各走各的。
+    落差的后果是「后端是新的、前端是旧的」：用户按新文档去点一个按钮，按钮不存在，
+    而 API 探针、健康检查、版本一致性检查全都通过，因为它们查的是后端。
+
+    三条判定纪律：
+
+    - **不一致是 warn 不是 fail。** 服务确实在正常响应，只是界面旧了；
+      fail 会让健康检查把一个可用实例摘下线。
+    - **读不到版本是 skip 不是 warn。** 纯 API 部署没有静态目录，那是合法形态，
+      报 warn 会让运维去修一个不存在的故障。
+    - **证据同时给结构化字段与人话。** CI 读前者判断，运维读后者知道下一步。
+    """
+
+    freshness = static_build_freshness(installed=installed, expected=expected)
+    installed_version = str(freshness["installed"])
+    expected_version = str(freshness["expected"])
+    evidence = {
+        "installed_version": installed_version,
+        "expected_version": expected_version,
+    }
+    if freshness["status"] == "unknown":
+        return _check(
+            CHECK_IDS[7], "skip",
+            "未检测到内置前端构建产物",
+            "纯 API 部署无需处理；若本应提供界面，请构建 WebUI 后再拷入静态目录",
+            **evidence,
+        )
+    if not freshness["stale"]:
+        return _check(
+            CHECK_IDS[7], "pass",
+            f"前端构建与后端同版本（{installed_version}）",
+            "无需处理",
+            **evidence,
+        )
+    return _check(
+        CHECK_IDS[7], "warn",
+        f"前端构建版本为 {installed_version}，后端期望 {expected_version}",
+        "在 webui/ 下重新构建（npm run build）并把 dist 内容拷到静态目录，"
+        "否则界面缺少这个后端已提供的功能",
+        **evidence,
+    )
+
+
 async def run_readiness_checks(
     config: GlobalConfig,
     workflow_registry: WorkflowRegistry,
@@ -376,6 +425,8 @@ async def run_readiness_checks(
     data_path: Path,
     config_path: Optional[Path] = None,
     block_registry: Optional[BlockRegistry] = None,
+    static_dir: Optional[Path] = None,
+    expected_webui_version: Optional[str] = None,
     timeout_seconds: float = 1.0,
 ) -> ReadinessResponse:
     """Run each local check independently with a strict per-check timeout."""
@@ -388,6 +439,15 @@ async def run_readiness_checks(
         (CHECK_IDS[4], lambda: _im_availability(config, im_manager)),
         (CHECK_IDS[5], lambda: _llm_availability(config, llm_manager)),
         (CHECK_IDS[6], lambda: _mcp_health(config, mcp_manager)),
+        (
+            CHECK_IDS[7],
+            lambda: _static_build_current(
+                installed=get_installed_webui_version(static_dir)
+                if static_dir is not None
+                else "unknown",
+                expected=expected_webui_version or "unknown",
+            ),
+        ),
     )
     results = []
     for check_id, operation in checks:

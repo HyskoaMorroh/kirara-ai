@@ -13,6 +13,8 @@ from kirara_ai.config.global_config import GlobalConfig
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.llm.adapter import AutoDetectModelsProtocol
 from kirara_ai.llm.llm_manager import LLMManager
+from kirara_ai.llm.pricing import PriceCatalog
+from kirara_ai.llm.pricing_sync import PriceSyncReport, UpstreamPriceSyncer
 from kirara_ai.logger import get_logger
 from kirara_ai.plugin_manager.extension_host import ExtensionLifecycleHost
 from kirara_ai.plugin_manager.models import LifecycleName
@@ -24,6 +26,14 @@ from kirara_ai.scheduler.model_catalog import (
 
 # 记录每个后端上次自动检测时间的状态文件
 STATE_FILE = os.path.join(DATA_PATH, "auto_detect_state.json")
+
+# 定价同步在状态文件里的键。后端名不会长这样（配置里的 name 不允许带冒号），
+# 所以它和各后端的检测时间戳共存在同一份状态里不会撞名。
+PRICE_SYNC_STATE_KEY = "__price_sync__"
+
+# 定价同步的默认间隔天数。价格变动不频繁，一周一次足够，又不至于让新接入的
+# 模型长期落在「无价格」状态。
+DEFAULT_PRICE_SYNC_INTERVAL_DAYS = 7
 
 # 后台循环的检查周期（秒），每 24 小时检查一次是否有到期的后端
 CHECK_INTERVAL_SECONDS = 86400
@@ -55,6 +65,9 @@ class TaskScheduler:
         self._task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
         self._state: Dict[str, Any] = self._load_state()
+        # 本进程最近一次定价同步是否成功。None 表示这个进程还没同步过——和
+        # "同步过但失败了"是两种处境，界面上不该显示成同一个样子。
+        self._last_price_sync_ok: Optional[bool] = None
 
     def _load_state(self) -> Dict[str, Any]:
         """读取上次检测时间的记录"""
@@ -280,10 +293,85 @@ class TaskScheduler:
                 self._state[backend.name] = datetime.now().isoformat()
                 state_changed = True
 
+        # 定价同步和模型检测共用这套状态与到期判定：两者都是"隔几天去上游看一
+        # 眼"，没必要为它再养一个循环。它不属于任何后端，所以用一个不会与后端
+        # 名相撞的固定键。
+        #
+        # 结果刻意不并入 results：那份映射的契约是"后端名 -> 检测是否成功"，
+        # 调用方会按后端名遍历它。塞一个假后端名进去，调用方就会把定价同步当成
+        # 一个真上游来处理。同步结果改由 get_status 汇报。
+        price_interval = self._resolve_price_interval()
+        if price_interval > 0 and (
+            force or self._is_due(PRICE_SYNC_STATE_KEY, price_interval)
+        ):
+            report = await self._run_price_sync()
+            self._last_price_sync_ok = report.error is None
+            # 失败不打时间戳，否则要再等一个完整间隔才会重试。
+            if report.error is None:
+                self._state[PRICE_SYNC_STATE_KEY] = datetime.now().isoformat()
+                state_changed = True
+
         if state_changed and not self._save_state():
             self._state = state_before_run
 
         return results
+
+    def _resolve_price_interval(self) -> int:
+        """读取定价同步间隔（天）。0 表示关闭。"""
+        try:
+            config: GlobalConfig = self.container.resolve(GlobalConfig)
+        except Exception:
+            return DEFAULT_PRICE_SYNC_INTERVAL_DAYS
+        interval = getattr(
+            config.llms, "price_sync_interval_days", DEFAULT_PRICE_SYNC_INTERVAL_DAYS
+        )
+        try:
+            return max(0, int(interval))
+        except (TypeError, ValueError):
+            return DEFAULT_PRICE_SYNC_INTERVAL_DAYS
+
+    def _resolve_price_catalog(self):
+        """取出价目表。没注册就返回 None，让同步安静跳过。"""
+        try:
+            catalog = self.container.resolve(PriceCatalog)
+        except Exception:
+            return None
+        return catalog if isinstance(catalog, PriceCatalog) else None
+
+    async def _run_price_sync(self) -> "PriceSyncReport":
+        """跑一轮定价同步，并把结果落盘。"""
+        catalog = self._resolve_price_catalog()
+        if catalog is None:
+            return PriceSyncReport(error="price catalog is not available")
+
+        self.logger.info("Running upstream price catalog sync")
+        report = await UpstreamPriceSyncer().sync(catalog)
+
+        if report.error is not None:
+            self.logger.warning(f"Price sync failed: {report.error}")
+            return report
+
+        # 只有真的写进了新价格才需要落盘，避免每轮都重写文件。
+        if report.imported:
+            try:
+                await asyncio.to_thread(catalog.save)
+            except Exception as error:  # noqa: BLE001
+                self.logger.warning(f"Price sync could not persist the catalog: {error}")
+                return PriceSyncReport(error=str(error))
+            self.logger.info(
+                f"Price sync updated {report.imported} model price(s), "
+                f"{report.unchanged} unchanged, {report.skipped_manual} manual kept"
+            )
+        else:
+            self.logger.info(
+                f"Price sync found no changes ({report.unchanged} model(s) already current)"
+            )
+
+        self._emit_lifecycle(
+            "price_catalog_synced",
+            {"component": "scheduler", **report.as_dict()},
+        )
+        return report
 
     async def _loop(self) -> None:
         """后台循环，定期检查是否有后端到期"""
@@ -342,4 +430,14 @@ class TaskScheduler:
                     "model_count": len(backend.models),
                 }
             )
-        return {"running": self._task is not None and not self._task.done(), "backends": status}
+        price_interval = self._resolve_price_interval()
+        return {
+            "running": self._task is not None and not self._task.done(),
+            "backends": status,
+            "price_sync": {
+                "interval_days": price_interval,
+                "last_run": self._state.get(PRICE_SYNC_STATE_KEY),
+                "enabled": price_interval > 0,
+                "last_ok": self._last_price_sync_ok,
+            },
+        }

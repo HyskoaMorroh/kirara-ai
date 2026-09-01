@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from kirara_ai.config.global_config import GlobalConfig, LLMBackendConfig
+from kirara_ai.config.global_config import GlobalConfig, LLMBackendConfig, backend_field_default
 from kirara_ai.events.event_bus import EventBus
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.llm.adapter import LLMBackendAdapter, LLMChatProtocol
@@ -119,7 +119,15 @@ def test_stream_deadline_falls_back_to_the_legacy_key_when_unset():
 
 
 def test_stream_deadline_has_a_default_for_a_missing_backend():
-    assert LLMManager._stream_timeout(None) == pytest.approx(60.0)
+    """兜底值必须等于配置字段的默认值，而不是一个抄进测试的字面常数。
+
+    原先这里钉死 60.0。放宽默认值（需求 8：要容得下最大强度思考）时，这条断言
+    会把正确的改动判成回归——它钉的是「当时那个数」，而要守的规则是
+    「兜底与用户看得见的默认值同源」。
+    """
+    assert LLMManager._stream_timeout(None) == pytest.approx(
+        backend_field_default("stream_total_timeout_seconds")
+    )
 
 
 def test_stream_activity_budget_cannot_exceed_the_stream_total_deadline():

@@ -80,6 +80,7 @@ class SessionStore:
         messages: Iterable[LLMChatMessage],
         *,
         agent_id: str | None = None,
+        context: Any | None = None,
     ) -> None:
         payload = {
             "format_version": _STORE_FORMAT_VERSION,
@@ -91,11 +92,81 @@ class SessionStore:
         }
         if agent_id is not None:
             payload["agent_id"] = str(agent_id)
+        # 渠道身份：会话被清理时要派发 `SessionEnd` Hook，而 Hook 需要一个真实的
+        # `ChannelContext`。文件名只是摘要，无法反推四个标识，所以在这里存下来。
+        # 不存的话只有两条路：派发一个编出来的身份（审计从此不可信），
+        # 或者干脆不派发（声明了却不触发）。
+        identity = self._channel_identity(context)
+        if identity is not None:
+            payload["channel_identity"] = identity
         with self._transaction():
             self._atomic_write(
                 self._history_path(session_key, agent_id=agent_id),
                 payload,
             )
+
+    #: `ChannelContext` 的四个标识 + 渠道类型。顺序与 dataclass 声明一致，
+    #: 读回时可直接 `ChannelContext(**identity)` 还原。
+    _CHANNEL_IDENTITY_FIELDS = (
+        "channel_type",
+        "adapter_instance",
+        "account_scope",
+        "conversation_scope",
+        "sender_scope",
+    )
+
+    @classmethod
+    def _channel_identity(cls, context: Any | None) -> dict[str, str] | None:
+        """把 `ChannelContext` 摊平成可落盘的字典；缺字段时返回 None。
+
+        不导入 `ChannelContext` 做 isinstance：`core` 已经 import 了本模块，
+        反向导入会成环。按属性取值即可——五个字段齐全才算一个有效身份，
+        缺任何一个就返回 None，让调用方跳过而不是存一份半截的记录。
+        """
+        if context is None:
+            return None
+        identity: dict[str, str] = {}
+        for name in cls._CHANNEL_IDENTITY_FIELDS:
+            value = getattr(context, name, None)
+            if not isinstance(value, str) or not value:
+                return None
+            identity[name] = value
+        return identity
+
+    @classmethod
+    def _read_channel_identity(cls, payload: Any) -> dict[str, str] | None:
+        """从已落盘的记录里读回渠道身份；旧文件或残缺记录一律 None。"""
+        if not isinstance(payload, dict):
+            return None
+        raw = payload.get("channel_identity")
+        if not isinstance(raw, dict):
+            return None
+        identity: dict[str, str] = {}
+        for name in cls._CHANNEL_IDENTITY_FIELDS:
+            value = raw.get(name)
+            if not isinstance(value, str) or not value:
+                return None
+            identity[name] = value
+        return identity
+
+    def read_session_metadata(self, session_id: str) -> dict[str, Any] | None:
+        """读一个会话的元数据，不含对话正文。
+
+        清理路由手里只有 `session_id`；派发 `SessionEnd` 需要 agent 与渠道身份。
+        未知 id 返回 None 而不是抛错——路由要给 404，不是 500。
+        """
+        with self._transaction():
+            path = self._session_path(session_id)
+            if path is None:
+                return None
+            payload = self._read_json(path, default=None)
+        if not isinstance(payload, dict):
+            return None
+        return {
+            "session_id": session_id,
+            "agent_id": payload.get("agent_id"),
+            "channel_identity": self._read_channel_identity(payload),
+        }
 
     def load_history(
         self,
@@ -295,6 +366,8 @@ class SessionStore:
                         "message_count": len(messages),
                         "updated_at": updated_at,
                         "pending_confirmations": pending_counts.get(session_digest, 0),
+                        # 界面上要能看出哪些会话来自哪个渠道；旧文件为 None。
+                        "channel_identity": self._read_channel_identity(payload),
                     }
                 )
         sessions.sort(key=lambda item: (item["updated_at"] or ""), reverse=True)
@@ -338,6 +411,11 @@ class SessionStore:
                 "format_version": _STORE_FORMAT_VERSION,
                 "messages": [],
             }
+            # 清历史保留会话本身，渠道身份也必须留下：丢了的后果是这个会话
+            # 从此再也派发不出 `SessionEnd`。
+            identity = self._read_channel_identity(payload)
+            if identity is not None:
+                replacement["channel_identity"] = identity
             if agent_id is not None:
                 replacement["agent_id"] = str(agent_id)
             if session_digest is not None:

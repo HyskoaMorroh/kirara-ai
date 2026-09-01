@@ -137,8 +137,11 @@ OneBot 实现（LLOneBot / NapCat 等）主动连过来。因此保存适配器�
 
 `aggregate` **不是**逐字推送。它的实际收益是三条容错路径开始生效：
 
-- `stream_first_byte_timeout_seconds`：等首个数据块的上限，超时可切换下一个供应商；
-- `stream_idle_timeout_seconds`：识别中途卡住的流；
+- `stream_first_byte_timeout_seconds`（默认 60 秒）：等首个数据块的上限，超时可切换
+  下一个供应商。默认给得宽，是因为开了最大强度思考的上游会先做一段长推理再吐第一个
+  字节——按十几秒判定的话，用户看到的是「上游没响应」，而实际上它还在想；
+- `stream_idle_timeout_seconds`（默认 120 秒）：识别中途卡住的流。同理，推理块之间
+  的停顿是正常的，不是卡死；
 - **首字节之前**的故障转移是安全的（还没有任何内容发给用户）；一旦已经产出内容，
   系统不会切换并拼接，避免用户看到两段重复回复。
 
@@ -201,7 +204,8 @@ OpenAI 兼容那一族已经会，Claude / Gemini / Ollama 目前只解析文本
 - 多轮工具调用**共享**同一份预算，不会每轮重新给满——否则「总预算」名不副实。
 
 它约束的是整轮。单次请求的超时仍由各 Provider 自己的
-`non_stream_timeout_seconds` / `stream_*_timeout_seconds` 决定，两者是不同层级：
+`non_stream_timeout_seconds`（默认 600 秒）/ `stream_*_timeout_seconds` 决定，
+两者是不同层级：
 Provider 超时决定「这一次上游调用等多久」，`turn_deadline_seconds` 决定
 「这一整轮（含工具往返）最多花多久」。
 
@@ -214,13 +218,20 @@ Provider 超时决定「这一次上游调用等多久」，`turn_deadline_secon
 「调用者是不是这个 Agent 的创建者」把关，而这个身份此前只由 WebUI 的登录态提供。
 IM 入站链路没有它，因此**聊天侧所有人都拿不到工具，包括你本人**。
 
-在 `data/config.yaml` 里声明你自己：
+**在界面上声明**（推荐）：「系统设置 → Agent 运行时 → 创建者渠道身份」，
+点「添加创建者身份」，选渠道类型、填你自己的用户标识（QQ 号 / Telegram 用户 ID），
+保存后**重启服务**。渠道类型是下拉而不是自由文本：后端只接受六个渠道名，
+写错会静默匹配不上任何消息。
+
+也可以直接改 `data/config.yaml`，两者是同一份配置：
 
 ```yaml
 agent_runtime:
   creator_channel_identities:
-    - channel_type: onebot        # webui / onebot / qqbot / telegram / wecom
+    - channel_type: onebot        # webui / http / onebot / qqbot / telegram / wecom
       sender_scope: "10001"       # 你自己的 QQ 号，不是机器人的
+      # account_scope: "20002"    # 可选：限定只经由这个机器人账号才算
+      # adapter_instance: bot-a   # 可选：限定适配器实例
       # allow_group_chat: false   # 群聊里是否生效，默认关闭
 ```
 
@@ -228,6 +239,8 @@ agent_runtime:
 
 - **群聊默认不生效。** 群里所有人都看得到你发的指令并照抄；照抄的人身份不同
   因而拿不到工具，但把宿主操作暴露在多人可见的会话里是另一回事。
+- **渠道与发送者标识一起比对。** QQ 号和 Telegram 用户 ID 可能撞号，
+  只比一个等于把另一个渠道的同号用户也放进来。
 - **未声明的人照常得到正常回复**，只是工具列表为空——不是报错，也不是拒绝服务。
 
 完整边界见 `docs/AGENTS_SKILLS_HOOKS_MCP_GUIDE.md` 第 8 节。

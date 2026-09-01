@@ -13,7 +13,7 @@ export interface ResourceVersion {
   installed_at: string
 }
 
-export interface ManagedResource {
+export interface ManagedResource extends ResourceDependencyProjection {
   resource_id: string
   type: ResourceType
   current_version: string
@@ -81,7 +81,37 @@ export interface SkillsSearchResponse {
   offset: number
 }
 
-export interface CatalogItem {
+/**
+ * 一个资源的系统依赖汇总档位，与后端 `_dependency_status` 的六个返回值一一对应。
+ *
+ * `unknown` 与 `missing` 必须分开：前者是「还没探测过」，后者是「探测过、确实没有」。
+ * 显示成同一种状态会让刚装完还没探测的资源看起来像坏的，用户于是去装一个本来
+ * 就在的东西。
+ */
+export type ResourceDependencyStatus =
+  | 'not_required'
+  | 'ready'
+  | 'missing'
+  | 'failed'
+  | 'cancelled'
+  | 'unknown'
+
+/**
+ * 后端在每个目录项与已安装资源上投影的依赖就绪信息。
+ *
+ * 声明为可选：老后端不带这几个字段，读到 undefined 表示「这个后端还不提供
+ * 依赖信息」，与「不需要依赖」（`not_required`）不是一回事。
+ */
+export interface ResourceDependencyProjection {
+  /** 这个资源需要哪些系统依赖；空数组表示确实不需要。 */
+  dependency_ids?: string[]
+  /** 每个依赖的探测结果。长度与 `dependency_ids` 不等时汇总档位为 unknown。 */
+  system_dependencies?: SystemDependency[]
+  dependencies_ready?: boolean
+  dependency_status?: ResourceDependencyStatus
+}
+
+export interface CatalogItem extends ResourceDependencyProjection {
   catalog_id: string
   type: Exclude<ResourceType, 'session'>
   name: string

@@ -72,17 +72,23 @@ const menuOptions = computed<MenuOption[]>(() => {
       ]
     case 'plugins':
       return []
-    case 'memory':
+    case 'resources':
       return [
         {
-          label: () => '记忆管理',
-          key: 'memory-list',
-          path: '/memory'
+          label: () => '资源列表',
+          key: 'resources-list',
+          path: '/resources'
         },
         {
-          label: () => '记忆检索',
-          key: 'memory-search',
-          path: '/memory/search'
+          label: () => '记忆资源',
+          // 记忆是资源类型之一，落点带上 type 让页面直接筛好，而不是跳过去再手动选一次。
+          key: 'resources-memory',
+          path: '/resources?type=memory'
+        },
+        {
+          label: () => '系统依赖',
+          key: 'resources-dependencies',
+          path: '/resources/dependencies'
         }
       ]
     case 'tracing':
@@ -110,6 +116,17 @@ const menuOptions = computed<MenuOption[]>(() => {
 
 // 当前选中的菜单项
 const activeKey = computed(() => {
+  // 先按整条链接精确认一次：有两个条目共用 /resources，只有 query 不同（资源列表 / 记忆资源），
+  // 只比 path 的话点进记忆资源，高亮仍停在资源列表，读起来像点击没生效。
+  const query = route.query
+  const suffix = query.type ? `?type=${String(query.type)}` : ''
+  const exact = menuOptions.value.find(
+    (option) => option.path === route.fullPath || option.path === `${route.path}${suffix}`
+  )
+  if (exact) {
+    return exact.key
+  }
+
   const pathParts = route.path.split('/')
   if (pathParts.length > 2) {
     return `${pathParts[1]}-${pathParts[2]}`
@@ -128,7 +145,7 @@ const getDefaultSubModule = (module: string) => {
       return 'list'
     case 'plugins':
       return 'installed'
-    case 'memory':
+    case 'resources':
       return 'list'
     case 'tracing':
       // 与路由的 `/tracing` 重定向保持一致：默认落在使用统计。
@@ -146,8 +163,8 @@ const getMenuTitle = (key: string) => {
       return '模型与 Agent'
     case 'plugins':
       return '插件'
-    case 'memory':
-      return '记忆'
+    case 'resources':
+      return '资源与记忆'
     case 'tracing':
       return '系统记录'
     default:

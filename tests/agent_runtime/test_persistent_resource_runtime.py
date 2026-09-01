@@ -138,11 +138,26 @@ def _install(lifecycle, resource_id, resource_type, entry, content, source):
         archive.unlink(missing_ok=True)
 
 
-def _install_downloaded_skill(lifecycle, downloaded_root: Path) -> dict:
-    """Install the exact manifest and files produced by the remote Skill download."""
+def _install_downloaded_skill(lifecycle, downloaded_root: Path, manifest: dict | None = None) -> dict:
+    """Install the exact manifest and files produced by the remote Skill download.
+
+    `manifest` 可由调用方传入并**就地改写**：`skill:agent-browser` 现在是内置条目，
+    覆盖安装要抬版本号，而调用方随后要按落盘的那个版本去断言绑定。两边各读一次
+    磁盘上的 `1.0.0` 就会对不上，因此这里让调用方持有同一个字典。
+    """
 
     manifest_path = downloaded_root / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest is None:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    already_installed = manifest["resource_id"] in {
+        resource["resource_id"] for resource in lifecycle.list_resources()
+    }
+    if already_installed:
+        # `update_archive` 要求版本单调递增（防降级），而这份真实产物与内置
+        # 条目声明的是同一个 `1.0.0`。把它标成 `1.0.1` 落盘：被测对象是
+        # **文件内容**（`SKILL.md` 正文能否到达模型），版本号只是安装通道的
+        # 前置条件，抬一位不改变这条用例证明的事。
+        manifest["version"] = "1.0.1"
     archive_path = lifecycle.imports_path / f"{manifest['resource_id']}.zip"
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
@@ -152,6 +167,16 @@ def _install_downloaded_skill(lifecycle, downloaded_root: Path) -> dict:
                 (downloaded_root / file_record["path"]).read_bytes(),
             )
     try:
+        # `skill:agent-browser` 现在是内置目录条目（需求 10：首屏就得有货），
+        # 因此 `ensure_builtins()` 已经把同一个 `resource_id` 装进去了——它由
+        # `source_key` 的摘要决定，与这份下载产物必然同一个。这条用例要证明的是
+        # 「**真实下载的字节**能进运行时」，所以这里走 `update_archive` 覆盖成
+        # 真实产物，而不是把内置那份当成它。用 `install_archive` 会撞
+        # 「resource ID is already installed」——那是环境冲突，不是被测行为。
+        if already_installed:
+            return lifecycle.update_archive(
+                archive_path, expected_resource_id=manifest["resource_id"]
+            )
         return lifecycle.install_archive(archive_path)
     finally:
         archive_path.unlink(missing_ok=True)
@@ -584,7 +609,9 @@ async def test_real_downloaded_agent_browser_skill_enters_persistent_runtime(tmp
         "hook.ai-debug",
     ):
         lifecycle.enable(resource_id, confirmed=True)
-    installed = _install_downloaded_skill(lifecycle, downloaded_root)
+    installed = _install_downloaded_skill(
+        lifecycle, downloaded_root, manifest=downloaded_manifest
+    )
     lifecycle.enable(installed["resource_id"], confirmed=True)
 
     def binding(resource_id, resource_type):

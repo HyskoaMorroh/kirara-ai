@@ -242,6 +242,41 @@ def _definitions() -> tuple[DependencyDefinition, ...]:
             timeout_seconds=900,
         ),
         DependencyDefinition(
+            dependency_id="uvx-runtime",
+            name="uvx Runner",
+            description=(
+                "uvx 一次性运行器，供以 uvx 启动的 stdio MCP 使用。"
+                "与 uv 是两个命令：uv 装了不代表 uvx 在 PATH 上。"
+            ),
+            kind="mcp-runtime",
+            required_by=("mcp:fetch", "mcp:time"),
+            probe_commands=(("uvx", "--version"),),
+            prerequisites=("python-tooling",),
+            operator_guidance=(
+                "uvx 随 uv 一起分发（uv 0.3+）。若 uv 可用而 uvx 不可用，"
+                "通常是 uv 版本过旧或服务进程的 PATH 未包含 uv 的可执行目录。"
+            ),
+        ),
+        DependencyDefinition(
+            dependency_id="npx-runtime",
+            name="npx Runner",
+            description=(
+                "npx 一次性运行器，供以 npx 启动的 stdio MCP 使用。"
+                "Context7 有自己的登记项（context7-runtime），此项覆盖其余 npx 预设。"
+            ),
+            kind="mcp-runtime",
+            required_by=(
+                "mcp:memory",
+                "mcp:sequential-thinking",
+                "mcp:filesystem",
+                "mcp:chrome-devtools",
+                "mcp:playwright",
+            ),
+            probe_commands=(("npx", "--version"),),
+            prerequisites=("node-runtime",),
+            operator_guidance="npx 随 Node.js 一起安装；请先修复 Node.js Runtime。",
+        ),
+        DependencyDefinition(
             dependency_id="context7-runtime",
             name="Context7 MCP Runtime",
             description="运行 Context7 stdio MCP 所需的 npx 环境；MCP 连接状态另行展示。",
@@ -328,6 +363,26 @@ def _definitions() -> tuple[DependencyDefinition, ...]:
     )
 
 
+#: `runtime_dependency` 声明值到登记项 id 的映射。
+#:
+#: 预设用命令名声明自己需要什么（`"uvx"` / `"npx"`），登记表用 id 索引探测项。
+#: 两者不同名是刻意的：命令名是事实，id 是这套依赖系统的主键，未来同一个命令
+#: 可能对应多条探测链（例如按平台分叉）。
+_RUNTIME_DEPENDENCY_IDS = {
+    "uvx": "uvx-runtime",
+    "npx": "npx-runtime",
+}
+
+
+def known_dependency_ids() -> frozenset[str]:
+    """Return every registered dependency id.
+
+    给调用方一条校验途径：判定出的 id 必须能在登记表里查到，否则探测、安装与
+    状态展示全都无从进行——而那种情况下界面只会显示一个查不到状态的依赖名。
+    """
+    return frozenset(definition.dependency_id for definition in _definitions())
+
+
 def dependency_ids_for_resource(item: Mapping[str, Any]) -> list[str]:
     """Return the server dependencies one catalog item or resource needs.
 
@@ -353,6 +408,16 @@ def dependency_ids_for_resource(item: Mapping[str, Any]) -> list[str]:
 
     if catalog_id == "mcp:context7" or source_key == "mcp:context7" or resource_id == "mcp.context7":
         return ["context7-runtime"]
+
+    # 其余 stdio MCP 预设按它们自己声明的 `runtime_dependency` 判定。
+    # 此前这个字段无人消费：7 个预设一律返回空列表，含义是「不需要任何依赖」，
+    # 而它们全都需要——没有 uvx 的机器上 mcp:fetch 一次都起不来，
+    # 界面上却只显示「连接失败 / 工具数 0」，不说缺什么。
+    declared = item.get("runtime_dependency") or metadata.get("runtime_dependency")
+    mapped = _RUNTIME_DEPENDENCY_IDS.get(str(declared or "").strip().casefold())
+    if mapped is not None:
+        return [mapped]
+
     if str(item.get("type") or "").casefold() != "skill":
         return []
 

@@ -338,24 +338,25 @@ const formatJSON = (data: any) => {
 }
 
 // 获取状态类型
-const getStatusType = (status: string | undefined) => {
-  const statusMap = {
-    pending: 'warning',
-    success: 'success',
-    failed: 'error'
-  }
-  return statusMap[status || 'pending'] || 'warning'
+/** 状态到 n-tag type 的映射。上游可能返回表外的状态，一律按「请求中」处理。 */
+const STATUS_TAG_TYPES: Record<string, 'warning' | 'success' | 'error'> = {
+  pending: 'warning',
+  success: 'success',
+  failed: 'error'
 }
 
+const getStatusType = (status: string | undefined) =>
+  STATUS_TAG_TYPES[status || 'pending'] || 'warning'
+
 // 获取状态文本
-const getStatusText = (status: string | undefined) => {
-  const statusMap = {
-    pending: '请求中',
-    success: '成功',
-    failed: '失败'
-  }
-  return statusMap[status || 'pending'] || '请求中'
+const STATUS_TEXTS: Record<string, string> = {
+  pending: '请求中',
+  success: '成功',
+  failed: '失败'
 }
+
+const getStatusText = (status: string | undefined) =>
+  STATUS_TEXTS[status || 'pending'] || '请求中'
 
 // 刷新数据
 const refreshData = async () => {

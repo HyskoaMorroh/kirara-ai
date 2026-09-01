@@ -45,12 +45,12 @@ class LLMBackendConfig(BaseModel):
     max_retries: int = Field(default=0, ge=0, le=10, description="Provider 内部最大重试次数")
     retry_backoff_seconds: float = Field(default=0.5, ge=0, description="重试初始退避秒数")
     retry_backoff_max_seconds: float = Field(default=5.0, ge=0, description="重试最大退避秒数")
-    request_timeout_seconds: float = Field(default=60.0, gt=0, description="兼容旧配置：一次模型执行的总时间预算")
-    non_stream_timeout_seconds: float = Field(default=60.0, gt=0, description="非流式请求总超时")
-    stream_first_byte_timeout_seconds: float = Field(default=15.0, gt=0, description="流式请求首字节超时")
-    stream_idle_timeout_seconds: float = Field(default=30.0, gt=0, description="流式请求相邻字节最大静默时间")
+    request_timeout_seconds: float = Field(default=600.0, gt=0, description="兼容旧配置：一次模型执行的总时间预算")
+    non_stream_timeout_seconds: float = Field(default=600.0, gt=0, description="非流式请求总超时")
+    stream_first_byte_timeout_seconds: float = Field(default=60.0, gt=0, description="流式请求首字节超时；默认值要容得下最大强度思考的推理前奏")
+    stream_idle_timeout_seconds: float = Field(default=120.0, gt=0, description="流式请求相邻字节最大静默时间；推理块之间的停顿不应被判成断流")
     stream_total_timeout_seconds: float = Field(
-        default=60.0,
+        default=600.0,
         gt=0,
         description="流式请求总超时；未显式配置时沿用 request_timeout_seconds",
     )
@@ -224,6 +224,11 @@ class LLMBackendConfig(BaseModel):
 class LLMConfig(BaseModel):
     api_backends: List[LLMBackendConfig] = Field(
         default=[], description="LLM API后端列表"
+    )
+    price_sync_interval_days: int = Field(
+        default=7,
+        ge=0,
+        description="自动同步公开定价目录的间隔天数，0 表示关闭（手工价始终保留）",
     )
 
 class MCPTransportConfig(BaseModel):
@@ -657,3 +662,15 @@ class GlobalConfig(BaseModel):
     agent_runtime: AgentRuntimeConfig = AgentRuntimeConfig()
 
     model_config = ConfigDict(extra="allow")
+
+
+def backend_field_default(name: str) -> Any:
+    """返回 `LLMBackendConfig` 某个字段的默认值。
+
+    运行时在拿不到 backend 配置时需要兜底值。把常数抄进调用点会漂移——
+    改了配置默认值而漏改常数，就出现「面板显示 600、代码按 60 掐断」，
+    而走到兜底分支的请求按一个界面上根本看不到的数字失败。
+    让兜底与用户看得见的那个默认值同源。
+    """
+
+    return LLMBackendConfig.model_fields[name].default

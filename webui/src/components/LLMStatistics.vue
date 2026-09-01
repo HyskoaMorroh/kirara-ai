@@ -1045,9 +1045,14 @@ onUnmounted(() => {
     role="alert"
   >
     {{ statisticsError }}
-    <template #action>
+    <!--
+      按钮放在默认插槽里，不用 `#action`：naive-ui 的 AlertSlots 只有
+      default / icon / header，`#action` 的内容根本不会渲染——统计加载失败后
+      就没有任何重试入口，用户只能刷新整页。
+    -->
+    <div class="alert-actions">
       <n-button size="small" data-test="retry-statistics" @click="fetchLLMStats">重试</n-button>
-    </template>
+    </div>
   </n-alert>
   <n-space v-else-if="llmStats" vertical :size="12">
     <!-- 概览统计卡片 -->
@@ -1316,6 +1321,11 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* n-alert 正文内的操作区：与错误文案留出间距 */
+.alert-actions {
+  margin-top: 10px;
+}
+
 .overview-card {
   background: rgba(var(--card-bg-color-rgb), 0.8);
   backdrop-filter: blur(20px);

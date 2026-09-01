@@ -32,7 +32,7 @@ export interface TracingViewModel<S extends TraceStatistics> {
   refreshData: () => void
   initialize: () => Promise<void>
   formatDate: (date: string | Date | null | undefined) => string
-  formatDuration: (durationMs: number | null) => string
+  formatDuration: (durationMs: number | null | undefined) => string
   formatTokens: (tokens: number | null) => string
 }
 // 基础接口定义
@@ -431,8 +431,11 @@ export function useTracingViewModel<S extends TraceStatistics>(
     }
   }
 
-  const formatDuration = (durationMs: number | null) => {
-    if (durationMs === null) return '未知'
+  // 接 undefined 而不只是 null：调用方传的是 `traceDetail?.duration`，
+  // 追踪详情尚未加载时那是 undefined，不是 null。两者都该显示「未知」，
+  // 而不是让 undefined 走到 `.toFixed` 抛 TypeError。
+  const formatDuration = (durationMs: number | null | undefined) => {
+    if (durationMs === null || durationMs === undefined) return '未知'
     return durationMs < 1000
       ? `${durationMs.toFixed(2)} 毫秒`
       : `${(durationMs / 1000).toFixed(2)} 秒`

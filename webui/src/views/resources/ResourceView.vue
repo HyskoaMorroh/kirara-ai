@@ -56,6 +56,7 @@ import {
   importResource,
   installCatalogItem,
   installImportableArchive,
+  installRemoteSkill,
   installResource,
   installSystemDependency,
   listDependencyTasks,
@@ -70,6 +71,7 @@ import {
   restoreResourceBackup,
   retryDependencyTask,
   searchResourceCatalog,
+  searchSkills,
   setRepositoryEnabled,
   updateRemoteResource,
   updateResource
@@ -80,6 +82,8 @@ import type {
   CatalogItem,
   DependencyInstallTask,
   DiscoveredSkill,
+  ImportableArchive,
+  SkillsSearchResult,
   ManagedResource,
   ResourceBackup,
   ResourceContent,
@@ -89,6 +93,7 @@ import type {
   SystemDependency
 } from '@/api/resource'
 import type { AgentSummary } from '@/api/agent'
+import { RESOURCE_TYPE_ORDER, countResourcesByType, matchesResourceKeyword } from './resourceFilter'
 
 type ResourceFilter = ResourceType | 'all'
 type PanelName =
@@ -185,9 +190,32 @@ const catalogTypeOptions = [
   { label: 'Hook', value: 'hook' }
 ]
 
-const visibleResources = computed(() => resources.value)
+/**
+ * 关键词在前端过滤，类型走服务端。
+ * 已经取回来的列表不该为了搜一个词再请求一次——那会让「边打边看」变成每敲一个字符发一次请求。
+ */
+const keyword = ref('')
+const visibleResources = computed(() =>
+  resources.value.filter((item) => matchesResourceKeyword(item, keyword.value))
+)
+/** 装了资源但被关键词滤空——和「一个资源都没装」是两种处境，空状态文案不能共用。 */
+const filteredEmpty = computed(() => resources.value.length > 0 && visibleResources.value.length === 0)
 const hasResources = computed(() => visibleResources.value.length > 0)
 const isPanelOpen = computed(() => panel.value !== null)
+
+/**
+ * 摘要条的按类型分项。
+ *
+ * 统计的是 `resources`（服务端按当前 type 返回的全量）而不是 `visibleResources`：
+ * 关键词是临时的取景框，分项要回答的是「这台机器上到底装了什么」。
+ * 让分项跟着搜索框跳动，等于每敲一个字符就重画一次库存清单。
+ */
+const typeBreakdown = computed(() => {
+  const counts = countResourcesByType(resources.value)
+  const labelOf = (value: string) =>
+    typeOptions.find((option) => option.value === value)?.label ?? value
+  return RESOURCE_TYPE_ORDER.map((value) => ({ value, label: labelOf(value), count: counts[value] ?? 0 }))
+})
 
 const typeLabel = (type: ResourceType) =>
   ({ skill: 'Skill', prompt: 'Prompt', session: 'Session', memory: 'Memory', mcp: 'MCP', hook: 'Hook' })[type]
@@ -313,7 +341,7 @@ const enableInstalledCatalogItem = (item: CatalogItem) => {
       try {
         await run(() => enableResource(resourceId, true), '启用资源失败')
         message.success('资源已启用，现在可以在 Agent 里绑定它')
-        await Promise.all([loadResources(), searchRemote(remoteOffset.value)])
+        await Promise.all([loadResources(), runDiscoverSearch(remoteOffset.value)])
       } finally {
         busyResourceId.value = ''
       }
@@ -718,6 +746,65 @@ const repositoryColumns = computed(() => [
   }
 ])
 
+/**
+ * 发现资源有两个来源，返回结构和覆盖面都不同，必须让用户自己选：
+ * - catalog：服务器内置的一份挑选清单，条目固定、可离线；
+ * - skills.sh：活的远程索引，能搜到清单之外的长尾技能。
+ * 混在一起搜会让人分不清「搜不到」是清单没收录还是远程没有这个技能。
+ */
+const discoverSource = ref<'catalog' | 'skills-sh'>('catalog')
+const skillsShResults = ref<SkillsSearchResult[]>([])
+const skillsShTotal = ref(0)
+
+/** skills.sh 直查：结果结构继承 DiscoveredSkill，安装可直接复用仓库直查那条路径。 */
+const searchSkillsSh = async (offset = 0) => {
+  remoteLoading.value = true
+  remoteSearched.value = true
+  remoteOffset.value = offset
+  try {
+    const result = await run(
+      () => searchSkills(remoteQuery.value.trim(), remoteLimit, offset),
+      '搜索 skills.sh 失败'
+    )
+    skillsShResults.value = result.skills
+    skillsShTotal.value = result.total_count
+    remoteStatus.value = 'ok'
+    remoteError.value = ''
+  } catch {
+    skillsShResults.value = []
+    skillsShTotal.value = 0
+    remoteStatus.value = 'error'
+    remoteError.value = 'skills.sh 暂时无法访问，请稍后重试或改用内置目录'
+  } finally {
+    remoteLoading.value = false
+  }
+}
+
+/** 统一入口：按当前来源分派，翻页与回车都只认这一个函数。 */
+/** 分页页数要按当前来源的总数算，否则 skills.sh 的页码是内置目录的。 */
+const discoverTotal = computed(() =>
+  discoverSource.value === 'skills-sh' ? skillsShTotal.value : remoteTotal.value
+)
+
+const runDiscoverSearch = (offset = 0) =>
+  discoverSource.value === 'skills-sh' ? searchSkillsSh(offset) : searchRemote(offset)
+
+/** 换来源等于换了一份数据，旧结果留在屏幕上会被误读成新来源的返回。 */
+const changeDiscoverSource = (value: 'catalog' | 'skills-sh') => {
+  discoverSource.value = value
+  remoteResults.value = []
+  skillsShResults.value = []
+  remoteTotal.value = 0
+  skillsShTotal.value = 0
+  remoteSearched.value = false
+  remoteError.value = ''
+}
+
+const discoverSourceOptions = [
+  { label: '内置目录', value: 'catalog' },
+  { label: 'skills.sh', value: 'skills-sh' }
+]
+
 const searchRemote = async (offset = 0) => {
   remoteLoading.value = true
   remoteSearched.value = true
@@ -765,7 +852,7 @@ const installCatalog = (item: CatalogItem) => {
       try {
         await run(() => installCatalogItem(item.catalog_id, item.branch), '安装资源失败')
         message.success('资源已安装，启用前需要确认')
-        await Promise.all([loadResources(), searchRemote()])
+        await Promise.all([loadResources(), runDiscoverSearch()])
         if (showCatalogDetailModal.value && selectedCatalogItem.value?.catalog_id === item.catalog_id) {
           try {
             const detail = await getCatalogItem(item.catalog_id)
@@ -831,6 +918,63 @@ const dependencyStatusLabel = (dependency: SystemDependency) => {
   if (dependency.status === 'cancelled') return '已取消'
   if (dependency.status === 'failed') return '检查失败'
   return '未就绪'
+}
+
+/**
+ * 资源的系统依赖提示。
+ *
+ * 后端已经在每个资源上投影了 `dependency_status` 与 `system_dependencies`，
+ * 但界面此前从不渲染：装了 `mcp:fetch`（靠 uvx 启动）而机器上没有 uvx 时，
+ * 唯一线索是 MCP 面板的「连接失败 / 工具数 0」——没有一处说缺什么，
+ * 用户会去查网络、查配置、查 API Key。
+ *
+ * 返回 null 表示「无需提示」：不需要依赖（not_required）、全部就绪（ready），
+ * 以及后端没提供这些字段（老后端，undefined）三种情况都不该占用界面。
+ */
+const resourceDependencyHint = (
+  row: Pick<ManagedResource, 'dependency_status' | 'system_dependencies'>
+): { label: string; detail: string; type: 'warning' | 'error' | 'default' } | null => {
+  const status = row.dependency_status
+  // undefined 是「这个后端不提供依赖信息」，与「不需要依赖」不是一回事，
+  // 但两者都不该显示提示。
+  if (!status || status === 'not_required' || status === 'ready') return null
+
+  const dependencies = row.system_dependencies || []
+  // 说得出名字才算说了话。只讲「依赖未就绪」，用户不知道该去装什么。
+  const blocking = dependencies.filter((item) => !item.ready)
+  const names = (blocking.length ? blocking : dependencies)
+    .map((item) => item.name || item.dependency_id)
+    .filter(Boolean)
+  const nameText = names.length ? names.join('、') : '未知依赖'
+
+  if (status === 'unknown') {
+    // 「还没探测过」与「探测过、确实没有」是两种处境：前者的下一步是去检查，
+    // 后者的下一步是去安装。混成一句会让用户装一个本来就在的东西。
+    return {
+      label: '依赖待检查',
+      detail: `${nameText} 尚未探测。请在「系统依赖」里检查它是否已安装。`,
+      type: 'default'
+    }
+  }
+  if (status === 'missing') {
+    return {
+      label: '缺少依赖',
+      detail: `${nameText} 未安装，这个资源启用后也不会生效。请在「系统依赖」里安装它。`,
+      type: 'warning'
+    }
+  }
+  if (status === 'failed') {
+    return {
+      label: '依赖安装失败',
+      detail: `${nameText} 上次安装失败。请在「系统依赖」里查看原因并重试。`,
+      type: 'error'
+    }
+  }
+  return {
+    label: '依赖已取消',
+    detail: `${nameText} 的安装被取消，需要重新安装后这个资源才会生效。`,
+    type: 'warning'
+  }
 }
 
 const dependencyStatusType = (dependency: SystemDependency) => {
@@ -1087,6 +1231,31 @@ const resourceColumns: DataTableColumns<ManagedResource> = [
               )
             )
           }
+          // 依赖缺失与「未生效」是两个独立的失效原因，可以同时成立：
+          // 一个没绑定 Agent、又缺 uvx 的 MCP 资源两条都要说。
+          const dependencyHint = resourceDependencyHint(row)
+          if (dependencyHint) {
+            tags.push(
+              h(
+                NTooltip,
+                {},
+                {
+                  trigger: () =>
+                    h(
+                      NTag,
+                      {
+                        type: dependencyHint.type,
+                        size: 'small',
+                        bordered: false,
+                        'data-test': 'resource-dependency-hint'
+                      },
+                      { default: () => dependencyHint.label }
+                    ),
+                  default: () => dependencyHint.detail
+                }
+              )
+            )
+          }
           return tags
         }
       })
@@ -1247,7 +1416,7 @@ const auditColumns: DataTableColumns<AuditRecord> = [
 const openPanel = async (name: Exclude<PanelName, null>) => {
   clearDependencyPolling()
   panel.value = name
-  if (name === 'discover') await Promise.all([loadRepositories(), searchRemote()])
+  if (name === 'discover') await Promise.all([loadRepositories(), runDiscoverSearch()])
   if (name === 'backups') await loadBackups()
   if (name === 'relations') await loadRelations()
   if (name === 'dependencies') await loadDependencyData()
@@ -1262,8 +1431,17 @@ const updateDependencyLayout = () => {
   compactDependencyLayout.value = window.innerWidth <= 768
 }
 
+/** query 里带来的类型必须是真实存在的筛选项，否则外部链接能把界面筛成空白。 */
+const isResourceFilter = (value: unknown): value is ResourceFilter =>
+  typeof value === 'string' && typeOptions.some((option) => option.value === value)
+
 onMounted(() => {
   window.addEventListener('resize', updateDependencyLayout)
+  // 先认下 query 里的类型再加载：反过来会先拉一次全部资源，再因类型变化拉第二次。
+  const requested = route.query.type
+  if (isResourceFilter(requested)) {
+    resourceType.value = requested
+  }
   void loadResources()
   if (route.query.panel === 'dependencies') {
     void openPanel('dependencies')
@@ -1301,10 +1479,45 @@ onBeforeUnmount(() => {
       <div><span>服务器存储</span><strong class="summary-note">受控目录</strong></div>
     </section>
 
+    <!--
+      按类型分项。装了 0 个的类型照样显示，且可点击直接切筛选——
+      「Hooks 0」本身就是绑定 Agent 时挑不到 Hook 的答案，比让用户逐个翻下拉去数快得多。
+    -->
+    <section class="type-breakdown" aria-label="按类型统计">
+      <button
+        v-for="entry in typeBreakdown"
+        :key="entry.value"
+        type="button"
+        class="type-chip"
+        :class="{ 'type-chip--active': resourceType === entry.value, 'type-chip--empty': entry.count === 0 }"
+        :aria-pressed="resourceType === entry.value"
+        :data-test="`type-count-${entry.value}`"
+        @click="changeType(resourceType === entry.value ? 'all' : entry.value)"
+      >
+        <span class="type-chip-label">{{ entry.label }}</span>
+        <span class="type-chip-count">{{ entry.count }}</span>
+      </button>
+    </section>
+
     <n-card class="workspace-card">
       <h2 class="card-section-title">已安装资源</h2>
       <div class="resource-toolbar">
         <n-select :value="resourceType" :options="typeOptions" :input-props="{ 'aria-label': '资源类型筛选' }" @update:value="changeType" />
+        <!--
+          搜索框紧跟类型下拉：两者是同一件事的两个维度（哪一类、叫什么），
+          分开摆会让人以为搜索只作用于某一类。clearable 是必要的——
+          没有清除按钮时，用户滤空之后往往以为资源被删了。
+        -->
+        <n-input
+          v-model:value="keyword"
+          class="resource-search"
+          clearable
+          placeholder="搜索名称、ID 或描述"
+          data-test="resource-search"
+          :input-props="{ 'aria-label': '搜索已安装资源' }"
+        >
+          <template #prefix><n-icon aria-hidden="true"><search-outline /></n-icon></template>
+        </n-input>
         <!--
           「从 ZIP 安装」与「导入已有」是两个后端端点、两套语义：
           前者直接安装一个新资源，后者把一个已准备好的包纳管。
@@ -1321,6 +1534,16 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-if="loading" class="loading-state" aria-busy="true"><n-skeleton text :repeat="4" /><n-skeleton text style="width: 82%" /></div>
+      <!-- 滤空 ≠ 未安装：前者要给的出路是「清除关键词」，后者是「去安装」。 -->
+      <n-empty
+        v-else-if="filteredEmpty"
+        :description="`没有匹配「${keyword.trim()}」的已安装资源`"
+        data-test="resource-search-empty"
+      >
+        <template #extra>
+          <n-button aria-label="清除搜索关键词" @click="keyword = ''">清除关键词</n-button>
+        </template>
+      </n-empty>
       <n-empty v-else-if="!hasResources" description="暂无已安装资源">
         <template #extra><n-button type="primary" aria-label="安装第一个资源" @click="openPanel('discover')"><template #icon><n-icon aria-hidden="true"><search-outline /></n-icon></template>安装第一个资源</n-button></template>
       </n-empty>
@@ -1554,8 +1777,22 @@ onBeforeUnmount(() => {
     <n-modal :show="isPanelOpen && panel === 'discover'" preset="card" title="发现并安装资源" aria-label="发现并安装资源" class="resource-modal discover-modal" @update:show="(value) => !value && (panel = null)">
       <n-card :bordered="false" size="small">
         <h2 class="card-section-title">统一资源目录</h2>
-        <n-form inline @submit.prevent="searchRemote(0)">
-          <n-form-item label="资源类型">
+        <n-form inline @submit.prevent="runDiscoverSearch(0)">
+          <n-form-item label="来源">
+            <!--
+              两个来源覆盖面不同：内置目录是挑好的固定清单，skills.sh 是活的远程索引。
+              不给选择的话，清单里没有的技能就等于「不存在」。
+            -->
+            <n-select
+              :value="discoverSource"
+              :options="discoverSourceOptions"
+              data-test="discover-source"
+              :input-props="{ 'aria-label': '发现来源' }"
+              @update:value="changeDiscoverSource"
+            />
+          </n-form-item>
+          <!-- skills.sh 只索引 skill，留着类型下拉会让人以为能在那里搜 MCP 或 Hook。 -->
+          <n-form-item v-if="discoverSource === 'catalog'" label="资源类型">
             <n-select v-model:value="remoteType" :options="catalogTypeOptions" clearable :input-props="{ 'aria-label': '目录资源类型' }" />
           </n-form-item>
           <n-form-item label="关键词"><n-input v-model:value="remoteQuery" placeholder="搜索资源名称或描述" clearable /></n-form-item>
@@ -1565,6 +1802,28 @@ onBeforeUnmount(() => {
         <n-alert v-else-if="remoteStatus === 'error'" type="warning" :show-icon="true">
           {{ remoteError || '在线资源索引暂时不可用，当前仅展示本地资源。' }}
         </n-alert>
+        <template v-else-if="discoverSource === 'skills-sh'">
+          <n-empty v-if="remoteSearched && !skillsShResults.length" description="skills.sh 上没有匹配的技能" />
+          <n-list v-else-if="skillsShResults.length" bordered class="remote-results">
+            <n-list-item v-for="item in skillsShResults" :key="item.source_key">
+              <n-space align="center" justify="space-between" :wrap="true">
+                <div>
+                  <strong>{{ item.name || item.directory }}</strong>
+                  <div class="upload-hint">{{ item.description || item.source_key }}</div>
+                  <small>{{ item.owner }}/{{ item.repository }}{{ item.branch ? ` · 分支 ${item.branch}` : '' }}{{ item.installs ? ` · ${item.installs} 次安装` : '' }}</small>
+                </div>
+                <n-button
+                  size="small"
+                  type="primary"
+                  data-test="install-skills-sh-result"
+                  aria-label="安装 skills.sh 技能"
+                  @click="installRemoteFromDiscovery(item)"
+                ><template #icon><n-icon aria-hidden="true"><cloud-download-outline /></n-icon></template>安装</n-button>
+              </n-space>
+            </n-list-item>
+          </n-list>
+          <n-empty v-else description="输入关键词后搜索 skills.sh" />
+        </template>
         <n-empty v-else-if="remoteSearched && !remoteResults.length" description="没有匹配的资源" />
         <div v-else class="remote-results">
           <article v-for="item in remoteResults" :key="item.catalog_id" class="remote-result">
@@ -1602,7 +1861,7 @@ onBeforeUnmount(() => {
             </n-space>
           </article>
         </div>
-        <n-pagination v-if="remoteTotal > remoteLimit" :page="Math.floor(remoteOffset / remoteLimit) + 1" :page-count="Math.ceil(remoteTotal / remoteLimit)" @update:page="(page) => searchRemote((page - 1) * remoteLimit)" />
+        <n-pagination v-if="discoverTotal > remoteLimit" :page="Math.floor(remoteOffset / remoteLimit) + 1" :page-count="Math.ceil(discoverTotal / remoteLimit)" @update:page="(page) => runDiscoverSearch((page - 1) * remoteLimit)" />
       </n-card>
       <n-divider />
       <n-card :bordered="false" size="small">
@@ -1838,10 +2097,29 @@ h1 { margin: 8px 0 6px; font-size: 30px; line-height: 1.2; letter-spacing: 0; }
 .summary-strip span { color: var(--text-color-secondary); font-size: 13px; }
 .summary-strip strong { font-size: 22px; font-weight: 650; }
 .summary-note { color: var(--success-color-text); font-size: 16px !important; }
+
+/* 分项紧贴摘要条下方：同一个「库存概览」的第二行，用负 margin 收掉重复间距。 */
+.type-breakdown { display: flex; flex-wrap: wrap; gap: 8px; margin: -12px 0 24px; }
+.type-chip { display: inline-flex; align-items: baseline; gap: 8px; padding: 6px 12px; border: 1px solid var(--border-color); border-radius: 999px; background: var(--card-bg-color); color: var(--text-color-secondary); font: inherit; font-size: 13px; cursor: pointer; transition: border-color 0.15s, color 0.15s, background 0.15s; }
+.type-chip:hover { border-color: var(--primary-color); color: var(--text-color-base); }
+.type-chip:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+.type-chip-count { color: var(--text-color-base); font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.type-chip--active { border-color: var(--primary-color); background: var(--primary-color-suppl); color: var(--text-color-base); }
+/* 装了 0 个的类型压暗但不隐藏——它是「压根没装」的诊断信号，不是噪声。 */
+.type-chip--empty { opacity: 0.55; }
+.type-chip--empty .type-chip-count { font-weight: 500; }
 .workspace-card { margin-bottom: 20px; }
 .card-section-title { margin: 0 0 16px; font-size: 18px; line-height: 1.4; font-weight: 600; }
 .resource-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-bottom: 16px; }
 .resource-toolbar :deep(.n-select) { width: 150px; }
+/* 搜索框推到最左：工具栏整体右对齐，筛选类控件靠左、动作类按钮靠右，
+   两组之间自然分开，不用再画分隔线。 */
+.resource-toolbar .resource-search { width: 240px; margin-right: auto; }
+@media (max-width: 900px) {
+  /* 窄屏按钮会换行，此时搜索框独占一行比挤成 240px 更好读 */
+  .resource-toolbar { flex-wrap: wrap; justify-content: flex-start; }
+  .resource-toolbar .resource-search { width: 100%; margin-right: 0; }
+}
 .loading-state { display: grid; gap: 14px; min-height: 150px; padding: 18px 4px; }
 .resource-name { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
 .resource-name small { color: var(--text-color-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

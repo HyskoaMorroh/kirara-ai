@@ -10,6 +10,7 @@ LifecycleName = Literal[
     "workflow_error",
     "dispatch_preview",
     "model_catalog_refreshed",
+    "price_catalog_synced",
     "mcp_operation",
 ]
 CapabilityName = Literal[

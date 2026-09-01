@@ -36,7 +36,24 @@
 
 ### 启动 readiness
 
-`GET /backend-api/api/system/readiness` 是鉴权后的本地、有界、密钥安全诊断。响应包含 `ready`、`timestamp` 和按固定顺序排列的 `checks`：`data_directories_writable`、`configuration_parseable`、`workflows_valid`、`dispatch_targets_exist`、`im_available`、`llm_available`、`mcp_health`。每项给出 `status`、摘要、修复建议和不含敏感值的 evidence。
+`GET /backend-api/api/system/readiness` 是鉴权后的本地、有界、密钥安全诊断。响应包含 `ready`、`timestamp` 和按固定顺序排列的 `checks`：`data_directories_writable`、`configuration_parseable`、`workflows_valid`、`dispatch_targets_exist`、`im_available`、`llm_available`、`mcp_health`、`static_build_current`。每项给出 `status`、摘要、修复建议和不含敏感值的 evidence。
+
+最后一项 `static_build_current` 比对**正在提供服务的前端构建**与后端版本。
+静态目录（`$PWD/web`）与源码目录（`webui/`）各走各的版本，本地源码部署时很容易出现
+「后端是新的、前端是旧的」：用户按新文档去点一个按钮，按钮不存在，而其余检查、
+版本一致性检查与 API 探针全都通过——因为它们查的是后端。evidence 里给出
+`installed_version` 与 `expected_version` 两个结构化字段，便于 CI 判断。
+
+三条判定纪律：
+
+- **不一致是 `warn` 而不是 `fail`。** 服务确实在正常响应，只是界面旧了；
+  判成 fail 会让健康检查把一个可用实例摘下线。
+- **读不到版本是 `skip` 而不是 `warn`。** 纯 API 部署没有静态目录，那是合法形态；
+  报 warn 会让运维去修一个不存在的故障。
+- **修复建议给具体动作**（在 `webui/` 下重新构建并把 `dist` 拷到静态目录），
+  而不是复述「版本不一致」这个现象。
+
+Docker 部署不受此影响：镜像构建时重新拷贝 `webui/dist`。
 
 它不主动调用远端 LLM 来证明模型可回答，也不保证 MCP 远端持续可用。未配置 MCP 为 `skip`，部分 MCP 不可用通常为 `warn`。它需要 Bearer 鉴权，因此不能直接替代容器的匿名 TCP healthcheck。
 
@@ -695,7 +712,7 @@ curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/js
 | 接口 | 能看到什么 |
 | --- | --- |
 | `GET /backend-api/api/system/status` | 运行时长、活跃适配器数、活跃 LLM 后端数、已加载插件数、工作流数、内存/CPU 占用、版本、Python 版本、是否设置了代理 |
-| `GET /backend-api/api/system/readiness` | 有界本地检查：数据目录、配置、工作流、调度目标、IM、LLM、可选 MCP；不返回密钥 |
+| `GET /backend-api/api/system/readiness` | 有界本地检查：数据目录、配置、工作流、调度目标、IM、LLM、可选 MCP、前端构建版本；不返回密钥 |
 | `GET /backend-api/api/mcp/statistics` | MCP 服务器总数、stdio/sse 各多少、已连接/已断开/错误各多少、工具总数 |
 | `GET /backend-api/api/mcp/servers` | 每台服务器的连接状态（`disconnected`/`connecting`/`connected`/`disconnecting`/`error`） |
 | `GET /backend-api/api/mcp/tools` | 当前所有可用工具及其 JSON Schema |

@@ -574,7 +574,8 @@ onMounted(async () => {
         <template #header-extra>
           <n-space>
             <n-button @click="openPreview()"> 试运行消息 </n-button>
-            <n-button type="primary" @click="createRule"> 创建规则 </n-button>
+            <!-- 必须带括号：createRule 首参可选，裸绑会把 MouseEvent 当 workflowId 传进去。 -->
+            <n-button type="primary" @click="createRule()"> 创建规则 </n-button>
           </n-space>
         </template>
         <div class="dispatch-rules-description">

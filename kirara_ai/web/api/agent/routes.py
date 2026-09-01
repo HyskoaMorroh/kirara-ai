@@ -51,6 +51,51 @@ def _hook_runtime():
     return getattr(container.resolve(AgentRuntimeExecutor), "hook_runtime", None)
 
 
+async def _dispatch_session_end(
+    session_id: str, metadata: dict[str, Any] | None
+) -> None:
+    """Fire `SessionEnd` for a session that was just cleared.
+
+    三条刻意的设计：
+
+    - **拿不到渠道身份就不派发。** 会话文件按摘要命名，升级前写的记录没有存
+      渠道身份。派发一个编出来的身份会污染审计——那比缺一个事件更坏。
+    - **Hook 失败不阻断清理。** Hook 是策略副作用，不是清理的前置条件；
+      一个写坏的钩子不该让「删会话」这个操作从此不可用。
+    - **在清理之后调用。** Hook 若去读这个会话，应当看到它已经被清理，
+      而不是观察到一个与所告知事件相矛盾的状态。
+    """
+    from kirara_ai.agent_runtime import AgentRuntimeExecutor
+    from kirara_ai.agent_runtime.core import ChannelContext
+
+    container = g.container
+    if not container.has(AgentRuntimeExecutor):
+        return
+    executor = container.resolve(AgentRuntimeExecutor)
+    dispatch = getattr(executor, "dispatch_session_end", None)
+    if dispatch is None:
+        return
+    if not metadata:
+        return
+    identity = metadata.get("channel_identity")
+    if not identity:
+        return
+    try:
+        context = ChannelContext(**identity)
+    except Exception:
+        return
+    try:
+        await dispatch(
+            session_id=session_id,
+            agent_id=metadata.get("agent_id"),
+            context=context,
+        )
+    except Exception:
+        logger.opt(exception=True).warning(
+            "SessionEnd Hook failed after clearing a session"
+        )
+
+
 def _error(message: str, status_code: int):
     return jsonify({"error": message}), status_code
 
@@ -461,8 +506,11 @@ async def delete_session(session_id: str):
     if store is None:
         return _error("session store is not configured", 503)
     try:
+        # 元数据必须在清理**之前**读：清理之后文件已经不在，渠道身份无从取回。
+        metadata = store.read_session_metadata(session_id)
         if not store.delete_session(session_id):
             return _error("session not found", 404)
+        await _dispatch_session_end(session_id, metadata)
         return jsonify({"deleted": True})
     except Exception as error:
         return _handle_error(error)
@@ -476,8 +524,13 @@ async def clear_session_history(session_id: str):
     if store is None:
         return _error("session store is not configured", 503)
     try:
+        # 清历史同样是这一段会话上下文的终点：那一轮的历史不再存在。
+        # 与删除会话一样，元数据要在清理之前读——虽然 clear_history 会保留
+        # 渠道身份，但读的顺序统一更不容易在将来被改错。
+        metadata = store.read_session_metadata(session_id)
         if not store.clear_history(session_id):
             return _error("session not found", 404)
+        await _dispatch_session_end(session_id, metadata)
         return jsonify({"cleared": True})
     except Exception as error:
         return _handle_error(error)

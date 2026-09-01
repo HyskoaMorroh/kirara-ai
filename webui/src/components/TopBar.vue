@@ -9,10 +9,11 @@
   </div>
 </template>
 
-<script>
-export default {
-  name: 'TopBar'
-}
+<script setup lang="ts">
+// 不写 lang="ts" 时 vue-tsc 会把这段当 JS 虚拟文件（TopBar.vue.js）纳入 program，
+// 撞上 tsconfig 的 allowJs: false，每次 typecheck 都固定吐一条 TS6504。
+// 与其为一个组件放开 allowJs，不如让它跟仓库其余组件一样走 TS。
+defineOptions({ name: 'TopBar' })
 </script>
 
 <style scoped>

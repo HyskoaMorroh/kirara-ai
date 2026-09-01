@@ -7,7 +7,33 @@ import { useThemeStore } from '@/stores/theme'
 import { useUpdateViewModel } from '@/views/system/update.vm'
 import UpdateChecker from '@/components/UpdateChecker.vue'
 import { http } from '@/utils/http'
-import type { SystemStatus } from '@/stores/app'
+
+/**
+ * 后端 `/system/status` 真正发出的形状,全字段 snake_case。
+ *
+ * 不能借用 store 里的 `SystemStatus`：那个是转换之后的 camelCase 内部形状,
+ * 拿它标注响应会让下面每一处 `data.status.xxx` 都落在类型之外。
+ */
+interface SystemStatusPayload {
+  version: string
+  uptime: number
+  active_adapters: number
+  active_backends: number
+  loaded_plugins: number
+  workflow_count: number
+  memory_usage: {
+    percent: number
+    total: number
+    used: number
+    free: number
+  }
+  cpu_usage: number
+  cpu_info: string
+  python_version: string
+  platform: string
+  has_proxy: boolean
+}
+
 const updateCheckerRef = ref<InstanceType<typeof UpdateChecker> | null>(null)
 const appStore = useAppStore()
 const themeStore = useThemeStore()
@@ -19,7 +45,7 @@ const webUIVersion = import.meta.env.VITE_APP_VERSION || 'unknown'
 
 const fetchStatus = () => {
   http
-    .get<{ status: SystemStatus }>('/system/status')
+    .get<{ status: SystemStatusPayload }>('/system/status')
     .then((data) => {
       connecting.value = false
       appStore.updateSystemStatus({
@@ -50,7 +76,12 @@ const fetchStatus = () => {
       appStore.updateSystemStatus({
         status: 'error',
         apiConnected: false,
-        memoryUsage: 0,
+        memoryUsage: {
+          percent: 0,
+          total: 0,
+          used: 0,
+          free: 0
+        },
         cpuUsage: 0,
         uptime: 0,
         activeAdapters: 0,
@@ -73,14 +104,23 @@ onMounted(() => {
   appStore.updateSystemStatus({
     status: 'warning',
     apiConnected: false,
-    memoryUsage: 0,
+    memoryUsage: {
+      percent: 0,
+      total: 0,
+      used: 0,
+      free: 0
+    },
     cpuUsage: 0,
     uptime: 0,
     activeAdapters: 0,
     activeBackends: 0,
     loadedPlugins: 0,
     workflowCount: 0,
-    version: 'unknown'
+    version: 'unknown',
+    platform: 'unknown',
+    cpuInfo: 'unknown',
+    pythonVersion: 'unknown',
+    hasProxy: false
   })
   connecting.value = true
   timer = setInterval(() => {

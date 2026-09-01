@@ -52,11 +52,32 @@ vi.mock('naive-ui', () => {
         return () => h('div', attrs, slots.default?.())
       }
     })
+  // 同步间隔是数字输入。壳组件读不到 v-model，测试就无法验证「填 0 等于关闭」，
+  // 所以这里要真的把 input 的值回抛成 update:value，而不是渲染成一个 div。
+  const NInputNumber = defineComponent({
+    name: 'NInputNumber',
+    inheritAttrs: false,
+    props: { value: { type: Number, default: null } },
+    emits: ['update:value'],
+    setup(props, { attrs, emit }) {
+      return () =>
+        h('input', {
+          ...attrs,
+          type: 'number',
+          value: props.value ?? '',
+          onInput: (event: Event) => {
+            const raw = (event.target as HTMLInputElement).value
+            emit('update:value', raw === '' ? null : Number(raw))
+          }
+        })
+    }
+  })
 
   return {
     NAlert: passthrough('NAlert'),
     NButton,
     NCard: passthrough('NCard'),
+    NInputNumber,
     NTag: passthrough('NTag'),
     useDialog: () => ({ warning: dialogWarning }),
     useMessage: () => message

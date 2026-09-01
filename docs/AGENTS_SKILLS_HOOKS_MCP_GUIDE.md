@@ -267,6 +267,24 @@ MCP 的 prompt/resource 可通过 `/backend-api/api/mcp/servers/<server_id>/prom
 `PreCompact`、`PostCompact`、`SessionStart`、`SessionEnd`、`UserPromptSubmit`、
 `SubagentStart`、`SubagentStop`、`Stop`。
 
+这 11 个事件**全部都会被真正派发**，由 `tests/agent_runtime/test_hook_event_contract.py`
+双向锁住：声明了必须能找到派发点，派发了必须已在清单里。反向那一条同样重要——
+派发一个未声明的事件时，声明校验会拒绝用户为它写钩子，于是那个派发点永远没有消费者。
+
+三个事件的派发时机需要单独说明，因为它们不在主对话回路上：
+
+| 事件 | 何时派发 |
+| --- | --- |
+| `SubagentStart` | 队友委派通过参数与 Agent 校验之后、真正执行之前。校验不过时不派发——委派没有发生，报告「子代理已启动」会让审计里出现一对没有实际执行的 Start/Stop |
+| `SubagentStop` | 委派结束，**无论成功、队友无输出还是抛异常**。放在 `finally` 里，因此不会留下一个永不结束的 `SubagentStart` |
+| `SessionEnd` | 会话被清理时（`DELETE /agents/sessions/<id>` 与 `.../history` 两条路径），在清理**之后**派发。Hook 若去读这个会话，应当看到它已经被清理，而不是观察到一个与所告知事件相矛盾的状态 |
+
+`SessionEnd` 有一个前提值得知道：它需要一个真实的 `ChannelContext`，
+而会话文件按摘要命名，渠道身份是从 3.3.0b15 起才随历史一并落盘的。
+**升级前写入的会话不会派发 `SessionEnd`**——但清理照常成功。这是刻意的：
+派发一个编出来的渠道身份会污染审计，而因为拿不到身份就拒绝清理，
+等于让用户永远删不掉升级前的会话。
+
 声明是 JSON，一个事件一个对象：
 
 ```json
@@ -420,6 +438,8 @@ Skill 包和它依赖的可执行程序是**两件事**。装上 `agent-browser`
 | `agent-browser-cli` | cli | 是 | `npm install -g agent-browser` |
 | `agent-browser-browser` | browser-runtime | 是 | `agent-browser install`（拉 Chromium，超时 900s） |
 | `context7-runtime` | mcp-runtime | 否 | Context7 由 npx 启动，修 Node 即可 |
+| `uvx-runtime` | mcp-runtime | 否 | `mcp:fetch` / `mcp:time` 靠 `uvx` 拉起。**与 `uv` 是两个命令**：uv 装了不代表 uvx 在 PATH 上（uvx 是 uv 0.3 起才分发的独立入口）|
+| `npx-runtime` | mcp-runtime | 否 | 其余以 npx 启动的 stdio MCP（memory / sequential-thinking / filesystem / chrome-devtools / playwright）|
 | `graphify-cli` | cli | 是 | `uv tool install --upgrade graphifyy` |
 | `rtk-cli` | cli | 是 | 终端输出压缩；**与同名的 Rust Type Kit 不是同一个工具**，以 `rtk gain` 是否可用为准 |
 | `memsearch-cli` | cli | 是 | `uv tool install --upgrade memsearch` |
@@ -440,6 +460,28 @@ Skill 包和它依赖的可执行程序是**两件事**。装上 `agent-browser`
   而错误要到实际调用时才暴露——那时界面已经说过它可用了。因此 `rtk-cli` 探测
   `rtk --version` 与 `rtk gain` 两条，后者是说明里点名的判据。
   一条依赖的全部探测命令必须**逐条**成功才算就绪。
+
+### stdio MCP 的依赖来自预设自己的声明
+
+每个 stdio 型 MCP 预设在内置目录里声明它靠什么拉起（`runtime_dependency`：
+`uvx` 或 `npx`），依赖判定读这个声明，因此**新增一个 stdio 预设时不需要再改判定逻辑**。
+
+这一点此前是断的，值得记录失败形态：`runtime_dependency` 一度只是一个没人读的字段，
+`uvx` 连登记项都没有，于是 8 个预设里 7 个的依赖判定返回空列表——而空列表的含义是
+「这个资源不需要任何系统依赖」。用户装 `mcp:fetch`、启用、绑定全部成功，
+机器上没有 uvx，界面唯一的线索是 MCP 面板显示「连接失败 / 工具数 0」，
+没有一处说缺什么。人会去查网络、查配置、查 API Key。
+
+现在资源列表按资源显示依赖状态并点名缺的是哪一个。**两个状态刻意不合并**：
+
+| 状态 | 含义 | 下一步 |
+| --- | --- | --- |
+| `unknown` | 还没探测过 | 去「系统依赖」里检查 |
+| `missing` | 探测过，确实没有 | 去「系统依赖」里安装 |
+
+混成一句「依赖未就绪」会让人去装一个本来就在的东西。
+另有一种取值是**字段缺失**（老后端不提供依赖信息），此时界面不显示任何提示——
+那与「不需要依赖」不是一回事，但都不该占用界面。
 
 ### 依赖状态会进到对话里
 

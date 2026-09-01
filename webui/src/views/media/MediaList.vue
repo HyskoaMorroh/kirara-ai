@@ -351,7 +351,15 @@
     >
       <n-space vertical>
         <n-form-item label="自动清理未引用资源">
-          <n-switch v-model:value="configAutoRemoveUnreferenced" />
+          <!--
+            `configAutoRemoveUnreferenced` 的 null 表示「配置还没从后端取回」，
+            这个语义要保留；但 n-switch 的 value 只接受 string | number | boolean，
+            所以在这里落到 false，而不是把 null 传进组件。
+          -->
+          <n-switch
+            :value="configAutoRemoveUnreferenced === true"
+            @update:value="(value: boolean) => (configAutoRemoveUnreferenced = value)"
+          />
         </n-form-item>
         <n-form-item label="未引用资源保留天数" v-if="configAutoRemoveUnreferenced">
           <n-input-number v-model:value="configCleanupDuration" :min="1" placeholder="输入天数">

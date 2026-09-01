@@ -14,7 +14,8 @@ from kirara_ai.backup import BackupService, BackupValidationError
 from kirara_ai.backup.service import MAX_ARCHIVE_SIZE_BYTES
 from kirara_ai.config import DATA_PATH
 from kirara_ai.config.config_loader import CONFIG_FILE, ConfigLoader
-from kirara_ai.config.global_config import GlobalConfig
+from kirara_ai.agent_runtime import SUPPORTED_CHANNEL_TYPES
+from kirara_ai.config.global_config import CreatorChannelIdentity, GlobalConfig
 from kirara_ai.im.manager import IMManager
 from kirara_ai.internal import set_restart_flag, shutdown_event
 from kirara_ai.llm.llm_manager import LLMManager
@@ -140,6 +141,14 @@ async def get_system_config():
                     config.agent_runtime.channel_reply_stream_modes
                 ),
                 "tool_search_threshold": config.agent_runtime.tool_search_threshold,
+                # 声明哪些 IM 渠道身份属于创建者。默认空表意味着聊天侧谁都拿不到
+                # 创建者身份——MCP 工具与 command Hook 在 IM 渠道上一律不可用，
+                # 包括创建者本人。此前唯一的配置入口是手改 config.yaml，
+                # 于是界面上既看不到当前声明、也无从解释工具为何为空。
+                "creator_channel_identities": [
+                    identity.model_dump()
+                    for identity in config.agent_runtime.creator_channel_identities
+                ],
             }
         }
     except Exception as e:
@@ -265,12 +274,25 @@ _PROCESS_REPLY_STREAM_MODES = ("off", "aggregate", "incremental")
 
 #: 本路由允许写入的键。白名单而非黑名单：打错的键必须报错，
 #: 静默丢掉会让界面显示「保存成功」而那个值从未生效。
+#: 一条创建者身份允许出现的字段。多余字段直接拒绝而不是忽略——
+#: 静默丢弃拼错的键会让用户以为自己设置生效了。
+_CREATOR_IDENTITY_FIELDS = frozenset(
+    {
+        "channel_type",
+        "sender_scope",
+        "account_scope",
+        "adapter_instance",
+        "allow_group_chat",
+    }
+)
+
 _AGENT_RUNTIME_WRITABLE_KEYS = frozenset(
     {
         "turn_deadline_seconds",
         "reply_stream_mode",
         "channel_reply_stream_modes",
         "tool_search_threshold",
+        "creator_channel_identities",
     }
 )
 
@@ -338,6 +360,51 @@ async def update_agent_runtime_config():
         if not 0 <= raw <= 500:
             return {"error": "tool_search_threshold 必须在 0 到 500 之间"}, 400
 
+    if "creator_channel_identities" in data:
+        raw = data["creator_channel_identities"]
+        if not isinstance(raw, list):
+            return {"error": "creator_channel_identities 必须是一个数组"}, 400
+        for index, entry in enumerate(raw):
+            if not isinstance(entry, dict):
+                return {
+                    "error": f"第 {index + 1} 条创建者身份必须是一个对象"
+                }, 400
+            unknown_fields = set(entry) - _CREATOR_IDENTITY_FIELDS
+            if unknown_fields:
+                return {
+                    "error": f"第 {index + 1} 条创建者身份含不支持的字段："
+                    f"{', '.join(sorted(unknown_fields))}"
+                }, 400
+            channel = entry.get("channel_type")
+            # 渠道名写错不能静默落盘：那条身份会永远匹配不上任何消息，
+            # 而用户看到的是「声明了却没用」，无从判断是拼错还是功能坏了。
+            if channel not in SUPPORTED_CHANNEL_TYPES:
+                return {
+                    "error": f"第 {index + 1} 条创建者身份的渠道类型无效："
+                    f"只能是 {'、'.join(sorted(SUPPORTED_CHANNEL_TYPES))}"
+                }, 400
+            sender = entry.get("sender_scope")
+            # 空标识会匹配上谁？这个问题不该留给运行时回答。
+            if not isinstance(sender, str) or not sender.strip():
+                return {
+                    "error": f"第 {index + 1} 条创建者身份缺少发送者标识"
+                }, 400
+            for optional_key in ("account_scope", "adapter_instance"):
+                value = entry.get(optional_key)
+                if value is not None and (
+                    not isinstance(value, str) or not value.strip()
+                ):
+                    return {
+                        "error": f"第 {index + 1} 条创建者身份的 {optional_key} "
+                        "要么省略，要么是非空字符串"
+                    }, 400
+            allow_group = entry.get("allow_group_chat", False)
+            if not isinstance(allow_group, bool):
+                return {
+                    "error": f"第 {index + 1} 条创建者身份的 allow_group_chat "
+                    "必须是布尔值"
+                }, 400
+
     try:
         if "turn_deadline_seconds" in data:
             runtime.turn_deadline_seconds = float(data["turn_deadline_seconds"])
@@ -349,6 +416,20 @@ async def update_agent_runtime_config():
             )
         if "tool_search_threshold" in data:
             runtime.tool_search_threshold = int(data["tool_search_threshold"])
+        if "creator_channel_identities" in data:
+            # 空数组是一个有效值（撤销全部声明），不是「没填」。
+            runtime.creator_channel_identities = [
+                CreatorChannelIdentity(
+                    channel_type=entry["channel_type"],
+                    sender_scope=entry["sender_scope"].strip(),
+                    account_scope=entry.get("account_scope"),
+                    adapter_instance=entry.get("adapter_instance"),
+                    # 群聊默认关：群里所有人都看得到创建者发的指令并照抄，
+                    # 把宿主操作暴露在多人可见会话里要显式打开。
+                    allow_group_chat=bool(entry.get("allow_group_chat", False)),
+                )
+                for entry in data["creator_channel_identities"]
+            ]
 
         ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
     except Exception as e:
@@ -536,6 +617,10 @@ async def get_system_readiness():
             data_path=Path(DATA_PATH),
             config_path=Path(CONFIG_FILE),
             block_registry=g.container.resolve(BlockRegistry),
+            # 静态目录与后端版本从这里传入：readiness 自己不该去猜服务的是哪一份
+            # 构建产物，那由 Quart 的 static_folder 决定。
+            static_dir=Path(current_app.static_folder or "web"),
+            expected_webui_version=get_installed_version(),
         )
     ).model_dump(mode="json")
 

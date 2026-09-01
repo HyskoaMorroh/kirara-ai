@@ -144,15 +144,24 @@ export function useMCPViewModel() {
   const fetchServers = async () => {
     try {
       isLoading.value = true
-      const params = {
-        page: currentPage.value,
-        page_size: pageSize.value,
-        type: filterParams.value.connectionType,
-        status: filterParams.value.status,
-        query: filterParams.value.query || undefined
-      }
+      // 查询参数必须拼进 URL。此前写的是 `http.get(path, { params })`——
+      // 第二个参数是 `Omit<RequestInit, 'method'>`（原生 fetch 配置），没有
+      // `params` 这一项，fetch 会静默忽略它：分页永远停在第 1 页、筛选和搜索
+      // 一律返回全量，而请求成功、控制台干净，界面上完全看不出。
+      const search = new URLSearchParams({
+        page: String(currentPage.value),
+        page_size: String(pageSize.value)
+      })
+      // 三个可选筛选项只在有值时才拼；直接 String(undefined) 会得到字面量
+      // "undefined"，后端会把它当成一个有效的筛选值。
+      const { connectionType, status, query } = filterParams.value
+      if (connectionType) search.set('type', connectionType)
+      if (status) search.set('status', status)
+      if (query) search.set('query', query)
 
-      const response = await http.get<PagedResponse<MCPServer>>('/mcp/servers', { params })
+      const response = await http.get<PagedResponse<MCPServer>>(
+        `/mcp/servers?${search.toString()}`
+      )
       servers.value = response.items
       totalServers.value = response.total
       totalPages.value = response.total_pages

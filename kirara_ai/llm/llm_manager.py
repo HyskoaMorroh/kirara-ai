@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Unio
 
 from typing_extensions import deprecated
 
-from kirara_ai.config.global_config import GlobalConfig, ModelConfig
+from kirara_ai.config.global_config import GlobalConfig, ModelConfig, backend_field_default
 from kirara_ai.events.event_bus import EventBus
 from kirara_ai.events.llm import LLMAdapterLoaded, LLMAdapterUnloaded
 from kirara_ai.ioc.container import DependencyContainer
@@ -543,11 +543,21 @@ class LLMManager:
             breaker = self._resilience_breakers.setdefault(
                 provider_name,
                 CircuitBreaker(
-                    failure_threshold=backend.circuit_failure_threshold if backend else 3,
-                    error_rate_threshold=backend.circuit_error_rate_threshold if backend else 0.5,
-                    min_requests=backend.circuit_min_requests if backend else 10,
-                    recovery_timeout_seconds=backend.circuit_recovery_timeout_seconds if backend else 30,
-                    recovery_success_threshold=backend.circuit_recovery_success_threshold if backend else 2,
+                    failure_threshold=backend.circuit_failure_threshold
+                    if backend
+                    else backend_field_default("circuit_failure_threshold"),
+                    error_rate_threshold=backend.circuit_error_rate_threshold
+                    if backend
+                    else backend_field_default("circuit_error_rate_threshold"),
+                    min_requests=backend.circuit_min_requests
+                    if backend
+                    else backend_field_default("circuit_min_requests"),
+                    recovery_timeout_seconds=backend.circuit_recovery_timeout_seconds
+                    if backend
+                    else backend_field_default("circuit_recovery_timeout_seconds"),
+                    recovery_success_threshold=backend.circuit_recovery_success_threshold
+                    if backend
+                    else backend_field_default("circuit_recovery_success_threshold"),
                 ),
             )
             if not breaker.acquire():
@@ -569,7 +579,11 @@ class LLMManager:
 
             provider_retries = max(0, max_retries if max_retries is not None else (backend.max_retries if backend else 0))
             base_delay = max(0.0, retry_delay if retry_delay is not None else (backend.retry_backoff_seconds if backend else 0.5))
-            max_delay = backend.retry_backoff_max_seconds if backend else 5.0
+            max_delay = (
+                backend.retry_backoff_max_seconds
+                if backend
+                else backend_field_default("retry_backoff_max_seconds")
+            )
             # 每个供应商按自己的配置发请求；副本而非就地改写，避免设置泄漏到下一家。
             provider_request = self._request_for_provider(request, backend)
             for retry_index in range(provider_retries + 1):
@@ -878,11 +892,21 @@ class LLMManager:
             breaker = self._resilience_breakers.setdefault(
                 provider_name,
                 CircuitBreaker(
-                    failure_threshold=backend.circuit_failure_threshold if backend else 3,
-                    error_rate_threshold=backend.circuit_error_rate_threshold if backend else 0.5,
-                    min_requests=backend.circuit_min_requests if backend else 10,
-                    recovery_timeout_seconds=backend.circuit_recovery_timeout_seconds if backend else 30,
-                    recovery_success_threshold=backend.circuit_recovery_success_threshold if backend else 2,
+                    failure_threshold=backend.circuit_failure_threshold
+                    if backend
+                    else backend_field_default("circuit_failure_threshold"),
+                    error_rate_threshold=backend.circuit_error_rate_threshold
+                    if backend
+                    else backend_field_default("circuit_error_rate_threshold"),
+                    min_requests=backend.circuit_min_requests
+                    if backend
+                    else backend_field_default("circuit_min_requests"),
+                    recovery_timeout_seconds=backend.circuit_recovery_timeout_seconds
+                    if backend
+                    else backend_field_default("circuit_recovery_timeout_seconds"),
+                    recovery_success_threshold=backend.circuit_recovery_success_threshold
+                    if backend
+                    else backend_field_default("circuit_recovery_success_threshold"),
                 ),
             )
             if not breaker.acquire():
@@ -914,11 +938,21 @@ class LLMManager:
                 if retry_delay is not None
                 else (backend.retry_backoff_seconds if backend else 0.5),
             )
-            max_delay = backend.retry_backoff_max_seconds if backend else 5.0
-            first_byte_timeout = (
-                backend.stream_first_byte_timeout_seconds if backend else 15.0
+            max_delay = (
+                backend.retry_backoff_max_seconds
+                if backend
+                else backend_field_default("retry_backoff_max_seconds")
             )
-            idle_timeout = backend.stream_idle_timeout_seconds if backend else 30.0
+            first_byte_timeout = (
+                backend.stream_first_byte_timeout_seconds
+                if backend
+                else backend_field_default("stream_first_byte_timeout_seconds")
+            )
+            idle_timeout = (
+                backend.stream_idle_timeout_seconds
+                if backend
+                else backend_field_default("stream_idle_timeout_seconds")
+            )
             # 流式路径与非流式同一处翻译：供应商级推理强度必须在两条路径上
             # 表现一致，否则同一个 Provider 的行为取决于是否开了流式。
             provider_request = self._request_for_provider(request, backend)
@@ -1119,7 +1153,7 @@ class LLMManager:
     @staticmethod
     def _non_stream_timeout(backend) -> float:
         if backend is None:
-            return 60.0
+            return backend_field_default("non_stream_timeout_seconds")
         configured_fields = getattr(backend, "model_fields_set", set())
         if "non_stream_timeout_seconds" in configured_fields:
             return backend.non_stream_timeout_seconds
@@ -1135,7 +1169,7 @@ class LLMManager:
         legacy default.
         """
         if backend is None:
-            return 60.0
+            return backend_field_default("stream_total_timeout_seconds")
         configured_fields = getattr(backend, "model_fields_set", set())
         if "stream_total_timeout_seconds" in configured_fields:
             return backend.stream_total_timeout_seconds

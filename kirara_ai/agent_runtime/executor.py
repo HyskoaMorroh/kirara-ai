@@ -582,7 +582,9 @@ class AgentRuntimeExecutor:
                 # 收尾确实成功时告知调用方屏幕上已经有完整回复了，否则它会再整段
                 # 投递一次，同一段内容出现两遍。失败时保持 False 走兜底。
                 result.delivered_incrementally = incremental.delivered
-                self._persist_history(context.session_key, agent.agent_id, result)
+                self._persist_history(
+                    context.session_key, agent.agent_id, result, context=context
+                )
                 self._persist_memory(
                     context,
                     agent.agent_id,
@@ -617,6 +619,43 @@ class AgentRuntimeExecutor:
                     },
                     correlation_id=correlation_id,
                 )
+
+    async def dispatch_session_end(
+        self,
+        *,
+        session_id: str,
+        agent_id: Optional[str],
+        context: ChannelContext,
+    ) -> None:
+        """Dispatch `SessionEnd` for a session that has just been cleared.
+
+        清理路由手里只有 `session_id` 与落盘的渠道身份；`agent` 与 `snapshot`
+        由这里解析——executor 才是持有 registry 的一方，让路由去解析等于把
+        运行时细节漏进 HTTP 层。
+
+        Agent 已被删除时（`agent_id` 指向一个不存在的 Agent）静默返回：
+        它的绑定快照无从重建，而派发一个空快照会让 Hook 以为这个 Agent
+        没有任何资源绑定——那是错的信息，不是缺失的信息。
+        """
+        if not agent_id:
+            return
+        try:
+            agent = self.agent_registry.get(agent_id)
+        except Exception:
+            return
+        if agent is None:
+            return
+        try:
+            snapshot = agent.snapshot(model_id=agent.model_priority[0])
+        except Exception:
+            return
+        await self._run_hook(
+            "SessionEnd",
+            agent=agent,
+            context=context,
+            snapshot=snapshot,
+            payload={"session_id": session_id, "agent_id": agent_id},
+        )
 
     async def confirm(
         self,
@@ -905,6 +944,7 @@ class AgentRuntimeExecutor:
                     pending.context.session_key,
                     current_agent.agent_id,
                     response,
+                    context=pending.context,
                 )
                 self._persist_memory(
                     pending.context,
@@ -1097,6 +1137,11 @@ class AgentRuntimeExecutor:
                     # 仍走原有确认链路，委派不是绕过授权的旁路。
                     delegated = await self._delegate_to_teammate(
                         call,
+                        # agent / snapshot 由调用处传入：Subagent Hook 要看到的是
+                        # 本轮真正生效的那份绑定快照，在方法内部重新解析会拿到
+                        # 另一个版本。
+                        agent=agent,
+                        snapshot=snapshot,
                         context=context,
                         depth_remaining=teammate_depth,
                         correlation_id=correlation_id,
@@ -1336,6 +1381,8 @@ class AgentRuntimeExecutor:
         self,
         call: ToolCall,
         *,
+        agent: AgentDefinition,
+        snapshot: ResourceSnapshot,
         context: ChannelContext,
         depth_remaining: int,
         correlation_id: str,
@@ -1362,34 +1409,70 @@ class AgentRuntimeExecutor:
         if teammate is None or not teammate.enabled:
             return self._error_result(call, f"unknown teammate Agent: {teammate_id}")
 
+        # `SubagentStart` / `SubagentStop` 在这里派发而不是在调用处：这样无论
+        # 将来从哪条分支触发委派，两个事件都必然成对出现。
+        #
+        # 派发在参数与队友校验**之后**：委派没真的发生时不该报告"子代理已启动"，
+        # 否则审计里会出现一对没有实际执行的 Start/Stop。
+        await self._run_hook(
+            "SubagentStart",
+            agent=agent,
+            context=context,
+            snapshot=snapshot,
+            payload={
+                "parent_agent_id": agent.agent_id,
+                "teammate_agent_id": teammate_id,
+                "depth_remaining": depth_remaining,
+            },
+            correlation_id=correlation_id,
+        )
+
         delegated_message = IMMessage(
             sender=ChatSender.get_bot_sender(),
             message_elements=[TextMessage(task.strip())],
         )
+        delegation_status = "failed"
         try:
-            result = await self.run(
-                context,
-                delegated_message,
-                session_agent_id=teammate_id,
-                # 队友不继承主 Agent 的历史：它是一次独立的、自带背景的子任务。
-                history=(),
-                # 深度递减：A→B→A 不会无限递归。
-                teammate_depth=max(0, depth_remaining - 1),
+            try:
+                result = await self.run(
+                    context,
+                    delegated_message,
+                    session_agent_id=teammate_id,
+                    # 队友不继承主 Agent 的历史：它是一次独立的、自带背景的子任务。
+                    history=(),
+                    # 深度递减：A→B→A 不会无限递归。
+                    teammate_depth=max(0, depth_remaining - 1),
+                )
+            except Exception as error:  # noqa: BLE001 - 委派失败不应终止整轮
+                return self._error_result(
+                    call, f"teammate execution failed: {type(error).__name__}"
+                )
+            if result.status is not RuntimeStatus.COMPLETED or not (result.text or "").strip():
+                return self._error_result(
+                    call, f"teammate {teammate_id} produced no answer"
+                )
+            delegation_status = "completed"
+            return LLMToolResultContent(
+                id=call.id,
+                name=name,
+                content=result.text,
+                isError=False,
             )
-        except Exception as error:  # noqa: BLE001 - 委派失败不应终止整轮
-            return self._error_result(
-                call, f"teammate execution failed: {type(error).__name__}"
+        finally:
+            # 放在 finally：委派失败、队友无输出、异常三条路径都要闭合这次委派，
+            # 否则审计里会留下一个永不结束的 SubagentStart。
+            await self._run_hook(
+                "SubagentStop",
+                agent=agent,
+                context=context,
+                snapshot=snapshot,
+                payload={
+                    "parent_agent_id": agent.agent_id,
+                    "teammate_agent_id": teammate_id,
+                    "status": delegation_status,
+                },
+                correlation_id=correlation_id,
             )
-        if result.status is not RuntimeStatus.COMPLETED or not (result.text or "").strip():
-            return self._error_result(
-                call, f"teammate {teammate_id} produced no answer"
-            )
-        return LLMToolResultContent(
-            id=call.id,
-            name=name,
-            content=result.text,
-            isError=False,
-        )
 
     async def _maybe_compact_messages(
         self,
@@ -2665,12 +2748,18 @@ class AgentRuntimeExecutor:
         session_key: str,
         agent_id: str,
         result: RuntimeResult,
+        *,
+        context: Optional[ChannelContext] = None,
     ) -> None:
         if self.session_store is None or result.response is None:
             return
         messages = [message for message in result.messages if message.role != "system"]
         messages.append(result.response.message)
-        self.session_store.save_history(session_key, messages, agent_id=agent_id)
+        # 透传 context：会话文件按摘要命名，不存下渠道身份的话，
+        # 会话被清理时就没有真实的 `ChannelContext` 可供 `SessionEnd` Hook 使用。
+        self.session_store.save_history(
+            session_key, messages, agent_id=agent_id, context=context
+        )
 
     @staticmethod
     def _history_key(context: ChannelContext, agent_id: str) -> str:

@@ -14,7 +14,15 @@
 /** 预设键。`custom` 表示用户自己选了区间，不由这里计算。 */
 export type UsageRangePreset = 'today' | '24h' | '7d' | '14d' | '30d' | 'custom'
 
-export interface UsageRangePresetOption {
+/**
+ * 用 `type` 而非 `interface`：naive-ui 的 `SelectMixedOption` 带索引签名
+ * `[k: string]: unknown`，TS 只对 type alias 做隐式索引签名匹配，interface 不做。
+ * 写成 interface 时这里直接塞给 `n-select :options` 会报 TS2322。
+ *
+ * 反过来把 `value` 放宽成 `string | number` 也能过检，但那样就丢了「只有这六个键
+ * 合法」的约束——预设键写错时应当在编译期报出来，而不是运行时静默落进 `custom`。
+ */
+export type UsageRangePresetOption = {
   label: string
   value: UsageRangePreset
 }

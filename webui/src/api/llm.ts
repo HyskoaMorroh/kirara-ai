@@ -109,11 +109,11 @@ export const resilienceDefaults = (): Required<
   max_retries: 0,
   retry_backoff_seconds: 0.5,
   retry_backoff_max_seconds: 5,
-  request_timeout_seconds: 60,
-  non_stream_timeout_seconds: 60,
-  stream_first_byte_timeout_seconds: 15,
-  stream_idle_timeout_seconds: 30,
-  stream_total_timeout_seconds: 60,
+  request_timeout_seconds: 600,
+  non_stream_timeout_seconds: 600,
+  stream_first_byte_timeout_seconds: 60,
+  stream_idle_timeout_seconds: 120,
+  stream_total_timeout_seconds: 600,
   circuit_failure_threshold: 3,
   circuit_error_rate_threshold: 0.5,
   circuit_min_requests: 10,
@@ -215,10 +215,35 @@ export interface AutoDetectScheduleRow {
   model_count: number
 }
 
+/**
+ * 定价自动同步的运行态（需求 9）。
+ *
+ * 与模型自动检测共用同一个调度循环，因此也共用同一次响应——分两次请求会让界面上
+ * 出现「循环没在跑，但同步显示已启用」这种自相矛盾的瞬间。
+ */
+export interface PriceSyncState {
+  /** 同步间隔天数。`0` 表示关闭自动同步。 */
+  interval_days: number
+  /** `interval_days > 0`。后端算好再给，避免前端各自判断口径不一致。 */
+  enabled: boolean
+  /** 上次同步时间；`null` 表示从未同步过，不是「时间未知」。 */
+  last_run: string | null
+  /**
+   * 上次同步结果，三态：
+   * `null` = 从未同步过，`true` = 成功，`false` = 失败。
+   *
+   * 不能塌成布尔。价格长期不动时，「上游没调价」与「同步早就失败了」在界面上
+   * 完全同形，而把「从没跑过」显示成「失败」又会引来无意义的排查。
+   */
+  last_ok: boolean | null
+}
+
 export interface AutoDetectScheduleResponse {
   /** 后台调度循环是否在跑。为 false 时所有间隔配置都不会生效。 */
   running: boolean
   backends: AutoDetectScheduleRow[]
+  /** 老后端可能不带这一段，因此可选。 */
+  price_sync?: PriceSyncState
 }
 
 /**
@@ -344,6 +369,16 @@ export interface PricingCatalogResponse {
     versions: PricingVersion[]
     backup_generations: number[]
   }
+}
+
+/** 一轮定价同步的结果。`skipped_manual` 是被手工价保护住的条目数。 */
+export interface PricingSyncReport {
+  imported: number
+  unchanged: number
+  skipped_manual: number
+  error: string | null
+  synced_at: string | null
+  changed_models: string[]
 }
 
 export const llmApi = {
@@ -555,6 +590,24 @@ export const llmApi = {
 
   exportPricing() {
     return http.fetch('/llm/pricing/export', { method: 'GET' })
+  },
+
+  /**
+   * 立即从公开定价目录同步一次单价。
+   *
+   * 在这之前价格只能手工填或导入 JSON：用户新增一个上游后要自己去翻官网价目
+   * 表，逐个模型敲四个数字——记错单位（每千 vs 每百万）成本统计就整体偏一千
+   * 倍且没有任何提示。手工维护过的版本不会被覆盖。
+   */
+  syncPricing() {
+    return http.post<PricingSyncReport>('/llm/pricing/sync', {})
+  },
+
+  /** 设置定价自动同步的间隔天数，0 表示关闭。 */
+  updatePricingSyncSchedule(intervalDays: number) {
+    return http.put<{ interval_days: number }>('/llm/pricing/sync-schedule', {
+      interval_days: intervalDays
+    })
   },
 
   /**

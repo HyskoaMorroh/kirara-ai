@@ -2,6 +2,7 @@ import { fileURLToPath, URL } from 'node:url'
 import importMetaUrlPlugin from '@codingame/esbuild-import-meta-url-plugin'
 
 import { defineConfig, normalizePath } from 'vite'
+import type { Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import path from 'path'
 import packageJson from './package.json'
@@ -23,7 +24,9 @@ function getReleaseVersion(): string {
 
 const appVersion = getReleaseVersion()
 
-function versionMetadataPlugin() {
+// 返回值显式标成 rollup Plugin：不标时 `generateBundle` 里的 `this` 推不出
+// PluginContext，`this.emitFile` 会报 TS2339，而缺它 version.json 不会产出。
+function versionMetadataPlugin(): Plugin {
   return {
     name: 'kirara-version-metadata',
     generateBundle() {
@@ -103,7 +106,17 @@ export default defineConfig({
   },
   optimizeDeps: {
     esbuildOptions: {
-      plugins: [importMetaUrlPlugin],
+      // 顶层 esbuild 是 0.25.x（@codingame 插件要求 >=0.19），vite 4 内嵌 0.18.x，
+      // 两份 `Plugin` 类型互不兼容。运行时同一个插件对象在两个版本上都能工作，
+      // 但类型层必须显式转换。转换范围刻意收到这一个值：写成 `as any` 会把将来
+      // 真正的签名变化也一起吞掉。两份 esbuild 对齐后应删掉这个转换。
+      plugins: [importMetaUrlPlugin as unknown as NonNullable<
+        NonNullable<Parameters<typeof defineConfig>[0] extends infer C
+          ? C extends { optimizeDeps?: { esbuildOptions?: { plugins?: infer P } } }
+            ? P
+            : never
+          : never>
+      >[number]],
     },
     include: [
         'vscode/localExtensionHost',

@@ -265,7 +265,10 @@ const resilienceValue = (key: keyof LLMBackend): number => {
 const updateResilience = (key: keyof LLMBackend, value: number | null) => {
   if (value === null) return
   updateAdapter((nextAdapter) => {
-    ;(nextAdapter as Record<string, unknown>)[key as string] = value
+    // 先经 unknown 再转：LLMBackend 是具名接口，与 Record<string, unknown>
+    // 没有足够重叠，直接断言报 TS2352。这里按运行时确实存在的键写入数值，
+    // 键的合法性由形参类型 `keyof LLMBackend` 保证。
+    ;(nextAdapter as unknown as Record<string, unknown>)[key as string] = value
   })
 }
 

@@ -182,8 +182,9 @@ mcp / memory 从设计上就没有工作流绑定，于是这五类永远回退�
 
 **MCP 工具受两层门禁**：Agent 的 `mcp_allowlist`，以及创建者身份校验。
 IM 渠道上的普通用户拿不到 MCP 工具——这是设计如此。
-如果你希望自己在 QQ 上也能用，需要在
-`agent_runtime.creator_channel_identities` 里声明你的渠道身份。
+如果你希望自己在 QQ 上也能用，在「系统设置 → Agent 运行时 → 创建者渠道身份」
+里声明你的渠道身份（等价于 `agent_runtime.creator_channel_identities`），
+保存后重启服务。默认空表的含义是**聊天侧谁都拿不到，包括你本人**。
 
 **怎么确认这步成了**：请求详情的工具列表里出现 `context7.resolve-library-id`。
 

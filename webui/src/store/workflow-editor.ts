@@ -184,6 +184,19 @@ const snapshotsEqual = (left: WorkflowGraphSnapshot, right: WorkflowGraphSnapsho
  */
 const MAX_HISTORY_DEPTH = 100
 
+/**
+ * 取栈顶快照。空栈返回 `undefined`。
+ *
+ * 不用 `stack.at(-1)`：`Array.prototype.at` 要 Chrome 92 / Safari 15.4,而本项目
+ * 没设 `build.target`,走 Vite 默认的 `'modules'` 基线（Chrome 87 / Safari 14）。
+ * Vite 只降级语法、不给内置方法补 polyfill,所以 `.at` 会原样进产物,在基线浏览器上
+ * 抛 `TypeError: ... .at is not a function`。而取栈顶在每次画布改动时都会走到,
+ * 一旦抛错就是整个工作流编辑器打不开,不是某处小功能失效。
+ */
+function peek<T>(stack: readonly T[]): T | undefined {
+  return stack.length === 0 ? undefined : stack[stack.length - 1]
+}
+
 class WorkflowEditorModel {
   private state = ref({
     blocks: [] as BlockInstance[],
@@ -299,7 +312,7 @@ class WorkflowEditorModel {
       description: this.state.value.description,
       workflowId: this.state.value.workflowId,
       config: this.state.value.config
-    }, this.state.value.undoStack.at(-1))
+    }, peek(this.state.value.undoStack))
   }
 
   private pushToUndoStack(clearRedo = true) {
@@ -308,7 +321,7 @@ class WorkflowEditorModel {
   }
 
   private pushHistoryState(state: HistoryState, clearRedo = true) {
-    const previousState = this.state.value.undoStack.at(-1)
+    const previousState = peek(this.state.value.undoStack)
     if (!previousState || !snapshotsEqual(previousState, state)) {
       this.state.value.undoStack.push(state)
     }
@@ -327,7 +340,7 @@ class WorkflowEditorModel {
   // 提取：保存当前状态到 redo 栈
   private pushToRedoStack() {
     const currentState = this.createHistoryState()
-    const previousState = this.state.value.redoStack.at(-1)
+    const previousState = peek(this.state.value.redoStack)
     if (!previousState || !snapshotsEqual(previousState, currentState)) {
       this.state.value.redoStack.push(currentState)
     }
@@ -357,7 +370,7 @@ class WorkflowEditorModel {
     const currentState = this.createHistoryState()
     while (
       this.state.value.undoStack.length > 0 &&
-      snapshotsEqual(this.state.value.undoStack.at(-1)!, currentState)
+      snapshotsEqual(peek(this.state.value.undoStack)!, currentState)
     ) {
       this.state.value.undoStack.pop()
     }

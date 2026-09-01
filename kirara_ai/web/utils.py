@@ -36,6 +36,45 @@ def get_installed_webui_version(install_path: Path) -> str:
         return "unknown"
 
 
+def static_build_freshness(*, installed: str, expected: str) -> dict[str, object]:
+    """Compare the served static build against the version the backend ships with.
+
+    `app.py` 把 `$PWD/web` 作为静态目录，而 `webui/` 才是源码——两者版本各走各的。
+    本地开发或源码部署时很容易出现「后端是新的、前端是旧的」：用户按新文档去点
+    一个按钮，按钮不存在，而 API 探针、健康检查、版本一致性检查全都通过，
+    因为它们查的是后端。
+
+    两条刻意的判定：
+
+    - **不同即过期，不比大小。** 静态构建比后端新同样是不一致（例如切分支后
+      忘了重建），一样需要重新构建，没有「新一点没关系」这种情形。
+    - **读不到不等于过期。** 构建产物不存在是纯 API 部署的合法形态；把它报成
+      「过期」会让一个正常部署看起来有问题，运维会去修一个不存在的故障。
+    """
+
+    installed_version = str(installed or "").strip()
+    expected_version = str(expected or "").strip()
+    if (
+        not installed_version
+        or not expected_version
+        or installed_version == "unknown"
+        or expected_version == "unknown"
+    ):
+        return {
+            "status": "unknown",
+            "stale": False,
+            "installed": installed_version or "unknown",
+            "expected": expected_version or "unknown",
+        }
+    stale = installed_version != expected_version
+    return {
+        "status": "stale" if stale else "current",
+        "stale": stale,
+        "installed": installed_version,
+        "expected": expected_version,
+    }
+
+
 def _safe_webui_member_path(member: tarfile.TarInfo) -> PurePosixPath | None:
     prefix = PurePosixPath("package/dist")
     if "\\" in member.name:

@@ -400,19 +400,13 @@
               v-else-if="param.type === 'integer' || param.type === 'number'"
               v-model:value="toolForm[param.name]"
               :step="param.type === 'integer' ? 1 : undefined"
-              :input-props="{
-                'data-test': `tool-param-${param.name}`,
-                'aria-label': param.name
-              }"
+              :input-props="passthroughInputProps(`tool-param-${param.name}`, param.name)"
             />
             <n-select
               v-else-if="param.options"
               v-model:value="toolForm[param.name]"
               :options="param.options"
-              :input-props="{
-                'data-test': `tool-param-${param.name}`,
-                'aria-label': param.name
-              }"
+              :input-props="passthroughInputProps(`tool-param-${param.name}`, param.name)"
               clearable
             />
             <n-input
@@ -421,19 +415,13 @@
               type="textarea"
               :rows="4"
               :placeholder="param.description || (param.type === 'array' ? '[]' : '{}')"
-              :input-props="{
-                'data-test': `tool-param-${param.name}`,
-                'aria-label': param.name
-              }"
+              :input-props="passthroughInputProps(`tool-param-${param.name}`, param.name)"
             />
             <n-input
               v-else
               v-model:value="toolForm[param.name]"
               :placeholder="param.description || ''"
-              :input-props="{
-                'data-test': `tool-param-${param.name}`,
-                'aria-label': param.name
-              }"
+              :input-props="passthroughInputProps(`tool-param-${param.name}`, param.name)"
             />
           </n-form-item>
         </n-form>
@@ -501,10 +489,7 @@
             <n-input
               v-model:value="promptForm[argument.name]"
               :placeholder="argument.description || ''"
-              :input-props="{
-                'data-test': `prompt-argument-${argument.name}`,
-                'aria-label': argument.name
-              }"
+              :input-props="passthroughInputProps(`prompt-argument-${argument.name}`, argument.name)"
             />
           </n-form-item>
           <n-empty v-if="selectedPrompt.arguments.length === 0" description="该提示无需参数" />
@@ -633,13 +618,28 @@ interface MCPJSONSchemaProperty {
   default?: unknown
 }
 
+/**
+ * 表单输入框的透传属性。
+ *
+ * `data-test` 供前端测试定位，`aria-label` 是无障碍必需项。naive-ui 的
+ * `inputProps` 类型取自 `InputHTMLAttributes`，不含 `data-*`，直接内联会报
+ * TS2322。断言比删属性更合适——删掉会同时废掉测试定位与读屏标签。
+ */
+const passthroughInputProps = (testId: string, label: string) =>
+  ({ 'data-test': testId, 'aria-label': label }) as unknown as Record<string, string>
+
 interface MCPToolParameter {
   name: string
   description: string
   required: boolean
   type: string
   schema: MCPJSONSchemaProperty
-  options?: Array<{ label: string; value: unknown }>
+  /**
+   * 下拉候选。`value` 收窄为 `string | number`——n-select 只接受标量，
+   * 而 JSON Schema 的 `enum` 是 `unknown[]`。非标量枚举值在下拉里本来
+   * 也选不中，因此在构造时就转成字符串，而不是把 unknown 一路传到组件。
+   */
+  options?: Array<{ label: string; value: string | number }>
 }
 
 // 资源相关
@@ -817,7 +817,12 @@ const getToolParams = (tool: MCPTool): MCPToolParameter[] => {
         required: schema.required?.includes(name) || false,
         type: schemaType(prop),
         schema: prop,
-        options: prop.enum?.map((value) => ({ label: String(value), value }))
+        options: prop.enum?.map((value) => ({
+          label: String(value),
+          // 数字保留原值以便回填，其余一律转字符串：对象/数组作为下拉值无法比较，
+          // 选中后 v-model 也无从回显。
+          value: typeof value === 'number' ? value : String(value)
+        }))
       })
     }
   }

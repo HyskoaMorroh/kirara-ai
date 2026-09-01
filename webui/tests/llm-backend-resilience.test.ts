@@ -17,6 +17,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import LLMView from '../src/views/llm/LLMView.vue'
+import { resilienceDefaults } from '../src/api/llm'
 import type { ConfigSchema, LLMBackend } from '../src/api/llm'
 
 const { messageError, messageSuccess, llmApi } = vi.hoisted(() => ({
@@ -180,12 +181,19 @@ describe('LLM backend resilience round trip', () => {
     const created = wrapper.findComponent({ name: 'LLMAdapterConfig' }).props(
       'adapter'
     ) as LLMBackend
-    expect(created.priority).toBe(100)
-    expect(created.participate_in_failover).toBe(true)
-    expect(created.max_retries).toBe(0)
-    expect(created.stream_first_byte_timeout_seconds).toBe(15)
-    expect(created.stream_idle_timeout_seconds).toBe(30)
-    expect(created.circuit_failure_threshold).toBe(3)
-    expect(created.circuit_min_requests).toBe(10)
+    // 断言「带齐了默认值」，而不是复制一份具体数字。
+    // 之前这里写死 15/30，后端把超时默认放宽后这条测试会失败，而失败原因
+    // 与它想守的行为（新建时字段不为 undefined）毫无关系。两端默认值是否
+    // 一致由 resilience-defaults-parity.test.ts 单独钉住。
+    const defaults = resilienceDefaults()
+    expect(created.priority).toBe(defaults.priority)
+    expect(created.participate_in_failover).toBe(defaults.participate_in_failover)
+    expect(created.max_retries).toBe(defaults.max_retries)
+    expect(created.stream_first_byte_timeout_seconds).toBe(
+      defaults.stream_first_byte_timeout_seconds
+    )
+    expect(created.stream_idle_timeout_seconds).toBe(defaults.stream_idle_timeout_seconds)
+    expect(created.circuit_failure_threshold).toBe(defaults.circuit_failure_threshold)
+    expect(created.circuit_min_requests).toBe(defaults.circuit_min_requests)
   })
 })

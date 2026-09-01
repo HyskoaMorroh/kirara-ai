@@ -75,7 +75,7 @@ import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
 import '@vue-flow/minimap/dist/style.css'
-import type { Connection, Edge, EdgeChange, EdgeUpdateEvent, Node, NodeChange } from '@vue-flow/core'
+import type { Connection, Edge, EdgeChange, EdgeUpdateEvent, GraphNode, Node, NodeChange } from '@vue-flow/core'
 import { MarkerType } from '@vue-flow/core'
 import {
   useLayout,
@@ -588,7 +588,11 @@ const convertWiresToEdges = (wires: Wire[], blocks = viewState.value.blocks): Ed
 }
 
 // 将 vue-flow 节点转换回 BlockInstance
-const convertNodesToBlocks = (sourceNodes = nodes.value): BlockInstance[] => {
+// 只读 id / position / data 三项，因此既接受渲染后的 GraphNode，
+// 也接受尚未渲染的 Node（补位后立刻要转回 BlockInstance 的那一批）。
+const convertNodesToBlocks = (
+  sourceNodes: readonly (Node | GraphNode)[] = nodes.value
+): BlockInstance[] => {
   return sourceNodes.map((node) => {
     return {
       type_name: node.data?.blockType?.type_name,
@@ -614,7 +618,7 @@ const convertEdgesToWires = (): Wire[] => {
 
 type DebouncedFunction = (() => Promise<void>) & { cancel: () => void }
 
-const debounce = (func: () => void, delay: number): DebouncedFunction => {
+const debounce = (func: (...args: any[]) => void, delay: number): DebouncedFunction => {
   let timer: number | null = null
   let resolvePending: (() => void) | null = null
   const debounced = function (this: any, ...args: any[]) {
@@ -825,7 +829,8 @@ const restoreGraph = () => {
 /** Fit measured nodes inside the canvas area not covered by edge panels. */
 const fitCanvasToVisibleArea = async () => {
   const root = canvasRoot.value
-  const canvas = root?.querySelector<HTMLElement>('.vue-flow')
+  if (!root) return false
+  const canvas = root.querySelector<HTMLElement>('.vue-flow')
   if (!canvas || nodes.value.length === 0) return false
   if (nodes.value.some((node) => !node.dimensions?.width || !node.dimensions?.height)) return false
 
@@ -964,7 +969,9 @@ const handleFitView = () => {
  * DOM 实测尺寸仍然优先。
  */
 const nodeBoxSize = (node: Node) => {
-  const measured = node.dimensions
+  // dimensions 只在 vue-flow 渲染后存在（GraphNode 才声明它）。这里按可选读取：
+  // 首次插入、尚未测量的节点没有这个字段，此时回落到 useLayout 的估算尺寸。
+  const measured = (node as Partial<GraphNode>).dimensions
   if (measured?.width && measured?.height) {
     return { width: measured.width, height: measured.height }
   }
@@ -1030,7 +1037,7 @@ const handleDuplicateSelection = () => {
     return
   }
 
-  const created: Node[] = []
+  const created: GraphNode[] = []
   runCanvasBatch(() => {
     const existingIds = new Set(nodes.value.map((node) => node.id))
     // 原先固定 +40/+40，副本必然压在原节点上（节点至少 220px 宽）。
@@ -1898,8 +1905,11 @@ const closeNodeConfig = () => {
 }
 
 // 添加拖放处理函数
-const onDrop = (event: DragEvent) => {
-  if (!event.dataTransfer) return
+// vue-flow 的 `@drop` 声明为 `(...args: unknown[]) => void`，
+// 因此形参先收 unknown 再窄化到 DragEvent，而不是直接标注 DragEvent。
+const onDrop = (...args: unknown[]) => {
+  const [event] = args
+  if (!(event instanceof DragEvent) || !event.dataTransfer) return
 
   const data = event.dataTransfer.getData('application/vueflow')
   if (!data) return

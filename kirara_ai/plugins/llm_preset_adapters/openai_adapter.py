@@ -475,18 +475,49 @@ class OpenAIAdapterChatBase(
         }
         data = {k: v for k, v in data.items() if v is not None}
 
-        with self._session.post(
-            api_url,
-            json=data,
-            headers=headers,
-            timeout=(10, 300),
-            stream=True,
-        ) as response, self._track_response(req, response):
+        # 整流（需求 8）：与非流式路径同一套语义。此前 `stream_chat` 在
+        # `raise_for_status()` 失败后直接抛，于是同一个请求换成流式就不整流了——
+        # 而 `reply_stream_mode` 配成 aggregate/incremental 之后（文档推荐这么配，
+        # 因为流式超时与首字节前的故障转移才生效），供应商页上的四个整流开关
+        # 对这条路径从未参与任何决策。用户看到「请求失败」，真正的原因是一张图
+        # 或一个上游不认识的字段，两者都不是他能自己改的。
+        #
+        # 与非流式一致的两条边界：只对**真实的上游拒绝**生效；每类最多改一次，
+        # 改完仍失败就抛原始错误。流式路径上每次重试都要重新建连、重新等首字节，
+        # 无界重试会把一次必然失败拖成一串超时。
+        applied_rectifications: set[str] = set()
+        while True:
+            response = self._session.post(
+                api_url,
+                json=data,
+                headers=headers,
+                timeout=(10, 300),
+                stream=True,
+            )
             try:
                 response.raise_for_status()
+                break
             except Exception as error:
-                logger.error(f"Stream response: {response.text[:512]}")
-                raise error
+                body_text = response.text[:512]
+                logger.error(f"Stream response: {body_text}")
+                rectified, record = rectify_request(
+                    data,
+                    response.text,
+                    req.rectifier,
+                    already_applied=frozenset(applied_rectifications),
+                )
+                if rectified is None or record is None:
+                    response.close()
+                    raise error
+                logger.warning(
+                    "整流器改写流式请求后重试：%s %s", record.kind, record.details
+                )
+                applied_rectifications.add(record.kind)
+                data = rectified
+                # 关掉这条失败连接再重试：不关会让失败的响应体一直占着连接池。
+                response.close()
+
+        with response, self._track_response(req, response):
 
             # 工具调用增量按 `index` 累积，与文本增量并行处理。缺了它，
             # 「带工具的请求」只能被上层一刀切成非流式，而绑了 MCP 的 Agent

@@ -42,7 +42,10 @@ const currentAdapter = ref<IMAdapter | null>(null)
 const formRef = ref<FormInst | null>(null)
 const isEdit = ref<string | null>(null)
 
-type StatusTagType = 'default' | 'success' | 'warning' | 'error'
+// 与 n-tag 的 type prop 对齐（default | primary | success | info | warning | error）。
+// 原先漏了 'info'，而 `scanned: { type: 'info' }` 已经在用它——「已扫码待确认」
+// 这个状态的标签颜色因此落在类型之外。只补真正用到的档位，不照抄全集。
+type StatusTagType = 'default' | 'success' | 'info' | 'warning' | 'error'
 
 /**
  * 断开原因码到可读文案。

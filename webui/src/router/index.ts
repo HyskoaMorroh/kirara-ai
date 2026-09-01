@@ -30,7 +30,9 @@ const router = createRouter({
         {
           path: '/im/platforms',
           name: 'im-platforms',
-          component: () => import('@/views/ComingSoon.vue')
+          // 平台适配器的启停与配置都在 IMView，二级 activeKey 也默认指向 platforms。
+          redirect: { name: 'im' },
+          meta: { title: '平台管理', requiresAuth: true }
         },
         {
           path: '/llm',
@@ -40,12 +42,16 @@ const router = createRouter({
         {
           path: '/llm/backends',
           name: 'llm-backends',
-          component: () => import('@/views/ComingSoon.vue')
+          // 上游后端的增删改就在模型配置页，无需第二个页面。
+          redirect: { name: 'llm' },
+          meta: { title: '上游后端', requiresAuth: true }
         },
         {
           path: '/llm/models',
           name: 'llm-models',
-          component: () => import('@/views/ComingSoon.vue')
+          // 模型清单随后端配置一起维护，落到模型配置页。
+          redirect: { name: 'llm' },
+          meta: { title: '模型清单', requiresAuth: true }
         },
         {
           path: '/llm/agents',
@@ -128,12 +134,17 @@ const router = createRouter({
         {
           path: '/memory',
           name: 'memory',
-          component: () => import('@/views/ComingSoon.vue')
+          // 记忆本身是资源类型之一（GET /api/resources?type=memory），
+          // 能力一直都在，此前入口却指向占位页，读起来像功能没做。
+          redirect: { name: 'resources', query: { type: 'memory' } },
+          meta: { title: '记忆管理', requiresAuth: true }
         },
         {
           path: '/memory/search',
           name: 'memory-search',
-          component: () => import('@/views/ComingSoon.vue')
+          // 检索不再需要单独页面：资源管理已有关键词搜索框，落点带上类型即可。
+          redirect: { name: 'resources', query: { type: 'memory' } },
+          meta: { title: '记忆检索', requiresAuth: true }
         },
         {
           path: '/guide',

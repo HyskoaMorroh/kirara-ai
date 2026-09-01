@@ -36,7 +36,10 @@ vi.mock('vue-echarts', () => ({ default: { template: '<div data-test="chart" />'
 vi.mock('naive-ui', () => {
   const passthrough = (name: string, tag = 'section') => ({
     name,
-    template: `<${tag} v-bind="$attrs"><slot name="header-extra" /><slot name="trigger" /><slot /><slot name="action" /></${tag}>`
+    // 刻意不渲染 `action`：naive-ui 的 NAlert 没有这个 slot（AlertSlots 只有
+    // default / icon / header）。stub 渲染它会比真实组件宽容，让「按钮放在
+    // #action 里」这类界面上根本看不到的写法通过测试。
+    template: `<${tag} v-bind="$attrs"><slot name="header-extra" /><slot name="trigger" /><slot /></${tag}>`
   })
   return {
     NAlert: passthrough('NAlert'),

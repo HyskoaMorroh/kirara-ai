@@ -291,8 +291,12 @@ export const CODE_BLOCK_PORT_RUNTIME_TYPE = 'Any'
 
 const getConfiguredPorts = (block: ConfiguredBlock, direction: 'input' | 'output') => {
   const key = direction === 'input' ? 'inputs' : 'outputs'
-  return Array.isArray(block.config?.[key])
-    ? block.config[key].map((port) => asPort(port, direction)).filter(Boolean)
+  // 先取出来再判断：判断用 `block.config?.[key]`、取值用 `block.config[key]` 时，
+  // TS 不认为 `config` 已被收窄（可选链检查的是取值结果，不是 config 本身），
+  // 而真分支一旦因判断条件改动变得可达，就会抛 Cannot read properties of undefined。
+  const configured = block.config?.[key]
+  return Array.isArray(configured)
+    ? configured.map((port: unknown) => asPort(port, direction)).filter(Boolean)
     : []
 }
 

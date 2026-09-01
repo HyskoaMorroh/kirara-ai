@@ -18,6 +18,7 @@ from kirara_ai.llm.adapter import AutoDetectModelsProtocol
 from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.llm.llm_registry import LLMBackendRegistry
 from kirara_ai.llm.pricing import PriceCatalog, PriceCatalogConflictError, PriceVersion
+from kirara_ai.llm.pricing_sync import UpstreamPriceSyncer
 from kirara_ai.logger import get_logger
 from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
 from kirara_ai.scheduler import TaskScheduler
@@ -1536,6 +1537,47 @@ async def update_auto_detect_schedule(backend_name: str):
         return jsonify({"name": backend_name, "interval_days": interval_days})
     except Exception as e:
         logger.opt(exception=e).error("Failed to update auto-detect schedule")
+        return jsonify({"error": str(e)}), 500
+
+
+@llm_bp.route("/pricing/sync", methods=["POST"])
+@require_auth("llm.pricing.manage")
+async def sync_pricing_now():
+    """立即从公开定价目录同步一次单价。
+
+    手工维护过的价格不会被覆盖——同步只碰自己写过的版本。
+    """
+    try:
+        catalog = _pricing_catalog()
+        report = await UpstreamPriceSyncer().sync(catalog)
+        if report.error is not None:
+            return jsonify({"error": report.error, **report.as_dict()}), 502
+        if report.imported:
+            await asyncio.to_thread(catalog.save)
+        return jsonify(report.as_dict())
+    except Exception as e:
+        logger.opt(exception=e).error("Failed to sync pricing from upstream")
+        return jsonify({"error": str(e)}), 500
+
+
+@llm_bp.route("/pricing/sync-schedule", methods=["PUT"])
+@require_auth("llm.pricing.manage")
+@serialize_config_update
+async def update_pricing_sync_schedule():
+    """设置定价自动同步的间隔天数，0 表示关闭。"""
+    try:
+        data = await request.get_json()
+        interval_days = int(data.get("interval_days", 0))
+        if interval_days < 0:
+            return jsonify({"error": "interval_days must be >= 0"}), 400
+
+        config: GlobalConfig = g.container.resolve(GlobalConfig)
+        config.llms.price_sync_interval_days = interval_days
+        ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
+        logger.info(f"Price sync interval set to {interval_days} day(s)")
+        return jsonify({"interval_days": interval_days})
+    except Exception as e:
+        logger.opt(exception=e).error("Failed to update price sync schedule")
         return jsonify({"error": str(e)}), 500
 
 

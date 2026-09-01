@@ -103,12 +103,17 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { NForm, NFormItem, NInput, NButton, NTooltip, useMessage } from 'naive-ui'
+import type { FormValidationStatus } from 'naive-ui/es/form/src/interface'
 import { useLoginViewModel } from './login.vm'
 
 const { isFirstTime, loading, formModel, rules, handleSubmit, checkFirstTime } = useLoginViewModel()
 
 const message = useMessage()
-const passwordFeedback = ref<string | undefined>(undefined)
+// n-input 的 `status` 只接受 naive-ui 的 FormValidationStatus，宽 string 报 TS2322。
+// 该类型没有从包根导出，只能从 es/form/src/interface 取（与 naive-ui 自身
+// 各组件 .d.ts 的引用方式一致）。
+// 这里只用到 'error' 一档（密码校验失败时置上、成功时清空）。
+const passwordFeedback = ref<FormValidationStatus | undefined>(undefined)
 
 const handleLogin = async () => {
   try {

@@ -65,7 +65,9 @@ describe('catalog enable action', () => {
     // 不符，而那个不符恰好发生在用户最想确认「到底成没成」的时刻。
     const handler = viewSource.slice(viewSource.indexOf('const enableInstalledCatalogItem'))
     expect(handler.slice(0, 900)).toContain('loadResources()')
-    expect(handler.slice(0, 900)).toContain('searchRemote(')
+    // 刷新要走按当前来源分派的那个入口。写死某一个来源的搜索函数，在用户停在
+    // 另一个来源时会刷新他没在看的那一侧，启用结果看起来就像没生效。
+    expect(handler.slice(0, 900)).toContain('runDiscoverSearch(')
   })
 
   it('tells the user what became possible', () => {
