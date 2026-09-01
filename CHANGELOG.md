@@ -167,6 +167,51 @@
 本轮修正的缺陷有一个共同形态：**功能看起来在工作，实际给出反向或空白的结果**。
 每条都先有一个失败的回归测试，再改最小范围代码。
 
+- **Claude 与 Gemini 收不到系统提示词——前者必然报错，后者静默降级**（需求 7）：
+  第 7 条原文点名的 `Object of type LLMChatTextContent is not JSON serializable`
+  出在 `claude_adapter.py`：`messages` 那一项经过
+  `convert_llm_chat_message_to_claude_message()` 转成纯 dict，而 `system` 这一项
+  直接取 `system_messages[0].content`——一个 `list[LLMChatTextContent]`。
+  `requests` 对 `json=` 调用 `json.dumps`，于是每一次带系统提示词的调用都在发出
+  之前就抛错。而本项目的 Agent 运行时**总是**带系统提示词（人格、技能目录、
+  工具说明都在里面），所以这不是偶发，是 Claude 后端整体不可用；
+  流式与非流式两条路径各有一份同样的代码。
+  Gemini 是同一个缺口的另一种形态，但**不报错**因此更难发现：
+  `convert_llm_chat_message_to_gemini_message` 把 `system` 和 `user` 一起交给
+  `convert_non_tool_message`，后者把非 assistant 的一律映射成 `"role": "user"`。
+  系统提示词于是变成对话里的第一条用户消息——请求成功、模型有回复、而人格与规则
+  的权重完全不同（Gemini 有专门的 `systemInstruction` 字段，代码里一次都没出现过）。
+  现新增两个转换函数，口径一致：**合并全部系统消息的全部文本部件**
+  （只取第一段等于静默丢掉技能目录与工具说明，而模型仍会正常回答——那是最难发现
+  的一类缺陷）；**非文本部件跳过而不抛错**（顶层字段只接受文本，一张误入的图片
+  不该让整条请求失败，调用方的意图是设定人格）；**没有可用文本时返回 `None`**
+  让上层剔除该键（`"system": []` 与「没有 system」在上游侧不是一回事）。
+  Gemini 侧同时把系统消息从 `contents` 移除——留着会让同一段文字被算两遍 token，
+  而第一条用户消息不再是用户真正说的话。两个适配器的**流式与非流式都改**：
+  只修一条会让同一个 Agent 在两种模式下人格权重不同，而那个差别不会有任何报错。
+
+- **界面上的「自动检测」把保存挂在前端多走一步上**（需求 7）：第 7 条原文前半句是
+  「模型管理无法实现自动定期监测更新模型**并保存配置**」。后台调度器
+  `TaskScheduler._detect_backend()` 那条链一直是完整的（指纹校验、写
+  `backend_config.models`、`reload_backend`、`save_config_with_backup`，
+  每步失败都回滚），而界面那个按钮打的 `GET .../auto-detect-models` 只把结果
+  return——前端拿到之后再打一次 `PUT /backends/<name>` 间接落盘。
+  问题不是「不能保存」，而是**保存这件事依赖前端多走一步**：异常、切页、请求被新
+  一代取代——少走那一步就只刷新了界面而没落盘，而用户看到模型列表变了，
+  以为已经存好，重启进程后全没。
+  现新增 `POST .../auto-detect-models/apply` 把那条链搬到界面侧。
+  **刻意不让 GET 顺手保存**：GET 不该有副作用（缓存、预取、重试都会变成静默改
+  配置），而 21.1 要求保持公共 API 兼容——把既有 GET 改成 POST 会破坏现有调用点。
+  五条边界：`confirmed` 必填（与熔断重置同口径，改写 `data/config.yaml` 不接受
+  「顺手点一下」）；**空目录绝不写回**（一次网络抖动会让上游返回空列表，照它保存
+  等于让该后端在工作流里彻底不可选，而界面显示成功）；**先重载再落盘**
+  （反过来会留下「磁盘新、运行旧」的现场，下次重启静默切到从未验证过的目录）；
+  任一步失败都回滚内存目录；目录没变时如实报 `changed=false`（报成功会让运维以为
+  刚才那次操作改了什么，从而去别处找原因）。
+  实现时踩过一个坑值得记：函数体内又取了一次 `CONFIG_UPDATE_LOCK`，而
+  `@serialize_config_update` 已经持有它——`asyncio.Lock` 不可重入，请求永久挂住，
+  表现是**测试超时而不是报错**。
+
 - **十八条测试在「镜像内测试」里以 error 收场，因为三处 skip 判断都漏了同一条
   路径**（需求 24.3）：`run-tests.yml` 的 Docker image validation 把仓库挂进
   **运行时**镜像再跑整个 `./tests`。那个镜像只装 Python + ffmpeg + libmagic1——
@@ -2216,6 +2261,13 @@
   跨渠道对比表（`delivery-timeline-view` 追加七条）。
   `resolve_reply_stream_mode` 的优先级用例补齐入口声明那一层
   （`tests/agent_runtime/test_reply_stream_mode_scope.py`）。
+- 需求 7 的两半各有一组契约用例：系统提示词投递
+  （`tests/llm_adapters/test_system_prompt_delivery.py`，14 条，覆盖两个适配器 ×
+  流式/非流式 + 五种边界；只断言**请求体形状**，不打真实上游——要钉住的是
+  「我们发出去的 JSON 长什么样」，那与网络无关）；自动检测保存链路
+  （`tests/web/api/llm/test_auto_detect_apply.py` 10 条 +
+  `webui/tests/llm-auto-detect-apply.test.ts` 9 条，含「GET 仍然只读」这条
+  反向断言——那是这次修法的前提，丢了它下一个人会顺手给 GET 加副作用）。
 - 节流归因与热更新诊断的用例：`tests/im/test_pacing_attribution.py`
   （含「没有节流记录时两列缺失而不是 0」与「失败路径同样分开归因」两条边界）、
   `tests/im/test_hot_update_diagnostics.py`（用现场日志原文，含「热更新不覆盖扫码

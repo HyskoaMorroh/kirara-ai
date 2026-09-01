@@ -85,6 +85,40 @@ def build_claude_thinking(
     return {"type": "enabled", "budget_tokens": budget}
 
 
+def convert_system_messages_to_claude_system(
+    messages: list[LLMChatMessage],
+) -> Optional[list[dict]]:
+    """把系统消息转成 Claude 顶层 ``system`` 接受的 text block 列表。
+
+    需求 7 报的 ``Object of type LLMChatTextContent is not JSON serializable``
+    就出在这里的缺席：``messages`` 那一项经过
+    :func:`convert_llm_chat_message_to_claude_message` 转成纯 dict，而 ``system``
+    这一项此前直接取 ``system_messages[0].content``——一个
+    ``list[LLMChatTextContent]``。``requests`` 对 ``json=`` 参数调用
+    ``json.dumps``，于是每一次带系统提示词的调用都在发出之前就抛错。
+    而本项目的 Agent 运行时**总是**带系统提示词（人格、技能目录、工具说明都在
+    里面），所以这不是偶发，是 Claude 后端整体不可用。
+
+    三条边界：
+
+    * **合并全部系统消息的全部文本部件**，不是只取第一条的第一段。Agent 运行时把
+      人格、技能目录、工具说明拼成多个部件；只取第一段等于静默丢掉后两者，
+      而模型仍会正常回答——那是最难发现的一类缺陷。
+    * **非文本部件跳过而不是抛错。** Claude 的顶层 ``system`` 只接受文本；
+      一张误入系统提示词的图片不该让整条请求失败，调用方的意图是设定人格。
+    * **没有可用文本时返回 ``None``**，让上层把这个键整个剔除。
+      ``"system": []`` 与「没有 system」在 Claude 侧不是一回事。
+    """
+    blocks: List[Dict[str, Any]] = []
+    for message in messages:
+        if message.role != "system":
+            continue
+        for part in message.content:
+            if isinstance(part, LLMChatTextContent) and part.text:
+                blocks.append({"type": "text", "text": part.text})
+    return blocks or None
+
+
 async def convert_llm_chat_message_to_claude_message(messages: list[LLMChatMessage], media_manager: MediaManager) -> list[dict]:
     content: List[Dict[str, Any]] = []
     for msg in [msg for msg in messages if msg.role in ["user", "assistant", "tool"]]:
@@ -152,12 +186,9 @@ class ClaudeAdapter(
             "content-type": "application/json",
         }
 
-        # Claude 的系统消息比较特殊
-        system_messages = [msg for msg in req.messages if msg.role == "system"]
-        if system_messages:
-            system_message = system_messages[0].content
-        else:
-            system_message = None
+        # Claude 的系统消息是**顶层字段**，不是一条 message。它必须和 `messages`
+        # 一样被转成纯 dict——见 `convert_system_messages_to_claude_system`。
+        system_message = convert_system_messages_to_claude_system(req.messages)
 
         # 构建请求数据
 
@@ -287,8 +318,7 @@ class ClaudeAdapter(
             "accept": "text/event-stream",
         }
 
-        system_messages = [msg for msg in req.messages if msg.role == "system"]
-        system_message = system_messages[0].content if system_messages else None
+        system_message = convert_system_messages_to_claude_system(req.messages)
 
         data = {
             "model": req.model,

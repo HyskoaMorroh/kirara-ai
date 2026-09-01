@@ -93,7 +93,7 @@ async def convert_non_tool_message(msg: LLMChatMessage, media_manager: MediaMana
     }
 
 async def convert_llm_chat_message_to_gemini_message(msg: LLMChatMessage, media_manager: MediaManager) -> dict:
-    if msg.role in ["user", "assistant", "system"]:
+    if msg.role in ["user", "assistant"]:
         return await convert_non_tool_message(msg, media_manager)
     elif msg.role == "tool":
         results = cast(list[LLMToolResultContent], msg.content)
@@ -102,8 +102,40 @@ async def convert_llm_chat_message_to_gemini_message(msg: LLMChatMessage, media_
         raise ValueError(f"Invalid role: {msg.role}")
 
 async def convert_all_messages_to_gemini_format(messages: List[LLMChatMessage], media_manager: MediaManager) -> list[dict]:
+    """把对话消息转成 Gemini 的 ``contents``。
+
+    **系统消息不在这里**：Gemini 有专门的 ``systemInstruction`` 字段，
+    见 :func:`convert_system_messages_to_gemini_instruction`。此前系统消息和
+    ``user`` 一起走 ``convert_non_tool_message``，而后者把非 assistant 的一律映射成
+    ``"role": "user"``——于是系统提示词变成了对话里的第一条用户消息。
+    请求成功、模型有回复、而人格与规则的权重完全不同。**这种不报错的降级比抛异常
+    更难发现**：没有任何迹象表明系统提示词已经不是系统提示词了。
+    """
     # gather需要先用异步函数封装，然后才能使用asyncio.run()
-    return await asyncio.gather(*[convert_llm_chat_message_to_gemini_message(msg, media_manager) for msg in messages])
+    conversation = [msg for msg in messages if msg.role != "system"]
+    return await asyncio.gather(*[convert_llm_chat_message_to_gemini_message(msg, media_manager) for msg in conversation])
+
+
+def convert_system_messages_to_gemini_instruction(
+    messages: List[LLMChatMessage],
+) -> Optional[dict]:
+    """把系统消息转成 Gemini 的 ``systemInstruction``。
+
+    口径与 Claude 侧的同名转换一致（见 `claude_adapter.py`）：合并全部系统消息的
+    全部文本部件（只取第一段等于静默丢掉技能目录与工具说明）、跳过非文本部件
+    （该字段只接受文本，一张误入的图片不该让整条请求失败）、没有可用文本时返回
+    ``None`` 让上层剔除这个键。
+    """
+    parts: List[Dict[str, Any]] = []
+    for message in messages:
+        if message.role != "system":
+            continue
+        for part in message.content:
+            if isinstance(part, LLMChatTextContent) and part.text:
+                parts.append({"text": part.text})
+    if not parts:
+        return None
+    return {"parts": parts}
 
 def convert_tools_to_gemini_format(tools: list[Tool]) -> list[dict[Literal["function_declarations"], list[dict]]]:
     # 定义允许的字段结构
@@ -231,6 +263,8 @@ class GeminiAdapter(
 
         data = {
             "contents": asyncio.run(convert_all_messages_to_gemini_format(req.messages, self.media_manager)),
+            # 系统提示词走专门的字段，不混进 contents（见上面那两个转换函数）。
+            "systemInstruction": convert_system_messages_to_gemini_instruction(req.messages),
             "generationConfig": {
                 "temperature": req.temperature,
                 "topP": req.top_p,
@@ -342,6 +376,10 @@ class GeminiAdapter(
             "contents": asyncio.run(
                 convert_all_messages_to_gemini_format(req.messages, self.media_manager)
             ),
+            # 与非流式同一口径：系统提示词走专门的字段。两条路径必须一致——
+            # 只修一条会让「同一个 Agent 在流式和非流式下人格权重不同」，
+            # 而那个差别没有任何地方会报出来。
+            "systemInstruction": convert_system_messages_to_gemini_instruction(req.messages),
             "generationConfig": {
                 "temperature": req.temperature,
                 "topP": req.top_p,

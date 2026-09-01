@@ -230,17 +230,29 @@ const confirmAutoDetect = async () => {
       ) {
         return
       }
-      // 后端已经与定时任务共用模型目录规范化逻辑。这里仅替换当前后端的
-      // 最新可发现模型；工作流中的主模型和四个备用模型从未参与本次请求。
-      const detected = await llmApi.getBackendModels(adapter.name, request.signal)
+      // 检测**并保存**走后端的显式动作，不再「只读检测 + 前端再打一次 PUT」。
+      //
+      // 那条旧路径把「保存」这件事挂在前端多走一步上：少走一步（异常、切页、
+      // 请求被新一代取代）就只刷新了界面而没落盘，而用户看到模型列表变了，
+      // 以为已经存好——重启进程后全没。后端那条链（指纹校验 → 写目录 →
+      // 重载后端 → 落盘，任一步失败都回滚）现在由 apply 端点自己保证。
+      const applied = await llmApi.applyBackendModels(adapter.name)
       if (
         !modelDetectionRequests.isCurrent(request.generation) ||
         currentAdapter.value !== adapter
       ) {
         return
       }
-      adapter.models = detected.models as ModelInfo[]
-      await handleSave(adapter, adapter.name) // 保存检测到的模型列表
+      adapter.models = applied.models as ModelInfo[]
+      // 目录与已保存的完全一致时后端返回 changed=false。那不是失败，
+      // 也不该报「保存成功」——报成功会让运维以为刚才那次操作改了什么。
+      if (applied.changed) {
+        $message.success(`已保存 ${applied.models.length} 个模型`)
+      } else {
+        $message.info('模型目录与已保存的一致，无需改动')
+      }
+      // 重新拉一次列表：apply 已经落盘并重载了后端，本地副本要跟上。
+      await fetchAdapters()
     }
   } catch (error: unknown) {
     if (isAbortError(error) || !modelDetectionRequests.isCurrent(request.generation)) return

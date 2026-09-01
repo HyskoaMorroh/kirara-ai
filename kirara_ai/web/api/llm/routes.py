@@ -21,7 +21,9 @@ from kirara_ai.llm.pricing import PriceCatalog, PriceCatalogConflictError, Price
 from kirara_ai.logger import get_logger
 from kirara_ai.plugin_manager.resource_lifecycle import ResourceLifecycleService
 from kirara_ai.scheduler import TaskScheduler
-from kirara_ai.scheduler.model_catalog import normalize_detected_models
+from kirara_ai.scheduler.model_catalog import (backend_config_fingerprint,
+                                              model_catalogs_equal,
+                                              normalize_detected_models)
 from kirara_ai.scheduler.scheduler import CONFIG_UPDATE_LOCK
 from kirara_ai.web.api.llm.models import (LLMAdapterConfigSchema, LLMAdapterTypes, LLMBackendCreateRequest,
                                           LLMBackendInfo, LLMBackendList, LLMBackendListResponse, LLMBackendResponse,
@@ -1307,6 +1309,182 @@ async def auto_detect_models(backend_name: str):
     except Exception as e:
         logger.opt(exception=e).error("Failed to auto-detect models")
         return jsonify({"error": str(e)}), 500
+
+
+@llm_bp.route(
+    "/backends/<backend_name>/auto-detect-models/apply", methods=["POST"]
+)
+@require_auth
+@serialize_config_update
+async def apply_auto_detect_models(backend_name: str):
+    """Detect the upstream catalog **and persist it** (需求 7).
+
+    第 7 条原文的前半句是「模型管理无法实现自动定期监测更新模型**并保存配置**」。
+    后台调度器 `TaskScheduler._detect_backend()` 这条路径一直是完整的（指纹校验、
+    写 `backend_config.models`、`reload_backend`、`save_config_with_backup`，
+    每步失败都回滚），而界面上那个「自动检测」按钮打的是同名 **GET** 路由——
+    它只把结果 return，从不落盘。用户点一下、看到模型列表刷出来、以为已经保存了，
+    重启进程后全没了。
+
+    **刻意不让那个 GET 顺手保存。** GET 不该有副作用（缓存、预取、重试都会变成
+    静默改配置），而 21.1 要求保持公共 API 兼容——把既有 GET 改成 POST 会破坏
+    现有前端调用点。因此保留 GET 只读，这里另开一条显式的保存动作：
+    用户看到的是「检测 → 预览 → 保存」。
+
+    五条边界，每一条都对应一种「看起来成功其实坏了」：
+
+    * **`confirmed` 必填**（与熔断重置同口径）：这个动作改写 `data/config.yaml`，
+      不接受「顺手点一下」。
+    * **空目录绝不写回**：一次网络抖动或权限变更会让上游返回空列表，照它保存等于
+      让这个后端在工作流里彻底不可选，而界面上这一步是「成功」。与调度器同一条
+      判断，返回 409 让调用方知道是上游没给东西，不是我们拒绝了。
+    * **先重载、再落盘**：反过来会留下「磁盘上是新目录、运行中是旧目录」的现场，
+      下次重启就静默切到一个从未验证过的目录上。
+    * **任一步失败都回滚内存目录**：不回滚的话进程内是新目录、磁盘上是旧目录，
+      重启之后「保存成功」的那次改动凭空消失，而两者之间的所有对话都按新目录跑过。
+    * **目录没变时如实说「没变」**：报成功会让运维以为刚才那次操作改了什么，
+      从而去别处找原因。
+    """
+    try:
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict) or payload.get("confirmed") is not True:
+            return (
+                jsonify(
+                    {
+                        "error": "This action rewrites data/config.yaml; "
+                        "resend with {\"confirmed\": true}."
+                    }
+                ),
+                400,
+            )
+
+        manager: LLMManager = g.container.resolve(LLMManager)
+        config: GlobalConfig = g.container.resolve(GlobalConfig)
+
+        backend_config = next(
+            (item for item in config.llms.api_backends if item.name == backend_name),
+            None,
+        )
+        if backend_config is None:
+            return jsonify({"error": f"Backend {backend_name} not found"}), 404
+
+        adapter = manager.get(backend_name)
+        if not adapter:
+            return jsonify({"error": f"Backend {backend_name} not found"}), 404
+        if not isinstance(adapter, AutoDetectModelsProtocol):
+            return (
+                jsonify(
+                    {
+                        "error": f"Backend {backend_name} does not support "
+                        "auto-detect models"
+                    }
+                ),
+                400,
+            )
+
+        fingerprint = backend_config_fingerprint(backend_config)
+        detected = normalize_detected_models(await adapter.auto_detect_models())
+        if not detected:
+            return (
+                jsonify(
+                    {
+                        "error": "Upstream returned an empty model catalog; "
+                        "the saved catalog was left untouched.",
+                        "saved": False,
+                        "changed": False,
+                    }
+                ),
+                409,
+            )
+
+        # 与调度器的互斥由 `@serialize_config_update` 提供（它取的就是
+        # `CONFIG_UPDATE_LOCK`）。这里**不能**再取一次：`asyncio.Lock` 不可重入，
+        # 二次获取会让这条请求永久挂住——表现是超时，而不是报错。
+        #
+        # 锁已在手，下面这一段重读配置仍然必要：装饰器是在**进入本函数之前**取锁的，
+        # 而上面那次 `auto_detect_models()` 是一次网络往返——它期间不持锁，
+        # 因此指纹必须在锁内重新比一次。
+        if True:  # noqa: SIM108 - 保留缩进块，说明这一段在锁内执行
+            backend_config = next(
+                (
+                    item
+                    for item in config.llms.api_backends
+                    if item.name == backend_name
+                ),
+                None,
+            )
+            if backend_config is None:
+                return jsonify({"error": f"Backend {backend_name} not found"}), 404
+            if backend_config_fingerprint(backend_config) != fingerprint:
+                # 检测期间有人改了这个后端（换密钥、改地址）。这份目录来自旧配置，
+                # 写回去会把它盖在一个不同的上游上。
+                return (
+                    jsonify(
+                        {
+                            "error": "Backend configuration changed during "
+                            "detection; discarded the stale catalog.",
+                            "saved": False,
+                            "changed": False,
+                        }
+                    ),
+                    409,
+                )
+
+            if model_catalogs_equal(backend_config.models, detected):
+                return jsonify(
+                    {
+                        "saved": False,
+                        "changed": False,
+                        "models": [model.model_dump() for model in detected],
+                    }
+                )
+
+            previous = list(backend_config.models)
+            backend_config.models = detected
+            try:
+                await manager.reload_backend(backend_name)
+            except Exception as error:
+                backend_config.models = previous
+                logger.opt(exception=error).error(
+                    f"Failed to reload backend {backend_name} after auto-detect"
+                )
+                return (
+                    jsonify({"error": "Failed to reload the backend", "saved": False}),
+                    500,
+                )
+
+            try:
+                ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
+            except Exception as error:
+                backend_config.models = previous
+                logger.opt(exception=error).error(
+                    f"Failed to save config after auto-detect for {backend_name}"
+                )
+                try:
+                    await manager.reload_backend(backend_name)
+                except Exception as rollback_error:
+                    logger.opt(exception=rollback_error).error(
+                        f"Failed to restore backend {backend_name} after save failure"
+                    )
+                return (
+                    jsonify({"error": "Failed to save the configuration", "saved": False}),
+                    500,
+                )
+
+            logger.info(
+                f"Backend {backend_name} model catalog saved from WebUI: "
+                f"{len(previous)} -> {len(detected)} models"
+            )
+            return jsonify(
+                {
+                    "saved": True,
+                    "changed": True,
+                    "models": [model.model_dump() for model in detected],
+                }
+            )
+    except Exception as error:
+        logger.opt(exception=error).error("Failed to apply auto-detected models")
+        return jsonify({"error": str(error)}), 500
 
 
 @llm_bp.route("/auto-detect-schedule", methods=["GET"])

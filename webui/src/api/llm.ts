@@ -381,12 +381,37 @@ export const llmApi = {
   },
 
   /**
-   * 获取后端支持的模型列表
+   * 只读：检测后端当前可发现的模型目录，不写任何配置。
+   *
+   * 保留它是因为「预览」这一步本身有意义——用户先看清将要保存什么，
+   * 再决定是否保存。要落盘用 `applyBackendModels`。
    */
   getBackendModels(backendName: string, signal?: AbortSignal) {
     return http.get<{ models: ModelInfo[] }>(`/llm/backends/${backendName}/auto-detect-models`, {
       signal
     })
+  },
+
+  /**
+   * 检测并**保存**后端的模型目录（需求 7）。
+   *
+   * 与上面那个只读检测是两个动作。此前界面只有只读那一个，检测结果靠前端再打一次
+   * `PUT /backends/<name>` 间接落盘——保存这件事因此**依赖前端多走一步**，
+   * 后端这条路径自己不保证任何事：少走那一步，用户看到模型列表刷出来、
+   * 以为存好了，重启进程后全没。
+   *
+   * 这个端点把后台调度器那条完整链路（指纹校验 → 写目录 → 重载后端 → 落盘，
+   * 任一步失败都回滚）搬到界面侧。`confirmed` 是后端硬要求：它改写
+   * `data/config.yaml`，不接受「顺手点一下」。
+   *
+   * 响应里的 `saved` / `changed` 要分开读：目录与已保存的完全一致时
+   * `saved=false, changed=false`——那不是失败，是「本来就没变」。
+   */
+  applyBackendModels(backendName: string) {
+    return http.post<{ saved: boolean; changed: boolean; models: ModelInfo[] }>(
+      `/llm/backends/${encodeURIComponent(backendName)}/auto-detect-models/apply`,
+      { confirmed: true }
+    )
   },
 
   /**
