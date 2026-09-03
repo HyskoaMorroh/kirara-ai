@@ -355,6 +355,17 @@ export interface PricingVersion {
   version_id: string
   provider: string
   model: string
+  /**
+   * 可读化展示名，**不参与计价匹配**。
+   *
+   * 计价按 `(provider, model)` 找版本；这一项只是标签。价目表到几十条时
+   * `claude-sonnet-5` 与 `claude-sonnet-5-20260514` 在一屏里只差一个后缀，
+   * 而它们的单价可能不同——要挑出「我在用的那个」，唯一可读的抓手就是它。
+   *
+   * `null` 表示没填（老价目文件里这个字段本来就不存在），显示时回落到 `model`
+   * 而不是留一个空白单元格。
+   */
+  display_name?: string | null
   effective_from: string
   currency: string
   input_per_million: string
@@ -540,6 +551,23 @@ export const llmApi = {
   },
 
   /**
+   * 按给定次序重排一条模型的故障转移队列（需求 8）。
+   *
+   * 一次给出整条队列而不是「把某一家改成某个数字」：后者会经过中间态——
+   * 把 P3 改成 1 的那一刻队列里出现两个 1，而相等优先级的相对次序由后端
+   * `active_backends` 的列表下标决定，也就是用户看不见的东西。
+   *
+   * `providers` 必须是这条队列的**全部**成员：缺一个，它落在哪里就取决于
+   * 它原本的数字，而用户以为自己排的是整条队列（后端对此返回 400）。
+   */
+  reorderFailoverQueue(model: string, providers: string[]) {
+    return http.put<{
+      data: ProviderResilienceRow[]
+      summary: ResilienceSummary
+    }>('/llm/resilience/queue', { model, providers })
+  },
+
+  /**
    * 把一个 Provider 的熔断器清回 `closed`，并同时撤销持久化的隔离。
    *
    * 没有这个动作时，一次上游抖动打开的熔断只能等满恢复窗口，或者重启整个
@@ -635,5 +663,23 @@ export const llmApi = {
       '/llm/backends/import',
       { document: payload.document, overwrite: payload.overwrite ?? false }
     )
+  },
+
+  /**
+   * 把供应商清单回滚到最后一次写入之前的那一份。
+   *
+   * `save_config_with_backup` 每次写入前留一份 `config.yaml.bak`，这条接口只把
+   * `llms.api_backends` 取回来——**不是**整份配置回滚（那会把同一时间改过的
+   * Web 端口、IM 适配器、工作流一起退回去）。
+   *
+   * `confirmed` 是必填而不是可选：后端要求 `confirmed: true`，
+   * 写成可选会让第一次调用必然 400，而那个 400 读起来像参数拼错。
+   *
+   * 没有备份时后端返回 404 —— 那是「还没写过配置」这种正常状态，不是故障。
+   */
+  restoreBackends(payload: { confirmed: true }) {
+    return http.post<{
+      data: { restored_count: number; loaded_count: number; backends: string[] }
+    }>('/llm/backends/restore', payload)
   }
 }

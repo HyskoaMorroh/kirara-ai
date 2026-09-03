@@ -20,6 +20,9 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { NAlert, NButton, NCard, NPopconfirm, NTag, useMessage } from 'naive-ui'
 
 import { llmApi, type ProviderResilienceRow, type ResilienceSummary } from '@/api/llm'
+// 次序计算与按钮禁用条件抽成纯函数，由 `llm-failover-order.test.ts` 调用验证。
+// 算错的后果不是界面错位：这个次序会写进 config.yaml，决定真实请求先打哪一家。
+import { canMoveDown, canMoveUp, swappedOrder } from './failoverQueueOrder'
 
 const message = useMessage()
 
@@ -252,6 +255,61 @@ async function load(showSpinner = false) {
 const resettingProvider = ref('')
 
 /**
+ * 正在重排的模型名。
+ *
+ * 与 `resettingProvider` 同理按名字跟踪：两条队列同时在屏幕上时，
+ * 一个布尔会让两组按钮一起转圈，读起来像「另一条队列也在动」。
+ */
+const reorderingModel = ref('')
+
+/**
+ * 把一家供应商在队列里上移或下移一位。
+ *
+ * 为什么在这里而不是只在供应商编辑表单里填数字：`priority` 是一个**相对**量，
+ * 而编辑表单一次只看得见一家。想把 P3 提到 P1，得先记住另外两家各是多少、
+ * 再算一个中间值填进去，三次编辑分散在三个表单里。队列的次序应该在**看到队列
+ * 的地方**改。
+ *
+ * 用上移/下移而不是拖拽：键盘可达是硬要求（全站 UI 规约），而拖拽要额外补一套
+ * 键盘操作才能等价——两套交互对同一件事，出错时很难判断是哪一套没生效。
+ * 按钮天然可聚焦、可回车。
+ *
+ * 一次提交整条队列的新次序，不是「把这一家改成某个数字」：后者会经过中间态，
+ * 相等优先级的相对次序由后端列表下标决定，而那是用户看不见的东西。
+ */
+async function moveProvider(
+  model: string,
+  providers: ProviderResilienceRow[],
+  index: number,
+  offset: -1 | 1
+) {
+  // 次序计算在 `failoverQueueOrder.ts` 里，由那份测试调用验证。
+  // 越界返回 null 而不是原数组：那样会提交一次内容相同的写操作，
+  // 在 config.yaml 上留下一条无意义的备份。
+  const order = swappedOrder(
+    providers.map((row) => row.provider),
+    index,
+    offset
+  )
+  if (order === null) return
+
+  reorderingModel.value = model
+  try {
+    const response = await llmApi.reorderFailoverQueue(model, order)
+    // 用后端返回的新状态，不本地改序：本地改完再等轮询会让「界面上的次序」
+    // 与「实际生效的次序」在几秒内不一致，而排队顺序恰恰是这个页面唯一的论断。
+    rows.value = response.data || []
+    summary.value = response.summary ?? null
+    lastUpdated.value = new Date()
+    message.success(`已更新 ${model} 的队列顺序`)
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : `更新 ${model} 的队列顺序失败`)
+  } finally {
+    reorderingModel.value = ''
+  }
+}
+
+/**
  * 把一个 Provider 的熔断清回 `closed`，并撤销持久化的隔离。
  *
  * 没有这个动作时，一次上游抖动打开的熔断只能等满恢复窗口，或者重启整个
@@ -420,6 +478,36 @@ onBeforeUnmount(() => {
         >
           <div class="provider-main">
             <span class="order" :aria-label="`队列第 ${index + 1} 位`">P{{ index + 1 }}</span>
+            <!--
+              上移 / 下移就放在序号旁边：序号是「它排第几」，这两个按钮是
+              「改这个数」。放到行尾的动作区里会和「重置熔断」混在一起，
+              而后者是一次性动作，前者是配置。
+
+              两端各禁一个方向，而不是隐藏：位置固定的按钮更容易连点，
+              而首尾行的按钮消失会让其余行的布局跟着跳。
+            -->
+            <div v-if="queue.providers.length > 1" class="order-actions">
+              <n-button
+                size="tiny"
+                quaternary
+                data-test="queue-move-up"
+                :disabled="!canMoveUp(index, queue.providers.length) || reorderingModel === queue.model"
+                :aria-label="`把 ${row.provider} 上移一位`"
+                @click="moveProvider(queue.model, queue.providers, index, -1)"
+              >
+                ↑
+              </n-button>
+              <n-button
+                size="tiny"
+                quaternary
+                data-test="queue-move-down"
+                :disabled="!canMoveDown(index, queue.providers.length) || reorderingModel === queue.model"
+                :aria-label="`把 ${row.provider} 下移一位`"
+                @click="moveProvider(queue.model, queue.providers, index, 1)"
+              >
+                ↓
+              </n-button>
+            </div>
             <div class="provider-identity">
               <strong>{{ row.provider }}</strong>
               <small>priority {{ row.priority }}</small>
@@ -570,6 +658,12 @@ h1, h2, p { margin-top: 0; } h1 { margin-bottom: 8px; font-size: 28px; } h2 { ma
 /* 序号是这个面板最重要的一个字：没有它就看不出「队列」 */
 .order { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 26px; padding: 0 8px; color: var(--primary-color); background: color-mix(in srgb, var(--primary-color) 12%, transparent); border-radius: var(--radius-sm); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .provider-identity { display: grid; gap: 2px; min-width: 0; }
+/*
+ * 上移 / 下移竖排在序号右侧：两个方向按钮横排时容易点错，
+ * 竖排与「上 / 下」这件事本身的方向一致。
+ */
+.order-actions { display: grid; gap: 2px; }
+.order-actions :deep(.n-button) { min-width: 24px; height: 18px; padding: 0; font-size: 12px; line-height: 1; }
 .provider-identity strong { overflow-wrap: anywhere; }
 .provider-identity small { color: var(--text-color-2); font-variant-numeric: tabular-nums; }
 .provider-metrics { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; font-size: 12px; color: var(--text-color-2); }

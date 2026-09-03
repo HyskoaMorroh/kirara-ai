@@ -66,7 +66,12 @@ describe('Agent 运行时配置的读写契约', () => {
     expect(cardSource).toContain('addChannelRow')
     expect(cardSource).toContain('removeChannelRow')
     // 折叠回 Record 的责任落在 viewmodel 上。
-    expect(viewModelSource).toContain('collectChannelModes')
+    // 折叠规则本身（丢空行、去空白、空串归一成 null）由
+    // `agent-runtime-form.test.ts` 调用函数验证。这里只确认接线——
+    // 只测规则不测接线，等于验证了一个没人调用的函数。
+    expect(viewModelSource).toMatch(/collectChannelModes\(channelRows\.value\)/)
+    expect(viewModelSource).toMatch(/collectCreatorIdentities\(/)
+    expect(viewModelSource).toMatch(/from '\.\/agentRuntimeForm'/)
   })
 })
 

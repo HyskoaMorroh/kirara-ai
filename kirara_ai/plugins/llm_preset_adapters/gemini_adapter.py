@@ -18,6 +18,7 @@ from kirara_ai.llm.format.request import LLMChatRequest, Tool
 from kirara_ai.llm.format.response import Function, LLMChatResponse, Message, ToolCall, Usage
 from kirara_ai.llm.format.embedding import LLMEmbeddingRequest, LLMEmbeddingResponse
 from kirara_ai.llm.model_types import LLMAbility, ModelType
+from kirara_ai.llm.rectifier import rectify_request
 from kirara_ai.logger import get_logger
 from kirara_ai.media import MediaManager
 from kirara_ai.tracing import trace_llm_chat
@@ -290,7 +291,34 @@ class GeminiAdapter(
         # Remove None fields
         data = {k: v for k, v in data.items() if v is not None}
 
-        response = self._post_with_retry(api_url, json=data, headers=headers)
+        # 整流（需求 8）：与 Claude / OpenAI 路径同一套语义，但按 Gemini 自己的
+        # 请求体形状改字段（`contents[*].parts`、`generationConfig.thinkingConfig`）。
+        # 此前这个适配器连 `rectify_request` 都没有 import——供应商编辑页上的
+        # 整流开关对 Gemini **从未参与任何决策**，而界面上没有任何地方说明。
+        #
+        # 不能照搬 `messages` 形状的规则：那会往请求体注入 Anthropic 的
+        # `thinking` 与 `max_tokens` 两个顶层键，Gemini 对未知字段直接
+        # 400 INVALID_ARGUMENT，真正的预算位反而没改——一次「整流」把可重试的
+        # 错误变成必然失败。形状分派在 `detect_payload_shape` 里。
+        applied_rectifications: set[str] = set()
+        while True:
+            try:
+                response = self._post_with_retry(api_url, json=data, headers=headers)
+                break
+            except Exception as error:
+                rectified, record = rectify_request(
+                    data,
+                    error,
+                    req.rectifier,
+                    already_applied=frozenset(applied_rectifications),
+                )
+                if rectified is None or record is None:
+                    raise
+                self.logger.warning(
+                    "整流器改写请求后重试：%s %s", record.kind, record.details
+                )
+                applied_rectifications.add(record.kind)
+                data = rectified
 
         # 登记在途响应，让 `cancel_pending_request` 能真正断开这条连接。
         with self._track_response(req, response):
@@ -387,21 +415,59 @@ class GeminiAdapter(
                 "maxOutputTokens": req.max_tokens,
                 "stopSequences": req.stop,
                 "responseModalities": response_modalities,
+                # 与非流式同一口径：推理强度按 Gemini 自己的 thinkingConfig 表达。
+                # 只在非流式翻译会让同一个供应商在两种回复模式下推理强度不同，
+                # 而流式是带首字节/静默超时保护的默认路径——两边都成功返回，
+                # 差别没有任何地方会报出来。
+                "thinkingConfig": build_gemini_thinking_config(req.reasoning_effort),
             },
             "safetySettings": SAFETY_SETTINGS,
             "tools": convert_tools_to_gemini_format(req.tools) if req.tools else None,
         }
+        # 未配置的子键必须整个消失，不能留 None：不支持思考的模型收到
+        # `thinkingConfig: null` 会直接报错。与非流式同一处理。
+        data["generationConfig"] = {
+            key: value
+            for key, value in data["generationConfig"].items()
+            if value is not None
+        }
         data = {k: v for k, v in data.items() if v is not None}
 
-        with requests.post(
-            api_url, json=data, headers=headers, timeout=(10, 300), stream=True
-        ) as response, self._track_response(req, response):
+        # 整流与非流式路径同一套判定（需求 8）。只修非流式是半个修复：
+        # 参数约束错误在两条路径上完全一样，`reply_stream_mode` 换个档
+        # 就又会硬失败，而流式是带超时保护的默认路径。
+        #
+        # 建连阶段就要判完：流已经开始产出内容之后再重试会让用户看到两段回复
+        # 拼在一起，那比一次失败更难解释。因此整流只发生在 `raise_for_status`
+        # 这一跳，之后的流内异常照原样抛出。
+        applied_rectifications: set[str] = set()
+        while True:
+            response = requests.post(
+                api_url, json=data, headers=headers, timeout=(10, 300), stream=True
+            )
             try:
                 response.raise_for_status()
             except Exception as error:
-                self.logger.error(f"Stream response: {response.text[:512]}")
-                raise error
+                body_text = response.text[:512]
+                self.logger.error(f"Stream response: {body_text}")
+                response.close()
+                rectified, record = rectify_request(
+                    data,
+                    body_text,
+                    req.rectifier,
+                    already_applied=frozenset(applied_rectifications),
+                )
+                if rectified is None or record is None:
+                    raise error
+                self.logger.warning(
+                    "整流器改写流式请求后重试：%s %s", record.kind, record.details
+                )
+                applied_rectifications.add(record.kind)
+                data = rectified
+                continue
+            break
 
+        with response, self._track_response(req, response):
             for line in response.iter_lines(decode_unicode=True):
                 if not line or not line.startswith("data:"):
                     continue

@@ -19,8 +19,9 @@ def _version(
     *,
     effective_from: str = "2026-08-27T00:00:00Z",
     input_rate: str = "1.25",
+    display_name: str | None = None,
 ) -> dict[str, str]:
-    return {
+    payload = {
         "version_id": version_id,
         "provider": "provider-a",
         "model": "model-a",
@@ -31,6 +32,11 @@ def _version(
         "cache_read_per_million": "0.125",
         "cache_write_per_million": "1.75",
     }
+    # 只在显式给出时带上这个键：既有用例断言的正是「不提交它也能建」，
+    # 无条件塞一个 `None` 会把那条断言变成测另一件事。
+    if display_name is not None:
+        payload["display_name"] = display_name
+    return payload
 
 
 def _catalog_version(version_id: str, hour: int) -> PriceVersion:
@@ -331,3 +337,112 @@ async def test_pricing_internal_failure_is_generic_and_not_audited(
     assert await response.get_json() == {"error": "Price catalog operation failed"}
     assert "private catalog path" not in (await response.get_data(as_text=True))
     assert not lifecycle.audit_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_pricing_routes_accept_and_return_the_display_name(tmp_path: Path):
+    """显示名称必须能经 REST 写入并读回（需求 9）。
+
+    `PriceVersion` 有这个字段、界面上有这个输入框，而 `_PRICE_VERSION_FIELDS`
+    是一个**白名单**：漏掉它的话，前端提交会被 400「version contains unknown
+    fields」挡住——而那条错误对填表的人毫无指向性，他填的每一个字段看起来都合法。
+
+    这是新增模型字段时最容易漏的一处：模型改了、界面改了、测试也可能只测模型层，
+    而请求根本到不了模型。
+    """
+    # 读与写是两个 scope：这条用例两样都要，因此用 `*`（与既有 CRUD 用例一致）。
+    client, catalog, _ = _make_api(tmp_path, scopes=["*"])
+
+    created = await client.post(
+        "/api/llm/pricing",
+        headers=_headers(),
+        json={
+            "expected_revision": catalog.revision,
+            "version": _version("v-label", display_name="Claude Sonnet 5"),
+        },
+    )
+
+    assert created.status_code == 201, await created.get_data(as_text=True)
+    body = await created.get_json()
+    assert body["data"]["version"]["display_name"] == "Claude Sonnet 5"
+
+    listed = await client.get("/api/llm/pricing", headers=_headers())
+    versions = (await listed.get_json())["data"]["versions"]
+    assert {item["version_id"]: item["display_name"] for item in versions} == {
+        "v-label": "Claude Sonnet 5"
+    }
+
+
+@pytest.mark.asyncio
+async def test_pricing_routes_accept_an_omitted_display_name(tmp_path: Path):
+    """不带这个字段照旧可用：老前端与老价目文件都不会提交它。"""
+    client, catalog, _ = _make_api(tmp_path, scopes=["llm.pricing.manage"])
+
+    created = await client.post(
+        "/api/llm/pricing",
+        headers=_headers(),
+        json={"expected_revision": catalog.revision, "version": _version("v-plain")},
+    )
+
+    assert created.status_code == 201
+    assert (await created.get_json())["data"]["version"]["display_name"] is None
+
+
+@pytest.mark.asyncio
+async def test_pricing_routes_reject_a_blank_display_name(tmp_path: Path):
+    """空白标签会在表格里留下一行没有身份的价格，比没有标签更糟。"""
+    client, catalog, _ = _make_api(tmp_path, scopes=["llm.pricing.manage"])
+
+    response = await client.post(
+        "/api/llm/pricing",
+        headers=_headers(),
+        json={
+            "expected_revision": catalog.revision,
+            "version": _version("v-blank", display_name="   "),
+        },
+    )
+
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_editing_only_the_label_leaves_every_rate_untouched(tmp_path: Path):
+    """改标签不得动到任何一档单价——历史账单必须稳定。
+
+    这条走完整的 PUT 路径，而不是只调模型层：路由用 `model_validate` 整体替换
+    版本，一个把标签写进错误字段的实现会在这里显形。
+    """
+    client, catalog, _ = _make_api(tmp_path, scopes=["*"])
+    await client.post(
+        "/api/llm/pricing",
+        headers=_headers(),
+        json={
+            "expected_revision": catalog.revision,
+            "version": _version("v-rates", display_name="旧标签"),
+        },
+    )
+    before = (await (await client.get("/api/llm/pricing", headers=_headers())).get_json())[
+        "data"
+    ]["versions"][0]
+
+    updated = await client.put(
+        "/api/llm/pricing/v-rates",
+        headers=_headers(),
+        json={
+            "expected_revision": catalog.revision,
+            "version": _version("v-rates", display_name="新标签"),
+        },
+    )
+
+    assert updated.status_code == 200
+    after = (await (await client.get("/api/llm/pricing", headers=_headers())).get_json())[
+        "data"
+    ]["versions"][0]
+    assert after["display_name"] == "新标签"
+    for rate in (
+        "input_per_million",
+        "output_per_million",
+        "cache_read_per_million",
+        "cache_write_per_million",
+    ):
+        assert after[rate] == before[rate], f"{rate} 被改标签的操作改动了"

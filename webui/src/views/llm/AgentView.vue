@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { NAlert, NButton, NInput, NInputNumber, NSelect, NSwitch, NTag } from 'naive-ui'
+import { NAlert, NButton, NInput, NInputNumber, NSelect, NSwitch, NTag, useDialog } from 'naive-ui'
 
 import {
   clearSessionHistory,
   createAgentConfiguration,
+  deleteAgent,
   deleteSession,
   listAgents,
   listHookDeclarations,
@@ -71,6 +72,7 @@ const replyStreamModeOptions = [
 ]
 
 const agentOptions = ref<AgentSummary[]>([])
+const dialog = useDialog()
 const resources = ref<ManagedResource[]>([])
 const form = ref<AgentConfigurationRequest>(emptyForm())
 const selectedAgentId = ref('')
@@ -391,6 +393,52 @@ function replaceAgent(updated: AgentSummary) {
   selectAgent(updated)
 }
 
+/**
+ * 删除当前选中的 Agent。
+ *
+ * 此前 `DELETE /agents/<id>` **没有任何前端调用点**：建错一个 Agent 就永久留在
+ * 列表里，而它仍然参与「渠道身份 → Agent」的解析。
+ *
+ * 后端 `AgentRegistry.remove()` 有三道拒绝（默认 Agent、还有渠道绑定、
+ * 还有账号或会话绑定），每一条都给出可照做的原因。因此这里把后端那句话
+ * **原样显示**，不换成「删除失败」——那三种情况用户都能自己解决
+ * （先改默认、先解绑），而通用文案会把可解的问题变成死胡同。
+ */
+const deleting = ref(false)
+
+async function removeAgent() {
+  const agent = selectedAgent.value
+  if (!agent || isCreating.value) return
+  const label = form.value.display_name || form.value.agent_id
+  dialog.warning({
+    title: `确认删除 Agent ${label}`,
+    // 写出名字而不是「确定删除吗」：列表里的行看起来很像，
+    // 而这个操作不可逆（配置与绑定一起消失）。
+    content:
+      `删除后「${label}」的模型链、资源绑定与渠道关系都会消失，且不可恢复。` +
+      '被它服务的渠道会回落到默认 Agent。',
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      deleting.value = true
+      errorMessage.value = ''
+      savedMessage.value = ''
+      try {
+        await deleteAgent(agent.agent_id)
+        savedMessage.value = `已删除 Agent ${label}`
+        // 先清空编辑器再重取：留着一个已经不存在的 Agent，
+        // 下一次「保存配置」会把它重新建出来。
+        startNewAgent()
+        await loadAgents()
+      } catch (error) {
+        errorMessage.value = error instanceof Error ? error.message : 'Agent 删除失败'
+      } finally {
+        deleting.value = false
+      }
+    }
+  })
+}
+
 async function save() {
   errorMessage.value = ''
   savedMessage.value = ''
@@ -513,6 +561,39 @@ async function handleDeleteSession(session: SessionSummary) {
 function shortSessionId(sessionId: string) {
   return sessionId.slice(0, 12)
 }
+
+/**
+ * 会话来自谁：渠道类型 + 发送者标识。
+ *
+ * 只显示渠道类型回答不了「是谁」——同一个渠道上有几十个会话；只显示发送者
+ * 标识回答不了「同一个人在私聊和群里的两个会话」。两者一起才构成一个能用来
+ * 找行的身份。
+ *
+ * `null` 显示成「未记录」而不是空白或 `null` 字样：前者会被读成「渠道身份丢了」，
+ * 后者是把内部表示漏给用户。真正的含义是「这个会话建于渠道身份落盘之前」，
+ * 而它仍然可以被清空与删除。
+ *
+ * 收成一个函数而不是在模板里拼五个字段：那会让「`null` 怎么显示」这个判断
+ * 散落在多处，而那正是最容易漏的一处。
+ */
+function channelIdentityText(session: SessionSummary): string {
+  const identity = session.channel_identity
+  if (!identity) return '未记录'
+  return `${identity.channel_type} · ${identity.sender_scope}`
+}
+
+/** 悬浮时给出完整五元组：会话身份的其余三项在排查时才需要。 */
+function channelIdentityTitle(session: SessionSummary): string {
+  const identity = session.channel_identity
+  if (!identity) return '该会话建于渠道身份落盘之前，因此没有记录来源'
+  return [
+    `渠道：${identity.channel_type}`,
+    `适配器实例：${identity.adapter_instance}`,
+    `账号：${identity.account_scope}`,
+    `会话范围：${identity.conversation_scope}`,
+    `发送者：${identity.sender_scope}`
+  ].join('\n')
+}
 </script>
 
 <template>
@@ -560,6 +641,20 @@ function shortSessionId(sessionId: string) {
         </div>
         <div class="header-actions">
           <n-tag v-if="selectedAgent" :type="form.enabled ? 'success' : 'default'">{{ form.enabled ? '运行中' : '已停用' }}</n-tag>
+          <!--
+            新建中不显示删除：那条配置还不存在，按钮会被读成「取消新建」。
+            后端对默认 Agent 与仍有绑定的 Agent 会拒绝并说明原因，那句话原样显示。
+          -->
+          <n-button
+            v-if="selectedAgent && !isCreating"
+            secondary
+            type="error"
+            :loading="deleting"
+            data-test="delete-agent"
+            @click="removeAgent"
+          >
+            删除
+          </n-button>
           <n-button type="primary" :loading="saving" data-test="save-agent" @click="save">保存配置</n-button>
         </div>
       </header>
@@ -748,6 +843,12 @@ function shortSessionId(sessionId: string) {
           <div v-else class="session-table" role="table" aria-label="持久化会话">
             <div class="session-table-head" role="row">
               <span role="columnheader">会话</span>
+              <!--
+                渠道身份紧跟会话 ID：ID 是一个 64 位摘要，对人没有含义，
+                而清空历史与删除都以它为唯一标识。分不清哪一行属于谁的时候，
+                那两个动作只能靠猜。
+              -->
+              <span role="columnheader">渠道 / 发送者</span>
               <span role="columnheader">Agent</span>
               <span role="columnheader">消息数</span>
               <span role="columnheader">待确认</span>
@@ -762,6 +863,14 @@ function shortSessionId(sessionId: string) {
             >
               <span class="mono" role="cell" :title="session.session_id">
                 {{ shortSessionId(session.session_id) }}
+              </span>
+              <span
+                role="cell"
+                class="session-channel"
+                data-test="session-channel-identity"
+                :title="channelIdentityTitle(session)"
+              >
+                {{ channelIdentityText(session) }}
               </span>
               <span role="cell">{{ session.agent_id || '未绑定' }}</span>
               <span role="cell">{{ session.message_count }}</span>
@@ -936,11 +1045,14 @@ h4 { margin: 0; font-size: var(--font-size-base); }
 .relation-row { gap: var(--space-2); min-width: 0; margin-top: var(--space-2); }
 .session-row > .n-input { flex: 1; }
 
-/* 会话与待确认列表：用网格保证六列在窄屏下仍能各自换行而不挤成一团。 */
+/* 会话与待确认列表：用网格保证七列在窄屏下仍能各自换行而不挤成一团。 */
 .session-table { display: grid; gap: var(--space-1); margin-top: var(--space-3); min-width: 0; }
 .session-table-head, .session-table-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) 72px 72px minmax(0, 1.4fr) minmax(0, auto);
+  /* 渠道 / 发送者插在会话 ID 之后，宽度与它相当：两者一起才构成一个能用来
+     找行的身份，把它压窄会让发送者标识先被省略号吃掉。 */
+  grid-template-columns:
+    minmax(0, 1.2fr) minmax(0, 1.2fr) minmax(0, 1fr) 72px 72px minmax(0, 1.4fr) minmax(0, auto);
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
@@ -950,6 +1062,8 @@ h4 { margin: 0; font-size: var(--font-size-base); }
 .session-table-head { color: var(--text-color-secondary); font-weight: 650; }
 .session-table-row { border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--muted-bg-color); }
 .session-table-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 未记录的会话把这一格调淡：它是一个「建于升级之前」的事实，不是错误。 */
+.session-channel { color: var(--text-color-secondary); }
 .session-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-1); }
 .confirmation-list { display: grid; gap: var(--space-2); margin-top: var(--space-4); }
 .confirmation-row {

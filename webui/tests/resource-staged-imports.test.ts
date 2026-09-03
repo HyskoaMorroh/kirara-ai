@@ -67,18 +67,22 @@ describe('界面入口', () => {
     expect(viewSource).toContain('data-test="import-archive"')
   })
 
-  it('已安装且不是升级的包不能再点安装', () => {
-    expect(viewSource).toMatch(/entry\.installed && !entry\.is_upgrade/)
+  it('三个判断都接到 stagedArchives 的纯函数上', () => {
+    // 判断规则本身（三态组合下能不能点、写什么字、显示哪个标签）由
+    // `resource-staged-decisions.test.ts` **调用函数**验证。
+    //
+    // 原来这里钉的是模板里那三个表达式的写法，而它们既拦不住错、又拦得住对：
+    // 把 `&&` 写成 `||`（于是可升级的包也点不动）字符串还在；
+    // 把 `!!entry.error` 重构成 `Boolean(entry.error)` 测试反而红。
+    expect(viewSource).toMatch(/from '\.\/stagedArchives'/)
+    expect(viewSource).toMatch(/!canInstallStaged\(entry\)/)
+    expect(viewSource).toMatch(/stagedActionLabel\(entry\)/)
+    expect(viewSource).toMatch(/stagedStatus\(entry\)/)
   })
 
-  it('坏包不能点安装，并单独显示原因', () => {
-    expect(viewSource).toMatch(/!!entry\.error/)
+  it('坏包的原因显示在自己那一行', () => {
+    // 一个损坏的 ZIP 不该让整份列表打不开——这是文案与位置，不是纯逻辑。
     expect(viewSource).toContain('无法读取')
-  })
-
-  it('可更新的包按钮文案是「更新」而不是「安装」', () => {
-    // 「已装 1.0.0、盘上有 2.0.0」与「已装 2.0.0」处置不同。
-    expect(viewSource).toMatch(/entry\.is_upgrade \? '更新' : '安装'/)
   })
 
   it('空目录给出「把包放哪里」而不是只说没有数据', () => {

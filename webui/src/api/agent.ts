@@ -108,6 +108,21 @@ export async function listAgents() {
 }
 
 /**
+ * 一个会话来自哪个渠道、哪个账号、哪个人。
+ *
+ * 与后端 `SessionStore._CHANNEL_IDENTITY_FIELDS` 的五个字段一一对应。
+ * 五项是一组：只有渠道类型回答不了「是谁」（同一个渠道上有几十个会话），
+ * 只有发送者标识回答不了「同一个人在私聊和群里的两个会话」。
+ */
+export interface SessionChannelIdentity {
+  channel_type: string
+  adapter_instance: string
+  account_scope: string
+  conversation_scope: string
+  sender_scope: string
+}
+
+/**
  * 一个已持久化会话的元数据。
  *
  * 后端只返回条数与时间戳，不含任何对话正文：会话列表不应该变成
@@ -119,6 +134,14 @@ export interface SessionSummary {
   message_count: number
   updated_at: string | null
   pending_confirmations: number
+  /**
+   * 渠道身份；`null` 表示这个会话建于渠道身份落盘之前（本版以前）。
+   *
+   * 必须与「有身份」区分开：`session_id` 是一个 64 位摘要，对人没有含义，
+   * 而清空历史与删除会话都以它为唯一标识——分不清哪一行属于谁的时候，
+   * 这两个动作只能靠猜。
+   */
+  channel_identity: SessionChannelIdentity | null
 }
 
 /** 一条仍在等待人工决定的确认记录（不含工具参数）。 */
@@ -208,4 +231,19 @@ export async function createAgentConfiguration(payload: AgentConfigurationReques
 
 export async function updateAgentConfiguration(agentId: string, payload: AgentConfigurationRequest) {
   return http.put<AgentSummary>(`/agents/${encodeURIComponent(agentId)}/configuration`, payload)
+}
+
+/**
+ * 删除一个 Agent 配置。
+ *
+ * 后端 `AgentRegistry.remove()` 有三道拒绝：默认 Agent 不能删、还有渠道绑定的
+ * 不能删、还有账号或会话绑定的不能删，各自抛带原因的错误。调用方应把那句原因
+ * 原样显示出来——它们都是用户能照做的（先改默认、先解绑），
+ * 换成一句「删除失败」等于把一个可解的问题变成死胡同。
+ *
+ * 此前这条路由**没有任何前端调用点**：建错一个 Agent 就永久留在列表里，
+ * 而它仍然参与「渠道身份 → Agent」的解析。
+ */
+export async function deleteAgent(agentId: string) {
+  return http.delete<Record<string, never>>(`/agents/${encodeURIComponent(agentId)}`)
 }

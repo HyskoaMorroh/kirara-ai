@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+// 「没填」到 `null` 这一步在 `pricingForm.ts` 里，由那份测试调用验证：
+// 后端对空白 display_name 直接拒绝，不转换就是一条与用户所做无关的 400。
+import { copyVersion, pricingLabel } from './pricingForm'
 import {
   NAlert,
   NButton,
@@ -47,6 +50,9 @@ function emptyVersion(): PricingVersion {
     version_id: '',
     provider: '',
     model: '',
+    // 空串在提交前会被转成 `null`（见 `copyVersion`）：后端拒绝空白标签，
+    // 而表单里的「没填」天然是空串。
+    display_name: '',
     effective_from: defaultEffectiveFrom(),
     currency: 'USD',
     input_per_million: '0',
@@ -56,9 +62,6 @@ function emptyVersion(): PricingVersion {
   }
 }
 
-function copyVersion(version: PricingVersion): PricingVersion {
-  return { ...version }
-}
 
 async function loadCatalog() {
   loading.value = true
@@ -424,6 +427,17 @@ onMounted(() => {
       <form class="pricing-form" @submit.prevent="savePricing">
         <label>Provider<input v-model="form.provider" name="provider" autocomplete="off" /></label>
         <label>模型<input v-model="form.model" name="model" autocomplete="off" /></label>
+        <!--
+          显示名称与模型标识分两个输入框，且**不能**互相代替：计价按
+          `(provider, model)` 匹配，标签只是给人读的。留空时表格回落显示模型标识。
+        -->
+        <label>显示名称（可选）<input
+          v-model="form.display_name"
+          name="display_name"
+          maxlength="200"
+          autocomplete="off"
+          placeholder="留空则显示模型标识"
+        /></label>
         <label>版本 ID<input v-model="form.version_id" name="version_id" autocomplete="off" /></label>
         <!--
           格式提示常驻在字段旁，而不是只在出错后出现：后者等于让每个人都先错一次。
@@ -457,7 +471,13 @@ onMounted(() => {
       <div class="version-list">
         <article v-for="version in versions" :key="version.version_id" class="version-row">
           <div class="version-main">
-            <strong>{{ version.model }}</strong>
+            <!--
+              显示名称在前、模型标识在后（等宽）：一屏几十条时可读名才是抓手，
+              而标识是计价真正用的键，两者都要看得见。没填标签时只显示标识，
+              不留空行。
+            -->
+            <strong>{{ pricingLabel(version) }}</strong>
+            <span v-if="version.display_name" class="mono model-id">{{ version.model }}</span>
             <span>{{ version.provider }} · {{ version.version_id }}</span>
             <small>生效 {{ version.effective_from }} · {{ version.currency }}</small>
           </div>
@@ -513,6 +533,13 @@ h1, h2, p { margin-top: 0; } h1 { margin-bottom: 8px; font-size: 28px; } h2 { ma
 .version-row { gap: 20px; padding: 16px 0; border-bottom: 1px solid var(--border-color); }
 .version-main { flex: 1 1 250px; min-width: 0; display: grid; gap: 4px; }
 .version-main span, .version-main small { overflow-wrap: anywhere; }
+/*
+ * 模型标识用等宽：它是计价真正匹配的键，读它时要逐字符核对
+ * （`claude-sonnet-5` 与 `claude-sonnet-5-20260514` 只差一个后缀），
+ * 而比例字体下相近的标识很难分辨。
+ */
+.mono { font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
+.model-id { font-size: 12px; }
 .rate-grid { display: grid; grid-template-columns: repeat(4, minmax(74px, 1fr)); gap: 10px; flex: 1 1 380px; font-size: 12px; color: var(--text-color-2); }
 .rate-grid span { display: grid; gap: 3px; } .rate-grid b { color: var(--text-color); font-size: 14px; }
 .row-actions { display: flex; gap: 6px; }

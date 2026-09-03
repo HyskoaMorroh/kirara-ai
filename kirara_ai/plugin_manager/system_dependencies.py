@@ -373,6 +373,29 @@ _RUNTIME_DEPENDENCY_IDS = {
     "npx": "npx-runtime",
 }
 
+#: 技能名（或它的目录名）到服务器依赖 id 的映射。
+#:
+#: 需求 10 点名的五个工具都在登记表里有条目、探测与安装都能跑，断的是这一层：
+#: 此前只认 `agent-browser` 与 `graphify` 两个名字，其余一律返回空列表——
+#: 而空列表的含义是「这个技能不需要任何服务器依赖」。
+#:
+#: 后果有两处，都不报错：技能广告里不会出现「服务器上没有这个命令」
+#: （`skill_readiness_note()` 拿到空列表就什么都不说，于是模型照着一份它执行不了的
+#: 说明自信作答），安装界面也不显示这个技能缺什么。
+#:
+#: **只收服务器侧能装的 CLI。** `context-mode` 与 `caveman` 是操作者本机的
+#: Claude Code 插件（`install_supported` 为假、探测宿主 `claude --version`）：
+#: 把它们加进来会让技能在任何服务器上都显示缺依赖，而那个「缺」无从修复——
+#: 服务器侧压根不该装它。
+_SKILL_NAME_DEPENDENCY_IDS: dict[str, tuple[str, ...]] = {
+    "graphify": ("graphify-cli",),
+    "memsearch": ("memsearch-cli",),
+    # 需求 10 写的是「tk」，本机实际命令名是 `rtk`；两个写法都收，
+    # 因为技能目录可能按任一种命名。
+    "rtk": ("rtk-cli",),
+    "tk": ("rtk-cli",),
+}
+
 
 def known_dependency_ids() -> frozenset[str]:
     """Return every registered dependency id.
@@ -434,9 +457,13 @@ def dependency_ids_for_resource(item: Mapping[str, Any]) -> list[str]:
     }
     identifiers = names | source_parts
     if "agent-browser" in identifiers:
+        # 两条：CLI 本体与它要拉的 Chromium。少一条就等于「装了命令但打不开浏览器」
+        # 在界面上显示为就绪。
         return ["agent-browser-cli", "agent-browser-browser"]
-    if "graphify" in identifiers:
-        return ["graphify-cli"]
+    for name in identifiers:
+        mapped = _SKILL_NAME_DEPENDENCY_IDS.get(name)
+        if mapped is not None:
+            return list(mapped)
     return []
 
 

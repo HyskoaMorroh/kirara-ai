@@ -514,9 +514,13 @@ def test_repository_sources_are_persisted_as_server_state(tmp_path: Path):
     restarted = ResourceSourceService(_service(tmp_path))
     repositories = restarted.list_repositories()
 
-    assert repositories == [
-        {"owner": "owner", "name": "repo", "branch": "main", "enabled": False}
-    ]
+    # 断言坐标与启用状态，不整体比对字典：新增一个字段（例如
+    # `discovered_skills`）不该让这条测试红——它守的是「重复登记只留一条、
+    # 状态改动落盘」，与仓库记录有几个字段无关。
+    assert len(repositories) == 1
+    assert {
+        key: repositories[0][key] for key in ("owner", "name", "branch", "enabled")
+    } == {"owner": "owner", "name": "repo", "branch": "main", "enabled": False}
 
 
 def test_repository_update_check_compares_server_content_hash(tmp_path: Path, monkeypatch):

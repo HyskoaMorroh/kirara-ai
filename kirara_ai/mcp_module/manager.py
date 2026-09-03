@@ -4,12 +4,13 @@
 import asyncio
 import json
 from collections import deque
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 import time
-from typing import Callable, Dict, Iterable, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, NamedTuple, Optional, Tuple
 
 from mcp import McpError, types
 from mcp.shared.session import RequestResponder
@@ -256,6 +257,9 @@ class MCPServerManager:
                     expected_id = resource["resource_id"].removeprefix("mcp.")
                     if server_config.id != expected_id:
                         raise ValueError("managed MCP server ID does not match its resource ID")
+                    self._apply_runtime_overrides(
+                        server_config, resource.get("runtime_overrides")
+                    )
                     server_config.metadata["resource_id"] = resource["resource_id"]
                     configured[server_config.id] = server_config
                 except Exception as error:
@@ -265,6 +269,65 @@ class MCPServerManager:
         except (KeyError, ImportError):
             pass
         return list(configured.values())
+
+    @staticmethod
+    def _apply_runtime_overrides(
+        server_config: MCPServerConfig, overrides: Any
+    ) -> None:
+        """把「这台机器怎么跑它」合并进从归档读出的传输配置。
+
+        归档里的 `server.json` 有 `content_sha256` 护着，它是「目录发布了什么」；
+        覆盖是「这台机器允许什么、放在哪、等多久」。两者分开存，在这里合并。
+
+        没有这一步的话，`set_runtime_overrides` 只是往注册表里写了几个字段：
+        界面上显示已经配了 `/srv/data`，而进程里仍然没有任何可访问目录——
+        一个「已配置」的假象。
+
+        **身份字段不参与合并**：`command` / `type` / `url` / `id` 只来自归档。
+        写入侧已经按构造挡住了它们（`set_runtime_overrides` 不接受这些参数），
+        这里再按白名单读一遍，这样即使注册表被手改过也不会换掉要执行的程序。
+
+        每个键各自 try：一个坏键只丢它自己。整片跳过会让「改坏了一个超时」
+        连带丢掉同一条覆盖里正确的目录白名单，而那两件事互不相干。
+        """
+
+        if not isinstance(overrides, Mapping):
+            return
+        transport = server_config.server
+
+        extra_args = overrides.get("extra_args")
+        if isinstance(extra_args, (list, tuple)):
+            # 追加而不是替换：包名留在摘要保护的那一段里，
+            # 上游后续给 base args 新增的参数也继续生效。
+            appended = [str(item) for item in extra_args if str(item).strip()]
+            if appended:
+                transport.args = list(transport.args) + appended
+
+        for key in ("env", "headers"):
+            value = overrides.get(key)
+            if isinstance(value, Mapping):
+                merged = dict(getattr(transport, key) or {})
+                merged.update(
+                    {str(name): str(item) for name, item in value.items() if str(name).strip()}
+                )
+                setattr(transport, key, merged)
+
+        cwd = overrides.get("cwd")
+        if isinstance(cwd, str) and cwd.strip():
+            transport.cwd = cwd.strip()
+
+        roots = overrides.get("roots")
+        if isinstance(roots, (list, tuple)):
+            resolved = [str(item) for item in roots if str(item).strip()]
+            if resolved:
+                transport.roots = resolved
+
+        timeout = overrides.get("startup_timeout_ms")
+        if isinstance(timeout, int) and not isinstance(timeout, bool):
+            # 越界值在 `MCPTransportConfig` 那层是 ValidationError。写入侧已经
+            # 校验过范围，这里再挡一次，避免手改过的注册表让整条资源无法启动。
+            if 1_000 <= timeout <= 600_000:
+                transport.startup_timeout_ms = timeout
 
     async def refresh_managed_servers(self, *, connect: bool = True) -> None:
         """Reconcile enabled MCP resources after a WebUI lifecycle change."""

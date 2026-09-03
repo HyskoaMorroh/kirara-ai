@@ -17,6 +17,19 @@ export interface ManagedResource extends ResourceDependencyProjection {
   resource_id: string
   type: ResourceType
   current_version: string
+  /**
+   * 显示名。服务端从 `source_metadata.name` 投影上来，没有名字时是 `null`。
+   *
+   * 必须在这里声明：`resourceFilter.ts` 的关键词谓词读的就是这个字段，
+   * 而搜索框写着「搜索名称、ID 或描述」。字段不在类型里时，
+   * 传一个没有它的对象照样通过类型检查，于是那两个匹配面从未命中过任何东西。
+   *
+   * `null` 表示这条资源确实没有名字（界面回落到显示 ID），
+   * 与「读不到」不是一回事——服务端总会给出这个键。
+   */
+  name?: string | null
+  /** 描述。与 `name` 同源、同样可能为 `null`。 */
+  description?: string | null
   source: string
   source_key?: string | null
   source_metadata?: Record<string, unknown> | null
@@ -29,6 +42,14 @@ export interface ManagedResource extends ResourceDependencyProjection {
   installed_at: string
   updated_at: string
   versions: ResourceVersion[]
+  /**
+   * 这条受管 MCP 资源在这台机器上怎么跑（只有 mcp 类型有）。
+   *
+   * 与归档里的 `server.json` 分开：后者有摘要护着，是「目录发布了什么」；
+   * 这里是「这台机器允许什么、放在哪、等多久」。
+   * `env` / `headers` 的值一律是掩码，回传时不要带上未修改的键。
+   */
+  runtime_overrides?: ResourceRuntimeOverrides | null
   /**
    * 绑定了这个资源的 Agent ID。
    *
@@ -56,6 +77,14 @@ export interface ResourceRepository {
   name: string
   branch: string
   enabled: boolean
+  /**
+   * 上一次发现在这个仓库里找到多少个技能。
+   *
+   * `null` 是「还没发现过」，`0` 是「发现过、里面一个技能都没有」——后者才是
+   * 「这个仓库配错了」的信号（坐标拼错、分支写错、或压根不含 `SKILL.md`）。
+   * 两者合成一个数会让每个刚注册的仓库看起来都是配错的。
+   */
+  discovered_skills: number | null
 }
 
 export interface DiscoveredSkill {
@@ -269,9 +298,20 @@ export interface DependencyInstallTask {
   output_tail: string
 }
 
-export async function listResources(type?: ResourceType) {
-  const query = type ? `?type=${encodeURIComponent(type)}` : ''
-  return http.get<ManagedResource[]>(`/resources${query}`)
+/**
+ * 列出已安装资源。
+ *
+ * `query` 交给服务器而不是在前端过滤，是因为**正文只在服务器上**：
+ * `GET /resources` 不返回正文（提示词正文可能有几十 KB，且包含用户写进去的
+ * 规则，无条件塞进每次列表响应等于让一个只想看清单的请求把全部正文取回浏览器）。
+ * 名称、描述、ID 三面前端也能匹配，但正文这一面只能由服务器读。
+ */
+export async function listResources(type?: ResourceType, query?: string) {
+  const search = new URLSearchParams()
+  if (type) search.set('type', type)
+  if (query !== undefined) search.set('query', query)
+  const suffix = search.size > 0 ? `?${search.toString()}` : ''
+  return http.get<ManagedResource[]>(`/resources${suffix}`)
 }
 
 export async function listSystemDependencies() {
@@ -428,6 +468,48 @@ export async function disableResource(resourceId: string) {
   return http.post<ManagedResource>(`/resources/${encodeURIComponent(resourceId)}/disable`, {})
 }
 
+/**
+ * 一条受管 MCP 资源在**这台机器**上怎么跑。
+ *
+ * 只含「部署」那几个键。`command` / `args` / `type` / `url` / `id` 不在这里：
+ * 那是 `content_sha256` 保护的身份，改它们等于把这条资源指向另一个程序
+ * 或另一台服务器，后端会 400。
+ */
+export interface ResourceRuntimeOverrides {
+  /**
+   * 追加到归档 args **末尾**的参数，最常见的用途是 filesystem 的可访问目录。
+   *
+   * 追加而不是替换：包名留在摘要保护的那一段里，上游后续给 base args
+   * 新增的参数也继续生效。
+   */
+  extra_args?: string[]
+  /** 环境变量。按键合并；读回来时值是掩码，不要把掩码回传。 */
+  env?: Record<string, string>
+  /** http/sse 请求头。与 `env` 同样按键合并、同样打掩码。 */
+  headers?: Record<string, string>
+  cwd?: string
+  /** MCP 协议层声明给服务器的可访问根。 */
+  roots?: string[]
+  startup_timeout_ms?: number
+}
+
+/**
+ * 写入受管 MCP 资源的运行时配置。
+ *
+ * 只提交**真的改过**的键：`env` / `headers` 在后端按键合并，而读回来的值是
+ * 掩码（`********`）。把未修改的键连掩码一起回传，会把掩码写成真实值。
+ * 与 MCP 服务器编辑表单同一条约定。
+ */
+export async function setResourceRuntime(
+  resourceId: string,
+  overrides: ResourceRuntimeOverrides
+) {
+  return http.put<ManagedResource>(
+    `/resources/${encodeURIComponent(resourceId)}/runtime`,
+    overrides
+  )
+}
+
 export async function bindResourceWorkflow(resourceId: string, workflowId: string) {
   return http.post<ManagedResource>(`/resources/${encodeURIComponent(resourceId)}/workflow`, {
     workflow_id: workflowId
@@ -470,6 +552,22 @@ export async function setRepositoryEnabled(
   )
 }
 
+/**
+ * 摘掉一条仓库来源登记。
+ *
+ * `confirmed` 是后端的硬要求（缺它返回 400）：删除不可逆，比启停多一道确认。
+ * 与 `deleteResourceBackup` 同一写法——`DELETE` 带 body 走 `http.delete` 的
+ * `body` 选项。
+ *
+ * 它**不动**从这个仓库装过的资源：那些已经在服务器上独立成包。
+ */
+export async function removeRepository(owner: string, name: string, branch: string) {
+  return http.delete<ResourceRepository>(
+    `/resources/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/${encodeURIComponent(branch)}`,
+    { body: JSON.stringify({ confirmed: true }) }
+  )
+}
+
 export async function discoverRepository(owner: string, name: string, branch = 'main') {
   return http.get<DiscoveredSkill[]>(
     `/resources/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/${encodeURIComponent(branch)}/discover`
@@ -505,6 +603,44 @@ export async function installRemoteSkill(skill: {
   source_key?: string
 }) {
   return http.post<ManagedResource>('/resources/remote-install', skill)
+}
+
+/**
+ * 从一段纯文本创建 prompt / memory / session 资源（需求 10）。
+ *
+ * 打包与摘要在服务器侧完成：提示词这个类型的全部内容就是正文，
+ * 要求用户为一段纯文本手工写 `manifest.json`、手算 `content_sha256` 再打成 ZIP，
+ * 等于把这个类型最主要的用法排除在产品之外。
+ *
+ * 不传 `content_sha256`：那是服务器算的。请求方自带摘要等于让调用方自己决定
+ * 「校验通过」。
+ */
+export async function authorResourceDocument(payload: {
+  resource_id: string
+  type: 'prompt' | 'memory' | 'session'
+  content: string
+  name?: string
+  description?: string
+  version?: string
+}) {
+  return http.post<ManagedResource>('/resources/documents', payload)
+}
+
+/**
+ * 按新版本号写入改过的正文。
+ *
+ * 改正文只能走版本递增——`content_sha256` 把清单与文件绑在一起，就地编辑的后果
+ * 不是「改了没生效」，而是这个资源在下一次载入时直接失败。旧版本保留，
+ * 改错了能回去。
+ */
+export async function authorResourceDocumentVersion(
+  resourceId: string,
+  payload: { content: string; version: string; name?: string; description?: string }
+) {
+  return http.put<ManagedResource>(
+    `/resources/${encodeURIComponent(resourceId)}/documents`,
+    payload
+  )
 }
 
 export async function listResourceBackups(resourceId?: string) {

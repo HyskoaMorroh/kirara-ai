@@ -88,24 +88,55 @@ class LLMManager:
         }
         created: list[str] = []
         for backend in self.config.llms.api_backends:
-            if backend.name not in self._resilience_breakers:
+            existing = self._resilience_breakers.get(backend.name)
+            if existing is None:
                 created.append(backend.name)
-            self._resilience_breakers.setdefault(
-                backend.name,
-                CircuitBreaker(
+                self._resilience_breakers[backend.name] = CircuitBreaker(
                     failure_threshold=backend.circuit_failure_threshold,
                     error_rate_threshold=backend.circuit_error_rate_threshold,
                     min_requests=backend.circuit_min_requests,
                     recovery_timeout_seconds=backend.circuit_recovery_timeout_seconds,
                     recovery_success_threshold=backend.circuit_recovery_success_threshold,
-                ),
-            )
+                )
+            else:
+                # 已存在的 breaker 刷新阈值，而不是跳过。
+                #
+                # 此前这里是 `setdefault`：熔断参数只在**创建那一刻**被读进去。
+                # 于是编辑一个当前未加载的后端（`enable=False`，或启动后从未成功
+                # 加载）时，`PUT /llm/backends/<name>` 不会 unload，breaker 就带着
+                # 旧阈值活到重启——「保存成功」与「生效」不是一回事，而那个后端
+                # 也不在 `get_resilience_status()` 的行里，界面上连「重置熔断器」
+                # 这个变通入口都没有。
+                #
+                # 刷新而不重建：当前状态（是否熔断）、在途计数、已积累的样本与
+                # 迁移历史都要保留。换掉对象等于每次编辑配置都把一个正在熔断的
+                # 上游重新当作健康，那比参数晚生效更糟。
+                existing.reconfigure(
+                    failure_threshold=backend.circuit_failure_threshold,
+                    error_rate_threshold=backend.circuit_error_rate_threshold,
+                    min_requests=backend.circuit_min_requests,
+                    recovery_timeout_seconds=backend.circuit_recovery_timeout_seconds,
+                    recovery_success_threshold=backend.circuit_recovery_success_threshold,
+                )
             self._resilience_attempts.setdefault(backend.name, [])
         if created:
             # 重启后恢复「停机前处于熔断/半开」的 Provider：否则刚被隔离的上游
             # 会被立刻当作健康重试，下一个请求再付一次超时。
             self._restore_circuit_state({name: self._resilience_breakers[name] for name in created})
         self._resilience_initialized = True
+
+    def refresh_resilience_settings(self) -> None:
+        """让改过的容错参数立刻作用到运行中的熔断器上。
+
+        存在的理由是调用方需要一个**公开**入口：容错参数只在熔断器被创建的那一刻
+        被读进去，而 `PUT /llm/backends/<name>` 的 unload / load 两个分支各有条件
+        （未加载的不会 unload、停用的不会 load）。编辑一个停用的后端时两者都不成立，
+        于是五个 `circuit_*` 参数保存成功却要等到重启才生效。
+
+        幂等，且保住运行时状态（是否熔断、在途计数、已积累样本、迁移历史）——
+        细节见 `_initialize_resilience_state` 与 `CircuitBreaker.reconfigure`。
+        """
+        self._initialize_resilience_state()
 
     def _circuit_store(self):
         """Return the durable breaker store, or ``None`` when no data path is set."""

@@ -31,6 +31,19 @@ import {
 } from 'naive-ui'
 
 import { llmApi, type AutoDetectScheduleRow } from '@/api/llm'
+// 纯逻辑放在 `autoDetectSchedule.ts` 里，由那份测试**调用函数**验证。
+// 此前这一页的 40 条断言全是 `expect(viewSource).toContain(...)`——
+// 改一个比较运算符或把 86_400_000 写错，字符串还在、测试照绿，
+// 而用户会按一个错的时刻去等。
+import {
+  checkInterval,
+  isDirty as isRowDirty,
+  lastRunText as formatLastRun,
+  nextRunText as formatNextRun,
+  resultTag as buildResultTag,
+  runSummary,
+  savedMessage
+} from './autoDetectSchedule'
 
 const message = useMessage()
 
@@ -58,35 +71,9 @@ const neverRunCount = computed(
     rows.value.filter((row) => (row.interval_days ?? 0) > 0 && !row.last_run).length
 )
 
-/**
- * 下一轮预计时刻。
- *
- * `last_run` 缺失时**不猜**：后台循环的首轮延迟带 0–300 秒随机抖动，
- * 编一个「大约 X」会让人按那个时间去等。
- */
-function nextRunText(row: AutoDetectScheduleRow): string {
-  const interval = row.interval_days ?? 0
-  if (interval <= 0) return '已关闭'
-  if (!row.last_run) return '尚未成功检测过，将在启动后首轮触发'
-  const last = new Date(row.last_run)
-  if (Number.isNaN(last.getTime())) return '上次时间无法解析'
-  const next = new Date(last.getTime() + interval * 86_400_000)
-  return next.toLocaleString()
-}
-
-function lastRunText(row: AutoDetectScheduleRow): string {
-  if (!row.last_run) return '—'
-  const last = new Date(row.last_run)
-  return Number.isNaN(last.getTime()) ? row.last_run : last.toLocaleString()
-}
-
-function resultTag(name: string): { label: string; type: 'success' | 'error' } | null {
-  const results = lastRunResults.value
-  if (!results || !(name in results)) return null
-  return results[name]
-    ? { label: '本次成功', type: 'success' }
-    : { label: '本次失败', type: 'error' }
-}
+const nextRunText = (row: AutoDetectScheduleRow) => formatNextRun(row)
+const lastRunText = (row: AutoDetectScheduleRow) => formatLastRun(row)
+const resultTag = (name: string) => buildResultTag(lastRunResults.value, name)
 
 async function load(showSpinner = false) {
   if (showSpinner) loading.value = true
@@ -110,29 +97,19 @@ async function load(showSpinner = false) {
   }
 }
 
-function isDirty(row: AutoDetectScheduleRow): boolean {
-  const draft = draftIntervals.value[row.name]
-  return typeof draft === 'number' && draft !== (row.interval_days ?? 0)
-}
+const isDirty = (row: AutoDetectScheduleRow) =>
+  isRowDirty(row, draftIntervals.value[row.name])
 
 async function saveInterval(row: AutoDetectScheduleRow) {
-  const draft = draftIntervals.value[row.name]
-  if (typeof draft !== 'number' || !Number.isFinite(draft)) {
-    message.error('间隔天数必须是数字')
-    return
-  }
-  if (draft < 0) {
-    message.error('间隔天数不能为负数')
+  const checked = checkInterval(draftIntervals.value[row.name])
+  if (!checked.ok) {
+    message.error(checked.error)
     return
   }
   savingBackend.value = row.name
   try {
-    await llmApi.updateAutoDetectSchedule(row.name, Math.trunc(draft))
-    message.success(
-      draft === 0
-        ? `已关闭 ${row.name} 的自动检测`
-        : `${row.name} 的检测间隔已保存为 ${Math.trunc(draft)} 天`
-    )
+    await llmApi.updateAutoDetectSchedule(row.name, checked.value)
+    message.success(savedMessage(row.name, checked.value))
     await load(false)
   } catch (error) {
     message.error(
@@ -150,15 +127,8 @@ async function runNow() {
   try {
     const response = await llmApi.runAutoDetectNow()
     lastRunResults.value = response.results || {}
-    const total = Object.keys(lastRunResults.value).length
-    const failed = Object.values(lastRunResults.value).filter((ok) => !ok).length
-    if (total === 0) {
-      message.warning('没有后端配置了检测间隔，这一轮什么都没做')
-    } else if (failed === 0) {
-      message.success(`${total} 个后端检测完成`)
-    } else {
-      message.warning(`${total} 个后端里有 ${failed} 个检测失败`)
-    }
+    const summary = runSummary(lastRunResults.value)
+    message[summary.level](summary.text)
     await load(false)
   } catch (error) {
     message.error(error instanceof Error ? error.message : '立即检测失败')

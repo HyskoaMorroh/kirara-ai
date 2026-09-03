@@ -1,4 +1,5 @@
 import asyncio
+import importlib.util
 import json
 import os
 import shutil
@@ -22,7 +23,8 @@ from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.mcp_module.manager import MCPServerManager
 from kirara_ai.logger import WebSocketLogHandler, get_logger
 from kirara_ai.plugin_manager.plugin_loader import PluginLoader
-from kirara_ai.web.api.system.utils import (WEBUI_DIST_TAG, download_file, get_cpu_info, get_cpu_usage,
+from kirara_ai.web.api.system.utils import (ArtifactDigest, WEBUI_DIST_TAG, download_file, get_cpu_info,
+                                            get_cpu_usage,
                                             resolve_npm_release, resolve_pypi_release,
                                             verify_artifact_digest,
                                             get_installed_version, get_latest_npm_version, get_latest_pypi_version,
@@ -710,6 +712,40 @@ async def check_update():
     ).model_dump()
 
 
+def backend_installer_available() -> bool:
+    """这个解释器能不能装 wheel（即：`import pip` 是否可用）。
+
+    后端升级最后一步是 `python -m pip install <wheel>`，而**本项目的运行环境
+    可能根本没有 pip**：`uv venv` 默认不装（不带 `--seed`），而依赖是用 uv 锁的。
+    两个开发用虚拟环境都是这样：
+
+        $ .venv/Scripts/python.exe -m pip --version
+        No module named pip
+
+    那时升级会在下载并校验完几十 MB 之后抛 `CalledProcessError`，返回给用户的
+    `str(e)` 是 `Command '[...]' returned non-zero exit status 1.`——
+    既不提 pip，也不说该怎么办，把人引向网络或权限，
+    而实际上在这台机器上装什么都不会成功。
+
+    用 `find_spec` 而不是跑一次 `python -m pip --version` 子进程：
+    安装命令里的 `sys.executable` **就是当前进程的解释器**，因此「能不能 import
+    pip」是一个进程内问题。起子进程来回答它，会引入超时、子进程失败等额外
+    失败模式，还会与任何替换 `subprocess.run` 的测试互相干扰——
+    而这条前置检查本身不该依赖那些。
+
+    不尝试自动装 pip：往运行环境里塞一个它刻意没装的包，
+    是在用户没要求的情况下改变部署形态。
+
+    任何异常都算「不可用」：这个函数的返回值用来决定「要不要继续」，
+    让它抛异常等于把一次前置检查变成一次崩溃。
+    """
+
+    try:
+        return importlib.util.find_spec("pip") is not None
+    except Exception:  # noqa: BLE001 - 探针不能抛，见 docstring
+        return False
+
+
 @system_bp.route("/update", methods=["POST"])
 @require_auth
 async def perform_update():
@@ -737,6 +773,30 @@ async def perform_update():
                 }, 409
             if not trusted_url:
                 return {"status": "error", "message": "Backend download URL is unavailable"}, 502
+            # 确认这台机器装得上，**在下载之前**。
+            #
+            # uv 建的环境默认没有 pip（`uv venv` 不带 `--seed`），而后端安装最后
+            # 一步就是 `pip install`。不先问一次的话，用户要等下载 + 摘要校验走完
+            # 才在最后一步拿到一句 `returned non-zero exit status 1.`——
+            # 那句话既不提 pip 也不说该怎么办，把人引向网络或权限，
+            # 而实际上在这台机器上装什么都不会成功。
+            #
+            # 放在版本检查**之后**：没有新版本时该说的是「已是最新」，
+            # 那时装不装得上无关紧要，让用户先去装一个 pip 才发现无事可做
+            # 是把一次多余的操作强加给他。上面两步只读索引元数据，不下载 wheel，
+            # 因此这个次序仍然满足「下载之前」。
+            #
+            # WebUI 升级不经过 pip，因此这个检查只挡后端分支。
+            if not backend_installer_available():
+                return {
+                    "status": "error",
+                    "message": (
+                        "当前运行环境没有可用的 pip，无法自动安装后端更新。"
+                        "该环境可能由 uv 创建（默认不安装 pip）。"
+                        "请在服务器上用 `uv pip install --upgrade kirara-ai` 手动升级，"
+                        "或先为该环境安装 pip 后重试。"
+                    ),
+                }, 409
             backend_target = (latest, trusted_url, backend_digest)
 
         if update_webui:
@@ -779,8 +839,23 @@ async def perform_update():
             # 会被直接 `pip install`。TLS 只证明「来自这个镜像」，
             # 证明不了「这个镜像给的东西没被换过」。
             verify_artifact_digest(backend_file, backend_digest)
-            # 安装后端
-            subprocess.run([sys.executable, "-m", "pip", "install", backend_file], check=True)
+            # 安装后端。
+            #
+            # 失败时不需要自己回滚：pip 的 `UninstallPathSet.rollback()` 会在安装
+            # 失败时把旧版本的文件放回去，所以「装失败了」这一路旧版本仍然在。
+            # 真正缺的是把这件事**说出来**——见下面的 except 分支。
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", backend_file], check=True
+                )
+            except subprocess.CalledProcessError as error:
+                # 报出当前仍在运行的版本：这是用户判断「重试」还是「手动装」的依据。
+                # 原来的 `str(e)` 只有一串命令行与退出码，读不出「我现在是哪一版」。
+                raise RuntimeError(
+                    f"后端安装失败（退出码 {error.returncode}），"
+                    f"当前仍在运行 {get_installed_version()}。"
+                    "已下载的包未被安装，可重试或在服务器上手动升级。"
+                ) from error
 
         if webui_target:
             latest_webui_version, webui_url, static_dir, webui_digest = webui_target

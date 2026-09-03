@@ -52,6 +52,11 @@ class UpstreamPriceEntry:
     provider: str
     model: str
     provider_name: str
+    #: 上游为这个模型给出的可读名（目录里每个模型都带 `name`）。
+    #:
+    #: `None` 表示上游没给。**不回落到 provider 的 `name`**：那会让同一家的
+    #: 所有模型都显示成「Anthropic」，比没有标签更容易读错。
+    display_name: Optional[str]
     input_per_million: Decimal
     output_per_million: Decimal
     cache_read_per_million: Decimal
@@ -133,11 +138,20 @@ def parse_upstream_catalog(document: object) -> Iterator[UpstreamPriceEntry]:
             if input_price is None and output_price is None:
                 continue
 
+            # 上游给的可读名。类型不对时当作没给——目录由社区维护，
+            # `str(123)` 会在价目表里落一个假标签。
+            model_name = model.get("name")
+            if not isinstance(model_name, str) or not model_name.strip():
+                model_name = None
+            else:
+                model_name = model_name.strip()
+
             yield UpstreamPriceEntry(
                 key=f"{provider_id}/{model_id}",
                 provider=provider_id,
                 model=model_id,
                 provider_name=provider_name,
+                display_name=model_name,
                 input_per_million=input_price or Decimal("0"),
                 output_per_million=output_price or Decimal("0"),
                 cache_read_per_million=_as_decimal(cost.get("cache_read")) or Decimal("0"),
@@ -241,6 +255,7 @@ class UpstreamPriceSyncer:
                 version_id=entry.version_id,
                 provider=entry.provider,
                 model=entry.model,
+                display_name=entry.display_name,
                 effective_from=report.synced_at,
                 currency=self._currency,
                 input_per_million=entry.input_per_million,

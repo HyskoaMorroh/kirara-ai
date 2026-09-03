@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
+import { usageSourceLabel } from '@/views/tracing/usageSource'
 import {
   NCard,
   NGrid,
@@ -494,6 +495,11 @@ const modelUsageOption = computed(() => ({
         `输入 Token：${row.prompt_tokens}`,
         `输出 Token：${row.completion_tokens}`,
         `缓存读取：${formatNullableTokens(row.cached_tokens)}`,
+        // 缓存创建不能省：它的单价通常**高于**普通输入（Anthropic 是 1.25 倍），
+        // 而缓存读取只有输入的十分之一。一家「缓存创建高、缓存命中接近 0」的上游
+        // 正在按溢价写一堆永远不会被读到的缓存——账单异常里最该先查的一种，
+        // 而在只有三项的 tooltip 里它与一家正常上游长得一样。
+        `缓存创建：${formatNullableTokens(row.cache_write_tokens)}`,
         `平均响应：${Math.round(row.avg_duration)} ms`,
         `成本：${row.cost} ${llmStats.value?.overview.cost_currency || ''}`.trim(),
         // 单次成本回答「该不该换模型」；合计成本回答不了——
@@ -644,6 +650,11 @@ const providerUsageOption = computed(() => {
           `输入 Token：${row.prompt_tokens}`,
           `输出 Token：${row.completion_tokens}`,
           `缓存读取：${formatNullableTokens(row.cached_tokens)}`,
+          // 缓存创建不能省：它的单价通常**高于**普通输入（Anthropic 是 1.25 倍），
+          // 而缓存读取只有输入的十分之一。一家「缓存创建高、缓存命中接近 0」的上游
+          // 正在按溢价写一堆永远不会被读到的缓存——账单异常里最该先查的一种，
+          // 而在只有三项的 tooltip 里它与一家正常上游长得一样。
+          `缓存创建：${formatNullableTokens(row.cache_write_tokens)}`,
           `平均响应：${Math.round(row.avg_duration)} ms`,
           `成本：${row.cost}`,
           `单次成本：${formatCostPerRequest(row.cost, row.count, row.unpriced_requests)}`
@@ -721,15 +732,13 @@ const providerUsageOption = computed(() => {
 /** 用量来源分布：真实 / 估算 / 未知必须能一眼看出比例。 */
 const usageSourceOption = computed(() => {
   const rows = llmStats.value?.usage_sources ?? []
-  // `provider_partial` 单列：它的总额是补出来的（上游没报缓存维度，
-  // 缺失维度按 0 计价）。与 `provider` 合并显示等于把一份系统性偏低的账单
-  // 说成完全可信。
-  const labels: Record<string, string> = {
-    provider: '供应商返回',
-    provider_partial: '供应商部分回报',
-    estimated: '本地估算',
-    unknown: '未知'
-  }
+  // 文案与请求日志共用一份（`views/tracing/usageSource.ts`）：
+  // 两处各写一份会漂移，而漂移只显形在用户眼里——请求日志说
+  // 「供应商部分回报」而这张图说别的。
+  //
+  // `provider_partial` 单列的理由见那个模块：它的总额是补出来的
+  // （上游没报缓存维度，缺失维度按 0 计价），与 `provider` 合并显示
+  // 等于把一份系统性偏低的账单说成完全可信。
   return {
     title: {
       text: 'Token 来源构成',
@@ -764,7 +773,7 @@ const usageSourceOption = computed(() => {
         // 而这张图存在的全部理由就是回答「有多少消耗数字是不可当账单依据的」。
         // 后端 `usage_sources[].tokens` 一直返回，此前没有消费者。
         data: rows.map((item, index) => ({
-          name: labels[item.usage_source || 'unknown'] || item.usage_source || '未知',
+          name: usageSourceLabel(item.usage_source || 'unknown'),
           value: item.tokens,
           itemStyle: { color: themeColors.value[index % themeColors.value.length] }
         }))

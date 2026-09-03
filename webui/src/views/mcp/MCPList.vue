@@ -78,12 +78,24 @@
             </template>
             添加服务器
           </n-button>
-          <n-button secondary @click="openContext7Template" class="action-button">
-            <template #icon>
-              <n-icon><download-outline /></n-icon>
-            </template>
-            Context7 模板
-          </n-button>
+          <!--
+            预设按表渲染，与后端内置目录一一对应。此前这里只有一个「Context7 模板」
+            按钮：同样八个 stdio MCP，从「资源管理 → 发现并安装」进去装得到，
+            从这里进去只有一个——用户在 MCP 页找不到 `fetch`，会得出「这个项目
+            不支持它」这个错误结论，而它就在另一个页面的目录里。
+          -->
+          <n-dropdown
+            trigger="click"
+            :options="presetMenuOptions"
+            @select="(key: string) => applyPreset(key === '__custom__' ? null : key)"
+          >
+            <n-button secondary class="action-button" data-test="mcp-preset-menu">
+              <template #icon>
+                <n-icon><download-outline /></n-icon>
+              </template>
+              从预设新增
+            </n-button>
+          </n-dropdown>
           <n-button @click="refreshData" class="action-button" :loading="isLoading">
             <template #icon>
               <n-icon><refresh-outline /></n-icon>
@@ -537,6 +549,7 @@ import {
   NText,
   NTag,
   NDivider,
+  NDropdown,
   NPopconfirm,
   useMessage,
   useDialog,
@@ -593,6 +606,8 @@ const {
   fetchStatistics,
   openCreateModal,
   openContext7Template,
+  applyPreset,
+  presets,
   openEditModal,
   saveServer: originalSaveServer,
   deleteServer,
@@ -609,6 +624,23 @@ const {
 
 const message = useMessage()
 const router = useRouter()
+
+/**
+ * 预设下拉的菜单项。
+ *
+ * 「自定义」排在最前并与预设之间加一条分隔：它是空白起点，而不是第九个预设。
+ * 每一项的副标题说明靠什么运行时拉起——`npx` 与 `uvx` 都不是本项目的依赖，
+ * 运行时镜像两个都没装。不说明的话，用户点了启用只会看到
+ * 「连接失败 / 工具数 0」，而界面上没有任何线索指向真正的原因。
+ */
+const presetMenuOptions = computed(() => [
+  { key: '__custom__', label: '自定义（空白配置）' },
+  { key: '__divider__', type: 'divider' },
+  ...presets.map((preset) => ({
+    key: preset.id,
+    label: `${preset.label} · 需要 ${preset.runtime}`
+  }))
+])
 
 // 判断服务器是否正在运行
 const isServerRunning = computed(() => {

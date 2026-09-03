@@ -34,7 +34,18 @@ describe('类型声明', () => {
   })
 })
 
-describe('倒计时', () => {
+/**
+ * 倒计时的**算法**由 `im-qr-login-logic.test.ts` 调用函数验证：单位是秒不是毫秒、
+ * 恰好归零算过期、`age_unknown` 不拼数字、同一份快照在不同时刻给出不同秒数。
+ *
+ * 本文件只留「必须写在组件里才成立」的两件事：会自己走的计时器，以及卸载时清掉它。
+ * 这两条无法靠纯函数覆盖——它们是组件生命周期。
+ *
+ * 原来这里有 `toMatch(/qrCountdownExpired|remaining\w*\s*<=\s*0/)`：
+ * 用 `|` 接受两种写法，于是把 `<= 0` 改成 `< 0` 仍然匹配——
+ * 而那正是「归零后还显示待扫码」这个 bug 的形态。
+ */
+describe('倒计时的组件部分', () => {
   it('有一个会自己走的计时器', () => {
     expect(viewSource).toMatch(/setInterval|useIntervalFn/)
   })
@@ -44,30 +55,15 @@ describe('倒计时', () => {
     expect(viewSource).toMatch(/onUnmounted|clearInterval/)
   })
 
-  it('剩余秒数由「失效时刻 − 现在」算出，而不是照抄后端那一次的值', () => {
-    // 照抄的值在页面打开 90 秒后依然是打开那一刻的数字。
-    expect(viewSource).toContain('expires_at')
+  it('每一拍推进的是那个「现在」，而不是重新拉接口', () => {
+    // 倒计时靠本地时钟走：每秒打一次后端只为了刷新一个数字，
+    // 会把一个诊断页变成压测。
+    expect(viewSource).toMatch(/now\.value = Date\.now\(\)/)
   })
 
-  it('归零后标签改成已过期', () => {
-    expect(viewSource).toMatch(/qrCountdownExpired|remaining\w*\s*<=\s*0/)
-  })
-})
-
-describe('有效期本身要说出来', () => {
-  it('展示 validity_seconds', () => {
-    // 「这种码只能撑 120 秒」是用户决定「先拿手机再刷新」的依据。
-    expect(viewSource).toContain('validity_seconds')
-  })
-})
-
-describe('时间戳缺失时不编数字', () => {
-  it('age_unknown 有独立文案', () => {
-    expect(viewSource).toContain('age_unknown')
-  })
-
-  it('age_unknown 不显示剩余秒数', () => {
-    // 该分支下后端给的是 null；显示任何数字都是编的。
-    expect(viewSource).toMatch(/age_unknown[\s\S]{0,400}?(?:不显示|无法判断|未知)/)
+  it('倒计时与标签接在那份逻辑上', () => {
+    expect(viewSource).toMatch(/from '\.\/qrLoginPresentation'/)
+    expect(viewSource).toMatch(/computeQrRemainingSeconds\(qr, now\.value\)/)
+    expect(viewSource).toMatch(/buildQrLoginTag\(adapter\.health\?\.qr_login, now\.value\)/)
   })
 })

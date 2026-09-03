@@ -116,7 +116,9 @@ _BUILTINS: tuple[dict[str, Any], ...] = (
         "type": "hook",
         "name": "AI Debug Audit Hooks",
         "description": "记录 Agent 生命周期和工具策略事件的受控 Hook 声明。",
-        "version": "1.1.0",
+        # 事件集合变了必须抬版本号：`install()` 只在 bundled > installed 时推进
+        # 已装的资源，不抬的后果是「新部署有、老部署没有」，而两边界面都显示已安装。
+        "version": "1.2.0",
         "permissions": ["workflow.read", "process.execute"],
         "entry": "hook.json",
         "source": "catalog://kirara/hook/ai-debug",
@@ -182,6 +184,34 @@ _BUILTINS: tuple[dict[str, Any], ...] = (
                 "Stop": {
                     "type": "command",
                     "command": ["{python}", "-m", "kirara_ai.agent_runtime.audit_hook_command", "Stop"],
+                    "timeout_ms": 5000,
+                    "max_output_bytes": 4096,
+                    "required_permissions": ["process.execute"],
+                    "required_capabilities": ["process.execute"],
+                },
+                # 这三个事件是后补的派发点（会话清理、队友委派前后）。
+                # 内置件必须跟上：它是「Hook 到底有没有在跑」的唯一现成样本，
+                # 少一个事件就等于那类事件在产品上没有可验证的入口——
+                # 用户照这份声明抄，抄到的里面压根没有它。
+                "SessionEnd": {
+                    "type": "command",
+                    "command": ["{python}", "-m", "kirara_ai.agent_runtime.audit_hook_command", "SessionEnd"],
+                    "timeout_ms": 5000,
+                    "max_output_bytes": 4096,
+                    "required_permissions": ["process.execute"],
+                    "required_capabilities": ["process.execute"],
+                },
+                "SubagentStart": {
+                    "type": "command",
+                    "command": ["{python}", "-m", "kirara_ai.agent_runtime.audit_hook_command", "SubagentStart"],
+                    "timeout_ms": 5000,
+                    "max_output_bytes": 4096,
+                    "required_permissions": ["process.execute"],
+                    "required_capabilities": ["process.execute"],
+                },
+                "SubagentStop": {
+                    "type": "command",
+                    "command": ["{python}", "-m", "kirara_ai.agent_runtime.audit_hook_command", "SubagentStop"],
                     "timeout_ms": 5000,
                     "max_output_bytes": 4096,
                     "required_permissions": ["process.execute"],
@@ -627,20 +657,57 @@ class ResourceCatalogService:
             if item["type"] != "skill" and Version(str(item["version"])) > Version(
                 str(existing["current_version"])
             ):
-                return self._install_builtin(item, update=True)
-            return existing
+                return self._backfilled(item, self._install_builtin(item, update=True))
+            return self._backfilled(item, existing)
         if item["type"] == "skill":
             source_key = str(item["source_key"])
             owner_repo, directory = source_key.split(":", 1)
             owner, name = owner_repo.split("/", 1)
-            return self.sources.install_skill(
-                owner=owner,
-                name=name,
-                branch=branch,
-                directory=directory,
-                source_key=source_key,
+            return self._backfilled(
+                item,
+                self.sources.install_skill(
+                    owner=owner,
+                    name=name,
+                    branch=branch,
+                    directory=directory,
+                    source_key=source_key,
+                ),
             )
-        return self._install_builtin(item)
+        return self._backfilled(item, self._install_builtin(item))
+
+    def _backfilled(
+        self, item: Mapping[str, Any], resource: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """给缺显示名/描述的资源补上目录里那一份，**只补空缺**。
+
+        为什么不只在新安装时写：修复之前装好的资源，其 `source_metadata` 里
+        没有名称——而在真实部署里那些恰恰是绝大多数。它们不会因为代码更新
+        自己长出名字，于是「按名称搜索」对老资源继续失效。这里在每次
+        `install()`（含启动时的 `ensure_builtins()`）顺带补齐。
+
+        走 `set_display_metadata` 而不是重装或抬版本：显示名不参与
+        `content_sha256`，为补一行字给资源升一个版本会在版本列表里留下一条
+        与内容无关的记录，并触发一次多余的备份。
+
+        **只补空缺**：用户可能已经把一条资源改成了自己的叫法，
+        用目录里的名字盖掉它等于每次启动都撤销一次用户的重命名。
+        """
+
+        patch: dict[str, Any] = {}
+        for key in ("name", "description"):
+            if resource.get(key):
+                continue
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                patch[key] = value
+        if not patch:
+            return dict(resource)
+        resource_id = str(resource.get("resource_id") or "")
+        try:
+            return self.lifecycle.set_display_metadata(resource_id, **patch)
+        except Exception as error:  # noqa: BLE001 - 补显示名失败不该让安装失败
+            logger.warning("资源 %s 的显示名补齐失败（不影响安装）：%s", resource_id, error)
+            return dict(resource)
 
     def ensure_builtins(self) -> None:
         """Install or safely advance built-ins to the bundled version.
@@ -722,7 +789,17 @@ class ResourceCatalogService:
             "version": item["version"],
             "source": item["source"],
             "source_key": item["catalog_id"],
-            "source_metadata": {"provider": "catalog", "catalog_id": item["catalog_id"], "tags": item["tags"]},
+            "source_metadata": {
+                "provider": "catalog",
+                "catalog_id": item["catalog_id"],
+                "tags": item["tags"],
+                # 目录条目自己就带名称与描述（界面上「Office and Research Assistant」
+                # 与那句中文说明都出自这里）。此前建 manifest 时把它们丢掉了，
+                # 于是装完的资源在列表里只有一个 ID，搜索框承诺的「按名称、描述检索」
+                # 对目录安装的资源永远命中不了。
+                "name": item.get("name"),
+                "description": item.get("description"),
+            },
             "entry": item["entry"],
             "permissions": item["permissions"],
             "files": records,

@@ -80,11 +80,19 @@ describe('auto-detect schedule page reachability', () => {
 })
 
 describe('auto-detect schedule presentation', () => {
-  it('renders a never-run marker instead of inventing a timestamp', () => {
-    // `last_run: null` 可能是从没到期、也可能是每次都失败。显示成一个真实时间
-    // 会让运维以为它跑过。
-    expect(viewSource).toContain("if (!row.last_run) return '—'")
-    expect(viewSource).toContain('尚未成功检测过')
+  // 时刻计算、校验、汇总这几条**规则**由
+  // `llm-auto-detect-schedule-logic.test.ts` 调用函数验证。
+  // 本文件只留「必须写在模板里才有意义」的那些：可访问性属性、
+  // 确认框、data-test 钩子、以及组件与那份逻辑的接线。
+  //
+  // 为什么要分开：源码 grep 断言对行为改变不敏感。
+  // 原来这里有 `toContain("if (!row.last_run) return '—'")`——
+  // 把一整行代码当字符串钉住，重构成等价写法它就红，而把
+  // `86_400_000` 写错、把 `<= 0` 写成 `< 0`，它照样绿。
+  it('never-run 与算错时刻这两件事由逻辑测试覆盖，这里只确认接线', () => {
+    expect(viewSource).toMatch(/from '\.\/autoDetectSchedule'/)
+    expect(viewSource).toMatch(/formatNextRun\(row\)/)
+    expect(viewSource).toMatch(/formatLastRun\(row\)/)
   })
 
   it('warns prominently when the scheduler loop is not running', () => {
@@ -130,15 +138,20 @@ describe('auto-detect schedule presentation', () => {
     expect(viewSource).toContain('if (!(row.name in draftIntervals.value))')
   })
 
-  it('rejects a negative interval before the request', () => {
-    // 后端也会拒（400），但在客户端先说清楚比让人读一条 HTTP 错误好。
-    expect(viewSource).toContain('间隔天数不能为负数')
+  it('保存前先过校验，拦下时不发请求', () => {
+    // 具体拒哪些值由逻辑测试覆盖（负数、非数字、非有限值、小数截断）。
+    // 这里钉住「校验真的接在保存路径上」——只测规则不测接线，
+    // 等于验证了一个没人调用的函数。
+    expect(viewSource).toMatch(/checkInterval\(draftIntervals\.value\[row\.name\]\)/)
+    expect(viewSource).toMatch(/if \(!checked\.ok\)[\s\S]{0,120}return/)
   })
 
-  it('reports per-backend results of a forced run', () => {
-    // `results` 是 {后端名: 成功与否}。只说「完成」会掩盖其中失败的那几个。
+  it('逐后端结果接到汇总逻辑上', () => {
+    // `results` 是 {后端名: 成功与否}。三种处境（一个没跑 / 全成功 / 有失败）
+    // 的措辞由逻辑测试覆盖。
     expect(viewSource).toContain('lastRunResults')
-    expect(viewSource).toContain('本次失败')
+    expect(viewSource).toMatch(/runSummary\(lastRunResults\.value\)/)
+    expect(viewSource).toMatch(/message\[summary\.level\]\(summary\.text\)/)
   })
 
   it('gives the table an accessible caption and row headers', () => {

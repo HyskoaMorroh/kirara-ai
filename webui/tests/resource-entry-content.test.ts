@@ -62,7 +62,10 @@ describe('详情弹窗里的正文', () => {
   it('显示摘要是否与版本记录一致', () => {
     // 不显示这一行时用户只能靠信任，而这正是完整性校验存在的理由。
     expect(viewSource).toContain('data-test="entry-digest"')
-    expect(viewSource).toContain('entryDigestMatches')
+    // 比较逻辑（按版本号取记录再比摘要、空摘要不算一致、大小写敏感）由
+    // `resource-entry-digest.test.ts` 调用函数验证。这里只确认接线。
+    expect(viewSource).toMatch(/compareEntryDigest\(entryContent\.value/)
+    expect(viewSource).toMatch(/from '\.\/entryDigest'/)
   })
 
   it('多版本时可以切换看旧版正文', () => {

@@ -28,6 +28,11 @@ import DynamicConfigForm from '@/components/form/DynamicConfigForm.vue'
 import { AddOutline, ArrowBackOutline, SaveOutline } from '@vicons/ionicons5'
 import type { FormInst } from 'naive-ui'
 import MarkdownIt from 'markdown-it'
+import {
+  QR_STATE_TEXT,
+  qrLoginTag as buildQrLoginTag,
+  qrRemainingSeconds as computeQrRemainingSeconds
+} from './qrLoginPresentation'
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
@@ -77,18 +82,6 @@ const disconnectReasonText = (adapter: IMAdapter): string | null => {
  * 「上游接进来了，但它自己还没登录 QQ」。两者的处置一个是查地址与 Token，
  * 一个是去扫码——放在同一个标签里会让用户查错方向。
  */
-const QR_STATE_TEXT: Record<string, { label: string; type: StatusTagType }> = {
-  pending: { label: '等待二维码', type: 'default' },
-  waiting_scan: { label: '待扫码', type: 'warning' },
-  age_unknown: { label: '二维码时效未知', type: 'warning' },
-  scanned: { label: '已扫码待确认', type: 'info' },
-  expired: { label: '二维码已过期', type: 'error' },
-  succeeded: { label: 'QQ 已登录', type: 'success' },
-  failed: { label: '登录失败', type: 'error' },
-  unavailable: { label: '二维码暂不可用', type: 'default' },
-  quick_login: { label: '免扫码登录', type: 'success' }
-}
-
 /**
  * 会自己走的当前时刻，用于二维码倒计时。
  *
@@ -113,52 +106,18 @@ const HEALTH_REFRESH_INTERVAL_MS = 10_000
 const autoRefresh = ref(true)
 let healthTimer: ReturnType<typeof setInterval> | null = null
 
-/** 二维码还剩多少秒；无法判断时返回 `null`（绝不返回一个编出来的数字）。 */
-const qrRemainingSeconds = (qr: QRLoginSnapshot): number | null => {
-  if (!qr.expires_at) return null
-  const expiresAt = Date.parse(qr.expires_at)
-  if (Number.isNaN(expiresAt)) return null
-  return Math.max(0, (expiresAt - now.value) / 1000)
-}
+/**
+ * 倒计时与标签文案在 `qrLoginPresentation.ts` 里，由那份测试**调用函数**验证。
+ *
+ * 此前这些判断只被源码 grep「测过」：断言形如
+ * `expect(viewSource).toMatch(/qr\.state === 'waiting_scan' \? qrRemainingSeconds/)`,
+ * 钉住一行代码的写法，却不检查 `<= 0` 有没有写成 `< 0`、
+ * 除以 1000 有没有写成乘以 1000。而算错的后果是用户去扫一张过期的码。
+ */
+const qrRemainingSeconds = (qr: QRLoginSnapshot): number | null =>
+  computeQrRemainingSeconds(qr, now.value)
 
-const qrLoginTag = (
-  adapter: IMAdapter
-): { label: string; type: StatusTagType; title: string } | null => {
-  const qr = adapter.health?.qr_login
-  // 未配置上游日志路径时后端返回 null，此时不该显示任何扫码信息——
-  // 显示「未知」会让用户以为出了问题。
-  if (!qr || qr.state === 'unknown') return null
-
-  // 倒计时归零后必须改口：继续显示「待扫码（剩 0 秒）」是把过期说成可扫，
-  // 而用户此刻要做的是刷新取新码，不是再试一次扫。
-  const remaining = qr.state === 'waiting_scan' ? qrRemainingSeconds(qr) : null
-  const state = remaining !== null && remaining <= 0 ? 'expired' : qr.state
-  const preset = QR_STATE_TEXT[state]
-  if (!preset) return null
-
-  // 剩余时间必须是「还剩多久」而不是绝对时刻：用户要判断的是
-  // 「现在扫还来不来得及」。`age_unknown` 下 remaining 为 null，不拼任何数字。
-  const countdown =
-    state === 'waiting_scan' && remaining !== null
-      ? `（剩 ${Math.round(remaining)} 秒）`
-      : ''
-
-  const details: string[] = []
-  if (state === 'expired' && qr.state === 'waiting_scan') {
-    details.push('这张二维码已超过有效期，请点「刷新扫码状态」取最新一张。')
-  } else if (qr.remediation) {
-    details.push(qr.remediation)
-  }
-  if (qr.validity_seconds) details.push(`有效期 ${qr.validity_seconds} 秒`)
-  if (qr.latest_qr_path) details.push(`最新二维码：${qr.latest_qr_path}`)
-  if (qr.refresh_count > 0) details.push(`已刷新 ${qr.refresh_count} 次`)
-
-  return {
-    label: `${preset.label}${countdown}`,
-    type: preset.type,
-    title: details.join('\n')
-  }
-}
+const qrLoginTag = (adapter: IMAdapter) => buildQrLoginTag(adapter.health?.qr_login, now.value)
 
 /**
  * QQ 自身热更新的一枚独立标签。

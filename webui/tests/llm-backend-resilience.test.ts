@@ -41,7 +41,10 @@ vi.mock('naive-ui', () => ({
   NCard: { template: '<div><slot /></div>' },
   // 供应商配置导入 / 导出的工具条与冲突提示也用到这两个组件。
   NAlert: { template: '<div><slot /><slot name="action" /></div>' },
-  NButton: { template: '<button><slot /></button>' }
+  NButton: { template: '<button><slot /></button>' },
+  // 「恢复上一版」走确认对话框（回滚会丢掉最后一次保存的供应商改动）。
+  // 不 stub 它，组件在 setup 里就抛「No "useDialog" export」，整个文件都跑不起来。
+  useDialog: () => ({ warning: () => {} })
 }))
 
 // The view depends on the real defaults table, so only the HTTP surface is mocked.

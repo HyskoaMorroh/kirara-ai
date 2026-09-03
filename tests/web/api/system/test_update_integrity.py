@@ -344,6 +344,14 @@ class TestTheInstallPathActuallyVerifies:
             AsyncMock(return_value=(str(tampered), "irrelevant")),
         ), patch(
             "kirara_ai.web.api.system.routes.subprocess.run", _record_install
+        ), patch(
+            # 声明「这台机器装得上」：本用例的主题是摘要校验，
+            # 而 pip 前置检查排在下载之前（见
+            # `test_backend_upgrade_preflight.py`）。开发用的两个 uv 虚拟环境
+            # 都没有 pip，不声明这一条，请求会在 409 就停下，
+            # 于是这个用例根本走不到它要验证的那一步。
+            "kirara_ai.web.api.system.routes.backend_installer_available",
+            return_value=True,
         ):
             response = test_client.post(
                 "/backend-api/api/system/update",

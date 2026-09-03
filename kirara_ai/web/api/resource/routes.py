@@ -12,6 +12,7 @@ from kirara_ai.agent_runtime import AgentRegistry
 from kirara_ai.logger import get_logger
 from kirara_ai.plugin_manager.resource_lifecycle import (
     MAX_ARCHIVE_SIZE_BYTES,
+    RUNTIME_OVERRIDE_KEYS,
     ResourceLifecycleService,
     ResourceStateError,
     ResourceValidationError,
@@ -27,12 +28,17 @@ from kirara_ai.plugin_manager.system_dependencies import (
     SystemDependencyService,
 )
 from kirara_ai.mcp_module.manager import MCPServerManager
+from kirara_ai.web.api.mcp.models import REDACTED_SECRET
 from kirara_ai.web.auth.middleware import require_auth, require_creator
 
 
 resource_bp = Blueprint("resource", __name__)
 logger = get_logger("Web.Resource")
 MAX_RESOURCE_UPLOAD_SIZE = MAX_ARCHIVE_SIZE_BYTES
+
+#: 搜索关键词的上界。无界关键词会让每条资源都做一次超长子串匹配，
+#: 而一个真实的搜索词不会有这么长。
+_MAX_SEARCH_KEYWORD_LENGTH = 200
 
 
 def _service() -> ResourceLifecycleService:
@@ -128,6 +134,32 @@ def _binding_visibility(resource: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _redact_runtime_overrides(resource: dict[str, Any]) -> None:
+    """把运行时覆盖里的凭据换成掩码，只留键名。
+
+    `runtime_overrides.env` / `.headers` 装的是 MCP 服务器的凭据。它们出现在
+    **每一次**资源响应里（列表、详情、启用、写入回显都走 `_resource_response`），
+    所以不遮的后果不是「某个接口漏了」而是「一个只想看清单的请求把全部
+    MCP 凭据取回浏览器」。
+
+    与 `GET /mcp/servers` 的 `_redact_transport` 同一条规则、同一个掩码：
+    两个接口回的是同一份东西，一个遮一个不遮等于遮了也没用。
+    键名保留，否则界面看不出配过什么。
+
+    写回掩码不会污染存储：这里改的是 `deepcopy` 出来的响应副本。
+    而 `set_runtime_overrides` 的 `env` 按键合并、把掩码当作真值写入是可能的——
+    因此那一层的调用方（前端）不回传未修改的键，与 MCP 编辑表单同一约定。
+    """
+
+    overrides = resource.get("runtime_overrides")
+    if not isinstance(overrides, dict):
+        return
+    for key in ("env", "headers"):
+        values = overrides.get(key)
+        if isinstance(values, dict):
+            overrides[key] = {str(name): REDACTED_SECRET for name in values}
+
+
 def _resource_response(resource: Any) -> Any:
     """Add transient runtime and VPS readiness fields to lifecycle objects."""
 
@@ -137,6 +169,7 @@ def _resource_response(resource: Any) -> Any:
     projected = _catalog().project_dependencies(projected)
     projected.update(_runtime_status(projected))
     projected.update(_binding_visibility(projected))
+    _redact_runtime_overrides(projected)
     return projected
 
 
@@ -405,6 +438,33 @@ async def set_repository_enabled(owner: str, name: str, branch: str):
         return _lifecycle_error(error)
 
 
+@resource_bp.route("/repositories/<owner>/<name>/<branch>", methods=["DELETE"])
+# 与启停同一边界（写 `registry.json`，改变「哪些外部来源可被安装」），
+# 但删除不可逆，因此额外要求显式确认——与卸载资源同一口径。
+@require_creator("resources.manage")
+async def remove_repository(owner: str, name: str, branch: str):
+    """摘掉一条仓库来源登记。
+
+    此前只有「登记」与「启停」，没有任何删除路径：一个拼错的坐标会永久留在
+    `registry.json` 里，可以停用但去不掉，仓库表上永远多一行说明不了任何事的
+    死项，想清掉只能登服务器手改 JSON。
+
+    **不动已装资源**：从那个仓库装过的 Skill 已经独立成包（有自己的清单与摘要），
+    一起删掉等于把「不再从这里拉新的」变成「把装过的都毁掉」。
+    """
+    try:
+        payload = await _strict_json_object({"confirmed"})
+        if payload.get("confirmed") is not True:
+            raise ResourceValidationError("repository removal requires confirmation")
+        return jsonify(_sources().remove_repository(owner, name, branch))
+    except KeyError:
+        # 「没有这个仓库」是客户端问题，不是服务器故障；静默成功会让一个拼错的
+        # 删除请求看起来和真的删掉一样。
+        return _error(f"repository '{owner}/{name}@{branch}' is not registered", 404)
+    except Exception as error:
+        return _lifecycle_error(error)
+
+
 @resource_bp.route("/repositories/<owner>/<name>/<branch>/discover", methods=["GET"])
 @require_auth("resources.read")
 async def discover_repository(owner: str, name: str, branch: str):
@@ -615,10 +675,26 @@ async def get_storage_status():
 @resource_bp.route("", methods=["GET"])
 @require_auth("resources.read")
 async def list_resources():
+    """列出已安装资源，可按类型与关键词过滤。
+
+    `query` 的匹配面包含**正文**（仅纯文本类型），这是需求 10 点名的
+    「按名称、描述或内容检索」。过滤在服务器侧做而不是把正文发给浏览器自己筛：
+    正文可能有几十 KB 且包含用户写进去的规则，而 `read_entry` 每次都要重新校验
+    摘要——让列表接口顺带返回它，等于把一次列表请求变成 N 次全文件哈希，
+    并把一个只想看清单的请求变成一次全部正文的下载。响应里仍然不含正文。
+    """
     try:
-        return jsonify(
-            _resource_list_response(_service().list_resources(request.args.get("type")))
+        keyword = request.args.get("query")
+        if keyword is not None and len(keyword) > _MAX_SEARCH_KEYWORD_LENGTH:
+            # 无界关键词会让每条资源都做一次超长子串匹配。
+            raise ResourceValidationError("search keyword is too long")
+        service = _service()
+        resources = (
+            service.search_resources(keyword, resource_type=request.args.get("type"))
+            if keyword is not None
+            else service.list_resources(request.args.get("type"))
         )
+        return jsonify(_resource_list_response(resources))
     except Exception as error:
         return _lifecycle_error(error)
 
@@ -631,6 +707,100 @@ async def install_resource():
         _service().install_archive,
         success_status=201,
     )
+
+
+@resource_bp.route("/documents", methods=["POST"])
+# 从纯文本创建资源同样写服务器磁盘，与上传 ZIP 安装同一边界（需求 10）。
+@require_creator("resources.manage")
+async def author_resource_document():
+    """从一段纯文本创建 prompt / memory / session 资源。
+
+    需求 10 点名「Claude 提示词管理」，而提示词这个类型的**全部内容就是正文**：
+    没有可执行文件、没有依赖、没有外部来源。此前唯一的写入路径是上传一个手工
+    打包的 ZIP——用户得自己写 `manifest.json` 的八个必填字段、按
+    `path:size:sha256` 逐行拼接再哈希算出 `content_sha256`。
+    要求为一段纯文本走这一遍，等于把这个类型最主要的用法排除在产品之外。
+
+    打包与摘要在服务器侧完成，走的是与内置目录条目完全相同的那条路，
+    因此落盘后与一条内置提示词同形，`read_entry` 的摘要校验照常生效。
+    装完保持停用并需要确认，与其他三条安装路径一致——提示词会进系统提示词、
+    改变每一轮回复，「保存即生效」会让一次手误立刻作用到所有对话上。
+
+    `content_sha256` 不在可提交字段里：请求方自带摘要等于让调用方自己决定
+    「校验通过」。
+    """
+    try:
+        payload = await _strict_json_object(
+            {"resource_id", "type", "content", "name", "description", "version"}
+        )
+        resource_id = payload.get("resource_id")
+        resource_type = payload.get("type")
+        content = payload.get("content")
+        for label, value in (
+            ("resource_id", resource_id),
+            ("type", resource_type),
+            ("content", content),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ResourceValidationError(f"{label} is required")
+        for label in ("name", "description", "version"):
+            value = payload.get(label)
+            if value is not None and not isinstance(value, str):
+                raise ResourceValidationError(f"{label} must be a string")
+
+        version = payload.get("version") or "1.0.0"
+        authored = await asyncio.to_thread(
+            _service().author_document,
+            resource_id=resource_id.strip(),
+            resource_type=resource_type.strip(),
+            content=content,
+            name=payload.get("name"),
+            description=payload.get("description"),
+            version=version,
+        )
+        return jsonify(_resource_response(authored)), 201
+    except Exception as error:
+        return _lifecycle_error(error)
+
+
+@resource_bp.route("/<resource_id>/documents", methods=["PUT"])
+# 写入一个新版本目录，与上传 ZIP 升级同一边界。
+@require_creator("resources.manage")
+async def author_resource_document_version(resource_id: str):
+    """按新版本号写入改过的正文。
+
+    改正文只能走版本递增：`content_sha256` 把清单与文件绑在一起，就地编辑的
+    后果不是「改了没生效」，而是这个资源在下一次载入时直接失败。
+    版本必须递增、旧版本保留（改错了要能回去）、装完保持停用等待确认。
+
+    类型从已安装的注册表读而不是从请求体读——否则可以先上传一个 skill 的 ZIP、
+    再用这条纯文本路径改它的正文，绕过打包与审阅。
+    """
+    try:
+        payload = await _strict_json_object(
+            {"content", "version", "name", "description"}
+        )
+        content = payload.get("content")
+        version = payload.get("version")
+        for label, value in (("content", content), ("version", version)):
+            if not isinstance(value, str) or not value.strip():
+                raise ResourceValidationError(f"{label} is required")
+        for label in ("name", "description"):
+            value = payload.get(label)
+            if value is not None and not isinstance(value, str):
+                raise ResourceValidationError(f"{label} must be a string")
+
+        updated = await asyncio.to_thread(
+            _service().author_document_version,
+            resource_id,
+            content=content,
+            version=version.strip(),
+            name=payload.get("name"),
+            description=payload.get("description"),
+        )
+        return jsonify(_resource_response(updated))
+    except Exception as error:
+        return _lifecycle_error(error)
 
 
 @resource_bp.route("/imports", methods=["POST"])
@@ -814,6 +984,43 @@ async def bind_workflow(resource_id: str):
             payload.get("workflow_id"),
         )
     )
+
+
+@resource_bp.route("/<resource_id>/runtime", methods=["PUT"])
+# 覆盖决定 MCP 进程能读写哪些目录、带什么环境变量——那正是需求 10 说的
+# 「通过插件修改服务器内容或执行文件操作」的范围本身，必须限创建者。
+@require_creator("resources.manage")
+async def set_resource_runtime(resource_id: str):
+    """配置一条受管 MCP 资源在**这台机器**上怎么跑。
+
+    此前受管 MCP 资源完全没有配置入口：`PUT /mcp/servers/<id>` 只在
+    `config.mcp.servers` 里查找，而受管资源住在资源注册表里，因此那条路由对
+    它们一律返回 404——尽管界面给每一行都渲染了「编辑」按钮。
+    最明显的后果是 `mcp:filesystem`：它的描述要求「启用前必须在 args 末尾追加
+    允许访问的目录」，而在产品里做不到这件事。
+
+    只接受「这台机器怎么跑它」那几个键（`RUNTIME_OVERRIDE_KEYS`）。
+    `command` / `args` / `type` / `url` / `id` 不在其中：那是 `content_sha256`
+    保护的身份，从这个入口放开它们等于让「配一个可读目录」可以把 `npx`
+    换成任意程序。未知字段返回 400 而不是静默忽略——静默忽略会让一个拼错的
+    字段名看起来保存成功，而目录从未生效。
+
+    写完刷新受管服务器（不自动连接）：不刷新的话进程还在用旧参数跑，
+    而界面已经显示新配置了。
+    """
+    try:
+        payload = await _strict_json_object(set(RUNTIME_OVERRIDE_KEYS))
+        overrides = {
+            key: payload[key] for key in RUNTIME_OVERRIDE_KEYS if key in payload
+        }
+        resource = _service().set_runtime_overrides(resource_id, **overrides)
+        if g.container.has(MCPServerManager):
+            await g.container.resolve(MCPServerManager).refresh_managed_servers(
+                connect=False
+            )
+        return jsonify(_resource_response(resource))
+    except Exception as error:
+        return _lifecycle_error(error)
 
 
 @resource_bp.route("/<resource_id>/restore", methods=["POST"])

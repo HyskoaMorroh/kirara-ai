@@ -52,7 +52,9 @@ vi.mock('naive-ui', () => {
     NInputNumber: passthrough('NInputNumber', 'span'),
     NSelect: passthrough('NSelect', 'span'),
     NSwitch: passthrough('NSwitch', 'span'),
-    NTag: passthrough('NTag', 'span')
+    NTag: passthrough('NTag', 'span'),
+    // 见 `agent-view.test.ts` 里的同一条：删除 Agent 需要 `useDialog`。
+    useDialog: () => ({ warning: () => {} })
   }
 })
 

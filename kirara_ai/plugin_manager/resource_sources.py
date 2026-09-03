@@ -242,6 +242,15 @@ class ResourceSourceService:
         owner, name, branch = self.validate_repository(owner, name, branch)
         return self.lifecycle.set_source_repository_enabled(owner, name, branch, enabled)
 
+    def remove_repository(self, owner: str, name: str, branch: str) -> dict[str, Any]:
+        """摘掉一条仓库来源登记，不动从它装过的资源。
+
+        与启停走同一套坐标校验：一个没过校验的坐标压根不可能在登记表里，
+        跳过校验只会把「坐标非法」报成「仓库不存在」，而那两件事的处置不同。
+        """
+        owner, name, branch = self.validate_repository(owner, name, branch)
+        return self.lifecycle.remove_source_repository(owner, name, branch)
+
     def discover_repository(
         self, owner: str, name: str, branch: str = "main"
     ) -> list[dict[str, Any]]:
@@ -274,6 +283,22 @@ class ResourceSourceService:
                     "source_url": f"https://github.com/{owner}/{name}/tree/{urllib.parse.quote(branch, safe='/')}/{directory}",
                 }
             )
+        # 把条数记回仓库行：注册之后界面上此前看不出这个仓库有没有用——
+        # 一个坐标拼错或压根不含 `SKILL.md` 的仓库，与一个装着几百个技能的
+        # 仓库长得一模一样。数量是本次发现的自然副产品，不必让用户再点一次别的。
+        #
+        # 只在**成功**走到这里时记：失败路径上异常已经抛出去了，
+        # 而把一次网络错误写成 0 比不写更糟——0 是「这个仓库配错了」的信号。
+        #
+        # 未登记的坐标记不上（`KeyError`），但那不该让直查失败：
+        # `discover_repository` 的既有语义是「给一个坐标就能看里面有什么」，
+        # 不要求先登记。为了记一个数而拒绝这条路径，是用新特性削掉旧能力。
+        try:
+            self.lifecycle.record_repository_discovery(
+                owner, name, branch, count=len(discovered)
+            )
+        except KeyError:
+            pass
         return discovered
 
     def search_skills(self, query: str, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:

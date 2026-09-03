@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, computed, onMounted, onBeforeUnmount } from 'vue'
-import { useMessage, NModal, NCard, NAlert, NButton } from 'naive-ui'
+import { useMessage, useDialog, NModal, NCard, NAlert, NButton } from 'naive-ui'
 import { llmApi, resilienceDefaults } from '@/api/llm'
 import type { LLMBackend, ConfigSchema } from '@/api/llm'
 import type { ModelInfo } from '@/components/form/types'
@@ -14,6 +14,7 @@ import LLMModelForm from '@/components/llm/LLMModelForm.vue'
 import LLMConfirmContent from '@/components/llm/LLMConfirmContent.vue'
 
 const $message = useMessage()
+const dialog = useDialog()
 const isAutoDetectModelsSupported = ref(false)
 const showConfirmModal = ref(false)
 const autoDetectLoading = ref(false)
@@ -486,6 +487,56 @@ const cancelOverwriteImport = () => {
   pendingImportDocument.value = null
 }
 
+/**
+ * 把供应商清单回滚到最后一次写入之前的那一份。
+ *
+ * 后端 `POST /llm/backends/restore` 一直存在，界面上此前没有入口——
+ * 而定价目录早就有「恢复」按钮。改错一个后端之后只能登服务器手工编辑
+ * `config.yaml`，这条路径比定价更敏感（凭据、容错参数、路由都在里面）。
+ *
+ * 只回滚 `llms.api_backends` 这一段（后端保证），因此文案里必须说清
+ * 「丢的是最后一次保存的供应商改动」——「恢复备份」听起来是安全操作。
+ */
+const restoringBackends = ref(false)
+
+const handleRestoreBackends = () => {
+  dialog.warning({
+    title: '恢复供应商配置',
+    content:
+      '会把供应商清单回滚到最后一次保存之前的那一份，' +
+      '最后一次保存的供应商改动（含新增、删除、Key 与容错参数）将丢失。' +
+      '其他设置（Web、IM、工作流）不受影响。',
+    positiveText: '恢复',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      restoringBackends.value = true
+      try {
+        const response = await llmApi.restoreBackends({ confirmed: true })
+        await fetchAdapters()
+        const { restored_count: restored, loaded_count: loaded } = response.data
+        // 两个数字分开报：不相等意味着有后端恢复了但起不来
+        // （Key 失效、地址不通），只报一个数字会让那种情况看起来完全成功。
+        $message.success(
+          restored === loaded
+            ? `已恢复 ${restored} 个供应商并全部加载`
+            : `已恢复 ${restored} 个供应商，其中 ${loaded} 个加载成功；` +
+              '其余请检查凭据与地址'
+        )
+      } catch (error) {
+        const text = error instanceof Error ? error.message : ''
+        // 404 是「还没写过配置、没有 .bak」——正常状态而不是故障。
+        $message.error(
+          text.includes('404') || text.includes('no provider configuration backup')
+            ? '还没有可恢复的备份：首次保存供应商配置之后才会生成'
+            : text || '供应商配置恢复失败'
+        )
+      } finally {
+        restoringBackends.value = false
+      }
+    }
+  })
+}
+
 onBeforeUnmount(() => {
   adapterListRequests.cancel()
   schemaRequests.cancel()
@@ -525,6 +576,18 @@ onBeforeUnmount(() => {
                 @change="handleImportBackends"
               />
             </label>
+            <!--
+              「恢复上一版」与导入并列：三者都作用于「全部供应商」这一层。
+              放在这里而不是列表侧栏，避免被读成「恢复选中的那一个」。
+            -->
+            <n-button
+              size="small"
+              :loading="restoringBackends"
+              data-test="restore-backends"
+              @click="handleRestoreBackends"
+            >
+              恢复上一版
+            </n-button>
           </div>
         </div>
 

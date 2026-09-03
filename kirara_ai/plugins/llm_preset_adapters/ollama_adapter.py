@@ -17,6 +17,7 @@ from kirara_ai.llm.format.request import LLMChatRequest, Tool
 from kirara_ai.llm.format.response import Function, LLMChatResponse, Message, ToolCall, Usage
 from kirara_ai.llm.format.embedding import LLMEmbeddingRequest, LLMEmbeddingResponse
 from kirara_ai.llm.model_types import LLMAbility, ModelType
+from kirara_ai.llm.rectifier import rectify_request
 from kirara_ai.logger import get_logger
 from kirara_ai.media.manager import MediaManager
 from kirara_ai.tracing import trace_llm_chat
@@ -199,14 +200,40 @@ class OllamaAdapter(
             }
 
         # 登记在途响应，让 `cancel_pending_request` 能真正断开这条连接。
-        response = requests.post(api_url, json=data, headers=headers, timeout=(10, 120))
-        with self._track_response(req, response):
-            try:
-                response.raise_for_status()
-                response_data = response.json()
-            except Exception as e:
-                self.logger.error(f"API Response: {response.text}")
-                raise e
+        #
+        # 整流（需求 8）：与其他适配器同一套语义，按 Ollama 自己的请求体形状改
+        # 字段（并列的 `images` 数组、顶层 `think`）。此前这个适配器连
+        # `rectify_request` 都没有 import，供应商编辑页上的整流开关对它
+        # **从未参与任何决策**。
+        #
+        # 不能照搬 `messages` 形状的规则：Ollama 的 `content` 是纯字符串而不是
+        # 块列表，按块遍历一次也命中不了；`thinking` / `max_tokens` 更是
+        # Anthropic 的字段，写进去只是多两个被忽略的键，真正的位置没被改。
+        response_data: dict
+        applied_rectifications: set[str] = set()
+        while True:
+            response = requests.post(api_url, json=data, headers=headers, timeout=(10, 120))
+            with self._track_response(req, response):
+                try:
+                    response.raise_for_status()
+                    response_data = response.json()
+                    break
+                except Exception as e:
+                    body_text = response.text
+                    self.logger.error(f"API Response: {body_text}")
+                    rectified, record = rectify_request(
+                        data,
+                        body_text,
+                        req.rectifier,
+                        already_applied=frozenset(applied_rectifications),
+                    )
+                    if rectified is None or record is None:
+                        raise e
+                    self.logger.warning(
+                        "整流器改写请求后重试：%s %s", record.kind, record.details
+                    )
+                    applied_rectifications.add(record.kind)
+                    data = rectified
         # https://github.com/ollama/ollama/blob/main/docs/api.md#generate-a-chat-completion
         content = convert_llm_response(response_data)
         # 统计字段缺失时交出 None：此前用 response_data['prompt_eval_count']
@@ -289,15 +316,39 @@ class OllamaAdapter(
                 k: v for k, v in data["options"].items() if v is not None  # type: ignore
             }
 
-        with requests.post(
-            api_url, json=data, headers=headers, timeout=(10, 300), stream=True
-        ) as response, self._track_response(req, response):
+        # 整流与非流式路径同一套判定（需求 8）。只修非流式是半个修复：
+        # 参数约束错误在两条路径上完全一样，换个 `reply_stream_mode` 就又会硬失败。
+        #
+        # 建连阶段就要判完：流已经开始产出内容之后再重试会让用户看到两段回复
+        # 拼在一起，那比一次失败更难解释。
+        applied_rectifications: set[str] = set()
+        while True:
+            response = requests.post(
+                api_url, json=data, headers=headers, timeout=(10, 300), stream=True
+            )
             try:
                 response.raise_for_status()
             except Exception as error:
-                self.logger.error(f"Stream response: {response.text[:512]}")
-                raise error
+                body_text = response.text[:512]
+                self.logger.error(f"Stream response: {body_text}")
+                response.close()
+                rectified, record = rectify_request(
+                    data,
+                    body_text,
+                    req.rectifier,
+                    already_applied=frozenset(applied_rectifications),
+                )
+                if rectified is None or record is None:
+                    raise error
+                self.logger.warning(
+                    "整流器改写流式请求后重试：%s %s", record.kind, record.details
+                )
+                applied_rectifications.add(record.kind)
+                data = rectified
+                continue
+            break
 
+        with response, self._track_response(req, response):
             for line in response.iter_lines(decode_unicode=True):
                 if not line:
                     continue

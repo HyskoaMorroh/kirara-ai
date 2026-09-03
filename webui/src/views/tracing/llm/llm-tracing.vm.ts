@@ -1,4 +1,7 @@
 import { ref, computed, h } from 'vue'
+// 用量来源文案与统计图共用一份：两处各写一份会漂移，
+// 而漂移只会显形在用户眼里（请求日志与统计图说不同的词）。
+import { usageSourceLabel } from '../usageSource'
 import { useTracingViewModel } from '../tracing.vm'
 import type { TraceBase, TracerDelegate, TraceStatistics } from '../tracing.vm'
 import { NTag, NButton } from 'naive-ui'
@@ -168,11 +171,21 @@ export interface LLMStatistics {
  * Token 的 1/5 到 1/10。两者显示成同一个词时，一份系统性偏低的账单看起来
  * 与完全可信的账单毫无区别。
  */
-const USAGE_SOURCE_LABELS: Record<string, string> = {
-  provider: '供应商返回',
-  provider_partial: '供应商部分回报',
-  estimated: '本地估算',
-  unknown: '未知'
+
+/**
+ * 缓存两项的显示：区分「未上报」与「零」。
+ *
+ * `null` 表示没有任何上游报过缓存维度（未知），`0` 表示报了、确实没命中。
+ * 显示成同一个东西时，前者会被当成缓存失效去排查一个并不存在的问题——
+ * 而真正该做的是去查上游有没有返回 usage。
+ *
+ * 不复用 `formatTokens`：它把 `null` 显示成「未知」，那个词对**总** Token 合适
+ * （整条请求的用量确实未知），但缓存维度的「未知」有一个更准确的说法：
+ * 上游没报这一项，而这条请求本身是成功的。
+ */
+function formatOptionalTokens(tokens: number | null | undefined): string {
+  if (tokens === null || tokens === undefined) return '未上报'
+  return tokens.toLocaleString()
 }
 
 // LLM 追踪器委托实现
@@ -213,7 +226,7 @@ class LLMTracerDelegate implements TracerDelegate<LLMTrace, LLMStatistics> {
       usageSource: (stats.usage_sources || [])
         .filter((row) => !!row.usage_source)
         .map((row) => ({
-          label: USAGE_SOURCE_LABELS[row.usage_source as string] || (row.usage_source as string),
+          label: usageSourceLabel(row.usage_source as string),
           value: row.usage_source as string
         })),
       errorCategory: (stats.error_categories || [])
@@ -314,12 +327,47 @@ class LLMTracerDelegate implements TracerDelegate<LLMTrace, LLMStatistics> {
         width: 100,
         render: (row: LLMTrace) => baseVM.formatTokens(row.total_tokens)
       },
+      /*
+       * 四类 Token 各自成列（需求 9）。
+       *
+       * 「只有合计」在这个页面上不是省略而是歧义：同样 100 万 Token，
+       * 一家几乎全在读上下文、另一家几乎全在生成，成本能差 5~10 倍
+       *（输出单价通常是输入的数倍，缓存读取又比输入便宜一个量级）。
+       * 要回答「这条为什么这么贵」，合计恰恰是唯一回答不了的那个数字。
+       *
+       * 详情页早就有这份拆分，但那要一条一条点进去看，而排查的第一步是
+       * 横向比较一屏里的几十条。合计列保留——它仍是「这条请求有多大」最快的读法。
+       */
+      {
+        title: '输入',
+        key: 'prompt_tokens',
+        width: 90,
+        render: (row: LLMTrace) => baseVM.formatTokens(row.prompt_tokens)
+      },
+      {
+        title: '输出',
+        key: 'completion_tokens',
+        width: 90,
+        render: (row: LLMTrace) => baseVM.formatTokens(row.completion_tokens)
+      },
+      {
+        title: '缓存命中',
+        key: 'cached_tokens',
+        width: 100,
+        render: (row: LLMTrace) => formatOptionalTokens(row.cached_tokens)
+      },
+      {
+        title: '缓存创建',
+        key: 'cache_write_tokens',
+        width: 100,
+        render: (row: LLMTrace) => formatOptionalTokens(row.cache_write_tokens)
+      },
       {
         title: '用量来源',
         key: 'usage_source',
         width: 120,
         render: (row: LLMTrace) =>
-          row.usage_source ? USAGE_SOURCE_LABELS[row.usage_source] || row.usage_source : '---'
+          row.usage_source ? usageSourceLabel(row.usage_source) : '---'
       },
       {
         title: '成本',
@@ -421,7 +469,7 @@ class LLMTracerDelegate implements TracerDelegate<LLMTrace, LLMStatistics> {
         label: '用量来源',
         key: 'usage_source',
         formatter: (value: any) =>
-          value ? USAGE_SOURCE_LABELS[String(value)] || String(value) : '---'
+          value ? usageSourceLabel(String(value)) : '---'
       },
       {
         label: '首字节耗时',

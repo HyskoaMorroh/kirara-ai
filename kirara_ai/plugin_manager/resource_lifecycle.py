@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import os
 import re
@@ -49,6 +50,63 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SCRIPT_SUFFIXES = frozenset(
     {".bat", ".cmd", ".com", ".exe", ".js", ".msi", ".ps1", ".py", ".sh", ".vbs"}
 )
+
+
+#: 正文就是全部内容的资源类型——它们可以从一段纯文本创建。
+#:
+#: `skill` 与 `hook` 不在这里：前者的正文是给模型的行为说明（会被当作可执行的
+#: 操作步骤照做），后者是命令声明、能起进程（`process.execute`）。
+#: 那两类必须继续走「打包 + 审阅 + 显式确认」，一个纯文本输入框不是合适的入口。
+#: `mcp` 同理——它的正文是服务器连接声明，启用即拉进程。
+TEXT_AUTHORED_TYPES = frozenset({"prompt", "memory", "session"})
+
+#: 从纯文本创建的资源的入口文件名，按类型区分。
+#:
+#: 与内置目录里同类条目保持一致（`prompt:office-research` 用 `PROMPT.md`），
+#: 这样一条自建提示词与一条内置提示词在磁盘上是同一种形状。
+_TEXT_ENTRY_NAMES = {
+    "prompt": "PROMPT.md",
+    "memory": "MEMORY.md",
+    "session": "SESSION.md",
+}
+
+#: 只用于显示与检索的元数据键——可以在不改版本、不重新解包的情况下修补。
+#:
+#: 与 `source_metadata` 里其余的键有本质区别：`owner` / `repository` / `branch` /
+#: `directory` / `catalog_id` 决定「去哪里取下一版」，改它们等于改更新来源；
+#: 而这两个键只影响列表上显示什么字、搜索能不能命中。
+#: 因此修补入口（`set_display_metadata`）按构造只接受这两个，
+#: 而不是提供一个能改整个 `source_metadata` 的通用写口。
+DISPLAY_METADATA_KEYS = ("name", "description")
+
+#: 「这台机器怎么跑它」——可以在不改版本、不重新解包的情况下覆盖的 MCP 传输键。
+#:
+#: 与归档里 `server.json` 的其余字段有本质区别：`command` / `type` / `url` / `id`
+#: 决定**跑的是哪个程序、连的是哪台服务器**，它们由 `content_sha256` 护着，
+#: 是「目录发布了什么」；而这几个键是「这台机器允许什么、放在哪、等多久」。
+#:
+#: 因此覆盖入口（`set_runtime_overrides`）按构造只接受这几个，
+#: 而不是提供一个能改整份传输声明的通用写口——放开 `command` 等于让
+#: 「配一个可读目录」这个操作可以把 `npx` 换成任意程序。
+#:
+#: `extra_args` 是**追加**到归档 args 之后而不是替换：`mcp:filesystem` 的描述
+#: 说的就是「在 args 末尾追加允许访问的目录」，而追加也让上游后续给 base args
+#: 加的新参数继续生效，并把包名留在摘要保护的那一段里。
+RUNTIME_OVERRIDE_KEYS = (
+    "extra_args",
+    "env",
+    "headers",
+    "cwd",
+    "roots",
+    "startup_timeout_ms",
+)
+
+#: `MCPTransportConfig.startup_timeout_ms` 的取值范围，与那个模型逐字一致。
+#:
+#: 在写入这一刻校验，而不是等 pydantic 在下次启动时炸：越界值放过去之后，
+#: 整条资源无法启动，而报错指向 pydantic 校验，与用户「我改了个超时」看不出关系。
+_STARTUP_TIMEOUT_BOUNDS = (1_000, 600_000)
+
 
 
 class ResourceLifecycleError(RuntimeError):
@@ -110,15 +168,310 @@ class ResourceLifecycleService:
             raise ResourceValidationError("resource type is not supported")
         with self._lock:
             resources = [
-                copy.deepcopy(resource)
+                self._snapshot(resource)
                 for resource in self._registry["resources"].values()
                 if resource_type is None or resource["type"] == resource_type
             ]
         return sorted(resources, key=lambda resource: resource["resource_id"])
 
+    def search_resources(
+        self, keyword: str, *, resource_type: str | None = None
+    ) -> list[dict[str, Any]]:
+        """按关键词过滤已安装资源，**在服务器侧读正文**。
+
+        存在的理由：提示词这个类型的全部内容就是正文，而名称与描述都是用户随手
+        填的一行字。装了十几条之后，「哪一条里写了『先给结论』」只能靠逐条点开看，
+        而那正是搜索框存在的理由。
+
+        为什么不让 `list_resources()` 顺带返回正文（那样前端就能自己过滤）：
+
+        - `read_entry` 每次读取都重新校验摘要（读清单、读文件、算 SHA-256）。
+          对每条资源都做一遍等于把一次列表请求变成 N 次全文件哈希。
+        - 正文可能有几十 KB，几十条就是一次几 MB 的响应，其中绝大部分与当次
+          搜索无关。
+        - 提示词正文会包含用户写进去的规则。无条件塞进每一次列表响应，
+          等于让一个只想看清单的请求把全部正文都取回浏览器。
+
+        因此这里读正文、但**只返回元数据**：搜索是为了缩小清单，不是取回内容。
+
+        只对不含可执行内容的类型读正文（`TEXT_AUTHORED_TYPES`）。skill 与 hook 的
+        正文是行为声明，把它们并进关键词搜索会让一次搜索读遍所有 hook 命令行——
+        既慢，也把「找一条提示词」变成一次对全部可执行声明的全文检索。
+        它们仍然可以按 ID / 名称 / 描述命中。
+
+        读正文失败（文件被篡改、摘要不匹配）时**跳过正文这一面**而不是抛错：
+        一条坏资源不该让「列出资源」这个动作不可用，那时用户既看不到清单，
+        也无从知道是哪一条坏了。
+        """
+
+        needle = str(keyword or "").strip().casefold()
+        resources = self.list_resources(resource_type)
+        if not needle:
+            # 「没在搜」不等于「搜不到」。
+            return resources
+
+        matched: list[dict[str, Any]] = []
+        for resource in resources:
+            haystack = [
+                str(resource.get("resource_id") or ""),
+                str(resource.get("name") or ""),
+                str(resource.get("description") or ""),
+            ]
+            if resource.get("type") in TEXT_AUTHORED_TYPES:
+                try:
+                    haystack.append(
+                        self.read_entry(
+                            resource["resource_id"], resource.get("current_version")
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - 坏资源只丢正文这一面，不影响列表
+                    pass
+            if any(needle in value.casefold() for value in haystack):
+                matched.append(resource)
+        return matched
+
     def get_resource(self, resource_id: str) -> dict[str, Any]:
         with self._lock:
-            return copy.deepcopy(self._require_resource(resource_id))
+            return self._snapshot(self._require_resource(resource_id))
+
+    def set_display_metadata(
+        self,
+        resource_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """修补一条已安装资源的显示名与描述，**不动版本、不动摘要、不重新解包**。
+
+        这两个键只影响列表上显示什么字、搜索能不能命中，不参与
+        `content_sha256`（摘要只由 `files` 算出），也不决定「去哪里取下一版」。
+        因此修补它们既不需要抬版本号，也不需要重新走一遍安装：要求为了补一行
+        显示名而给资源升一个版本，会在版本列表里留下一条与内容无关的记录，
+        并触发一次多余的备份。
+
+        按构造只接受 `DISPLAY_METADATA_KEYS` 里的两个键，而不是开一个能改整个
+        `source_metadata` 的通用写口：`owner` / `repository` / `branch` /
+        `directory` / `catalog_id` 决定更新来源，改它们等于把这条资源指向
+        另一个上游，那是安装路径的权限，不该从「改个显示名」这个入口漏出去。
+
+        传 `None` 表示不动那一项；传空白字符串表示清掉它——
+        「没提供」与「明确清空」是两件事，用同一个值表达会让清空变得做不到。
+        """
+
+        with self._lock:
+            resource = self._require_resource(resource_id)
+            metadata = resource.get("source_metadata")
+            metadata = copy.deepcopy(metadata) if isinstance(metadata, dict) else {}
+            limits = {"name": 200, "description": 1000}
+            changed = False
+            for key, value in (("name", name), ("description", description)):
+                if value is None:
+                    continue
+                cleaned = str(value).strip()[: limits[key]]
+                if cleaned:
+                    if metadata.get(key) != cleaned:
+                        metadata[key] = cleaned
+                        changed = True
+                elif key in metadata:
+                    del metadata[key]
+                    changed = True
+            if not changed:
+                return self._snapshot(resource)
+            return self._update_state(
+                resource_id, {"source_metadata": metadata}, "set_display_metadata"
+            )
+
+    def set_runtime_overrides(
+        self,
+        resource_id: str,
+        *,
+        extra_args: Iterable[str] | None = None,
+        env: Mapping[str, str] | None = None,
+        headers: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        roots: Iterable[str] | None = None,
+        startup_timeout_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """记录一条受管 MCP 资源在**这台机器**上怎么跑，不动版本、不动摘要。
+
+        存在的理由：受管 MCP 资源住在资源注册表里，而唯一的编辑入口
+        `PUT /mcp/servers/<id>` 只在 `config.mcp.servers` 里查找，因此它对任何
+        受管服务器都返回 404。最明显的一条是 `mcp:filesystem`——它的描述亲口要求
+        「启用前必须在 args 末尾追加允许访问的目录」，而装完之后没有任何入口能追加。
+
+        为什么不改归档里的 `server.json`：那份声明有 `content_sha256` 护着，
+        它是「目录发布了什么」；一个本机目录白名单是「这台机器允许什么」。
+        混在一起会让每配一个目录都变成一次版本递增 + 一次备份，
+        并且升级时用本机路径覆盖上游的新声明。
+
+        可覆盖的键按构造只有 `RUNTIME_OVERRIDE_KEYS`：`command` / `type` / `url` /
+        `id` 不在其中，那是摘要保护的身份——放开它们等于让「配一个可读目录」
+        可以把 `npx` 换成任意程序、把本地 stdio 换成一个远端地址。
+
+        传 `None` 表示不动那一项；传空集合/空串表示清掉它——
+        「没提供」与「明确清空」是两件事，用同一个值表达会让清空做不到。
+        """
+
+        with self._lock:
+            resource = self._require_resource(resource_id)
+            if resource.get("type") != "mcp":
+                raise ResourceValidationError(
+                    "runtime overrides only apply to MCP resources"
+                )
+            current = resource.get("runtime_overrides")
+            overrides = copy.deepcopy(current) if isinstance(current, dict) else {}
+            changed = False
+
+            for key, value in (("extra_args", extra_args), ("roots", roots)):
+                if value is None:
+                    continue
+                cleaned = [
+                    str(item).strip()
+                    for item in value
+                    if isinstance(item, (str, int, float)) and str(item).strip()
+                ]
+                if cleaned:
+                    if overrides.get(key) != cleaned:
+                        overrides[key] = cleaned
+                        changed = True
+                elif key in overrides:
+                    del overrides[key]
+                    changed = True
+
+            # `env` / `headers` 按键合并：上游后续新增的默认值仍然生效，
+            # 而整片替换会让「补一个变量」把其余变量一起清掉。
+            for key, value in (("env", env), ("headers", headers)):
+                if value is None:
+                    continue
+                if not isinstance(value, Mapping):
+                    raise ResourceValidationError(f"{key} override must be a mapping")
+                merged = dict(overrides.get(key) or {})
+                for name, item in value.items():
+                    text = str(name).strip()
+                    if not text:
+                        continue
+                    if item is None or not str(item):
+                        merged.pop(text, None)
+                        continue
+                    merged[text] = str(item)
+                if merged:
+                    if overrides.get(key) != merged:
+                        overrides[key] = merged
+                        changed = True
+                elif key in overrides:
+                    del overrides[key]
+                    changed = True
+
+            if cwd is not None:
+                text = str(cwd).strip()
+                if text:
+                    if overrides.get("cwd") != text:
+                        overrides["cwd"] = text
+                        changed = True
+                elif "cwd" in overrides:
+                    del overrides["cwd"]
+                    changed = True
+
+            if startup_timeout_ms is not None:
+                # `bool` 是 `int` 的子类，`True` 会被当成 1 通过下界检查。
+                if isinstance(startup_timeout_ms, bool) or not isinstance(
+                    startup_timeout_ms, int
+                ):
+                    raise ResourceValidationError(
+                        "startup_timeout_ms override must be an integer"
+                    )
+                low, high = _STARTUP_TIMEOUT_BOUNDS
+                if not low <= startup_timeout_ms <= high:
+                    raise ResourceValidationError(
+                        f"startup_timeout_ms override must be between {low} and {high}"
+                    )
+                if overrides.get("startup_timeout_ms") != startup_timeout_ms:
+                    overrides["startup_timeout_ms"] = startup_timeout_ms
+                    changed = True
+
+            if not changed:
+                return self._snapshot(resource)
+            return self._update_state(
+                resource_id,
+                {"runtime_overrides": overrides},
+                "set_runtime_overrides",
+            )
+
+    def _snapshot(self, resource: Mapping[str, Any]) -> dict[str, Any]:
+        """把一条注册表记录复制出来，并把显示名与描述提到顶层。
+
+        为什么要投影而不是在安装时把它们**存**成两个顶层字段：注册表里已经有
+        一份（`source_metadata.name`），再存一份就有两份可以各自漂移，
+        而漂移之后没有任何症状——界面显示旧名字，更新检查用新名字，
+        两边都「有值」。这里从同一份数据派生，因此不可能不一致。
+
+        投影而不是让每个调用方自己去 `source_metadata` 里掏，是因为掏这一下
+        每处都得重写：前端过滤谓词、搜索、列表渲染、详情面板。
+        此前正是如此——`resourceFilter.ts` 读 `resource.name`、
+        搜索框写着「搜索名称、ID 或描述」，而记录里从来没有这个字段，
+        于是三个匹配面里有两个从未命中过任何东西，且类型检查发现不了
+        （那两个字段在谓词的入参类型里是可选的）。
+
+        顶层已有非空值时不覆盖：将来若有资源类型真的把名称存成顶层字段，
+        它说的话优先，这里只补空缺。
+        """
+
+        record = copy.deepcopy(dict(resource))
+        metadata = record.get("source_metadata")
+        for key in DISPLAY_METADATA_KEYS:
+            existing = record.get(key)
+            if isinstance(existing, str) and existing.strip():
+                continue
+            value = metadata.get(key) if isinstance(metadata, Mapping) else None
+            record[key] = value.strip() if isinstance(value, str) and value.strip() else None
+        return record
+
+    @staticmethod
+    def _with_display_metadata(
+        base: Mapping[str, Any] | None, *display_sources: Mapping[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """以 `base` 作为来源元数据，显示名按 `display_sources` 的先后取第一个非空。
+
+        为什么需要把这两类键分开处理：`source_metadata` 在升级与回滚时被**整体
+        替换**，那对 `owner` / `repository` / `branch` / `directory` / `catalog_id`
+        是对的——它们说的是「这一版从哪里来、下一版去哪里取」，换了版本就该跟着换。
+
+        但显示名与描述不是来源，它们是用户对这条资源的称呼。整体替换会让
+        「我把它改叫『办公助手』」在下一次升级或回滚时静默消失：新清单往往压根不
+        声明名称（手工打包的 ZIP、`author_document_version(name=None)` 都不写），
+        于是名字变成 `None`、列表回落到显示 ID，而用户会以为是自己的重命名没保存上。
+
+        优先级由调用方按**哪一份更新**来定，两种情形相反：
+
+        - 升级（`update_archive`）：新清单是上游这一版的说法，它明确给了就用它，
+          没给才沿用旧的；
+        - 回滚（`restore_version` / `restore_backup`）：那份存档记录的是**当时**的
+          叫法，比用户之后的重命名更旧。回滚的是内容，不该顺带撤销重命名，
+          所以现存记录优先，存档只用来补空缺。
+
+        任何一份都没有这个键时把它从结果里去掉，而不是留下 `base` 里的旧值——
+        否则「清空名称」这个动作会在下一次升级时被悄悄撤销。
+        """
+
+        result = dict(base) if isinstance(base, Mapping) else {}
+        for key in DISPLAY_METADATA_KEYS:
+            chosen: str | None = None
+            for source in display_sources:
+                if not isinstance(source, Mapping):
+                    continue
+                value = source.get(key)
+                if isinstance(value, str) and value.strip():
+                    chosen = value.strip()
+                    break
+            if chosen is None:
+                result.pop(key, None)
+            else:
+                result[key] = chosen
+        # 结果为空时保持 `None`，与「有一个空字典」区分开：
+        # `None` 的含义是「这条资源没有来源元数据」。
+        if not result:
+            return None if base is None else dict(base or {})
+        return result
 
     def resolve_binding(
         self,
@@ -241,6 +594,165 @@ class ResourceLifecycleService:
             "permissions": list(version_record["permissions"]),
         }
 
+    def author_document(
+        self,
+        *,
+        resource_id: str,
+        resource_type: str,
+        content: str,
+        name: str | None = None,
+        description: str | None = None,
+        version: str = "1.0.0",
+    ) -> dict[str, Any]:
+        """从一段纯文本创建一个新资源，服务器侧完成打包与摘要。
+
+        存在的理由：提示词这个类型的**全部内容就是正文**——没有可执行文件、
+        没有依赖、没有外部来源。而此前唯一的写入路径是上传一个手工打包的 ZIP：
+        用户得自己按八个必填字段写 `manifest.json`、按
+        `path:size:sha256\\n` 逐行拼接再哈希算出 `content_sha256`。
+        要求为一段纯文本走这一遍，等于把这个类型最主要的用法排除在产品之外。
+
+        **不放弃完整性契约。** 这里走的是与目录内置件完全相同的那条路
+        （`_install_builtin` 一直在做同样的事）：服务器算摘要、生成清单、打包、
+        再交给 `install_archive`。因此落盘后的资源与一条内置提示词逐字节同形，
+        `read_entry` 的摘要校验照常生效。给一个能就地改文件的编辑框才是错的——
+        那会让资源在下一次载入时直接失败。
+
+        **只对纯文本类型开放**（见 `TEXT_AUTHORED_TYPES`）。`skill` 的正文是给
+        模型的行为说明，`hook` 是能起进程的命令声明，`mcp` 启用即拉进程；
+        那三类必须继续走打包与显式确认。
+        """
+        resource_type = str(resource_type or "").strip()
+        if resource_type not in TEXT_AUTHORED_TYPES:
+            raise ResourceValidationError(
+                "only prompt, memory, and session resources can be authored as text"
+            )
+        resource_id = str(resource_id or "").strip()
+        if not _ID_PATTERN.fullmatch(resource_id):
+            raise ResourceValidationError("resource ID is invalid")
+        version = str(version or "").strip()
+        if not _SEMVER_PATTERN.fullmatch(version):
+            raise ResourceValidationError("resource version is not semantic versioning")
+        body = str(content or "")
+        if not body.strip():
+            raise ResourceValidationError("resource content must not be empty")
+
+        archive_path = self._build_text_archive(
+            resource_id=resource_id,
+            resource_type=resource_type,
+            version=version,
+            body=body,
+            name=name,
+            description=description,
+        )
+        try:
+            return self.install_archive(archive_path)
+        finally:
+            archive_path.unlink(missing_ok=True)
+
+    def author_document_version(
+        self,
+        resource_id: str,
+        *,
+        content: str,
+        version: str,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """按新版本号写入改过的正文。
+
+        改正文只能走版本递增：`content_sha256` 把清单与文件绑在一起，
+        就地编辑的后果不是「改了没生效」，而是下一次载入直接失败。
+        `update_archive` 负责版本必须递增、自动备份、装完保持停用等待确认。
+
+        类型从**已安装的注册表**读，不接受调用方声明——否则可以先上传一个
+        skill 的 ZIP、再用这条纯文本路径改它的正文，绕过打包与审阅。
+        """
+        existing = self.get_resource(resource_id)
+        resource_type = str(existing.get("type") or "")
+        if resource_type not in TEXT_AUTHORED_TYPES:
+            raise ResourceValidationError(
+                "only prompt, memory, and session resources can be authored as text"
+            )
+        version = str(version or "").strip()
+        if not _SEMVER_PATTERN.fullmatch(version):
+            raise ResourceValidationError("resource version is not semantic versioning")
+        body = str(content or "")
+        if not body.strip():
+            raise ResourceValidationError("resource content must not be empty")
+
+        metadata = existing.get("source_metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        archive_path = self._build_text_archive(
+            resource_id=resource_id,
+            resource_type=resource_type,
+            version=version,
+            body=body,
+            name=name if name is not None else metadata.get("name"),
+            description=(
+                description if description is not None else metadata.get("description")
+            ),
+        )
+        try:
+            return self.update_archive(archive_path, expected_resource_id=resource_id)
+        finally:
+            archive_path.unlink(missing_ok=True)
+
+    def _build_text_archive(
+        self,
+        *,
+        resource_id: str,
+        resource_type: str,
+        version: str,
+        body: str,
+        name: str | None,
+        description: str | None,
+    ) -> Path:
+        """把一段文本打成一个通得过 `_validate_archive` 的归档。
+
+        摘要算法与 `_install_builtin` 逐字节一致（`path:size:sha256\\n` 逐行拼接
+        再取 SHA-256）：两条路径产出的包必须同形，否则「自建的」与「内置的」
+        在校验、备份、恢复上会出现不同行为，而那种差异只在出问题时才显形。
+        """
+        entry = _TEXT_ENTRY_NAMES[resource_type]
+        data = body.encode("utf-8")
+        record = {
+            "path": entry,
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        content_hash = hashlib.sha256(
+            f"{record['path']}:{record['size']}:{record['sha256']}\n".encode("ascii")
+        ).hexdigest()
+        source_metadata: dict[str, Any] = {"provider": "authored"}
+        if name and str(name).strip():
+            source_metadata["name"] = str(name).strip()[:200]
+        if description and str(description).strip():
+            source_metadata["description"] = str(description).strip()[:1000]
+        manifest = {
+            "resource_id": resource_id,
+            "type": resource_type,
+            "version": version,
+            # 来源标明是用户在本机写的，而不是伪装成某个目录条目：
+            # 「这段提示词是谁给的」在排查行为差异时是第一个要回答的问题。
+            "source": f"authored://local/{resource_type}/{resource_id}",
+            "source_metadata": source_metadata,
+            "entry": entry,
+            # 一段文本不需要写权限，更不需要进程执行。
+            "permissions": ["workflow.read"],
+            "files": [record],
+            "content_sha256": content_hash,
+        }
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
+            archive.writestr(entry, data)
+        payload = buffer.getvalue()
+        # 落在受控的 imports 目录里：`install_archive` 会读它，之后由调用方删掉。
+        target = self.imports_path / f"authored-{hashlib.sha256(payload).hexdigest()}.zip"
+        target.write_bytes(payload)
+        return target
+
     def install_archive(self, archive_path: str | Path) -> dict[str, Any]:
         archive_path = Path(archive_path)
         manifest: ResourceManifest | None = None
@@ -289,7 +801,7 @@ class ResourceLifecycleService:
                     self._remove_path(staged_version.parents[1])
                 self._registry = next_registry
                 self._audit(manifest, "install", "success")
-                return copy.deepcopy(resource)
+                return self._snapshot(resource)
         except Exception as error:
             self._audit(manifest, "install", "failure", error)
             raise
@@ -347,7 +859,14 @@ class ResourceLifecycleService:
                         "current_version": manifest.version,
                         "source": self._sanitize_source(manifest.source),
                         "source_key": manifest.source_key,
-                        "source_metadata": copy.deepcopy(manifest.source_metadata),
+                        # 来源整体换成新清单的，但用户改过的显示名带过去——
+                        # 手工打包的 ZIP 往往不声明名称，整体替换会让一次升级
+                        # 静默丢掉用户的重命名，名字回落成 ID。
+                        "source_metadata": self._with_display_metadata(
+                            manifest.source_metadata,
+                            manifest.source_metadata,
+                            current.get("source_metadata"),
+                        ),
                         "entry": manifest.entry,
                         "permissions": list(manifest.permissions),
                         "content_sha256": manifest.content_sha256,
@@ -371,7 +890,7 @@ class ResourceLifecycleService:
                     self._remove_path(staged_version.parents[1])
                 self._registry = next_registry
                 self._audit(manifest, "update", "success")
-                return copy.deepcopy(next_resource)
+                return self._snapshot(next_resource)
         except Exception as error:
             self._audit(manifest, "update", "failure", error)
             raise
@@ -380,7 +899,7 @@ class ResourceLifecycleService:
         with self._lock:
             current = self._require_resource(resource_id)
             if current["enabled"] and not current["confirmation_required"]:
-                return copy.deepcopy(current)
+                return self._snapshot(current)
             if not confirmed:
                 raise ResourceStateError("explicit confirmation is required")
             return self._update_state(
@@ -393,7 +912,7 @@ class ResourceLifecycleService:
         with self._lock:
             current = self._require_resource(resource_id)
             if not current["enabled"]:
-                return copy.deepcopy(current)
+                return self._snapshot(current)
             return self._update_state(resource_id, {"enabled": False}, "disable")
 
     def bind_workflow(self, resource_id: str, workflow_id: str) -> dict[str, Any]:
@@ -450,7 +969,14 @@ class ResourceLifecycleService:
                 "current_version": version_record["version"],
                 "source": version_record["source"],
                 "source_key": version_record.get("source_key"),
-                "source_metadata": copy.deepcopy(version_record.get("source_metadata")),
+                # 回滚的是**内容**，不是用户给这条资源起的名字：
+                # 旧版本记录里存的是当时的显示名，用它覆盖等于让一次回滚
+                # 顺带把重命名也撤销掉，而用户要回退的只是正文。
+                "source_metadata": self._with_display_metadata(
+                    version_record.get("source_metadata"),
+                    current.get("source_metadata"),
+                    version_record.get("source_metadata"),
+                ),
                 "entry": version_record["entry"],
                 "permissions": list(version_record["permissions"]),
                 "content_sha256": version_record["content_sha256"],
@@ -463,7 +989,7 @@ class ResourceLifecycleService:
         """Remove a resource only after preserving its installed versions."""
 
         with self._lock:
-            current = copy.deepcopy(self._require_resource(resource_id))
+            current = self._snapshot(self._require_resource(resource_id))
             if not confirmed:
                 raise ResourceStateError("explicit confirmation is required")
             self._backup_version(resource_id, current["current_version"], reason="before-remove")
@@ -669,11 +1195,36 @@ class ResourceLifecycleService:
     def upsert_source_repository(
         self, owner: str, name: str, branch: str, *, enabled: bool
     ) -> dict[str, Any]:
-        """Persist one repository coordinate in the server registry."""
+        """Persist one repository coordinate in the server registry.
+
+        `discovered_skills` 初始为 `None`（还没发现过），而不是 0。
+        两者必须分开：0 是「发现过、里面一个技能都没有」，也就是「这个仓库配错了」
+        唯一的信号；写成 0 会让每个刚注册的仓库看起来都是配错的。
+
+        重新登记同一个坐标时保留已记下的数：改一次启用状态不该把
+        「识别到 864 个」清成「还没发现过」。
+        """
 
         with self._lock:
             repositories = copy.deepcopy(self._registry.setdefault("repositories", []))
-            item = {"owner": owner, "name": name, "branch": branch, "enabled": enabled}
+            previous = next(
+                (
+                    existing
+                    for existing in repositories
+                    if (existing.get("owner"), existing.get("name"), existing.get("branch"))
+                    == (owner, name, branch)
+                ),
+                None,
+            )
+            item = {
+                "owner": owner,
+                "name": name,
+                "branch": branch,
+                "enabled": enabled,
+                "discovered_skills": (
+                    previous.get("discovered_skills") if previous else None
+                ),
+            }
             repositories = [
                 existing
                 for existing in repositories
@@ -688,9 +1239,91 @@ class ResourceLifecycleService:
             self._registry = next_registry
             return copy.deepcopy(item)
 
+    def record_repository_discovery(
+        self, owner: str, name: str, branch: str, *, count: int
+    ) -> dict[str, Any]:
+        """记下一次发现的技能条数。
+
+        存在的理由：注册一个仓库之后，界面上此前完全看不出它有没有用——
+        一个 owner/name 拼错、分支写错、或者压根不含 `SKILL.md` 的仓库，
+        与一个装着几百个技能的仓库长得一模一样，都只是「已启用」。
+        而 `discover_repository()` 本来就会返回逐条清单，数量是它的自然副产品。
+
+        只改这一个坐标的这一个字段：启用状态不动（记数与启用无关，顺带改它
+        会让一次只读查询变成一次配置写入），其余仓库不动。
+        """
+
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("discovered skill count must be a non-negative integer")
+
+        with self._lock:
+            repositories = copy.deepcopy(self._registry.get("repositories", []))
+            for item in repositories:
+                if (item.get("owner"), item.get("name"), item.get("branch")) == (
+                    owner,
+                    name,
+                    branch,
+                ):
+                    item["discovered_skills"] = count
+                    next_registry = copy.deepcopy(self._registry)
+                    next_registry["repositories"] = repositories
+                    self._write_registry(next_registry)
+                    self._registry = next_registry
+                    return copy.deepcopy(item)
+        # 未登记的仓库不能凭一次记数被凭空创建出来：那会让一个拼错的坐标
+        # 悄悄变成一条注册记录。
+        raise KeyError(f"{owner}/{name}@{branch}")
+
+    def remove_source_repository(
+        self, owner: str, name: str, branch: str
+    ) -> dict[str, Any]:
+        """摘掉一条仓库来源登记。
+
+        为什么「停用」不够：停用表达的是「这个来源暂时不用」，删除表达的是
+        「这个来源是错的 / 不再存在」。没有删除时，一个拼错的坐标
+        （`anthropcis/skills`）会永久留在 `registry.json` 里——它可以被停用，
+        但那条记录再也去不掉，仓库表上永远多一行说明不了任何事的死项，
+        想清掉只能登服务器手改 JSON。
+
+        **只摘来源登记，不动已装资源。** 从那个仓库装过的 Skill 已经在服务器上
+        独立成包（有自己的清单与摘要）。一起删掉等于把「不再从这里拉新的」
+        变成「把装过的都毁掉」，而后者是用户没有要求过的。
+
+        未登记的坐标抛 `KeyError`：静默成功会让一个拼错的删除请求看起来
+        和真的删掉一样。
+        """
+
+        with self._lock:
+            repositories = copy.deepcopy(self._registry.get("repositories", []))
+            removed: dict[str, Any] | None = None
+            remaining: list[dict[str, Any]] = []
+            for item in repositories:
+                if (item.get("owner"), item.get("name"), item.get("branch")) == (
+                    owner,
+                    name,
+                    branch,
+                ):
+                    removed = item
+                    continue
+                remaining.append(item)
+            if removed is None:
+                raise KeyError(f"{owner}/{name}@{branch}")
+            next_registry = copy.deepcopy(self._registry)
+            next_registry["repositories"] = remaining
+            self._write_registry(next_registry)
+            self._registry = next_registry
+            removed.setdefault("discovered_skills", None)
+            return copy.deepcopy(removed)
+
     def list_source_repositories(self) -> list[dict[str, Any]]:
         with self._lock:
-            return copy.deepcopy(self._registry.get("repositories", []))
+            repositories = copy.deepcopy(self._registry.get("repositories", []))
+        # 升级前写入的注册表没有这个字段。补 `None`（还没发现过）而不是 0，
+        # 也不把它做成必填——后者会让升级之后注册表直接载入失败，
+        # 而那时用户手里已经没有可用的仓库清单了。
+        for item in repositories:
+            item.setdefault("discovered_skills", None)
+        return repositories
 
     def set_source_repository_enabled(
         self, owner: str, name: str, branch: str, enabled: bool
@@ -793,6 +1426,10 @@ class ResourceLifecycleService:
                     self._remove_path(final_version)
                 os.replace(staged_version, final_version)
                 restored = copy.deepcopy(resource_snapshot)
+                # 备份里的记录是**当时**那一份，包括当时的显示名。
+                # 恢复的是内容，不该顺带把用户之后的重命名撤销掉——
+                # 那条资源仍然在注册表里时，以它现在的叫法为准。
+                live = self._registry.get("resources", {}).get(resource_id)
                 restored.update(
                     {
                         "resource_id": resource_id,
@@ -800,6 +1437,11 @@ class ResourceLifecycleService:
                         "enabled": False,
                         "confirmation_required": True,
                         "updated_at": self._timestamp(),
+                        "source_metadata": self._with_display_metadata(
+                            restored.get("source_metadata"),
+                            live.get("source_metadata") if isinstance(live, dict) else None,
+                            restored.get("source_metadata"),
+                        ),
                     }
                 )
                 next_registry = copy.deepcopy(self._registry)
@@ -811,7 +1453,7 @@ class ResourceLifecycleService:
                     raise
                 self._registry = next_registry
                 self._audit_record(restored, "restore_backup", "success")
-                return copy.deepcopy(restored)
+                return self._snapshot(restored)
             finally:
                 self._remove_path(stage_root)
 
@@ -944,7 +1586,7 @@ class ResourceLifecycleService:
             raise
         self._registry = next_registry
         self._audit_record(resource, operation, "success")
-        return copy.deepcopy(resource)
+        return self._snapshot(resource)
 
     def _load_registry(self) -> dict[str, Any]:
         if not self.registry_path.exists():

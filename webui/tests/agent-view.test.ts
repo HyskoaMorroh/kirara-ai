@@ -36,7 +36,11 @@ vi.mock('naive-ui', () => {
     NInputNumber: { name: 'NInputNumber', props: ['value'], emits: ['update:value'], template: '<input type="number" v-bind="$attrs" :value="value" @input="$emit(\'update:value\', Number($event.target.value))" />' },
     NSelect: { name: 'NSelect', inheritAttrs: false, props: ['value', 'options', 'inputProps'], emits: ['update:value'], template: '<div class="n-select" v-bind="$attrs"><select v-bind="inputProps" :value="value" @change="$emit(\'update:value\', $event.target.value)"><option v-for="option in options" :key="option.value" :value="option.value">{{ option.label }}</option></select></div>' },
     NSwitch: { name: 'NSwitch', props: ['value'], emits: ['update:value'], template: '<input type="checkbox" v-bind="$attrs" :checked="value" @change="$emit(\'update:value\', $event.target.checked)" />' },
-    NTag: { template: '<span><slot /></span>' }
+    NTag: { template: '<span><slot /></span>' },
+    // 删除 Agent 走确认对话框（`DELETE /agents/<id>` 不可逆）。
+    // 不 stub 它，组件在 setup 里就抛「No "useDialog" export」，
+    // 整个文件一条都跑不起来。
+    useDialog: () => ({ warning: () => {} })
   }
 })
 

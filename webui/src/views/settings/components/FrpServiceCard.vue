@@ -6,6 +6,7 @@ import {
   NButton,
   NForm,
   NFormItem,
+  NIcon,
   NInput,
   NInputNumber,
   NSpin,

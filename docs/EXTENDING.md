@@ -1403,7 +1403,7 @@ CLI 自动更新器），不是「向某个模型上游发请求时的参数」�
 | 禁用自动升级 | CLI 自更新器的禁用环境变量 | `update.disable_auto_check` | 启动时与每次打开 WebUI 时都不再探测 PyPI / npm；手动检查照常 |
 | 隐藏 AI 署名 | commit / PR 署名尾注置空（不写 `Co-Authored-By`） | `LLMBackendConfig.hide_ai_attribution` | 在**投递给用户的回复文本**上移除 AI 自我署名 |
 | Teammates 模式 | CLI 多 agent 协作的实验开关 | `AgentDefinition.teammate_agent_ids` | 模型获得 `delegate_to_<id>` 工具，可把子任务交给队友 |
-| 整流器 | 两个 thinking 整流模块 + 四个整流开关 | `LLMBackendConfig.rectifier_enabled` 等四项 → `LLMChatRequest.rectifier` | 上游拒绝时按白名单改一处并重试一次，见 9.4 |
+| 整流器 | 两个 thinking 整流模块 + 四个整流开关 | `LLMBackendConfig.rectifier_enabled` 等五项 → `LLMChatRequest.rectifier` | 上游拒绝时按白名单改一处并重试一次，规则按请求体形状分派（`messages` / Gemini / Ollama），见 9.4 |
 
 后两项**不是同名字段的照搬，而是同一用户意图在本项目里的确切落点**：
 
@@ -1529,19 +1529,22 @@ PyPI 与 npm 两次超时。开关承诺的是「不去外网」，那么每一�
 
 ### 9.5 整流器：上游拒绝之后改一处再重试一次
 
-配置位置：WebUI「模型与 Agent → 模型 → 编辑供应商」，四个开关
-（`请求整流` 总开关 + `修正思考签名` / `修正思考预算` / `图片降级`）。默认全开。
+配置位置：WebUI「模型与 Agent → 模型 → 编辑供应商」，五个开关
+（`请求整流` 总开关 + `修正思考签名` / `修正思考预算` / `图片降级` /
+`去掉不支持的推理强度`）。默认全开。
 
 它修的不是「我们猜错了参数」，而是**同一个 API 在不同模型上约束不同**这一类
 必然失败：
 
 | 情形 | 上游报什么 | 改哪一处 |
 | --- | --- | --- |
-| 思考预算与最大输出长度关系不对 | `budget_tokens` 相关约束 | 预算设为 32000，必要时把 `max_tokens` 提到 64000 |
+| 思考预算与最大输出长度关系不对 | `budget_tokens` / `thinkingBudget` 相关约束 | 按各家的预算位改：Anthropic 形状把预算设为 32000 并在必要时把 `max_tokens` 提到 64000；Gemini 形状收进 `generationConfig.thinkingConfig.thinkingBudget` 并保证 `maxOutputTokens` 严格大于它 |
 | 多轮对话回传的思考签名已失效（换了模型或供应商） | `Invalid 'signature' in 'thinking' block` | 移除思考块与残留 `signature` 字段，正文不动 |
-| 模型不支持图片 | `does not support image` 一类措辞 | 图片块换成可见占位文本 `[Unsupported Image]` |
+| 模型不支持图片 | `does not support image` 一类措辞 | 图片块换成可见占位文本 `[Unsupported Image]`；Gemini 换 `contents[*].parts` 里的 `inline_data`，Ollama 删并列的 `images` 数组并把占位追加进纯文本 `content` |
+| 模型压根不支持思考 | `thinking is not supported` 一类措辞 | 去掉整个思考配置：Gemini 删 `generationConfig.thinkingConfig`，Ollama 删顶层 `think` |
+| 上游不认识 `reasoning_effort` | `Unrecognized request argument` 一类措辞 | 删掉该字段，其余一个不动 |
 
-三者的共同点是**改一处就能成功，不改就必然失败**，而原因既不在错误里说清，
+它们的共同点是**改一处就能成功，不改就必然失败**，而原因既不在错误里说清，
 也不是用户能自己改的。没有整流器时的表现是一次硬失败：用户看到「请求失败」，
 无从判断是模型不行、网络不行，还是一个参数关系不对。
 
@@ -1554,6 +1557,14 @@ PyPI 与 npm 两次超时。开关承诺的是「不去外网」，那么每一�
    无关的字段——真正的原因（密钥不对）反而被掩盖。
 3. **每类只改一次。** 改完重试仍失败就抛原始错误。反复整流会把「参数错」
    变成「一直在转」，而后者更难查：日志里全是重试，没有一条说明原因。
+4. **规则按请求体形状分派。** `detect_payload_shape()` 判断这是 `messages`
+   （OpenAI / Claude）、`gemini`（`contents` + `parts`）还是 `ollama`
+   （`messages` + 并列 `options`），再取对应那套规则。
+   把一家的字段名写进另一家更糟：往 Gemini 注入 Anthropic 的 `thinking` /
+   `max_tokens` 会让它直接 400 INVALID_ARGUMENT，而真正的预算位没被改——
+   一次「整流」把可重试的错误变成必然失败。
+   某家没有对应位置的规则在那家**不出现**（Gemini 不回传思考签名、
+   Ollama 的思考只有开关没有预算），而不是空转出一个「试过了但没改成」。
 
 改了什么会记进日志（`RectifyRecord`）。静默改写请求是最难排查的一类行为——
 用户发出的与上游收到的不是同一个请求，而没有任何地方说明这件事。
@@ -1570,7 +1581,10 @@ P2，一次本可成功的故障转移变成两连败。
 覆盖测试：`tests/llm/test_rectifier.py`（判定与改写，含「命中错误但无可改之处
 不算整流」）、`tests/llm/test_rectifier_config.py`（配置到运行时的映射、
 per-provider 下发）、`tests/llm/test_rectifier_integration.py`
-（适配器层真的重试，非流式与流式两条路径都覆盖）。
+（适配器层真的重试，非流式与流式两条路径都覆盖）、
+`tests/llm/test_rectifier_payload_shapes.py`（形状识别与各家规则，
+含「不得注入别家顶层字段」）、`tests/llm/test_rectifier_adapter_coverage.py`
+（四家自建请求体的适配器两条路径都不能悄悄退出整流）。
 
 ---
 

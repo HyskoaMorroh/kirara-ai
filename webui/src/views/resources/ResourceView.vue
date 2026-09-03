@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   NAlert,
   NButton,
@@ -13,6 +13,8 @@ import {
   NFormItem,
   NIcon,
   NInput,
+  NList,
+  NListItem,
   NModal,
   NPagination,
   NSelect,
@@ -28,13 +30,16 @@ import {
   type UploadFileInfo
 } from 'naive-ui'
 import {
+  AddOutline,
   ArchiveOutline,
   BuildOutline,
   CheckmarkCircleOutline,
   CloudDownloadOutline,
   CloudUploadOutline,
+  CreateOutline,
   EyeOutline,
   GitBranchOutline,
+  OptionsOutline,
   PeopleOutline,
   RefreshOutline,
   SearchOutline,
@@ -44,6 +49,8 @@ import {
 import { useRoute } from 'vue-router'
 import {
   addRepository,
+  authorResourceDocument,
+  authorResourceDocumentVersion,
   bindResourceWorkflow,
   cancelDependencyTask,
   checkResourceUpdates,
@@ -72,7 +79,9 @@ import {
   retryDependencyTask,
   searchResourceCatalog,
   searchSkills,
+  removeRepository,
   setRepositoryEnabled,
+  setResourceRuntime,
   updateRemoteResource,
   updateResource
 } from '@/api/resource'
@@ -88,12 +97,20 @@ import type {
   ResourceBackup,
   ResourceContent,
   ResourceRepository,
+  ResourceRuntimeOverrides,
   ResourceType,
   ResourceUpdateCheck,
   SystemDependency
 } from '@/api/resource'
 import type { AgentSummary } from '@/api/agent'
 import { RESOURCE_TYPE_ORDER, countResourcesByType, matchesResourceKeyword } from './resourceFilter'
+import { authoringFormError, suggestNextVersion } from './documentAuthoring'
+import { entryDigestMatches as compareEntryDigest } from './entryDigest'
+// 待安装包的三个显示判断（能不能点、按钮写什么、显示哪种标签）由
+// `resource-staged-archives.test.ts` 调用函数验证：三态两两不同，
+// 混淆任意一对都会误导（可升级的包被显示成已安装 → 用户不会去点）。
+import { canInstallStaged, stagedActionLabel, stagedStatus } from './stagedArchives'
+import { parseRepositoryCoordinate } from './repositoryCoordinate'
 
 type ResourceFilter = ResourceType | 'all'
 type PanelName =
@@ -103,6 +120,10 @@ type PanelName =
   | 'backups'
   | 'relations'
   | 'dependencies'
+  // 从纯文本创建 / 编辑一条提示词、记忆或会话。
+  | 'authoring'
+  // 配置一条受管 MCP 资源在这台机器上怎么跑（目录、环境变量、超时）。
+  | 'runtime'
   | null
 
 const message = useMessage()
@@ -122,7 +143,15 @@ const auditLoading = ref(false)
 const auditFilters = ref({ correlationId: '', component: '', outcome: '' })
 const repositories = ref<ResourceRepository[]>([])
 const repositoryLoading = ref(false)
-const repositoryForm = ref({ owner: '', name: '', branch: 'main' })
+/**
+ * 登记仓库的表单。
+ *
+ * `coordinate` 接受粘贴进来的任意形态（`owner/name`、仓库主页 URL、
+ * `git clone` 的地址、带 `/tree/<branch>` 的深链）；`branch` 只在坐标里没带分支
+ * 时才生效。此前这里是三个独立输入框，而用户手上拿到的东西一定是一个 URL——
+ * 要求他拆成三段手抄，正是拼错坐标的来源。
+ */
+const repositoryForm = ref({ coordinate: '', branch: '' })
 const remoteQuery = ref('')
 const remoteType = ref<Exclude<ResourceType, 'session'> | 'all'>('all')
 const remoteResults = ref<CatalogItem[]>([])
@@ -191,15 +220,38 @@ const catalogTypeOptions = [
 ]
 
 /**
- * 关键词在前端过滤，类型走服务端。
- * 已经取回来的列表不该为了搜一个词再请求一次——那会让「边打边看」变成每敲一个字符发一次请求。
+ * 关键词：三个元数据面（名称 / ID / 描述）在前端即时过滤，**正文面走服务器**。
+ *
+ * 为什么不能全放前端：`GET /resources` 不返回正文。正文可能有几十 KB，
+ * 且提示词正文里是用户写进去的规则——无条件塞进每一次列表响应，等于让一个
+ * 只想看清单的请求把全部正文都取回浏览器。所以正文命中只有服务器算得出。
+ *
+ * 为什么不干脆全放服务器：那会让每敲一个字符都等一次网络往返。
+ * 服务器返回的是「元数据命中 ∪ 正文命中」，是前端结果的**超集**，
+ * 因此在请求回来之前先按元数据过滤，只会「少显示几行」而不会显示错的行——
+ * 请求回来后正文命中的那几行补上，不会有行消失。
  */
 const keyword = ref('')
-const visibleResources = computed(() =>
-  resources.value.filter((item) => matchesResourceKeyword(item, keyword.value))
+/** 服务器算出的命中 ID（含正文面）。`null` = 还没搜 / 已清空。 */
+const bodyMatchIds = ref<Set<string> | null>(null)
+const searchingBody = ref(false)
+const visibleResources = computed(() => {
+  const needle = keyword.value.trim()
+  if (!needle) return resources.value
+  const ids = bodyMatchIds.value
+  return resources.value.filter(
+    (item) => matchesResourceKeyword(item, needle) || ids?.has(item.resource_id) === true
+  )
+})
+/**
+ * 滤空 ≠ 未安装，也 ≠ 「正文还在搜」。
+ *
+ * 正文请求在途时不报「没有匹配」：那时结论还没出来，
+ * 先说没有再补上几行，比晚半秒给出答案更容易被读成 bug。
+ */
+const filteredEmpty = computed(
+  () => resources.value.length > 0 && visibleResources.value.length === 0 && !searchingBody.value
 )
-/** 装了资源但被关键词滤空——和「一个资源都没装」是两种处境，空状态文案不能共用。 */
-const filteredEmpty = computed(() => resources.value.length > 0 && visibleResources.value.length === 0)
 const hasResources = computed(() => visibleResources.value.length > 0)
 const isPanelOpen = computed(() => panel.value !== null)
 
@@ -283,7 +335,52 @@ const loadResources = async () => {
 const changeType = async (value: ResourceFilter) => {
   resourceType.value = value
   await loadResources()
+  // 类型换了，正文命中是上一类的——不重搜就会把别的类型的 ID 留在集合里。
+  runBodySearch()
 }
+
+/**
+ * 服务器侧正文搜索，带节流。
+ *
+ * 节流而不是每次输入都发：正文命中要在服务器上逐条读文件并校验摘要，
+ * 每敲一个字符发一次会让「边打边看」变成一串重复的全文件哈希。
+ * 300ms 是「停手」与「还在打」的分界——比它短就是在为半个词做全文检索。
+ *
+ * 请求乱序会让旧关键词的结果覆盖新关键词的：`token` 只让最后一次生效。
+ */
+let bodySearchTimer: ReturnType<typeof setTimeout> | null = null
+let bodySearchToken = 0
+const runBodySearch = () => {
+  if (bodySearchTimer !== null) clearTimeout(bodySearchTimer)
+  const needle = keyword.value.trim()
+  if (!needle) {
+    // 清空搜索框时立刻丢掉正文命中，不留一份属于上一个关键词的集合。
+    bodyMatchIds.value = null
+    searchingBody.value = false
+    bodySearchToken += 1
+    return
+  }
+  searchingBody.value = true
+  const token = ++bodySearchToken
+  bodySearchTimer = setTimeout(async () => {
+    try {
+      const matched = await listResources(
+        resourceType.value === 'all' ? undefined : resourceType.value,
+        needle
+      )
+      if (token !== bodySearchToken) return
+      bodyMatchIds.value = new Set(matched.map((item) => item.resource_id))
+    } catch {
+      // 正文搜索失败只丢正文这一面：元数据过滤仍然可用，
+      // 让整个列表因为一次搜索失败而空掉才是更糟的结果。
+      if (token === bodySearchToken) bodyMatchIds.value = null
+    } finally {
+      if (token === bodySearchToken) searchingBody.value = false
+    }
+  }, 300)
+}
+
+watch(keyword, () => runBodySearch())
 
 const reload = async () => {
   await loadResources()
@@ -365,6 +462,247 @@ const disable = (resource: ManagedResource) => {
       }
     }
   })
+}
+
+/**
+ * 从纯文本创建 / 编辑一条提示词、记忆或会话。
+ *
+ * 参考界面上「提示词管理」有一个「+ 添加提示词」按钮：填名称、描述、正文，保存。
+ * 本项目此前唯一的写入路径是上传一个手工打包的 ZIP——用户得自己写
+ * `manifest.json` 的八个必填字段、手算 `content_sha256`。而提示词这个类型的
+ * 全部内容就是正文，要求为一段纯文本走那一遍等于把它最主要的用法排除在产品之外。
+ *
+ * 打包与摘要在服务器侧完成（`POST /resources/documents`），落盘后与一条内置
+ * 提示词同形。**不提供就地编辑**：`content_sha256` 把清单与文件绑在一起，
+ * 就地改的后果不是「改了没生效」而是下一次载入直接失败——所以改正文走版本递增。
+ */
+const AUTHORABLE_TYPES = ['prompt', 'memory', 'session'] as const
+type AuthorableType = (typeof AUTHORABLE_TYPES)[number]
+
+const authoringTypeOptions = AUTHORABLE_TYPES.map((value) => ({
+  label: typeLabel(value),
+  value
+}))
+
+const authoringForm = ref({
+  resource_id: '',
+  type: 'prompt' as AuthorableType,
+  name: '',
+  description: '',
+  content: '',
+  version: '1.0.0'
+})
+/** 非空表示在改一条已装资源的正文；此时 id 与类型不可改。 */
+const authoringTarget = ref<ManagedResource | null>(null)
+const authoringSaving = ref(false)
+
+/** 只有纯文本类型能走这条路：skill 的正文会被当成行为说明执行，hook 能起进程。 */
+const isAuthorable = (resource: ManagedResource) =>
+  (AUTHORABLE_TYPES as readonly string[]).includes(resource.type)
+
+/**
+ * 受管 MCP 资源的运行时配置。
+ *
+ * 此前受管 MCP 资源完全没有配置入口：`PUT /mcp/servers/<id>` 只在
+ * `config.mcp.servers` 里查，而受管资源住在资源注册表里——那条路由对它们一律
+ * 返回 404。最明显的一条是 `mcp:filesystem`，它的描述要求「启用前必须在 args
+ * 末尾追加允许访问的目录」，而在产品里没有任何地方能追加。
+ *
+ * 表单只覆盖「这台机器怎么跑它」那几个键。`command` / `args` / `type` / `url`
+ * 是摘要保护的身份，后端会 400——这里连输入框都不给，避免让人以为可以改。
+ */
+const runtimeTarget = ref<ManagedResource | null>(null)
+const runtimeSaving = ref(false)
+/** 目录与环境变量在表单里是可增删的行，不是一段要用户自己拼的 JSON。 */
+const runtimeForm = ref({
+  extraArgs: [] as string[],
+  env: [] as { key: string; value: string }[],
+  cwd: '',
+  roots: [] as string[],
+  startupTimeoutMs: ''
+})
+
+/** 只有 mcp 资源有传输配置可言。 */
+const isRuntimeConfigurable = (resource: ManagedResource) => resource.type === 'mcp'
+
+const openRuntimePanel = (resource: ManagedResource) => {
+  runtimeTarget.value = resource
+  const overrides = resource.runtime_overrides || {}
+  runtimeForm.value = {
+    extraArgs: [...(overrides.extra_args || [])],
+    // 值是掩码（`********`）。原样显示、原样比较：提交时只发改过的键，
+    // 把掩码当真值回传会把凭据写成八个星号。
+    env: Object.entries(overrides.env || {}).map(([key, value]) => ({ key, value })),
+    cwd: overrides.cwd || '',
+    roots: [...(overrides.roots || [])],
+    startupTimeoutMs: overrides.startup_timeout_ms ? String(overrides.startup_timeout_ms) : ''
+  }
+  panel.value = 'runtime'
+}
+
+const addRuntimeArg = () => runtimeForm.value.extraArgs.push('')
+const removeRuntimeArg = (index: number) => runtimeForm.value.extraArgs.splice(index, 1)
+const addRuntimeRoot = () => runtimeForm.value.roots.push('')
+const removeRuntimeRoot = (index: number) => runtimeForm.value.roots.splice(index, 1)
+const addRuntimeEnv = () => runtimeForm.value.env.push({ key: '', value: '' })
+const removeRuntimeEnv = (index: number) => runtimeForm.value.env.splice(index, 1)
+
+/**
+ * 超时的边界与后端逐字一致（1000–600000 毫秒）。
+ *
+ * 在这里拦下而不是等后端 400：一个越界值提交上去，返回的是英文校验串，
+ * 而用户看不出自己填的哪个字段越界。
+ */
+const runtimeError = computed(() => {
+  const raw = runtimeForm.value.startupTimeoutMs.trim()
+  if (!raw) return ''
+  if (!/^\d+$/.test(raw)) return '启动超时需为整数毫秒'
+  const value = Number(raw)
+  if (value < 1000 || value > 600000) return '启动超时需在 1000–600000 毫秒之间'
+  return ''
+})
+
+const saveRuntimeOverrides = async () => {
+  if (runtimeError.value) {
+    message.error(runtimeError.value)
+    return
+  }
+  const target = runtimeTarget.value
+  if (!target) return
+  const form = runtimeForm.value
+  const stored = target.runtime_overrides || {}
+  // 空数组与空串是「清空」，与后端约定一致；不提交的键才是「不动」。
+  const payload: ResourceRuntimeOverrides = {
+    extra_args: form.extraArgs.map((item) => item.trim()).filter(Boolean),
+    roots: form.roots.map((item) => item.trim()).filter(Boolean),
+    cwd: form.cwd.trim(),
+    startup_timeout_ms: form.startupTimeoutMs.trim()
+      ? Number(form.startupTimeoutMs.trim())
+      : undefined
+  }
+  // 环境变量只发改过的键：读回来的值是掩码，回传等于把凭据写成掩码本身。
+  const env: Record<string, string> = {}
+  for (const { key, value } of form.env) {
+    const name = key.trim()
+    if (!name) continue
+    if (stored.env && stored.env[name] === value) continue
+    env[name] = value
+  }
+  // 被删掉的键要显式清空（后端按键合并，不发就是保留）。
+  for (const name of Object.keys(stored.env || {})) {
+    if (!form.env.some((item) => item.key.trim() === name)) env[name] = ''
+  }
+  if (Object.keys(env).length > 0) payload.env = env
+  if (payload.startup_timeout_ms === undefined) delete payload.startup_timeout_ms
+
+  runtimeSaving.value = true
+  try {
+    await run(() => setResourceRuntime(target.resource_id, payload), '保存运行时配置失败')
+    message.success('已保存。已启用的服务器会按新配置重连')
+    panel.value = null
+    await loadResources()
+  } finally {
+    runtimeSaving.value = false
+  }
+}
+
+const openAuthoring = () => {
+  authoringTarget.value = null
+  authoringForm.value = {
+    resource_id: '',
+    type: 'prompt',
+    name: '',
+    description: '',
+    content: '',
+    version: '1.0.0'
+  }
+  panel.value = 'authoring'
+}
+
+/**
+ * 打开「改正文」。
+ *
+ * 预填当前正文而不是留空：这是编辑而不是重写，空白输入框会让用户以为旧内容
+ * 已经没了。版本号预填一个**递增**的建议值——后端要求严格递增，
+ * 让用户自己猜下一个版本号是把一个必然的约束留给他去撞。
+ *
+ * 名称与描述同样预填。它们此前留空，而后端把空值当作「不改」（回落到已存的
+ * 元数据），所以行为上不会丢——但界面上看不出这条资源现在叫什么，
+ * 想改名就得先去详情面板抄一遍。
+ */
+const openAuthoringForEdit = async (resource: ManagedResource) => {
+  authoringTarget.value = resource
+  authoringForm.value = {
+    resource_id: resource.resource_id,
+    type: resource.type as AuthorableType,
+    name: resource.name || '',
+    description: resource.description || '',
+    content: '',
+    version: suggestNextVersion(resource.current_version)
+  }
+  panel.value = 'authoring'
+  try {
+    const detail = await getResourceContent(resource.resource_id, resource.current_version)
+    authoringForm.value.content = detail.content
+  } catch (error) {
+    message.error(
+      `读取当前正文失败：${error instanceof Error ? error.message : '未知错误'}`
+    )
+  }
+}
+
+/**
+ * 校验与版本建议放在 `documentAuthoring.ts` 里，由那份测试直接调用。
+ *
+ * 曾经这两条正则写在这里，且都丢了反斜杠（`/^d+.d+.d+/`）：合法正则、不报错、
+ * 永远匹配不上，于是 `authoringError` 对任何输入都返回「版本号需形如 1.0.0」，
+ * 整条「从纯文本创建提示词」在界面上完全不可用——而当时的测试只 grep 源码字符串，
+ * 看得见那一行、看不见它匹配不上任何东西。
+ */
+const authoringError = computed(() =>
+  authoringFormError(authoringForm.value, { editing: authoringTarget.value !== null })
+)
+
+const saveAuthoredDocument = async () => {
+  if (authoringError.value) {
+    message.error(authoringError.value)
+    return
+  }
+  const form = authoringForm.value
+  authoringSaving.value = true
+  try {
+    if (authoringTarget.value) {
+      await run(
+        () =>
+          authorResourceDocumentVersion(authoringTarget.value!.resource_id, {
+            content: form.content,
+            version: form.version.trim(),
+            name: form.name.trim() || undefined,
+            description: form.description.trim() || undefined
+          }),
+        '保存新版本失败'
+      )
+      message.success('已保存为新版本，请确认后再启用')
+    } else {
+      await run(
+        () =>
+          authorResourceDocument({
+            resource_id: form.resource_id.trim(),
+            type: form.type,
+            content: form.content,
+            name: form.name.trim() || undefined,
+            description: form.description.trim() || undefined,
+            version: form.version.trim()
+          }),
+        '创建资源失败'
+      )
+      message.success('已创建，请确认后再启用')
+    }
+    panel.value = null
+    await loadResources()
+  } finally {
+    authoringSaving.value = false
+  }
 }
 
 const openDetail = (resource: ManagedResource) => {
@@ -477,15 +815,17 @@ const loadEntryContent = async (resource: ManagedResource, version?: string) => 
   }
 }
 
-/** 正文与运行时载入的是否同一份：摘要一致才成立，不靠信任。 */
-const entryDigestMatches = computed(() => {
-  const current = entryContent.value
-  if (!current || !selectedResource.value) return false
-  const record = selectedResource.value.versions.find(
-    (item) => item.version === current.version
-  )
-  return !!record && record.content_sha256 === current.content_sha256
-})
+/**
+ * 正文与运行时载入的是否同一份：摘要一致才成立，不靠信任。
+ *
+ * 比较本身在 `entryDigest.ts` 里，由那份测试调用验证。此前这个论断只被
+ * `toContain('entryDigestMatches')` 覆盖——那只证明这个名字存在，
+ * 而判断错的两个方向都很糟：说匹配时用户以为看到的就是运行时那份（文件可能已被
+ * 篡改），说不匹配时一个完好的资源被显示成可疑。
+ */
+const entryDigestMatches = computed(() =>
+  compareEntryDigest(entryContent.value, selectedResource.value?.versions)
+)
 
 /** 服务器 `resources/imports` 目录里已经放好的包。 */
 const stagedArchives = ref<ImportableArchive[]>([])
@@ -622,13 +962,18 @@ const loadRepositories = async () => {
 
 const saveRepository = async () => {
   const form = repositoryForm.value
-  if (!form.owner.trim() || !form.name.trim()) {
-    message.warning('请填写仓库所有者和仓库名称')
+  const parsed = parseRepositoryCoordinate(form.coordinate)
+  if (parsed === null) {
+    // 说清接受什么形态，而不是只说「格式不对」：后者让人无从改。
+    message.warning('请填写 owner/name 或 GitHub 仓库地址')
     return
   }
-  await run(() => addRepository(form.owner.trim(), form.name.trim(), form.branch.trim() || 'main'), '登记仓库失败')
+  // 坐标里带的分支优先（用户粘的是 `/tree/master`，他要的就是那个分支）；
+  // 没带时用分支输入框，仍为空则由后端按 `main` 处理。
+  const branch = parsed.branch || form.branch.trim() || 'main'
+  await run(() => addRepository(parsed.owner, parsed.name, branch), '登记仓库失败')
   message.success('仓库来源已登记')
-  repositoryForm.value = { owner: '', name: '', branch: 'main' }
+  repositoryForm.value = { coordinate: '', branch: '' }
   await loadRepositories()
 }
 
@@ -638,6 +983,34 @@ const toggleRepository = async (repository: ResourceRepository) => {
     '更新仓库状态失败'
   )
   await loadRepositories()
+}
+
+/**
+ * 摘掉一条仓库来源登记。
+ *
+ * 与「停用」是两件事：停用表达「这个来源暂时不用」，删除表达「这个来源是错的 /
+ * 不再存在」。没有删除时，一个拼错的坐标会永久留在仓库表上——可以停用，
+ * 但那条死项再也去不掉。
+ *
+ * 确认文案必须说清**不会**动已装资源：那是用户在按这个按钮之前最想知道的事，
+ * 而「删除仓库」这四个字读起来像会一起删掉从它装过的东西。
+ */
+const removeRepositoryRow = (repository: ResourceRepository) => {
+  ask({
+    title: `确认移除 ${repository.owner}/${repository.name}`,
+    content:
+      `移除后将不再从这个仓库发现或安装新的 Skill（分支 ${repository.branch}）。` +
+      '已经装好的资源不受影响，它们在服务器上是独立的包。',
+    positiveText: '移除',
+    onPositiveClick: async () => {
+      await run(
+        () => removeRepository(repository.owner, repository.name, repository.branch),
+        '移除仓库失败'
+      )
+      message.success('仓库来源已移除')
+      await loadRepositories()
+    }
+  })
 }
 
 /**
@@ -709,6 +1082,27 @@ const repositoryColumns = computed(() => [
   },
   { title: '分支', key: 'branch' },
   {
+    // 「识别到几个技能」是判断一个仓库配对没配对的唯一线索：坐标拼错、分支写错、
+    // 或压根不含 SKILL.md 的仓库，与装着几百个技能的仓库此前长得一模一样，
+    // 都只是「已启用」。要点进「发现」才知道，而那要出一次网下载整个归档。
+    title: '技能数',
+    key: 'discovered_skills',
+    render: (row: ResourceRepository) =>
+      row.discovered_skills === null || row.discovered_skills === undefined
+        // 「还没发现过」与「发现过、里面是 0 个」必须分开：后者才是配错的信号。
+        ? h(NTag, { size: 'small', bordered: false }, { default: () => '未发现过' })
+        : h(
+            NTag,
+            {
+              size: 'small',
+              bordered: false,
+              type: row.discovered_skills === 0 ? 'warning' : 'success',
+              'data-test': 'repository-skill-count'
+            },
+            { default: () => `识别到 ${row.discovered_skills} 个` }
+          )
+  },
+  {
     title: '状态',
     key: 'enabled',
     render: (row: ResourceRepository) =>
@@ -740,6 +1134,18 @@ const repositoryColumns = computed(() => [
             NButton,
             { size: 'small', onClick: () => toggleRepository(row) },
             { default: () => (row.enabled ? '停用' : '启用') }
+          ),
+          h(
+            NButton,
+            {
+              size: 'small',
+              type: 'error',
+              quaternary: true,
+              'data-test': 'remove-repository',
+              'aria-label': `移除仓库 ${row.owner}/${row.name}`,
+              onClick: () => removeRepositoryRow(row)
+            },
+            { default: () => '移除' }
           )
         ]
       })
@@ -1172,8 +1578,20 @@ const resourceColumns: DataTableColumns<ManagedResource> = [
     width: 240,
     render: (row) =>
       h('div', { class: 'resource-name' }, [
-        h('strong', row.resource_id),
-        h('small', `${typeLabel(row.type)} · ${sourceLabel(row)}`)
+        // 有显示名时把它放第一行，ID 降到第二行——但**不省略 ID**：
+        // 每个确认框、每条审计记录都按 ID 称呼这条资源，
+        // 界面上只给名字会让「确认删除 prompt.office-research」对不上任何一行。
+        h('strong', { title: row.name || row.resource_id }, row.name || row.resource_id),
+        h(
+          'small',
+          { title: row.resource_id },
+          row.name
+            ? `${row.resource_id} · ${typeLabel(row.type)} · ${sourceLabel(row)}`
+            : `${typeLabel(row.type)} · ${sourceLabel(row)}`
+        ),
+        row.description
+          ? h('small', { class: 'resource-description', title: row.description }, row.description)
+          : null
       ])
   },
   {
@@ -1269,6 +1687,36 @@ const resourceColumns: DataTableColumns<ManagedResource> = [
         default: () => [
           h(NTooltip, {}, { trigger: () => h(NButton, { quaternary: true, circle: true, 'aria-label': '查看资源', onClick: () => openDetail(row) }, { icon: () => h(NIcon, { 'aria-hidden': 'true' }, { default: () => h(EyeOutline) }) }), default: () => '查看资源详情' }),
           h(NTooltip, {}, { trigger: () => h(NButton, { quaternary: true, circle: true, 'aria-label': '更新资源', onClick: () => openUpdate(row) }, { icon: () => h(NIcon, { 'aria-hidden': 'true' }, { default: () => h(RefreshOutline) }) }), default: () => '打开更新入口' }),
+          // 「编辑正文」只对纯文本类型出现：skill 的正文是给模型的行为说明，
+          // hook 是能起进程的命令声明，那两类的正文不该从一个输入框改。
+          // 它保存的是一个**新版本**而不是就地改文件——后者会让下一次载入直接失败。
+          isAuthorable(row)
+            ? h(NTooltip, {}, {
+                trigger: () => h(NButton, {
+                  quaternary: true,
+                  circle: true,
+                  'aria-label': '编辑正文',
+                  'data-test': 'edit-document',
+                  onClick: () => void openAuthoringForEdit(row)
+                }, { icon: () => h(NIcon, { 'aria-hidden': 'true' }, { default: () => h(CreateOutline) }) }),
+                default: () => '编辑正文并保存为新版本'
+              })
+            : null,
+          // 「运行时配置」只对 mcp 出现：其余类型没有传输配置可言。
+          // 这是受管 MCP 资源唯一的配置入口——`PUT /mcp/servers/<id>` 只认
+          // `config.mcp.servers` 里的条目，对受管资源一律 404。
+          isRuntimeConfigurable(row)
+            ? h(NTooltip, {}, {
+                trigger: () => h(NButton, {
+                  quaternary: true,
+                  circle: true,
+                  'aria-label': '运行时配置',
+                  'data-test': 'edit-runtime',
+                  onClick: () => openRuntimePanel(row)
+                }, { icon: () => h(NIcon, { 'aria-hidden': 'true' }, { default: () => h(OptionsOutline) }) }),
+                default: () => '配置可访问目录、环境变量与启动超时'
+              })
+            : null,
           h(NButton, {
             type: row.enabled ? 'warning' : 'primary',
             size: 'small',
@@ -1451,6 +1899,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('resize', updateDependencyLayout)
   clearDependencyPolling()
+  // 页面已经走了，节流中的那一次搜索没有接收方。
+  if (bodySearchTimer !== null) clearTimeout(bodySearchTimer)
 })
 </script>
 
@@ -1466,6 +1916,12 @@ onBeforeUnmount(() => {
         <n-button secondary @click="reload"><template #icon><n-icon aria-hidden="true"><refresh-outline /></n-icon></template>刷新</n-button>
         <n-button secondary @click="openPanel('backups')"><template #icon><n-icon aria-hidden="true"><archive-outline /></n-icon></template>备份与恢复</n-button>
         <n-button secondary aria-label="系统依赖" @click="openPanel('dependencies')"><template #icon><n-icon aria-hidden="true"><build-outline /></n-icon></template>系统依赖</n-button>
+        <!--
+          「新建提示词」与「发现并安装」是两件不同的事：后者从外部拿一个现成的包，
+          前者写自己的内容。提示词这个类型的全部内容就是正文，没有可执行文件、
+          没有依赖，因此它是唯一能从一个输入框创建的类型（连同记忆与会话）。
+        -->
+        <n-button secondary data-test="author-document" aria-label="新建提示词、记忆或会话" @click="openAuthoring"><template #icon><n-icon aria-hidden="true"><add-outline /></n-icon></template>新建提示词</n-button>
         <n-button type="primary" aria-label="发现并安装资源" @click="openPanel('discover')"><template #icon><n-icon aria-hidden="true"><search-outline /></n-icon></template>发现并安装</n-button>
       </n-space>
     </header>
@@ -1512,9 +1968,10 @@ onBeforeUnmount(() => {
           v-model:value="keyword"
           class="resource-search"
           clearable
-          placeholder="搜索名称、ID 或描述"
+          :loading="searchingBody"
+          placeholder="搜索名称、ID、描述或正文"
           data-test="resource-search"
-          :input-props="{ 'aria-label': '搜索已安装资源' }"
+          :input-props="{ 'aria-label': '搜索已安装资源（含提示词正文）' }"
         >
           <template #prefix><n-icon aria-hidden="true"><search-outline /></n-icon></template>
         </n-input>
@@ -1537,7 +1994,7 @@ onBeforeUnmount(() => {
       <!-- 滤空 ≠ 未安装：前者要给的出路是「清除关键词」，后者是「去安装」。 -->
       <n-empty
         v-else-if="filteredEmpty"
-        :description="`没有匹配「${keyword.trim()}」的已安装资源`"
+        :description="`没有匹配「${keyword.trim()}」的已安装资源（已含提示词正文）`"
         data-test="resource-search-empty"
       >
         <template #extra>
@@ -1589,6 +2046,12 @@ onBeforeUnmount(() => {
       <template v-if="selectedResource">
         <n-descriptions bordered :column="1" label-placement="left">
           <n-descriptions-item label="资源 ID">{{ selectedResource.resource_id }}</n-descriptions-item>
+          <!--
+            名称与描述在详情里完整显示（表格里那两行是截断的）。
+            「未命名」而不是留空：空白格子看起来像没加载出来。
+          -->
+          <n-descriptions-item label="名称">{{ selectedResource.name || '未命名' }}</n-descriptions-item>
+          <n-descriptions-item label="描述">{{ selectedResource.description || '未填写' }}</n-descriptions-item>
           <n-descriptions-item label="类型">{{ typeLabel(selectedResource.type) }}</n-descriptions-item>
           <n-descriptions-item label="当前版本"><span class="mono">{{ selectedResource.current_version }}</span></n-descriptions-item>
           <n-descriptions-item label="来源">{{ sourceLabel(selectedResource) }}</n-descriptions-item>
@@ -1804,14 +2267,22 @@ onBeforeUnmount(() => {
         </n-alert>
         <template v-else-if="discoverSource === 'skills-sh'">
           <n-empty v-if="remoteSearched && !skillsShResults.length" description="skills.sh 上没有匹配的技能" />
-          <n-list v-else-if="skillsShResults.length" bordered class="remote-results">
-            <n-list-item v-for="item in skillsShResults" :key="item.source_key">
-              <n-space align="center" justify="space-between" :wrap="true">
-                <div>
+          <!--
+            与内置目录同一种卡片形态。此前这里是 `n-list`：同一个面板里切换来源
+            时布局整体换一次，读起来像换了一个页面，而两者的操作（查看、安装）
+            完全相同。
+          -->
+          <div v-else-if="skillsShResults.length" class="remote-results">
+            <article v-for="item in skillsShResults" :key="item.source_key" class="remote-result">
+              <div class="catalog-result-main">
+                <div class="catalog-result-heading">
                   <strong>{{ item.name || item.directory }}</strong>
-                  <div class="upload-hint">{{ item.description || item.source_key }}</div>
-                  <small>{{ item.owner }}/{{ item.repository }}{{ item.branch ? ` · 分支 ${item.branch}` : '' }}{{ item.installs ? ` · ${item.installs} 次安装` : '' }}</small>
+                  <n-tag v-if="item.installs" size="small" :bordered="false">{{ item.installs }} 次安装</n-tag>
                 </div>
+                <span>{{ item.owner }}/{{ item.repository }}{{ item.branch ? ` · 分支 ${item.branch}` : '' }}</span>
+                <p>{{ item.description || item.source_key }}</p>
+              </div>
+              <n-space class="catalog-result-actions">
                 <n-button
                   size="small"
                   type="primary"
@@ -1820,8 +2291,8 @@ onBeforeUnmount(() => {
                   @click="installRemoteFromDiscovery(item)"
                 ><template #icon><n-icon aria-hidden="true"><cloud-download-outline /></n-icon></template>安装</n-button>
               </n-space>
-            </n-list-item>
-          </n-list>
+            </article>
+          </div>
           <n-empty v-else description="输入关键词后搜索 skills.sh" />
         </template>
         <n-empty v-else-if="remoteSearched && !remoteResults.length" description="没有匹配的资源" />
@@ -1866,8 +2337,30 @@ onBeforeUnmount(() => {
       <n-divider />
       <n-card :bordered="false" size="small">
         <h2 class="card-section-title">仓库来源</h2>
-        <n-form inline @submit.prevent="saveRepository"><n-form-item label="所有者"><n-input v-model:value="repositoryForm.owner" placeholder="owner" /></n-form-item><n-form-item label="仓库"><n-input v-model:value="repositoryForm.name" placeholder="repository" /></n-form-item><n-form-item label="分支"><n-input v-model:value="repositoryForm.branch" placeholder="main" /></n-form-item><n-button type="primary" attr-type="submit">登记</n-button></n-form>
-        <n-data-table v-if="repositories.length" :loading="repositoryLoading" :data="repositories" :columns="repositoryColumns" :pagination="false" :bordered="false" :scroll-x="640" />
+        <!--
+          一个坐标输入框 + 一个可选分支。坐标框接受粘贴进来的任意形态，
+          因为用户手上拿到的东西一定是一个 URL；分支框只在坐标里没带分支时生效。
+        -->
+        <n-form inline @submit.prevent="saveRepository">
+          <n-form-item label="仓库">
+            <n-input
+              v-model:value="repositoryForm.coordinate"
+              class="repository-coordinate"
+              placeholder="owner/name 或 https://github.com/owner/name"
+              data-test="repository-coordinate"
+              :input-props="{ 'aria-label': '仓库坐标或 GitHub 地址' }"
+            />
+          </n-form-item>
+          <n-form-item label="分支">
+            <n-input
+              v-model:value="repositoryForm.branch"
+              placeholder="留空为 main"
+              :input-props="{ 'aria-label': '分支（可选）' }"
+            />
+          </n-form-item>
+          <n-button type="primary" attr-type="submit">登记</n-button>
+        </n-form>
+        <n-data-table v-if="repositories.length" :loading="repositoryLoading" :data="repositories" :columns="repositoryColumns" :pagination="false" :bordered="false" :scroll-x="760" />
         <n-empty v-else description="尚未登记仓库来源" />
 
         <!--
@@ -1883,24 +2376,32 @@ onBeforeUnmount(() => {
           <div v-if="discoverLoading" class="loading-state" aria-busy="true">
             <n-skeleton text :repeat="3" />
           </div>
-          <n-list v-else-if="discoveredSkills.length" bordered>
-            <n-list-item v-for="item in discoveredSkills" :key="item.source_key">
-              <n-space align="center" justify="space-between" :wrap="true">
-                <div>
+          <!--
+            仓库直查的结果与上方两个来源同一种卡片形态：三处都是「发现结果 +
+            安装」，形态不同会让人以为它们能做的事不一样。
+          -->
+          <div v-else-if="discoveredSkills.length" class="remote-results">
+            <article v-for="item in discoveredSkills" :key="item.source_key" class="remote-result">
+              <div class="catalog-result-main">
+                <div class="catalog-result-heading">
                   <strong>{{ item.name || item.directory }}</strong>
-                  <div class="upload-hint">{{ item.description || item.source_key }}</div>
                 </div>
+                <span>{{ item.directory }}</span>
+                <p>{{ item.description || item.source_key }}</p>
+              </div>
+              <n-space class="catalog-result-actions">
                 <n-button
                   size="small"
                   type="primary"
                   data-test="install-discovered-skill"
+                  aria-label="安装该仓库下的技能"
                   @click="installRemoteFromDiscovery(item)"
                 >
                   安装
                 </n-button>
               </n-space>
-            </n-list-item>
-          </n-list>
+            </article>
+          </div>
           <n-empty v-else description="该仓库下没有找到可安装的 Skill" />
         </template>
       </n-card>
@@ -1983,6 +2484,199 @@ onBeforeUnmount(() => {
       <n-data-table v-else class="modal-table" :loading="dependencyTaskLoading" :columns="dependencyTaskColumns" :data="dependencyTasks" :pagination="false" :bordered="false" :scroll-x="680" />
     </n-modal>
 
+    <!--
+      新建 / 编辑纯文本资源。
+      「保存即新版本」而不是就地改文件：`content_sha256` 把清单与文件绑在一起，
+      就地改的后果不是「改了没生效」，而是这个资源在下一次载入时直接失败。
+    -->
+    <n-modal
+      :show="panel === 'authoring'"
+      preset="card"
+      :title="authoringTarget ? '编辑正文（保存为新版本）' : '新建提示词 / 记忆 / 会话'"
+      :aria-label="authoringTarget ? '编辑资源正文' : '新建纯文本资源'"
+      class="resource-modal"
+      @update:show="(value) => !value && closePanel()"
+    >
+      <n-alert type="info" :show-icon="true">
+        打包与摘要由服务器完成，落盘后与内置条目同形。装完保持<strong>停用</strong>，
+        需要在资源列表里确认后才生效——提示词会进系统提示词、改变每一轮回复。
+      </n-alert>
+      <n-form class="authoring-form" @submit.prevent="saveAuthoredDocument">
+        <n-form-item label="资源 ID">
+          <n-input
+            v-model:value="authoringForm.resource_id"
+            :disabled="Boolean(authoringTarget)"
+            placeholder="例如 prompt.my-office"
+            data-test="authoring-resource-id"
+            :input-props="{ 'aria-label': '资源 ID' }"
+          />
+        </n-form-item>
+        <n-form-item label="类型">
+          <n-select
+            v-model:value="authoringForm.type"
+            :options="authoringTypeOptions"
+            :disabled="Boolean(authoringTarget)"
+            data-test="authoring-type"
+            :input-props="{ 'aria-label': '资源类型' }"
+          />
+        </n-form-item>
+        <n-form-item label="名称">
+          <n-input v-model:value="authoringForm.name" placeholder="可选，用于列表显示" :input-props="{ 'aria-label': '名称' }" />
+        </n-form-item>
+        <n-form-item label="描述">
+          <n-input v-model:value="authoringForm.description" placeholder="可选，一句话说明用途" :input-props="{ 'aria-label': '描述' }" />
+        </n-form-item>
+        <n-form-item label="版本">
+          <!-- 后端要求严格递增；编辑时这里预填的是当前版本的下一个 patch。 -->
+          <n-input v-model:value="authoringForm.version" placeholder="1.0.0" data-test="authoring-version" :input-props="{ 'aria-label': '版本号' }" />
+        </n-form-item>
+        <n-form-item label="正文">
+          <n-input
+            v-model:value="authoringForm.content"
+            type="textarea"
+            :autosize="{ minRows: 8, maxRows: 20 }"
+            placeholder="直接写提示词正文"
+            data-test="authoring-content"
+            :input-props="{ 'aria-label': '正文' }"
+          />
+        </n-form-item>
+        <n-alert v-if="authoringError" type="warning" :show-icon="true" data-test="authoring-error">
+          {{ authoringError }}
+        </n-alert>
+        <n-space justify="end">
+          <n-button @click="closePanel">取消</n-button>
+          <n-button
+            type="primary"
+            attr-type="submit"
+            data-test="authoring-save"
+            :loading="authoringSaving"
+            :disabled="Boolean(authoringError)"
+          >
+            {{ authoringTarget ? '保存为新版本' : '创建' }}
+          </n-button>
+        </n-space>
+      </n-form>
+    </n-modal>
+
+
+    <!--
+      受管 MCP 资源的运行时配置。归档里的 `server.json` 有摘要护着，是「目录发布了
+      什么」；这里配的是「这台机器允许什么」。因此没有 command / args / 传输类型
+      的输入框——那几个字段改了等于把资源指向另一个程序，后端会拒。
+    -->
+    <n-modal
+      :show="panel === 'runtime'"
+      preset="card"
+      title="运行时配置"
+      aria-label="受管 MCP 资源运行时配置"
+      class="resource-modal"
+      @update:show="(value) => !value && closePanel()"
+    >
+      <n-alert type="info" :show-icon="true">
+        这里配置 <strong>{{ runtimeTarget?.name || runtimeTarget?.resource_id }}</strong>
+        在本机怎么运行。命令与传输类型来自已签名的资源包，不能在此修改。
+        保存后已启用的服务器会按新配置重新加载。
+      </n-alert>
+      <n-form class="authoring-form" @submit.prevent="saveRuntimeOverrides">
+        <n-form-item label="追加启动参数">
+          <div class="runtime-rows">
+            <!--
+              filesystem 这类服务器靠启动参数声明可访问目录：不给目录时它没有
+              任何可操作范围。参数追加在资源包自带参数之后，包名本身不受影响。
+            -->
+            <p class="runtime-caption">
+              追加在资源包自带参数之后。文件类服务器在这里填允许访问的目录，
+              例如 <code>/srv/data/docs</code>。
+            </p>
+            <div v-for="(_, index) in runtimeForm.extraArgs" :key="`arg-${index}`" class="runtime-row">
+              <n-input
+                v-model:value="runtimeForm.extraArgs[index]"
+                placeholder="/srv/data/docs"
+                data-test="runtime-extra-arg"
+                :input-props="{ 'aria-label': `启动参数 ${index + 1}` }"
+              />
+              <n-button quaternary circle :aria-label="`删除启动参数 ${index + 1}`" @click="removeRuntimeArg(index)">
+                <template #icon><n-icon aria-hidden="true"><trash-outline /></n-icon></template>
+              </n-button>
+            </div>
+            <n-button size="small" quaternary data-test="runtime-add-arg" @click="addRuntimeArg">
+              <template #icon><n-icon aria-hidden="true"><add-outline /></n-icon></template>添加参数
+            </n-button>
+          </div>
+        </n-form-item>
+        <n-form-item label="环境变量">
+          <div class="runtime-rows">
+            <!-- 已保存的值显示为掩码；不改动的行不会被回传。 -->
+            <p class="runtime-caption">已保存的值以掩码显示。留空值即删除该变量。</p>
+            <div v-for="(item, index) in runtimeForm.env" :key="`env-${index}`" class="runtime-row">
+              <n-input v-model:value="item.key" placeholder="变量名" :input-props="{ 'aria-label': `环境变量名 ${index + 1}` }" />
+              <n-input v-model:value="item.value" placeholder="值" :input-props="{ 'aria-label': `环境变量值 ${index + 1}` }" />
+              <n-button quaternary circle :aria-label="`删除环境变量 ${index + 1}`" @click="removeRuntimeEnv(index)">
+                <template #icon><n-icon aria-hidden="true"><trash-outline /></n-icon></template>
+              </n-button>
+            </div>
+            <n-button size="small" quaternary data-test="runtime-add-env" @click="addRuntimeEnv">
+              <template #icon><n-icon aria-hidden="true"><add-outline /></n-icon></template>添加变量
+            </n-button>
+          </div>
+        </n-form-item>
+        <n-form-item label="可访问根目录">
+          <div class="runtime-rows">
+            <!-- MCP 协议层的 roots，与启动参数是两回事：前者由客户端声明。 -->
+            <p class="runtime-caption">
+              通过 MCP 协议声明给服务器的可访问根，与上面的启动参数是两套机制，
+              按服务器文档决定用哪一种。
+            </p>
+            <div v-for="(_, index) in runtimeForm.roots" :key="`root-${index}`" class="runtime-row">
+              <n-input
+                v-model:value="runtimeForm.roots[index]"
+                placeholder="/srv/data"
+                data-test="runtime-root"
+                :input-props="{ 'aria-label': `可访问根 ${index + 1}` }"
+              />
+              <n-button quaternary circle :aria-label="`删除可访问根 ${index + 1}`" @click="removeRuntimeRoot(index)">
+                <template #icon><n-icon aria-hidden="true"><trash-outline /></n-icon></template>
+              </n-button>
+            </div>
+            <n-button size="small" quaternary data-test="runtime-add-root" @click="addRuntimeRoot">
+              <template #icon><n-icon aria-hidden="true"><add-outline /></n-icon></template>添加根目录
+            </n-button>
+          </div>
+        </n-form-item>
+        <n-form-item label="工作目录">
+          <n-input
+            v-model:value="runtimeForm.cwd"
+            placeholder="留空则用服务进程的工作目录"
+            data-test="runtime-cwd"
+            :input-props="{ 'aria-label': '工作目录' }"
+          />
+        </n-form-item>
+        <n-form-item label="启动超时（毫秒）">
+          <n-input
+            v-model:value="runtimeForm.startupTimeoutMs"
+            placeholder="留空使用默认 120000"
+            data-test="runtime-timeout"
+            :input-props="{ 'aria-label': '启动超时毫秒' }"
+          />
+        </n-form-item>
+        <n-alert v-if="runtimeError" type="warning" :show-icon="true" data-test="runtime-error">
+          {{ runtimeError }}
+        </n-alert>
+        <n-space justify="end">
+          <n-button @click="closePanel">取消</n-button>
+          <n-button
+            type="primary"
+            attr-type="submit"
+            data-test="runtime-save"
+            :loading="runtimeSaving"
+            :disabled="Boolean(runtimeError)"
+          >
+            保存
+          </n-button>
+        </n-space>
+      </n-form>
+    </n-modal>
+
     <n-modal :show="panel === 'backups'" preset="card" title="备份与恢复" aria-label="备份与恢复" class="resource-modal" @update:show="(value) => !value && closePanel()">
       <n-alert type="warning" :show-icon="true">备份只保留资源版本元数据和受控文件。恢复或删除备份前必须确认，操作会写入服务器审计记录。</n-alert>
       <n-data-table class="modal-table" :loading="backupLoading" :columns="backupColumns" :data="backups" :pagination="false" :bordered="false" :scroll-x="720" />
@@ -2021,21 +2715,21 @@ onBeforeUnmount(() => {
                 <span class="mono">{{ entry.version }}</span>
                 <!-- 「已装 1.0.0、盘上有 2.0.0」与「已装 2.0.0」处置不同：
                      前者点更新，后者什么都不用做。 -->
-                <n-tag v-if="entry.is_upgrade" size="small" type="warning">
+                <n-tag v-if="stagedStatus(entry) === 'upgradable'" size="small" type="warning">
                   可更新（已装 {{ entry.installed_version }}）
                 </n-tag>
-                <n-tag v-else-if="entry.installed" size="small" type="success">已安装</n-tag>
+                <n-tag v-else-if="stagedStatus(entry) === 'installed'" size="small" type="success">已安装</n-tag>
                 <span class="staged-file mono">{{ entry.file_name }}</span>
               </template>
             </span>
           </div>
           <n-button
             size="small"
-            :disabled="!!entry.error || (entry.installed && !entry.is_upgrade)"
+            :disabled="!canInstallStaged(entry)"
             :loading="stagedBusyFile === entry.file_name"
             @click="installStaged(entry)"
           >
-            {{ entry.is_upgrade ? '更新' : '安装' }}
+            {{ stagedActionLabel(entry) }}
           </n-button>
         </li>
       </ul>
@@ -2121,8 +2815,15 @@ h1 { margin: 8px 0 6px; font-size: 30px; line-height: 1.2; letter-spacing: 0; }
   .resource-toolbar .resource-search { width: 100%; margin-right: 0; }
 }
 .loading-state { display: grid; gap: 14px; min-height: 150px; padding: 18px 4px; }
+/* 可增删的行：输入框吃满剩余宽度，删除按钮不被压扁。 */
+.runtime-rows { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+.runtime-row { display: flex; gap: 8px; align-items: center; }
+.runtime-row .n-input { flex: 1 1 auto; min-width: 0; }
+.runtime-caption { margin: 0 0 4px; color: var(--text-color-secondary); font-size: 12px; line-height: 1.6; }
 .resource-name { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
 .resource-name small { color: var(--text-color-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 描述可能很长：截断到一行并保留 title，展开靠详情面板而不是把表格撑高。 */
+.resource-description { max-width: 220px; }
 .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .permission-list { display: flex; flex-wrap: wrap; gap: 4px; max-width: 250px; }
 .lower-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
@@ -2134,6 +2835,10 @@ h1 { margin: 8px 0 6px; font-size: 30px; line-height: 1.2; letter-spacing: 0; }
 .dependency-modal { width: min(980px, calc(100vw - 32px)); }
 .modal-content { margin-top: 18px; }
 .modal-table { margin-top: 18px; }
+/* 正文输入框要占满宽度：提示词按行读，被压窄之后每一行都要横向扫视。 */
+.authoring-form { margin-top: 18px; }
+.authoring-form :deep(.n-form-item) { margin-bottom: 12px; }
+.authoring-form :deep(.n-input) { width: 100%; }
 .dependency-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-top: 20px; }
 .dependency-section-heading .card-section-title { margin-bottom: 4px; }
 .section-caption { margin: 0; color: var(--text-color-secondary); font-size: 13px; line-height: 1.5; }
@@ -2150,12 +2855,48 @@ h1 { margin: 8px 0 6px; font-size: 30px; line-height: 1.2; letter-spacing: 0; }
 .operator-guidance { display: inline-block; max-width: 220px; color: var(--text-color-secondary); font-size: 12px; line-height: 1.45; }
 .upload-title { margin-top: 8px; font-weight: 600; }
 .upload-hint { margin-top: 4px; color: var(--text-color-secondary); font-size: 13px; }
-.remote-results { display: grid; gap: 8px; margin-top: 16px; }
-.remote-result, .agent-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--border-color); }
-.remote-result:last-child, .agent-row:last-child { border-bottom: 0; }
+/*
+ * 发现结果是**卡片网格**而不是分隔行。
+ *
+ * 「发现」这件事的本质是横向比较：同一个关键词往往返回十几个来源不同、名字相近
+ * 的候选，逐行下拉看不出差别。列数由 `auto-fill` + `minmax` 决定而不是写死三列：
+ * 写死会在窄屏把卡片挤成一条，先被压掉的正是操作区，而那是这个面板唯一的目的。
+ */
+.remote-results { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin-top: 16px; }
+/*
+ * 卡片靠边框与内边距成形，不靠分隔线：两列以上时横向相邻的两张卡之间没有分隔线
+ * 可用，读不出「哪几段属于同一个候选」。
+ */
+.remote-result {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+.agent-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--border-color); }
+.agent-row:last-child { border-bottom: 0; }
 .remote-result strong, .agent-row strong { display: block; }
 .remote-result span, .agent-row span { display: block; margin-top: 4px; color: var(--text-color-secondary); font-size: 13px; }
-.remote-result p { margin: 8px 0 0; color: var(--text-color-secondary); line-height: 1.5; }
+/*
+ * 描述限三行：网格里一张卡变高会把整行拉高，其余卡片下方留出大片空白。
+ * 截断而不是隐藏——摘要的作用是「值不值得点查看」，三行足够判断。
+ */
+.remote-result p {
+  display: -webkit-box;
+  margin: 8px 0 0;
+  overflow: hidden;
+  color: var(--text-color-secondary);
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.catalog-result-main { display: grid; gap: 2px; min-width: 0; }
+.catalog-result-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.catalog-result-heading strong { overflow-wrap: anywhere; }
+.catalog-result-actions { justify-content: flex-end; }
 .agent-relations { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px 10px; }
 .agent-relations span { display: inline-block; }
 .agent-row-detailed { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(260px, 1.4fr); align-items: start; }
@@ -2175,6 +2916,8 @@ h1 { margin: 8px 0 6px; font-size: 30px; line-height: 1.2; letter-spacing: 0; }
   .header-actions { justify-content: flex-start; }
   .summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lower-grid { grid-template-columns: 1fr; }
+  /* 窄屏降到单列：两列各 <180px 时卡片里的操作按钮会先换行再被压扁。 */
+  .remote-results { grid-template-columns: 1fr; }
   .workspace-card :deep(.n-card-header) { align-items: flex-start; }
   .workspace-card :deep(.n-card-header__extra) { max-width: 100%; }
   .dependency-section-heading { align-items: stretch; flex-direction: column; }
@@ -2184,7 +2927,8 @@ h1 { margin: 8px 0 6px; font-size: 30px; line-height: 1.2; letter-spacing: 0; }
   h1 { font-size: 26px; }
   .summary-strip > div { padding: 14px; }
   .summary-strip strong { font-size: 19px; }
-  .remote-result, .agent-row { flex-direction: column; }
+  /* `.remote-result` 本来就是竖排卡片，这里只需要 `.agent-row` 折行。 */
+  .agent-row { flex-direction: column; }
   .agent-relations { justify-content: flex-start; }
   .agent-row-detailed { grid-template-columns: 1fr; }
   .binding-groups { grid-column: 1; }

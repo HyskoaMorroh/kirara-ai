@@ -49,7 +49,8 @@ vi.mock('naive-ui', () => {
     NInputNumber: passthrough('NInputNumber', 'span'),
     NSelect: passthrough('NSelect', 'span'),
     NSwitch: passthrough('NSwitch', 'span'),
-    NTag: passthrough('NTag', 'span')
+    NTag: passthrough('NTag', 'span'),
+    useDialog: () => ({ warning: () => {} })
   }
 })
 

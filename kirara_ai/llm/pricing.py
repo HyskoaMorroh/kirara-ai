@@ -42,6 +42,16 @@ class PriceVersion(BaseModel):
     version_id: str = Field(min_length=1)
     provider: str = Field(min_length=1)
     model: str = Field(min_length=1)
+    #: 可读化展示名，**不参与任何匹配**。
+    #:
+    #: 计价按 `(provider, model)` 找版本；这一项只是标签。存在的理由是价目表
+    #: 到几十条时 `claude-sonnet-5` 与 `claude-sonnet-5-20260514` 在一屏里只差
+    #: 一个后缀，而它们的单价可能不同——要挑出「我在用的那个」，唯一可读的
+    #: 抓手就是这个名字。上游目录每个模型本来就带 `name`。
+    #:
+    #: `None`（没填）与空串（填了个空的）必须分开：老的价目文件没有这个字段，
+    #: 读进来要照旧可用，而显示时回落到 `model` 而不是留一个空白单元格。
+    display_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     effective_from: datetime
     currency: str = Field(min_length=3, max_length=3)
     input_per_million: Decimal = Field(ge=0)
@@ -55,6 +65,21 @@ class PriceVersion(BaseModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("effective_from must include a timezone")
         return value.astimezone(timezone.utc)
+
+    @field_validator("display_name")
+    @classmethod
+    def reject_blank_display_name(cls, value: Optional[str]) -> Optional[str]:
+        """纯空白不是一个可用的标签，而 `min_length=1` 拦不住 `"   "`。
+
+        落一个全空白的标签，表格里就出现一行没有身份的价格——比没有标签更糟：
+        看不出它是哪个模型，也看不出它是「没填」。
+        """
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("display_name must not be blank")
+        return stripped
 
 
 class CostSnapshot(BaseModel):

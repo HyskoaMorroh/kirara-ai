@@ -62,6 +62,128 @@ export interface PagedResponse<T> {
 }
 
 /**
+ * 一条新增 MCP 的预设模板。
+ *
+ * `runtime` 是「这台机器靠什么把它拉起来」，与后端
+ * `resource_catalog.py` 里同一条目的 `runtime_dependency` 一致。它必须显示出来：
+ * `npx` 与 `uvx` 都不是本项目的依赖，运行时镜像两个都没装——不说明的话，
+ * 用户点了启用只会看到「连接失败 / 已连接 0 / 工具数 0」，而界面上没有任何
+ * 线索指向真正的原因。
+ */
+export interface MCPPreset {
+  id: string
+  label: string
+  description: string
+  command: string
+  args: string[]
+  runtime: 'npx' | 'uvx'
+  tags: string
+  homepage: string
+  /** 需要用户补参数时的提示（例如 filesystem 要追加可访问目录）。 */
+  hint?: string
+}
+
+/**
+ * 与后端内置目录（`resource_catalog.py` 的 `_BUILTINS`）逐条对应的预设表。
+ *
+ * 为什么要有这张表：同样八个 stdio MCP，从「资源管理 → 发现并安装」进去装得到，
+ * 而 MCP 页此前只有一个「Context7 模板」按钮。缺的不是七个按钮，是**这条链路的
+ * 对称性**——用户在 MCP 页找不到 `fetch`，会得出「这个项目不支持它」这个错误结论，
+ * 而它就在另一个页面的目录里。
+ *
+ * `id` 必须与目录一致：两个入口装出两个不同 id 的同一个 MCP 之后，
+ * 「为什么有两个 context7」无从解释，而 `refresh_managed_servers` 也按 id 对账。
+ *
+ * 表驱动而不是八个 `openXxxTemplate` 函数：后者每加一个预设要改三处
+ * （函数、按钮、导出），漏掉任何一处都不会报错。
+ */
+export const MCP_PRESETS: readonly MCPPreset[] = [
+  {
+    id: 'context7',
+    label: 'Context7',
+    description: '通过 MCP 获取最新软件库和框架文档，用于 AI 功能调试。',
+    command: 'npx',
+    args: ['-y', '@upstash/context7-mcp'],
+    runtime: 'npx',
+    tags: 'documentation, debugging',
+    homepage: 'https://context7.com'
+  },
+  {
+    id: 'fetch',
+    label: 'Fetch',
+    description: '抓取网页并转成适合模型阅读的文本，用于让 AI 读取在线内容。',
+    command: 'uvx',
+    args: ['mcp-server-fetch'],
+    runtime: 'uvx',
+    tags: 'web, fetch',
+    homepage: 'https://github.com/modelcontextprotocol/servers'
+  },
+  {
+    id: 'time',
+    label: 'Time',
+    description: '提供当前时间与时区换算，避免模型凭训练数据猜测日期。',
+    command: 'uvx',
+    args: ['mcp-server-time'],
+    runtime: 'uvx',
+    tags: 'time, utility',
+    homepage: 'https://github.com/modelcontextprotocol/servers'
+  },
+  {
+    id: 'memory',
+    label: 'Knowledge Graph Memory',
+    description: '以知识图谱方式保存与检索事实，跨会话复用。',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-memory'],
+    runtime: 'npx',
+    tags: 'memory, knowledge-graph',
+    homepage: 'https://github.com/modelcontextprotocol/servers'
+  },
+  {
+    id: 'sequential-thinking',
+    label: 'Sequential Thinking',
+    description: '把复杂问题拆成可回溯的思考步骤，用于多步推理调试。',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-sequential-thinking'],
+    runtime: 'npx',
+    tags: 'reasoning, debugging',
+    homepage: 'https://github.com/modelcontextprotocol/servers'
+  },
+  {
+    id: 'filesystem',
+    label: 'Filesystem',
+    description: '读写指定目录下的文件。',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-filesystem'],
+    runtime: 'npx',
+    tags: 'filesystem',
+    homepage: 'https://github.com/modelcontextprotocol/servers',
+    // 不预填一个目录：填任何具体路径都是替用户决定「哪些文件可以被读写」，
+    // 而这条 MCP 的全部风险就在那个参数上。
+    hint: '启用前需在参数末尾追加允许访问的目录，否则它没有任何可操作范围'
+  },
+  {
+    id: 'chrome-devtools',
+    label: 'Chrome DevTools',
+    description: '连接 Chrome 检查 DOM、控制台与网络请求，用于前端调试。',
+    command: 'npx',
+    args: ['-y', 'chrome-devtools-mcp@latest'],
+    runtime: 'npx',
+    tags: 'browser, debugging',
+    homepage: 'https://github.com/ChromeDevTools/chrome-devtools-mcp'
+  },
+  {
+    id: 'playwright',
+    label: 'Playwright',
+    description: '以可访问性树驱动浏览器，完成导航、点击与截图。',
+    command: 'npx',
+    args: ['-y', '@playwright/mcp@latest'],
+    runtime: 'npx',
+    tags: 'browser, automation',
+    homepage: 'https://github.com/microsoft/playwright-mcp'
+  }
+]
+
+/**
  * MCP服务器视图模型
  */
 export function useMCPViewModel() {
@@ -323,28 +445,55 @@ export function useMCPViewModel() {
     showServerModal.value = true
   }
 
-  // Context7 follows the canonical MCP stdio entry shape.
-  const openContext7Template = () => {
+  /** 当前选中的预设标签；`null` 表示「自定义」（空白起点）。 */
+  const activePresetId = ref<string | null>(null)
+
+  /**
+   * 应用一条预设，或回到自定义。
+   *
+   * 一个入口按 id 取表，而不是八个 `openXxxTemplate`：后者是同一段逻辑抄八遍，
+   * 每加一个预设要改函数、按钮、导出三处，漏掉任何一处都不会报错。
+   *
+   * 预设**只填字段，不锁字段**：参考界面明确「切换类型后应更新默认字段，
+   * 但保留用户可编辑能力」。填完仍走同一条唯一性校验与保存路径。
+   */
+  const applyPreset = (presetId: string | null) => {
     modalMode.value = 'create'
+    activePresetId.value = presetId
+    const preset = presetId === null
+      ? undefined
+      : MCP_PRESETS.find((item) => item.id === presetId)
+    if (!preset) {
+      // 未知 id 退回自定义而不是留一个半填的表单——后者看起来像预设生效了。
+      activePresetId.value = null
+      resetForm()
+      showServerModal.value = true
+      return
+    }
     formModel.value = {
-      id: 'context7',
-      name: 'Context7',
-      description: 'Context7 文档检索 MCP 服务器',
+      id: preset.id,
+      name: preset.label,
+      description: preset.description,
       transportType: 'stdio',
-      command: 'npx',
-      args: ['-y', '@upstash/context7-mcp'],
+      command: preset.command,
+      // 拷贝而不是共享引用：表单里删一个参数不该改掉这张常量表，
+      // 那会让下一次选同一个预设填出被改过的参数。
+      args: [...preset.args],
       cwd: '',
       url: '',
       env: [],
       headers: [],
-      tags: 'context7, documentation',
-      homepage: 'https://context7.com',
-      docs: 'https://github.com/upstash/context7',
+      tags: preset.tags,
+      homepage: preset.homepage,
+      docs: preset.homepage,
       appsJson: '{}',
-      metadataJson: '{\n  "provider": "context7"\n}'
+      metadataJson: JSON.stringify({ catalog_id: `mcp:${preset.id}` }, null, 2)
     }
     showServerModal.value = true
   }
+
+  /** 兼容既有调用点：Context7 是最常用的一条，保留一个直达入口。 */
+  const openContext7Template = () => applyPreset('context7')
 
   // 打开编辑模态框
   const openEditModal = (server: MCPServer) => {
@@ -544,6 +693,9 @@ export function useMCPViewModel() {
     stopServer,
     openCreateModal,
     openContext7Template,
+    applyPreset,
+    activePresetId,
+    presets: MCP_PRESETS,
     openEditModal,
     saveServer,
     resetForm,

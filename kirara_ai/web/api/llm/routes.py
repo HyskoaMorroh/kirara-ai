@@ -43,6 +43,10 @@ _PRICE_VERSION_FIELDS = frozenset(
         "version_id",
         "provider",
         "model",
+        # 可读化展示名。这是一个白名单，漏掉新增字段的后果不是「字段被忽略」，
+        # 而是整个请求以 400「version contains unknown fields」被拒——
+        # 而那条错误对填表的人毫无指向性：他填的每一项看起来都合法。
+        "display_name",
         "effective_from",
         "currency",
         "input_per_million",
@@ -1093,6 +1097,122 @@ async def reset_backend_circuit(backend_name: str):
         return jsonify({"error": "Failed to reset LLM provider circuit"}), 500
 
 
+@llm_bp.route("/resilience/queue", methods=["PUT"])
+# 改队列次序改变服务器接受流量的方式（谁先承载请求），与重置熔断同一边界：
+# 要求创建者身份，不是「有 scope 就行」。
+@require_creator("llm.manage")
+@serialize_config_update
+async def reorder_failover_queue():
+    """按给定次序重排一条模型的故障转移队列（需求 8）。
+
+    此前 `priority` 只能在供应商编辑表单里逐个填数字：想把 P3 提到 P1，得先记住
+    另外两家各是多少、再算一个中间值，而这三次编辑分散在三个表单里。队列页能
+    看到实际次序却只读——**看的地方和改的地方分离**。
+
+    接口按「一次给出整条队列」工作而不是「把某一家改成某个数字」：后者会经过
+    中间态。把 P3 改成 1 的那一刻队列里出现两个 1，而相等 priority 的相对次序由
+    `active_backends` 的列表下标决定（`get_provider_candidates` 的第二排序键），
+    也就是用户看不见的东西。
+
+    三条边界：
+
+    - **必须给全这条队列里的每一家**。缺一个，它落在哪里就取决于它原本的数字，
+      而用户以为自己排的是整条队列。
+    - **复用已在用的数字**，只交换「谁拿哪个」。同一家供应商可以同时服务多个模型；
+      凭空抬高它的 priority 会连带改动另一条此刻不在屏幕上的队列。
+    - **相等的数字要拆开**。全是默认 100 时多重集重排是恒等变换——保存成功而
+      次序没变，正是「新建三个供应商后拖不动」的现场表现。
+    """
+    try:
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "request body must be a JSON object"}), 400
+        unexpected = set(payload) - {"model", "providers"}
+        if unexpected:
+            return jsonify({"error": f"unexpected fields: {sorted(unexpected)}"}), 400
+
+        model_id = payload.get("model")
+        if not isinstance(model_id, str) or not model_id.strip():
+            return jsonify({"error": "model must be a non-empty string"}), 400
+        model_id = model_id.strip()
+
+        providers = payload.get("providers")
+        if not isinstance(providers, list) or not providers:
+            return jsonify({"error": "providers must be a non-empty list"}), 400
+        if not all(isinstance(name, str) and name.strip() for name in providers):
+            return jsonify({"error": "providers must be non-empty strings"}), 400
+        providers = [name.strip() for name in providers]
+        if len(set(providers)) != len(providers):
+            # 同一家出现两次时「它排第几」没有答案，而长度校验会被蒙过去。
+            return jsonify({"error": "providers must not repeat a backend"}), 400
+
+        config: GlobalConfig = g.container.resolve(GlobalConfig)
+        manager: LLMManager = g.container.resolve(LLMManager)
+
+        current = [
+            getattr(adapter, "backend_name", "")
+            for adapter in manager.get_provider_candidates(model_id)
+        ]
+        if not current:
+            # 拼错的模型名不能返回 200：那看起来与排序成功一模一样。
+            return jsonify({"error": f"model '{model_id}' has no failover queue"}), 404
+        if set(providers) != set(current):
+            missing = sorted(set(current) - set(providers))
+            unknown = sorted(set(providers) - set(current))
+            return (
+                jsonify(
+                    {
+                        "error": "providers must list exactly this model's queue",
+                        "missing": missing,
+                        "unknown": unknown,
+                    }
+                ),
+                400,
+            )
+
+        by_name = {
+            backend.name: backend
+            for backend in config.llms.api_backends
+            if backend.name in set(providers)
+        }
+        # 复用已在用的数字，升序发给新次序。相等值先拆开：`sorted` 之后逐位取
+        # 「不小于前一个 + 1」，既保持严格递增，又不把整组数字抬得比原来更高
+        # （只有在原本相等时才 +1）。
+        pool = sorted(by_name[name].priority for name in providers)
+        assigned: list[int] = []
+        for value in pool:
+            if assigned and value <= assigned[-1]:
+                value = assigned[-1] + 1
+            assigned.append(value)
+
+        previous = {name: by_name[name].priority for name in providers}
+        for name, priority in zip(providers, assigned):
+            by_name[name].priority = priority
+
+        try:
+            ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
+        except Exception:
+            # 落盘失败时把内存里的次序退回去：不退等于「界面显示新次序、
+            # 重启后回到旧次序」，而这个差异没有任何地方会报出来。
+            for name, priority in previous.items():
+                by_name[name].priority = priority
+            raise
+
+        _audit_backend_success(
+            "reorder_failover_queue",
+            backend_name=",".join(providers)[:256],
+        )
+        return jsonify(
+            {
+                "data": manager.get_resilience_status(),
+                "summary": manager.get_resilience_summary(),
+            }
+        )
+    except Exception as error:
+        logger.opt(exception=error).error("Failed to reorder the failover queue")
+        return jsonify({"error": "Failed to reorder the failover queue"}), 500
+
+
 @llm_bp.route("/backends", methods=["POST"])
 @require_auth
 @serialize_config_update
@@ -1188,6 +1308,24 @@ async def update_backend(backend_name: str):
             # 如果新配置启用则加载后端
             if updated_backend.enable:
                 manager.load_backend(updated_backend.name)
+            # 让改过的容错参数立刻生效，而不是等到重启。
+            #
+            # 上面两个分支（unload / load）是此前唯一会间接刷新熔断器的地方，
+            # 而它们各有条件：未加载的后端不会被 unload，停用的后端不会被 load。
+            # 编辑一个 `enable=False` 的后端时两者都不成立，于是五个 circuit_*
+            # 参数保存成功却要等重启——「保存成功」与「生效」不是一回事。
+            # 这个后端也不在 `get_resilience_status()` 的行里（那里只遍历
+            # `active_backends`），界面上连「重置熔断」这个变通入口都没有。
+            #
+            # 刷新是幂等的，且保住运行时状态（是否熔断、在途计数、样本、迁移历史），
+            # 所以在 load 成功之后无条件调用一次比按条件调用更不容易漏。
+            #
+            # `getattr` 而不是直接调用：这条路由在测试与嵌入式集成里会拿到只实现
+            # load/unload 的替身管理器。一个诊断性的刷新不该让一次本来成功的保存
+            # 变成 500——那会把「参数晚生效」换成「根本存不进去」。
+            refresh = getattr(manager, "refresh_resilience_settings", None)
+            if callable(refresh):
+                refresh()
             ConfigLoader.save_config_with_backup(CONFIG_FILE, config)
         except Exception:
             try:

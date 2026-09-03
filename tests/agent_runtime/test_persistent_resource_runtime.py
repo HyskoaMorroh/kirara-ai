@@ -858,3 +858,98 @@ class _EmptyMCPManager:
 
     def get_tools(self):
         return {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("creator_principal")
+async def test_an_authored_prompt_reaches_the_model(tmp_path: Path):
+    """从界面写的一条提示词，必须真的进入发给模型的系统提示词（需求 10）。
+
+    路由测试（`tests/web/api/resource/test_text_resource_authoring.py`）证明的是
+    「装进去了、摘要对得上」。那还不足以说明这条路径**有用**：一个装得进去却
+    进不了请求的资源，在界面上与一条生效的提示词长得一模一样——这正是本项目
+    反复出现的那种缺陷形态（`UsageSource.ESTIMATED` 当初就是有定义、有测试、
+    主链路零调用）。
+
+    这里走完整条链：`author_document()` 建资源 → `resolve_binding()` 绑到 Agent →
+    `executor.run()` 跑一轮 → 断言正文出现在 `messages[0]`（system）里。
+
+    第二段断言改正文之后的那一轮：新版本的正文要到达模型，**旧版本的不能**。
+    少了后半句，一个「读到了旧版本」的实现也能让前半句通过，
+    而那种缺陷的症状是「我改了提示词，模型行为没变」——最难自查的一类。
+    """
+    lifecycle = ResourceLifecycleService(tmp_path / "vps-data")
+    authored = lifecycle.author_document(
+        resource_id="prompt.authored-office",
+        resource_type="prompt",
+        content="你是一名严谨的办公助手。先给结论，再给依据。\n",
+        name="自建办公提示词",
+    )
+    assert authored["enabled"] is False, "装完应保持停用等待确认"
+    lifecycle.enable("prompt.authored-office", confirmed=True)
+
+    def binding(resource_id: str, resource_type: str):
+        return lifecycle.resolve_binding(
+            resource_id,
+            resource_type,
+            version=lifecycle.get_resource(resource_id)["current_version"],
+            enabled=True,
+            # `current` 而不是 `fixed`：这个 Agent 要跟着资源升版本走，
+            # 否则下面那半段（改正文后新正文到达模型）测的就不是同一件事。
+            version_policy="current",
+        )
+
+    agent = AgentDefinition(
+        agent_id="authored-prompt-agent",
+        model_priority=("qa-fallback",),
+        capabilities=frozenset({"research"}),
+        prompt_bindings=(binding("prompt.authored-office", "prompt"),),
+    )
+    registry = AgentRegistry(tmp_path / "vps-data")
+    registry.register(agent)
+    registry.set_default(agent.agent_id)
+    # 用重新载入的注册表：`_trusted_agent` 每轮从磁盘重解绑定，而这份测试
+    # 的后半段要看的正是「资源升版本之后，下一轮拿到的是新版本」。
+    reloaded_registry = AgentRegistry(tmp_path / "vps-data")
+
+    def _answer(text: str) -> LLMChatResponse:
+        return LLMChatResponse(
+            model="qa-fallback",
+            message=Message(role="assistant", content=[LLMChatTextContent(text=text)]),
+        )
+
+    llm = ControlledLLM({"qa-fallback": [_answer("好"), _answer("好")]})
+    executor = AgentRuntimeExecutor(
+        agent_registry=reloaded_registry,
+        llm_manager=llm,
+        mcp_manager=_EmptyMCPManager(),
+        # 与产品同一个实例。`ResourceLifecycleService` 在构造时把注册表读进内存，
+        # 另开一个实例看不到本测试通过 `lifecycle` 做的升级——而产品里
+        # 容器只注册一个实例（`container.register(ResourceLifecycleService, lifecycle)`），
+        # 所以「两个实例」是测试装配才有的形态，拿它断言等于测一个不存在的配置。
+        resource_service=lifecycle,
+    )
+
+    result = await executor.run(_context(), _message("帮我写一封邮件"))
+
+    assert result.status is RuntimeStatus.COMPLETED
+    system = llm.requests[0].messages[0]
+    assert system.role == "system"
+    assert "先给结论，再给依据。" in system.content[0].text
+
+    # 改正文 → 新版本的正文到达模型，旧版本的不再出现。
+    lifecycle.author_document_version(
+        "prompt.authored-office",
+        content="你是一名严谨的办公助手。永远先列出风险。\n",
+        version="1.0.1",
+    )
+    lifecycle.enable("prompt.authored-office", confirmed=True)
+    assert lifecycle.get_resource("prompt.authored-office")["current_version"] == "1.0.1"
+
+    await executor.run(_context(), _message("再写一封"))
+
+    updated = llm.requests[1].messages[0].content[0].text
+    assert "永远先列出风险。" in updated
+    assert "先给结论，再给依据。" not in updated, (
+        "模型收到的还是旧版本正文——「改了提示词、模型行为没变」正是最难自查的一类缺陷"
+    )

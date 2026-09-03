@@ -43,9 +43,24 @@ def _log_dir_in_subprocess(env: dict[str, str]) -> str:
         errors="replace",
         env={**os.environ, **env},
         check=False,
+        # 导入一个模块不该要几十秒。给上界是为了让「卡住」变成一条明确的失败，
+        # 而不是让整个测试进程挂在这里等——后者在 CI 上表现为超时打断，
+        # 报告里看不出是哪个用例。
+        timeout=120,
     )
     if result.returncode != 0:
-        pytest.fail(f"导入 kirara_ai.logger 失败：{result.stderr[-2000:]}")
+        # 连 stdout 一起报：导入期失败的诊断可能落在任一个流上
+        # （`ensure_data_directories` 抛的是 RuntimeError，而 loguru 的早期
+        # sink 写 stdout），只报 stderr 会得到一条空信息——那时既看不出原因
+        # 也无从复现。这条用例在一次全量运行里失败过一次，而单独跑十次全绿，
+        # 当时留下的就是一条没有内容的失败。
+        pytest.fail(
+            "导入 kirara_ai.logger 失败"
+            f"（exit={result.returncode}）\n"
+            f"--- stderr ---\n{result.stderr[-2000:]}\n"
+            f"--- stdout ---\n{result.stdout[-2000:]}"
+        )
+
     import json
 
     for line in reversed(result.stdout.strip().splitlines()):

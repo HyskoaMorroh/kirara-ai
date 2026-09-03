@@ -1,6 +1,10 @@
 import { ref } from 'vue'
 import { http } from '@/utils/http'
 import { useMessage } from 'naive-ui'
+// 两条折叠规则抽成纯函数，由 `agent-runtime-form.test.ts` 调用验证。
+// 此前它们只被 `toContain('collectChannelModes')` 覆盖——那只证明名字
+// 出现过，不证明空行被丢掉、空串归一成了 null。
+import { collectChannelModes, collectCreatorIdentities } from './agentRuntimeForm'
 
 /**
  * 与 `kirara_ai/config/global_config.py` 的 `AgentRuntimeConfig` 一一对应。
@@ -120,21 +124,6 @@ export function useAgentRuntimeViewModel() {
     channelRows.value.splice(index, 1)
   }
 
-  /**
-   * 把编辑中的行折叠成后端要的对象。
-   *
-   * 空渠道名整行丢掉而不是提交一个空键：后端会拒绝空键并返回 400，
-   * 而用户此刻只是还没填完那一行，报错在这里没有任何帮助。
-   */
-  const collectChannelModes = (): Record<string, ProcessReplyStreamMode> => {
-    const collected: Record<string, ProcessReplyStreamMode> = {}
-    for (const row of channelRows.value) {
-      const channel = row.channel.trim()
-      if (!channel) continue
-      collected[channel] = row.mode
-    }
-    return collected
-  }
 
   const addCreatorIdentity = () => {
     formData.value.creator_channel_identities.push({
@@ -152,23 +141,6 @@ export function useAgentRuntimeViewModel() {
     formData.value.creator_channel_identities.splice(index, 1)
   }
 
-  /**
-   * 把编辑中的身份折叠成后端要的形状。
-   *
-   * 与 `collectChannelModes` 同一条纪律：没填发送者标识的整条丢掉，
-   * 而不是提交一个空串让后端返回 400——用户此刻只是还没填完那一行。
-   * 可选字段的空串归一成 null：后端把空串视为无效（要么省略要么非空）。
-   */
-  const collectCreatorIdentities = (): CreatorChannelIdentity[] =>
-    formData.value.creator_channel_identities
-      .filter((identity) => identity.sender_scope.trim())
-      .map((identity) => ({
-        channel_type: identity.channel_type,
-        sender_scope: identity.sender_scope.trim(),
-        account_scope: identity.account_scope?.trim() || null,
-        adapter_instance: identity.adapter_instance?.trim() || null,
-        allow_group_chat: identity.allow_group_chat === true
-      }))
 
   const handleSubmit = async () => {
     loading.value = true
@@ -176,9 +148,11 @@ export function useAgentRuntimeViewModel() {
       await http.post('/system/config/agent-runtime', {
         turn_deadline_seconds: formData.value.turn_deadline_seconds,
         reply_stream_mode: formData.value.reply_stream_mode,
-        channel_reply_stream_modes: collectChannelModes(),
+        channel_reply_stream_modes: collectChannelModes(channelRows.value),
         tool_search_threshold: formData.value.tool_search_threshold,
-        creator_channel_identities: collectCreatorIdentities()
+        creator_channel_identities: collectCreatorIdentities(
+          formData.value.creator_channel_identities
+        )
       })
       // 这批参数在启动时被读进 executor。不说这句，用户会以为下一条消息
       // 就按新档位取回，然后去排查一个并不存在的问题。

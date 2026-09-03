@@ -75,12 +75,20 @@ describe('QR login snapshot typing', () => {
   })
 })
 
+/**
+ * 每种状态的文案、显示门槛、以及「无快照 / unknown 不显示」这几条**行为**
+ * 由 `im-qr-login-logic.test.ts` 调用函数验证（含 `QR_STATE_TEXT` 的逐状态覆盖，
+ * 以及 success/error 档位——把登录失败画成绿色比没有标签更糟）。
+ *
+ * 本文件留下的是「必须在模板里成立」的部分：扫码标签与连接状态标签是**两枚**
+ * 独立标签。那不是纯逻辑，而是布局决定。
+ */
 describe('QR login rendering', () => {
-  it('gives every actionable state its own label', () => {
-    // `unknown` 故意没有文案：未配置日志路径时不该显示任何扫码信息。
-    for (const state of BACKEND_STATES.filter((s) => s !== 'unknown')) {
-      expect(viewSource, `状态 ${state} 缺少展示文案`).toContain(`${state}:`)
-    }
+  it('每种可操作状态都有文案（逐状态断言在逻辑测试里）', () => {
+    // 这里只确认状态表来自那份共享模块，不再逐个 grep 组件源码——
+    // 文案已经不在组件里了。
+    expect(viewSource).toMatch(/QR_STATE_TEXT/)
+    expect(viewSource).toMatch(/from '\.\/qrLoginPresentation'/)
   })
 
   it('renders the QR state as a separate tag from the connection state', () => {
@@ -90,18 +98,12 @@ describe('QR login rendering', () => {
     expect(viewSource).toContain("['status-tag', adapterStatus(adapter).className]")
   })
 
-  it('shows nothing when the snapshot is absent or unknown', () => {
-    expect(viewSource).toMatch(/if \(!qr \|\| qr\.state === 'unknown'\) return null/)
+  it('刷新扫码状态后的提示复用同一张状态表', () => {
+    // 两处各写一份文案会漂移：标签说「已扫码待确认」而提示说别的。
+    expect(viewSource).toMatch(/QR_STATE_TEXT\[result\.qr_login\.state\]/)
   })
 
   it('surfaces the remediation text rather than only the state name', () => {
     expect(viewSource).toContain('qr_login?.remediation')
-  })
-
-  it('shows remaining seconds only while the code is still scannable', () => {
-    // 剩余秒数由 `expires_at` 自行倒数（见 im-qr-countdown.test.ts），
-    // 但门槛不变：只有 `waiting_scan` 才拼这个数字。
-    expect(viewSource).toMatch(/qr\.state === 'waiting_scan' \? qrRemainingSeconds/)
-    expect(viewSource).toMatch(/state === 'waiting_scan' && remaining !== null/)
   })
 })

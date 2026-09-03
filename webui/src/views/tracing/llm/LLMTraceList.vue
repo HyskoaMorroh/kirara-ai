@@ -194,6 +194,7 @@
               prefix: ({ itemCount }) => `共 ${itemCount} 条记录`
             }"
             :bordered="false"
+            :scroll-x="2220"
             class="trace-table"
           />
         </n-card>

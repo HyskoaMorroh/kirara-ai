@@ -261,3 +261,63 @@ async def test_check_update_still_probes_when_enabled(monkeypatch: pytest.Monkey
     await entry.check_update(GlobalConfig())
 
     probe.assert_awaited_once()
+
+
+class _StreamCaptured(Exception):
+    """在请求体建好、真正发出去之前中断，用于只断言载荷形状。
+
+    流式路径用 ``with requests.post(...) as response``，替身得能进上下文管理器；
+    抛异常比补一个假 response 更短，也不会因为少实现某个方法而在别处失败。
+    """
+
+    def __init__(self, payload: dict | None) -> None:
+        super().__init__("payload captured")
+        self.payload = payload
+
+
+def _capture_gemini_stream_body(
+    monkeypatch: pytest.MonkeyPatch, **request_overrides
+) -> dict:
+    from kirara_ai.plugins.llm_preset_adapters import gemini_adapter
+
+    adapter = GeminiAdapter(GeminiConfig(api_key="key", api_base="http://invalid.example"))
+    adapter.backend_name = "gemini"
+    adapter.tracer = MagicMock()
+    adapter.media_manager = MagicMock()
+
+    def fake_post(url, **kwargs):
+        raise _StreamCaptured(kwargs.get("json"))
+
+    monkeypatch.setattr(gemini_adapter.requests, "post", fake_post)
+    with pytest.raises(_StreamCaptured) as captured:
+        # `stream_chat` 是生成器：必须真的取一次才会执行到 post。
+        next(iter(adapter.stream_chat(chat_request(**request_overrides))))
+    assert captured.value.payload is not None
+    return captured.value.payload
+
+
+def test_gemini_streaming_carries_the_same_thinking_budget(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """流式与非流式必须同一口径，否则「最大强度思考」在主流路径上静默失效。
+
+    流式是带首字节/静默超时保护的默认路径。只在非流式翻译 `thinkingConfig`
+    会让同一个供应商在两种回复模式下推理强度不同，而这个差别**两边都成功返回**，
+    没有任何地方会报出来——与系统提示词那次是同一种形态的缺陷。
+    """
+    payload = _capture_gemini_stream_body(monkeypatch, reasoning_effort="max")
+
+    generation = payload.get("generationConfig") or {}
+    assert generation.get("thinkingConfig") == {"thinkingBudget": -1}
+    # 不透传档位名：Gemini 不认识 `reasoning_effort`，收到未知顶层键会 400。
+    assert "reasoning_effort" not in payload
+
+
+def test_gemini_streaming_omits_thinking_config_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """未配置时流式同样不得出现该键：不支持思考的模型收到它会直接报错。"""
+    payload = _capture_gemini_stream_body(monkeypatch)
+
+    generation = payload.get("generationConfig") or {}
+    assert "thinkingConfig" not in generation

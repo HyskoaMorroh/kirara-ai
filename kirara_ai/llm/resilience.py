@@ -141,6 +141,11 @@ class CircuitBreaker:
         # 判断 len(outcomes) >= min_requests，窗口比它小的话该条件永假，
         # 配置里的错误率阈值就被静默关掉，只剩连续失败阈值起作用。
         # history_size 仍是下界，用来保证「窗口不至于太短」这一原本意图。
+        #
+        # 单独记下 `history_size`：`reconfigure` 改 `min_requests` 时要重算窗口，
+        # 而重算需要知道调用方原本要求的下界是多少——只看 `maxlen` 分不清
+        # 「当前容量来自 history_size」还是「来自上一次的 min_requests」。
+        self._history_size = max(1, history_size)
         self._outcomes: Deque[bool] = deque(
             maxlen=max(1, history_size, self.min_requests)
         )
@@ -160,6 +165,55 @@ class CircuitBreaker:
         self._transitions: Deque[dict[str, Any]] = deque(
             maxlen=CIRCUIT_TRANSITION_HISTORY
         )
+
+    def reconfigure(
+        self,
+        *,
+        failure_threshold: Optional[int] = None,
+        error_rate_threshold: Optional[float] = None,
+        min_requests: Optional[int] = None,
+        recovery_timeout_seconds: Optional[float] = None,
+        recovery_success_threshold: Optional[int] = None,
+        history_size: Optional[int] = None,
+    ) -> None:
+        """就地换掉阈值，保住运行时状态。
+
+        存在的理由：这五个参数在界面上可编辑，但熔断器只在**被创建的那一刻**读
+        它们。没有这个方法时，改过的阈值要等进程重启才生效，而「保存成功」的提示
+        已经给出去了——用户把失败阈值从 8 改成 3，下一次故障仍按 8 次才熔断。
+
+        **换阈值而不换对象**：当前状态（是否熔断）、在途计数、已积累的成败样本、
+        迁移历史全部保留。把 breaker 整个替换掉等于每次编辑配置都让一个正在熔断的
+        上游重新被当作健康，那比参数晚生效更糟——配置页上一次无关的编辑会悄悄
+        取消一次正在生效的隔离。
+
+        省略的参数保持原值：调用方只改了一个字段时，其余四个不该被默认值覆盖。
+        边界收敛与构造函数同一套，否则「改一次配置」就成了绕过校验的路径。
+        """
+        with self._lock:
+            if failure_threshold is not None:
+                self.failure_threshold = max(1, failure_threshold)
+            if error_rate_threshold is not None:
+                self.error_rate_threshold = min(1.0, max(0.0, error_rate_threshold))
+            if min_requests is not None:
+                self.min_requests = max(1, min_requests)
+            if recovery_timeout_seconds is not None:
+                self.recovery_timeout_seconds = max(0.0, recovery_timeout_seconds)
+            if recovery_success_threshold is not None:
+                self.recovery_success_threshold = max(1, recovery_success_threshold)
+
+            # 样本窗口跟着 `min_requests` 走，理由与构造函数里那段相同：
+            # 窗口比 min_requests 小时，`_should_open` 的错误率分支
+            # （`len(outcomes) >= min_requests`）永假，用户配的错误率阈值被静默关掉。
+            #
+            # 只在容量真的要变时重建 deque：`maxlen` 不可写，重建时保留最近的样本
+            # （deque 从左侧丢弃），因为健康判断看的是当下而不是最早那几次。
+            desired = max(1, history_size or 0, self._history_size, self.min_requests)
+            if history_size is not None:
+                self._history_size = max(1, history_size)
+                desired = max(1, self._history_size, self.min_requests)
+            if desired != self._outcomes.maxlen:
+                self._outcomes = deque(self._outcomes, maxlen=desired)
 
     def _current_error_rate(self) -> float:
         requests = len(self._outcomes)

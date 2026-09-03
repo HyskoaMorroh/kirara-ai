@@ -242,7 +242,13 @@ class TestSystemUpdate:
             "kirara_ai.web.api.system.routes.download_file", download
         ), patch(
             "kirara_ai.web.api.system.routes.verify_artifact_digest"
-        ) as verify, patch("kirara_ai.web.api.system.routes.subprocess.run") as install:
+        ) as verify, patch(
+            # 本用例的主题是「可信 URL 覆盖客户端传入的 URL」。pip 前置检查排在
+            # 下载之前，而开发用的两个 uv 虚拟环境都没有 pip——不声明这一条，
+            # 请求在 409 就停下，断言的那一步不会发生。
+            "kirara_ai.web.api.system.routes.backend_installer_available",
+            return_value=True,
+        ), patch("kirara_ai.web.api.system.routes.subprocess.run") as install:
             response = test_client.post(
                 "/backend-api/api/system/update",
                 headers=auth_headers,

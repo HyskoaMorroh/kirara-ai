@@ -188,11 +188,17 @@ def test_every_resource_route_that_writes_to_disk_is_creator_guarded():
         ('"/catalog/install"', '"POST"'),
         ('"/remote-install"', '"POST"'),
         ('"/<resource_id>/versions"', '"POST"'),
+        # 从纯文本创建 / 改正文：与上传 ZIP 同一件事，只是打包在服务器侧做。
+        ('"/documents"', '"POST"'),
+        ('"/<resource_id>/documents"', '"PUT"'),
         ('"/<resource_id>/update"', '"POST"'),
         ('"/<resource_id>/enable"', '"POST"'),
         ('"/<resource_id>/restore"', '"POST"'),
         ('"/backups/<backup_id>/restore"', '"POST"'),
         ('"/backups/<backup_id>"', '"DELETE"'),
+        # 摘掉仓库来源登记：写 `registry.json`，改变「哪些外部来源可被安装」。
+        # 与启停同一边界，且因为不可逆还额外要求显式确认。
+        ('"/repositories/<owner>/<name>/<branch>"', '"DELETE"'),
     )
 
     for route, method in disk_mutating_routes:
