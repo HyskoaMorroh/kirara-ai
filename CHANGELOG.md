@@ -20,6 +20,59 @@
 二是对「Telegram / WeCom 没有这个现象」这类对照说法逐条核实——其中「节流只有 QQ 有」
 成立，而「LaTeX 完全没处理」不成立（处理存在，缺的是若干同义命令与配对边界）。
 
+### Fixed（发布后补修）
+
+- **`webui/yarn.lock` 与 `package.json` 对不上，CI 从干净环境装不起来**：
+  上一个提交给 `package.json` 加了五个依赖（`date-fns` / `highlight.js` /
+  `semver` / `@codingame/monaco-vscode-configuration-service-override` /
+  `vscode-languageclient`）而没有更新锁文件。逐条核对差异：
+  `highlight.js` 要 `^11.11.1` 而锁里键是 `^11.8.0`；`vscode-languageclient`
+  要 `^9.0.1` 而锁里是 `~9.0.1`；`semver` 要顶层 `^7.7.1` 而锁里只有传递依赖的
+  `^7.3.6/7.5.4/7.6.3`。于是 `yarn install --frozen-lockfile` 直接失败：
+  `error Your lockfile needs to be updated`。
+
+  **为什么本机 1172 个测试全绿却没发现**：本机一直用 `npx --no-install vitest`
+  与 `npx --no-install vue-tsc` 跑，`node_modules` 早就装好了，锁文件从未被校验过。
+  CI 是干净环境、必须从锁文件重建，因此只在那里暴露。这是验证方式的盲区——
+  把「测试全绿」当成了「装得起来」。
+
+  重新解析锁文件时还踩到第二层：本机 `~/.npmrc` 指向 `registry.npmmirror.com`，
+  于是新解析出的三条 `resolved` 带上了镜像地址。
+  `tests/test_webui_build_contract.py` 的白名单守卫当场抓住了它——
+  那条测试正是为「镜像地址漏进锁文件」写的。改用
+  `yarn install --registry https://registry.npmjs.org` 重新生成后通过，
+  并实测 `yarn install --frozen-lockfile` 退出码 0。
+
+- **`context-mode` 与 `caveman` 的依赖建模是错的**（需求 10）：
+  两条登记项此前标为 `kind="claude-plugin"`、`install_supported=False`、
+  探测宿主 `claude --version`，理由写着「装在操作者自己的 Claude 配置里，
+  不是服务器运行时组件」。实测推翻了这个前提：
+
+  ```
+  npm view context-mode version   ->  1.0.169
+  npm ls -g --depth=0             ->  context-mode@1.0.169
+  package.json  "bin": {"context-mode": "./cli.bundle.mjs"}
+  自述：Works with Claude Code, Gemini CLI, VS Code Copilot, OpenCode, Codex CLI
+  ```
+
+  它是 npm 上有 `bin` 入口的普通包，不绑定任何宿主，完全可以装到 Linux VPS 上。
+  按 `claude --version` 探测会**两个方向都答错**：装了 `context-mode` 但没装
+  Claude CLI 的 VPS 报 `missing`，装了 Claude CLI 却没装 `context-mode` 的机器
+  报 `ready`。现改为 `kind="cli"`、探测 `context-mode --version`、
+  安装 `npm install -g context-mode`。
+
+  `caveman` 一并纠正但结论不同：它同样有自己的可执行文件（本机
+  `caveman-installer@2.0.0`，`bin: caveman`），但公共 npm 上
+  `caveman-installer` 是 404、`caveman` 是一个无关的 JS 模板引擎。
+  因此它保持只探测不代装——**原因是分发渠道而不是「它是插件」**，
+  运维指引里写明这两个名字各是什么：猜一条 `npm i -g caveman` 会装上模板引擎，
+  命令存在、探测通过、功能完全不对，比报 `missing` 更糟。
+
+  两条同时加入 `_SKILL_NAME_DEPENDENCY_IDS`：此前被排除让需求 10 点名的五个工具
+  里有两个永远不参与技能就绪判定，技能广告不会说「服务器上没有这个命令」，
+  模型照着一份它执行不了的说明自信作答。「能不能代装」与「要不要参与就绪判定」
+  是两个问题——后者的判据是「这台机器上有没有这个命令」，而那对两者都有答案。
+
 ### Added
 
 - **两个体检脚本：把「撞一个修一个」换成「一次列全」**（需求 14）：

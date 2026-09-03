@@ -330,34 +330,57 @@ def _definitions() -> tuple[DependencyDefinition, ...]:
         ),
         DependencyDefinition(
             dependency_id="context-mode-plugin",
-            name="Context Mode Plugin",
+            name="Context Mode CLI",
             description=(
-                "Context Mode 是 Claude Code 插件，在沙箱内处理大输出并只回传结论。"
-                "它安装在操作者自己的 Claude 配置里，不是服务器运行时组件。"
+                "Context Mode 在沙箱内处理大输出并只回传结论。"
+                "npm 包名为 context-mode，自带 `context-mode` 可执行文件，"
+                "可作为 stdio MCP 服务器运行——因此它是**服务器侧组件**，装在 VPS 上。"
             ),
-            kind="claude-plugin",
+            kind="cli",
             required_by=("大输出分析",),
-            # 只探测宿主 CLI 是否存在：插件本身没有独立可执行文件，
-            # 用它自己的名字去探测只会永远报 missing。
-            probe_commands=(("claude", "--version"),),
-            operator_guidance=(
-                "请在操作者本机的 Claude Code 中安装该插件（claude plugin install），"
-                "服务器侧无需也无法代为安装。"
-            ),
+            # 探测它**自己的**可执行文件。
+            #
+            # 这一条曾经写成 `("claude", "--version")` 并标为 `claude-plugin`,
+            # 理由是「插件没有独立可执行文件」——那个判断是错的。实测：
+            #
+            #     $ npm view context-mode version   -> 1.0.169
+            #     $ npm ls -g --depth=0             -> context-mode@1.0.169
+            #     package.json: "bin": {"context-mode": "./cli.bundle.mjs"}
+            #
+            # 它是发布在 npm 上、有 bin 入口的普通包，其自述也写明支持
+            # Claude Code / Gemini CLI / VS Code Copilot / OpenCode / Codex CLI。
+            # 按 `claude --version` 探测的后果是：一台装了 context-mode 但没装
+            # Claude CLI 的 VPS 会被报成 missing，而一台装了 Claude CLI 却没装
+            # context-mode 的机器会被报成 ready——两个方向都答错。
+            probe_commands=(("context-mode", "--version"),),
+            install_commands=(("npm", "install", "-g", "context-mode"),),
+            prerequisites=("node-runtime",),
         ),
         DependencyDefinition(
             dependency_id="caveman-plugin",
-            name="Caveman Plugin",
+            name="Caveman CLI",
             description=(
-                "Caveman 是 Claude Code 插件，用于压缩输出表达。"
-                "它安装在操作者自己的 Claude 配置里，不是服务器运行时组件。"
+                "Caveman 用于压缩输出表达。分发形态是一个安装器"
+                "（本机实测为 caveman-installer，提供 `caveman` 可执行文件），"
+                "而它在公共 npm 上不可达，因此服务器侧不能代为安装。"
             ),
-            kind="claude-plugin",
+            kind="cli",
             required_by=("输出压缩",),
-            probe_commands=(("claude", "--version"),),
+            # 与 context-mode 一样探测自己的可执行文件——它确实有一个。
+            # 但**不给** install_commands，因为公共 npm 上装不到：
+            #
+            #     $ npm view caveman-installer  -> E404 Not Found
+            #     $ npm view caveman            -> 一个无关的 JS 模板引擎
+            #
+            # 本机那份是 caveman-installer@2.0.0（bin: caveman -> bin/install.js）。
+            # 猜一个 `npm i -g caveman` 会装上那个模板引擎：命令存在、
+            # 探测通过、而功能完全不是要的那个——比报 missing 更糟。
+            probe_commands=(("caveman", "--version"),),
+            prerequisites=("node-runtime",),
             operator_guidance=(
-                "请在操作者本机的 Claude Code 中安装该插件（claude plugin install），"
-                "服务器侧无需也无法代为安装。"
+                "公共 npm 上没有可用的 caveman 命令行包（caveman-installer 为 404，"
+                "caveman 是同名的模板引擎）。请由 VPS 运维按其官方分发渠道安装，"
+                "并确保服务进程的 PATH 能访问 caveman。"
             ),
         ),
     )
@@ -383,10 +406,14 @@ _RUNTIME_DEPENDENCY_IDS = {
 #: （`skill_readiness_note()` 拿到空列表就什么都不说，于是模型照着一份它执行不了的
 #: 说明自信作答），安装界面也不显示这个技能缺什么。
 #:
-#: **只收服务器侧能装的 CLI。** `context-mode` 与 `caveman` 是操作者本机的
-#: Claude Code 插件（`install_supported` 为假、探测宿主 `claude --version`）：
-#: 把它们加进来会让技能在任何服务器上都显示缺依赖，而那个「缺」无从修复——
-#: 服务器侧压根不该装它。
+#: 需求 10 点名的五个工具全部收在这里。它们都有自己的可执行文件，
+#: 因此「服务器上装了没有」这个问题对每一个都答得出来。
+#:
+#: `caveman` 是唯一一个 `install_supported` 为假的：它的可执行文件确实存在
+#: （本机 `caveman-installer@2.0.0` 提供 `caveman`），但公共 npm 上装不到，
+#: 因此登记项只探测、不代装，并在 `operator_guidance` 里说明由运维处理。
+#: 仍然收进这张表是对的：「装了没有」是一个有答案的问题，而技能广告需要那个答案——
+#: 不收的后果是模型照着一份它执行不了的说明自信作答。
 _SKILL_NAME_DEPENDENCY_IDS: dict[str, tuple[str, ...]] = {
     "graphify": ("graphify-cli",),
     "memsearch": ("memsearch-cli",),
@@ -394,6 +421,11 @@ _SKILL_NAME_DEPENDENCY_IDS: dict[str, tuple[str, ...]] = {
     # 因为技能目录可能按任一种命名。
     "rtk": ("rtk-cli",),
     "tk": ("rtk-cli",),
+    # 这两条此前被排除，理由是「它们是操作者本机的 Claude Code 插件」——
+    # 那个判断是错的：`context-mode` 是 npm 上有 bin 入口的普通包，
+    # 跨 Claude Code / Codex / VS Code 都能跑，完全可以装到 Linux VPS 上。
+    "context-mode": ("context-mode-plugin",),
+    "caveman": ("caveman-plugin",),
 }
 
 

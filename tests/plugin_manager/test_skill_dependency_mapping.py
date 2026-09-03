@@ -17,11 +17,14 @@
 这条测试按**登记项**驱动，而不是逐个写死名字：新增一条 CLI 登记项时，
 如果忘了往映射表里加对应的技能名，这里立刻红。写死名字的版本只能守住今天这几个。
 
-不覆盖 `claude-plugin` 类型的两条（context-mode / caveman）：它们装在操作者
-自己的 Claude 配置里，不是服务器组件（`install_supported` 为假）。
-一个技能声明「我需要操作者本机装了某个 Claude 插件」是无从校验的，
-因此那两条只出现在依赖面板上，不参与技能就绪判定——这一点也要锁住，
-否则下一个人会顺手把它们加进映射表，让技能永远显示缺依赖。
+需求 10 点名的五个工具全部覆盖。`context-mode` 与 `caveman` 曾被排除，理由是
+「它们是操作者本机的 Claude Code 插件」——那个前提是错的：`context-mode` 是
+npm 上有 bin 入口的普通包（本机就是 `npm i -g` 装的），自述支持 Claude Code /
+Gemini CLI / VS Code Copilot / OpenCode / Codex CLI，跨宿主都能跑。
+`caveman` 也有自己的可执行文件，只是公共 npm 上装不到，因此只探测不代装。
+
+「能不能代装」与「要不要参与就绪判定」是两个问题：后者的判据是
+「这台机器上有没有这个命令」，而那对两者都有答案。
 """
 
 from __future__ import annotations
@@ -36,8 +39,26 @@ from kirara_ai.plugin_manager.system_dependencies import (
 
 
 def _cli_definitions():
-    """服务器侧可安装的 CLI 登记项——只有这些才该参与技能就绪判定。"""
+    """有自己可执行文件的 CLI 登记项——只有这些才该参与技能就绪判定。
+
+    包含 `caveman-plugin`（`install_supported` 为假）：它确实有 `caveman`
+    可执行文件，只是公共 npm 上装不到。「装了没有」对它是一个有答案的问题，
+    而技能广告需要那个答案——不收的后果是模型照着一份它执行不了的说明作答。
+    """
     return [item for item in _definitions() if item.kind == "cli"]
+
+
+def _skill_name_for(definition) -> str:
+    """登记项 id 到技能名。
+
+    绝大多数是去掉 `-cli` 后缀（`graphify-cli` ← `graphify`）。
+    `context-mode-plugin` / `caveman-plugin` 沿用历史 id 后缀（改 id 会让已落盘的
+    探测记录与任务历史对不上），所以两种后缀都要剥。
+    """
+    for suffix in ("-cli", "-plugin"):
+        if definition.dependency_id.endswith(suffix):
+            return definition.dependency_id[: -len(suffix)]
+    return definition.dependency_id
 
 
 def test_the_probe_finds_cli_definitions():
@@ -53,7 +74,7 @@ def test_every_cli_dependency_is_reachable_by_a_skill_name(definition):
     `-cli` 后缀作为候选名——这正是现有两条（`graphify-cli` ← `graphify`、
     `agent-browser-cli` ← `agent-browser`）的构成方式。
     """
-    candidate = definition.dependency_id.removesuffix("-cli")
+    candidate = _skill_name_for(definition)
     resolved = dependency_ids_for_resource(
         {"type": "skill", "name": candidate, "directory": f"skills/{candidate}"}
     )
@@ -68,26 +89,33 @@ def test_resolved_ids_are_all_registered():
     """判定出的 id 必须能在登记表里查到，否则探测与安装都无从进行。"""
     known = known_dependency_ids()
     for definition in _cli_definitions():
-        candidate = definition.dependency_id.removesuffix("-cli")
+        candidate = _skill_name_for(definition)
         for resolved in dependency_ids_for_resource(
             {"type": "skill", "name": candidate, "directory": f"skills/{candidate}"}
         ):
             assert resolved in known, f"{resolved} 不在登记表里，界面会显示一个查不到状态的依赖"
 
 
-def test_claude_plugins_are_not_treated_as_skill_dependencies():
-    """操作者本机的 Claude 插件不参与技能就绪判定。
+def test_context_mode_and_caveman_are_skill_dependencies():
+    """这两条**要**参与技能就绪判定。
 
-    它们的 `install_supported` 为假、探测的是宿主 `claude --version`。
-    把它们加进映射表会让技能在**任何**服务器上都显示缺依赖——
-    而那个「缺」是无从修复的，因为服务器侧压根不该装它。
+    它们此前被排除，理由是「操作者本机的 Claude Code 插件、服务器侧不该装」——
+    那个前提是错的。`context-mode` 是 npm 上有 bin 入口的普通包，其自述写明支持
+    Claude Code / Gemini CLI / VS Code Copilot / OpenCode / Codex CLI，
+    跨宿主都能跑，也就完全可以装到 Linux VPS 上（本机就是 `npm i -g` 装的）。
+    `caveman` 同样有自己的可执行文件，只是分发渠道不在公共 npm。
+
+    排除它们的后果是需求 10 点名的五个工具里有两个永远不出现在技能就绪判定里：
+    技能广告不会说「服务器上没有这个命令」，模型照着一份它执行不了的说明作答。
     """
-    for name in ("context-mode", "caveman"):
+    for name, expected in (
+        ("context-mode", "context-mode-plugin"),
+        ("caveman", "caveman-plugin"),
+    ):
         resolved = dependency_ids_for_resource(
             {"type": "skill", "name": name, "directory": f"skills/{name}"}
         )
-        assert "context-mode-plugin" not in resolved
-        assert "caveman-plugin" not in resolved
+        assert expected in resolved, f"技能名 {name!r} 识别不出 {expected}"
 
 
 def test_a_skill_with_no_known_tool_needs_nothing():
@@ -105,7 +133,7 @@ def test_an_installed_resource_shape_resolves_the_same_way():
     运行时说就绪（或者反过来），而这种不一致没有任何症状。
     """
     for definition in _cli_definitions():
-        candidate = definition.dependency_id.removesuffix("-cli")
+        candidate = _skill_name_for(definition)
         installed = dependency_ids_for_resource(
             {
                 "type": "skill",

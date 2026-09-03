@@ -579,14 +579,30 @@ Skill 包和它依赖的可执行程序是**两件事**。装上 `agent-browser`
 | `graphify-cli` | cli | 是 | `uv tool install --upgrade graphifyy` |
 | `rtk-cli` | cli | 是 | 终端输出压缩；**与同名的 Rust Type Kit 不是同一个工具**，以 `rtk gain` 是否可用为准 |
 | `memsearch-cli` | cli | 是 | `uv tool install --upgrade memsearch` |
-| `context-mode-plugin` | claude-plugin | **否** | Claude Code 插件 |
-| `caveman-plugin` | claude-plugin | **否** | Claude Code 插件 |
+| `context-mode-plugin` | cli | 是 | `npm install -g context-mode`；探测 `context-mode --version` |
+| `caveman-plugin` | cli | **否** | 有 `caveman` 可执行文件，但公共 npm 上装不到（见下） |
 
-三条边界必须讲清楚：
+四条边界必须讲清楚：
 
-- **Claude Code 插件装在操作者自己的 Claude 配置里，不是服务器运行时组件。**
-  因此它们的 `install_supported` 为 `false`，接口会拒绝安装请求并返回运维指引。
-  给它们编一条安装命令只会把命令跑到错误的目标上。
+- **`caveman` 不能代装的原因是分发渠道，不是「它是插件」。**
+  它确实有自己的可执行文件，但公共 npm 上取不到那个包：
+
+  ```
+  npm view caveman-installer  ->  E404 Not Found
+  npm view caveman            ->  一个无关的 JS 模板引擎
+  ```
+
+  猜一条 `npm i -g caveman` 会装上那个模板引擎：命令存在、探测通过、
+  而功能完全不是要的那个——比报 `missing` 更糟。因此登记项只探测不代装，
+  并在运维指引里写明这两个名字各是什么。
+
+  `context-mode` 与它相反，是 npm 上有 `bin` 入口的普通包
+  （`"bin": {"context-mode": "./cli.bundle.mjs"}`），自述支持 Claude Code /
+  Gemini CLI / VS Code Copilot / OpenCode / Codex CLI——不绑定任何宿主，
+  因此**是**服务器侧组件，装在 VPS 上。
+  这两条曾被标成 `claude-plugin` 并探测宿主 `claude --version`，那是错的建模：
+  装了 `context-mode` 但没装 Claude CLI 的 VPS 会被报成 `missing`，
+  而装了 Claude CLI 却没装 `context-mode` 的机器会被报成 `ready`——两个方向都答错。
 - **安装命令是服务器登记的固定值**，请求方不能传入命令或参数；
   这是「只有创建者能改 VPS」这条约束在依赖安装上的落地方式。
 - **探测一个不存在的可执行文件是「未安装」，不是接口错误。** 探测接口在这种情况下
@@ -597,8 +613,9 @@ Skill 包和它依赖的可执行程序是**两件事**。装上 `agent-browser`
   技能广告里不会出现「服务器上没有这个命令」，模型照着一份它执行不了的说明自信作答。
   `tests/plugin_manager/test_skill_dependency_mapping.py` 按登记项驱动：
   新增一条 CLI 登记项而忘了加映射时立刻红。
-  两条 `claude-plugin` 不进这张表——它们装在操作者本机，加进来会让技能在任何
-  服务器上都显示缺依赖，而那个「缺」无从修复。
+  需求 10 点名的五个工具现在全部在表里，`caveman` 也在——「能不能代装」与
+  「要不要参与就绪判定」是两个问题：后者的判据是「这台机器上有没有这个命令」,
+  而那对它同样有答案。
 
 - **探测命令必须能区分同名的不同工具。** `rtk` 有两个不相关的同名程序，
   两个都响应 `--version`。只探版本号会把装错的那个判成「就绪」，

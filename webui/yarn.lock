@@ -582,9 +582,9 @@
   dependencies:
     "@codingame/monaco-vscode-api" "15.0.3"
 
-"@codingame/monaco-vscode-configuration-service-override@~15.0.2":
+"@codingame/monaco-vscode-configuration-service-override@~15.0.2", "@codingame/monaco-vscode-configuration-service-override@~15.0.3":
   version "15.0.3"
-  resolved "https://registry.npmjs.org/@codingame/monaco-vscode-configuration-service-override/-/monaco-vscode-configuration-service-override-15.0.3.tgz"
+  resolved "https://registry.npmjs.org/@codingame/monaco-vscode-configuration-service-override/-/monaco-vscode-configuration-service-override-15.0.3.tgz#1f4b68eedb2e0f78ed82525ed08170001f2afc20"
   integrity sha512-5Z+/+HCjmEcO7EnfdkHItx8uxtelPt7NbrCKAXPzOjNYzERz7s+0kjSeskhGU+I6G9eeKS+veASdT/YOUhqWog==
   dependencies:
     "@codingame/monaco-vscode-422642f2-7e3a-5c1c-9e1e-1d3ef1817346-common" "15.0.3"
@@ -2859,6 +2859,11 @@ he@^1.2.0:
   resolved "https://registry.npmjs.org/he/-/he-1.2.0.tgz"
   integrity sha512-F/1DnUGPopORZi0ni+CvrCgHQ5FyEAHRLSApuYWMmrbSwoN2Mn/7k+Gl38gJnR7yyDZk6WLXwiGod1JOWNDKGw==
 
+highlight.js@^11.11.1:
+  version "11.12.0"
+  resolved "https://registry.npmjs.org/highlight.js/-/highlight.js-11.12.0.tgz#470d918fd556a76debc40fe5e4b540b6b9cb9890"
+  integrity sha512-nbfWpyRMcMrPMmDwJB+dhX/eiaPKtc2RB+0QZskqJ3WjRA/FDS0e9hZrx8EC/lbEv8gXy98FcDbNa/dspAaJMg==
+
 highlight.js@^11.8.0:
   version "11.11.1"
   resolved "https://registry.npmjs.org/highlight.js/-/highlight.js-11.11.1.tgz"
@@ -3848,7 +3853,7 @@ semver@^7.3.6, semver@^7.3.7, semver@^7.5.4, semver@^7.6.3:
   resolved "https://registry.npmjs.org/semver/-/semver-7.7.1.tgz"
   integrity sha512-hlq8tAfn0m/61p4BVRcPzIGr6LKiMwo4VM6dGi6pt4qcRkmNzTcWq6eCEjEh+qXjkMDvPlOFFSGwQjoEa6gyMA==
 
-semver@^7.5.3:
+semver@^7.5.3, semver@^7.7.1:
   version "7.8.5"
   resolved "https://registry.npmjs.org/semver/-/semver-7.8.5.tgz#39b646037dd50c14fb451e7e4cac58ed8b863f69"
   integrity sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==
@@ -4378,7 +4383,7 @@ vscode-jsonrpc@~8.2.1:
   resolved "https://registry.npmjs.org/vscode-jsonrpc/-/vscode-jsonrpc-8.2.1.tgz"
   integrity sha512-kdjOSJ2lLIn7r1rtrMbbNCHjyMPfRnowdKjBQ+mGq6NAW5QY2bEZC/khaC5OR8svbbjvLEaIXkOq45e2X9BIbQ==
 
-vscode-languageclient@~9.0.1:
+vscode-languageclient@^9.0.1, vscode-languageclient@~9.0.1:
   version "9.0.1"
   resolved "https://registry.npmjs.org/vscode-languageclient/-/vscode-languageclient-9.0.1.tgz"
   integrity sha512-JZiimVdvimEuHh5olxhxkht09m3JzUGwggb5eRUkzzJhZ2KjCN0nh55VfiED9oez9DyF8/fz1g1iBV3h+0Z2EA==

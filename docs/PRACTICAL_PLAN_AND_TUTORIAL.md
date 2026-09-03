@@ -274,13 +274,24 @@ skill 的正文是给模型的行为说明、hook 是能起进程的命令声明
 
 ### 3.6 装 CLI 工具到 VPS
 
-「资源 → 依赖」页可以把 rtk / graphify / memsearch 等装到服务器上。
+「资源 → 依赖」页可以把 rtk / graphify / memsearch / context-mode 装到服务器上。
 命令由服务端固定，**浏览器只提交一个已登记的依赖 ID**，不接受任何路径或参数——
 否则那就是一个远程命令执行接口。
 
-`context-mode` 与 `caveman` 标为「Claude Code 插件」：它们装在**操作者自己的**
-Claude 配置里，服务器侧无需也无法代为安装。界面上如实这么写，
-而不是给一个永远失败的安装按钮。
+需求点名的五个工具里只有 `caveman` 装不了，原因是**分发渠道**而非「它是插件」：
+
+```
+npm view caveman-installer  ->  E404 Not Found
+npm view caveman            ->  一个无关的 JS 模板引擎
+```
+
+它确实有自己的 `caveman` 可执行文件，但公共 npm 上取不到那个包。猜一条
+`npm i -g caveman` 会装上那个模板引擎：命令存在、探测通过、功能完全不对——
+比显示「未安装」更糟。所以界面上它只有「探测」没有「安装」，
+并在指引里写明这两个名字各是什么，让运维按官方渠道装。
+
+`context-mode` 与它相反：npm 上有 `bin` 入口的普通包，跨 Claude Code / Codex /
+VS Code / Gemini CLI / OpenCode 都能跑，因此**能**装到 VPS 上，按钮照常可用。
 
 ---
 

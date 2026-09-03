@@ -73,24 +73,61 @@ def test_memsearch_has_a_real_installer(service: SystemDependencyService):
     assert entry["install_supported"] is True
 
 
-@pytest.mark.parametrize("dependency_id", ["context-mode-plugin", "caveman-plugin"])
-def test_a_claude_plugin_is_probe_and_guidance_only(
-    service: SystemDependencyService, dependency_id: str
+def test_context_mode_is_installable_on_the_server(service: SystemDependencyService):
+    """Context Mode 是 npm 上有 bin 入口的普通包，服务器侧能装、能探测。
+
+    这一条替换的是原来那句「Claude Code 插件、服务器侧无法安装」的断言——
+    那个前提是错的，实测：
+
+        $ npm view context-mode version   -> 1.0.169
+        $ npm ls -g --depth=0             -> context-mode@1.0.169
+        package.json: "bin": {"context-mode": "./cli.bundle.mjs"}
+
+    它自述支持 Claude Code / Gemini CLI / VS Code Copilot / OpenCode / Codex CLI，
+    也就是说它不绑定任何一个宿主。按 `claude --version` 探测会两个方向都答错：
+    装了 context-mode 但没装 Claude CLI 的 VPS 报 missing，
+    装了 Claude CLI 却没装 context-mode 的机器报 ready。
+    """
+    entry = catalog(service)["context-mode-plugin"]
+
+    assert entry["install_supported"] is True
+    assert entry["kind"] == "cli"
+    # 探测自己的可执行文件，而不是某个宿主 CLI。
+    definition = service._definition("context-mode-plugin")
+    assert definition.probe_commands[0][0] == "context-mode"
+    assert definition.install_commands == (
+        ("npm", "install", "-g", "context-mode"),
+    )
+
+
+def test_caveman_is_probed_but_not_installed_by_the_server(
+    service: SystemDependencyService,
 ):
-    """A Claude Code plugin installs into the operator's own config, not the server."""
-    entry = catalog(service)[dependency_id]
+    """Caveman 有自己的可执行文件，但公共 npm 上装不到，因此只探测不代装。
+
+    与 context-mode 的区别是**分发渠道**而不是「是不是插件」：
+
+        $ npm view caveman-installer  -> E404 Not Found
+        $ npm view caveman            -> 一个无关的 JS 模板引擎
+
+    本机那份是 `caveman-installer@2.0.0`（`bin: caveman`）。猜一个
+    `npm i -g caveman` 会装上那个模板引擎：命令存在、探测通过、
+    而功能完全不是要的那个——比报 missing 更糟。
+    """
+    entry = catalog(service)["caveman-plugin"]
 
     assert entry["install_supported"] is False
     assert entry["operator_guidance"]
-    assert "claude" in entry["operator_guidance"].lower()
+    # 指引必须说清「为什么装不了」，而不是笼统地推给运维：
+    # 运维照着一句「请安装 caveman」会装上那个模板引擎。
+    assert "npm" in entry["operator_guidance"]
+    definition = service._definition("caveman-plugin")
+    assert definition.probe_commands[0][0] == "caveman"
 
 
-@pytest.mark.parametrize("dependency_id", ["context-mode-plugin", "caveman-plugin"])
-def test_installing_a_guidance_only_dependency_is_refused(
-    service: SystemDependencyService, dependency_id: str
-):
+def test_installing_caveman_is_refused(service: SystemDependencyService):
     with pytest.raises(DependencyInstallUnsupported):
-        service.install(dependency_id, confirmed=True, start=False)
+        service.install("caveman-plugin", confirmed=True, start=False)
 
 
 def test_rtk_is_not_claimed_to_be_the_same_tool_as_the_type_kit(
