@@ -875,9 +875,17 @@ curl -H "Authorization: Bearer <token>" \
 | Kirara 先启动 | `waiting` → `connected` | Kirara 侧无接入日志，直到上游拨入 | 3 分钟 | 否 |
 | QQ 先启动 | 上游按自身间隔重连直到 Kirara 就绪 | **上游侧**日志（LLOneBot 的重连记录；Kirara 侧只会看到最终的 `lifecycle connect`） | 3 分钟 | 否 |
 | OneBot 断线后恢复 | `connected` → `reconnecting` → `connected` | `OneBot 连接已断开` 与 `OneBot 连接已建立` 各一条 | 上游重连间隔（默认 3 秒）；超过 `reconnect_grace_seconds` 未回则转 `disconnected` | 否 |
+| 断线全程无人查看面板 | 同上一行——`reconnecting` **与有没有人观察无关** | 同上；这一行的意义在于它曾经不成立 | 同上 | 否 |
 | Token 配错 | `credential_rejected` | `last_disconnect_reason=access_token_mismatch` | 不会自愈 | 否，改配置 |
 | 数据目录只读 | 启动即失败并给出原因 | `所在卷为只读挂载，请以可写方式重新挂载` | 不会自愈 | 否，改挂载 |
 | 网络暂不可用 | `waiting` | 无接入日志 | 网络恢复后 3 分钟 | 否 |
+
+> **为什么单列「无人查看」这一行**：`reconnecting` 曾经只在掉线时恰好有人读过
+> 状态接口的情况下才生效——「上游连上过」这个事实此前只在读取快照时被记下，
+> 于是它实际记的是「连着的时候有人看过面板」。而 compose 重启通常发生在没人
+> 看面板的时候，所以为这个报障加的状态在这个报障自己的场景里不生效。
+> 现已改为在链路真的活着的那一刻记住（心跳与 `lifecycle connect` 都算）。
+> 验收时请**先重启、后打开面板**，而不是一直盯着面板重启——后者会掩盖这类缺陷。
 
 > **本表未在真实 Docker 环境中逐项跑过。** 状态转换与恢复逻辑有自动化测试覆盖
 > （`tests/plugins/im_onebot_adapter/test_connection_states.py`），
