@@ -276,6 +276,15 @@ class OneBotAdapter(
             self._last_heartbeat_at = now
             self._connection_status = "connected"
             self._external_login_status = "upstream_reported_online"
+            # 「上游连上过」必须在**这里**记住，而不是等到有人读快照。
+            # 此前唯一的置位点在 `get_health_snapshot()` 里，于是它记的其实是
+            # 「连着的时候有人看过面板」：连上、掉线、期间没有任何一次 HTTP 读取，
+            # `_note_upstream_disconnected()` 就因 `_ever_connected` 为假而直接
+            # 返回、不开重连窗口，状态报成「未连接」而不是「正在重连」。
+            # compose 重启恰好落在这个组合里（没人盯着面板），这正是需求 1
+            # 那个报障的形状。心跳与 lifecycle 一并算：两者都证明链路活着，
+            # 而重启后上游可能不重发 `lifecycle connect`、直接继续发心跳。
+            self._ever_connected = True
             self._clear_connection_failure()
             self._clear_reconnect_window()
             if meta_type == "lifecycle" and sub_type == "connect":
@@ -459,6 +468,9 @@ class OneBotAdapter(
         if self.connections:
             self._prune_stale_connections(now)
         if self.connections:
+            # 兜底：正常路径已在 `_handle_meta` 里置位（那才是链路活着的时刻）。
+            # 这里留着是为了覆盖不经过元事件就填充 `connections` 的路径，
+            # 例如测试夹具与将来可能的其他接入方式。
             self._ever_connected = True
 
         if not self._started:

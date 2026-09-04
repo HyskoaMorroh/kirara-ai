@@ -55,6 +55,37 @@
   一处调用点回到只看 `npx` 在不在**——漏改一处会在那一条上恢复原样，而本机
   （包已缓存）看不出区别。
 
+- **`reconnecting` 只在「掉线时恰好有人看着面板」的情况下才生效（需求 1、18.1）**：
+  需求 1 的报障是 `docker compose down && pull && up -d` 之后 QQ 显示未连接。
+  `reconnecting` 状态就是为它加的——上游反向 WebSocket 掉线后自己会回连，
+  这段时间报「正在重连」而不是「未连接」，否则操作者会去重查地址与 Token，
+  而那两项从来没错。
+
+  但那条路径有个前提没被满足：`_ever_connected` 此前**只在
+  `get_health_snapshot()` 里**被置位。也就是说它记的不是「上游连上过」，
+  而是「上游连着的时候有人读过一次状态」。而 `_note_upstream_disconnected()`
+  在 `_ever_connected` 为假时直接返回、不开重连窗口。于是：连上 → 掉线 →
+  期间没有任何一次快照读取 → 窗口没开 → 状态是 `disconnected`。
+
+  现场恰好落在这个组合里，因为 compose 重启通常发生在没人看面板的时候：
+  `down` 之后进程重建、计数器归零，上游拨入、几分钟后镜像 pull 完又断开重连，
+  整个过程没有一次 HTTP 读取，于是面板打开时看到的正是「未连接」。
+  换句话说，为这个报障加的状态在这个报障自己的场景里不生效。
+
+  置位点移到 `_handle_meta` 里链路真的活着的那一刻。心跳与 `lifecycle connect`
+  一并算：两者都证明链路活着，而 Kirara 重启后上游可能不重发
+  `lifecycle connect`、直接继续发心跳，只认 lifecycle 会漏掉这种真实形态。
+  快照里那一处保留为兜底（覆盖不经过元事件填充 `connections` 的路径），
+  但不再是唯一置位点。
+
+  另外三个适配器不受影响，已逐个核对：Telegram 与企业微信的 `_ever_started`
+  在 `start()` 里置位（读快照那处只是补一次），QQ 官方机器人没有重连窗口——
+  它们都不是「上游拨入」模型，没有这个状态。
+
+  回归测试 `tests/plugins/im_onebot_adapter/test_ever_connected_latch.py`（5 项）
+  的核心用例全程走 `_handle_meta`、掉线前**零次**读快照，坏版本在那一条上
+  返回 `disconnected`。
+
 - **全新部署无法回复任何消息：解析不到 Agent，四个渠道各说一套话（需求 10、19.5）**：
   用户在 Telegram 发一句话，收到的是
 
