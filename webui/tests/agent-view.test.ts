@@ -22,6 +22,30 @@ vi.mock('../src/api/resource', () => ({
   listResources
 }))
 
+// 模型优先链与 Provider 白名单的候选来自 `GET /llm/backends`。
+// 不 stub 它，`loadBackends()` 会真的去 fetch，在测试环境里得到
+// 「Failed to parse URL」——那条错误会渲染进页面并污染这一页的断言。
+vi.mock('../src/api/llm', () => ({
+  llmApi: {
+    // 返回一个真实形状的后端：模型优先链的候选来自这里，
+    // 空列表会让「从候选里选一个模型」这条路径无法测到。
+    // `ability: 14` 是 `LLMAbility.TextChat`（Chat|TextInput|TextOutput）。
+    getBackends: vi.fn(async () => ({
+      data: {
+        backends: [
+          {
+            name: 'openai-main',
+            adapter: 'openai',
+            config: {},
+            enable: true,
+            models: [{ id: 'primary-model', type: 'llm', ability: 14 }]
+          }
+        ]
+      }
+    }))
+  }
+}))
+
 vi.mock('naive-ui', () => {
   const passthrough = (tag: string) => ({ name: tag, template: `<section><slot /></section>` })
   return {
@@ -212,9 +236,11 @@ describe('AgentView', () => {
     const wrapper = mount(AgentView)
     await flushPromises()
 
-    const modelInput = wrapper.get('input[aria-label="1号模型"]')
+    // 模型链改成了可筛选可创建的选择器：模型 ID 就在「模型配置」页上，
+    // 手打拼错的后果是运行时失败，而那时的报错与拼写无关。
+    const modelSelect = wrapper.get('select[aria-label="1号模型"]')
     const promptSelect = wrapper.get('select[aria-label="Prompt资源"]')
-    expect(modelInput.element.tagName).toBe('INPUT')
+    expect(modelSelect.element.tagName).toBe('SELECT')
     expect(promptSelect.element.tagName).toBe('SELECT')
     expect(wrapper.find('.n-input[aria-label]').exists()).toBe(false)
     expect(wrapper.find('.n-select[aria-label]').exists()).toBe(false)
@@ -236,7 +262,9 @@ describe('AgentView', () => {
 
     await wrapper.get('[data-test="new-agent"]').trigger('click')
     await wrapper.get('[data-test="agent-id"] input').setValue('new-research-agent')
-    await wrapper.get('[aria-label="1号模型"]').setValue('primary-model')
+    // 从候选里选（mock 里那个后端提供了 `primary-model`），
+    // 这与用户真实操作一致：不再手打模型 ID。
+    await wrapper.get('select[aria-label="1号模型"]').setValue('primary-model')
     await wrapper.get('[data-test="save-agent"]').trigger('click')
     await flushPromises()
 

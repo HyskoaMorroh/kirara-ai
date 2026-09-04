@@ -245,6 +245,153 @@ def _agent_runtime_audit_sink(
             logger.debug("Unable to persist Agent runtime audit")
 
 
+#: 默认 Agent 的标识与显示名。
+#:
+#: 固定 ID 而不是随机生成：它会出现在审计记录、会话绑定与界面上，
+#: 每次启动换一个 ID 会让「同一个默认 Agent」在历史里变成许多条不同的记录。
+_DEFAULT_AGENT_ID = "default-agent"
+_DEFAULT_AGENT_DISPLAY_NAME = "默认助手"
+
+#: 兜底 Agent 会绑上的内置资源。只含**不起进程**的两类。
+#:
+#: 刻意不含 `mcp.context7` 与 `hook.ai-debug`：那两类会拉起进程、能操作服务器，
+#: 默认就绑等于替用户决定「装完立刻可以动服务器」，而需求 10 对这件事的要求
+#: 是显式确认。用户在 Agent 页手动绑定它们仍然照常可用。
+_DEFAULT_AGENT_RESOURCES = (
+    ("prompt.office-research", "prompt"),
+    ("memory.research-context", "memory"),
+)
+
+
+def _chat_capable_models(config: GlobalConfig) -> list[str]:
+    """配置里所有**能对话**的模型 ID，按后端与模型的声明顺序。
+
+    只取 `type == "llm"` 且带 Chat 能力位的模型：拿 `image_generation` 或
+    `embedding` 当主模型，第一次对话必然失败，而报错指向「模型不支持对话」，
+    与用户实际做过的事毫无关系——他会去查模型配置，而问题在一个自动决定里。
+
+    停用的后端整个跳过：它的模型现在拿不到，写进优先链只是让第一次请求
+    必然走到备用链。
+    """
+
+    from kirara_ai.llm.model_types import LLMAbility, ModelType
+
+    models: list[str] = []
+    for backend in config.llms.api_backends:
+        if not backend.enable:
+            continue
+        for model in backend.models:
+            if str(getattr(model, "type", "")) != ModelType.LLM.value:
+                continue
+            ability = getattr(model, "ability", 0)
+            if not isinstance(ability, int) or not ability & LLMAbility.Chat.value:
+                continue
+            model_id = str(getattr(model, "id", "")).strip()
+            if model_id and model_id not in models:
+                models.append(model_id)
+    return models
+
+
+def provision_default_agent(
+    agent_registry: Any,
+    config: GlobalConfig,
+    resource_service: Any | None,
+) -> None:
+    """注册表为空时建出一个可用的默认 Agent。
+
+    为什么必须有这一步
+    ----------------
+    四个 IM 适配器加 HTTP 入口全部用 `require_agent=True` 派发
+    （`im_onebot_adapter/adapter.py`、`im_qqbot_adapter/adapter.py`、
+    `im_telegram_adapter/adapter.py`、`im_wecom_adapter/adapter.py`、
+    `im_http_legacy_adapter/adapter.py`），而那个参数的含义就是
+    「解析不到 Agent 就抛错」。于是一个新部署：配好模型、配好渠道、
+    **不去 Agent 页手建一个**，任何一句话都得到
+    `No Agent is configured for this channel identity`。
+
+    而 `ensure_builtins()` 已经预置了 12 条资源。也就是说「首屏就有货」
+    只做了一半：资源在，用它们的那个东西不在——需求 10 的关系模型
+    「渠道身份 → Agent → 上游模型/备用链 → 插件」第一环没有兜底，
+    后面全部预置都到不了用户面前。
+
+    三条刻意的边界
+    ------------
+    **只在注册表完全空时介入。** 这是兜底而不是「每次启动同步一份」：
+    后者会覆盖用户的配置。「有 Agent 但没设默认」也不介入——那可能是
+    用户刻意的（按渠道分别绑定、不要全局兜底），替他补一个默认 Agent
+    会让本该「没有匹配就拒绝」的渠道悄悄开始回话。
+
+    **没有可对话模型时不建。** 建一个指向空模型链的 Agent，会把
+    「你还没配模型」这个清晰的错误换成一次对话时的运行时解析失败。
+
+    **失败只降级，不阻断启动。** `ensure_builtins()` 已经是这个约定
+    （出网失败只跳过条目）。让「建一个默认 Agent」把服务拖死，
+    比没有这个功能更糟。
+    """
+
+    from kirara_ai.agent_runtime import AgentDefinition
+
+    try:
+        if agent_registry.agents:
+            # 用户已经有配置——一个字都不动。
+            return
+        models = _chat_capable_models(config)
+        if not models:
+            logger.info(
+                "尚无可对话的模型，暂不创建默认 Agent；"
+                "在「模型管理」里配置一个上游后重启即可自动创建"
+            )
+            return
+
+        prompt_bindings = []
+        memory_bindings = []
+        if resource_service is not None:
+            for resource_id, resource_type in _DEFAULT_AGENT_RESOURCES:
+                try:
+                    # 绑一条停用的资源等于没绑：运行时会跳过它，
+                    # 而界面上「已绑定」看起来是好的。
+                    resource_service.enable(resource_id, confirmed=True)
+                    binding = resource_service.resolve_binding(
+                        resource_id,
+                        resource_type,
+                        version=resource_service.get_resource(resource_id)[
+                            "current_version"
+                        ],
+                        enabled=True,
+                    )
+                except Exception:
+                    # 内置资源在离线部署里可能没装上（`ensure_builtins()` 会降级
+                    # 跳过要出网的条目）。那时「能回话」比「带着提示词回话」重要：
+                    # 没有 Agent 是完全不能用，没有提示词只是少一层行为约束。
+                    logger.debug("内置资源 {} 不可用，默认 Agent 跳过该绑定", resource_id)
+                    continue
+                if resource_type == "prompt":
+                    prompt_bindings.append(binding)
+                else:
+                    memory_bindings.append(binding)
+
+        agent = AgentDefinition(
+            agent_id=_DEFAULT_AGENT_ID,
+            display_name=_DEFAULT_AGENT_DISPLAY_NAME,
+            # 全部可对话模型按声明顺序进优先链：第一个不可用时自动进备用链，
+            # 这正是需求 8 的队列语义在单 Agent 上的体现。
+            model_priority=tuple(models),
+            prompt_bindings=tuple(prompt_bindings),
+            memory_bindings=tuple(memory_bindings),
+        )
+        agent_registry.register(agent)
+        # 设为全局默认：六个渠道的解析链最后一环读的就是它。
+        agent_registry.configure(agent, is_default=True)
+        logger.info(
+            "已创建默认 Agent {}（模型链 {}），所有渠道现在都能收到回复；"
+            "可在「模型与 Agent → Agent 管理」里调整",
+            _DEFAULT_AGENT_ID,
+            ", ".join(models[:3]) + ("…" if len(models) > 3 else ""),
+        )
+    except Exception as error:  # noqa: BLE001 - 兜底失败只降级，见 docstring
+        logger.warning("默认 Agent 创建失败（不影响启动）：{}", error)
+
+
 def init_agent_runtime(container: DependencyContainer):
     """Register the shared Agent runtime against the application's services."""
     # Import lazily because Runtime imports the message package, whose package
@@ -323,6 +470,10 @@ def init_agent_runtime(container: DependencyContainer):
     container.register(AgentRegistry, agent_registry)
     container.register(SessionStore, session_store)
     container.register(AgentRuntimeExecutor, runtime)
+    # 注册表为空时兜底建一个默认 Agent。放在注册**之后**：
+    # 六个入口都用 `require_agent=True` 派发，没有任何 Agent 时它们全部报错，
+    # 而 `ensure_builtins()` 已经预置了资源——缺的只是用它们的那个东西。
+    provision_default_agent(agent_registry, config, resource_service)
     return runtime
 
 

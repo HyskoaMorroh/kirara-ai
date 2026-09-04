@@ -24,8 +24,15 @@ import {
   type PendingConfirmation,
   type SessionSummary
 } from '@/api/agent'
+import { llmApi } from '@/api/llm'
+import type { LLMBackend } from '@/api/llm'
 import { listResources } from '@/api/resource'
 import type { ManagedResource } from '@/api/resource'
+import {
+  collectModelChoices,
+  collectProviderChoices,
+  unknownModels
+} from './agentModelChoices'
 
 type BindingKey = 'prompt_bindings' | 'skill_bindings' | 'memory_bindings' | 'mcp_bindings' | 'hook_bindings'
 
@@ -110,7 +117,6 @@ const hooksLoading = ref(false)
 const hooksError = ref('')
 const previewToolName = ref('')
 const previewResults = ref<Record<string, HookPreviewResult>>({})
-const providerText = ref('')
 const capabilitiesText = ref('')
 const mcpAllowlistText = ref('')
 const persistedAgentId = ref<string | null>(null)
@@ -126,6 +132,39 @@ const selectedAgent = computed(() =>
  * 停用的 Agent 不列出——选中它只会得到一个调用时必定失败的工具，
  * 让模型撞墙一次再重试，白花一轮 token。
  */
+/**
+ * 模型优先链与 Provider 白名单的候选项，来自 `GET /llm/backends`。
+ *
+ * 那两格原来是纯文本框，而这些名字就在「模型配置」页上。手打的后果不是
+ * 「多打几个字」：模型 ID 拼错不会当场报错，Agent 保存成功，直到某次真实
+ * 对话解析不到那个模型才失败——而那时的报错与拼写无关。
+ *
+ * 拉取失败只让候选为空，不阻断编辑：选择器仍可自由输入（`tag`），
+ * 因此拿不到后端列表时这一页照样可用。
+ */
+const backends = ref<LLMBackend[]>([])
+const backendLoadError = ref('')
+const modelOptions = computed(() => collectModelChoices(backends.value))
+const providerOptions = computed(() => collectProviderChoices(backends.value))
+
+/** 填了但当前配置里找不到的模型。只提示，不阻止保存。 */
+const unknownModelNames = computed(() =>
+  unknownModels(form.value.model_priority, modelOptions.value)
+)
+
+async function loadBackends() {
+  backendLoadError.value = ''
+  try {
+    const response = await llmApi.getBackends()
+    backends.value = response.data.backends || []
+  } catch (error) {
+    // 拿不到候选不该让这一页不可用——选择器允许自由输入。
+    backends.value = []
+    backendLoadError.value =
+      error instanceof Error ? error.message : '供应商列表加载失败，模型候选暂不可用'
+  }
+}
+
 const teammateOptions = computed(() =>
   agentOptions.value
     .filter((agent) => agent.enabled && agent.agent_id !== form.value.agent_id.trim())
@@ -206,7 +245,8 @@ function formFromAgent(agent: AgentSummary): AgentConfigurationRequest {
 }
 
 function syncTextFields(next: AgentConfigurationRequest) {
-  providerText.value = next.provider_allowlist.join(', ')
+  // Provider 白名单已改为多选（直接绑 `form.provider_allowlist`），
+  // 不再经过文本中转——留着这一行会让「选完又被文本覆盖」。
   capabilitiesText.value = next.capabilities.join(', ')
   mcpAllowlistText.value = next.mcp_allowlist.join(', ')
 }
@@ -265,7 +305,8 @@ async function loadResourceCatalog() {
 }
 
 async function load() {
-  await Promise.all([loadAgents(), loadResourceCatalog()])
+  // 三者并行：候选项与 Agent 列表互不依赖，串起来只会让首屏更慢。
+  await Promise.all([loadAgents(), loadResourceCatalog(), loadBackends()])
 }
 
 function isBindableResource(resource: ManagedResource) {
@@ -369,7 +410,10 @@ function buildPayload(): AgentConfigurationRequest {
     display_name: form.value.display_name?.trim() || null,
     workflow_id: form.value.workflow_id?.trim() || null,
     model_priority: form.value.model_priority.map((model) => model.trim()).filter(Boolean),
-    provider_allowlist: parseList(providerText.value),
+    // 多选组件已经给出数组；仍然 trim + 去空，因为 `tag` 允许自由输入。
+    provider_allowlist: form.value.provider_allowlist
+      .map((name) => String(name).trim())
+      .filter(Boolean),
     capabilities: parseList(capabilitiesText.value),
     mcp_allowlist: parseList(mcpAllowlistText.value),
     relations: {
@@ -681,12 +725,61 @@ function channelIdentityTitle(session: SessionSummary): string {
           <div class="ordered-list">
             <div v-for="(model, index) in form.model_priority" :key="index" class="ordered-row">
               <span class="order-number">{{ index + 1 }}</span>
-              <n-input v-model:value="form.model_priority[index]" :placeholder="index === 0 ? '主模型 ID' : '备用模型 ID'" :input-props="{ 'aria-label': `${index + 1}号模型` }" />
+              <!--
+                可筛选可创建的选择器而不是纯文本框：模型 ID 就在「模型配置」页上，
+                手打拼错不会当场报错，Agent 保存成功，直到某次真实对话解析不到
+                那个模型才失败——而那时的报错与拼写无关。
+                保留 `tag`（可创建）：模型可能来自尚未登记的后端，
+                或者用户想先配 Agent 再配供应商。
+              -->
+              <n-select
+                v-model:value="form.model_priority[index]"
+                filterable
+                tag
+                :options="modelOptions"
+                :placeholder="index === 0 ? '选择或输入主模型 ID' : '选择或输入备用模型 ID'"
+                :input-props="{ 'aria-label': `${index + 1}号模型` }"
+                data-test="model-priority-select"
+              />
               <n-button quaternary size="small" :disabled="form.model_priority.length === 1" :aria-label="`移除第 ${index + 1} 个模型`" @click="removeModel(index)">移除</n-button>
             </div>
           </div>
+          <!--
+            填了但当前配置里找不到的模型：只提示不阻止保存——尚未登记的后端上的
+            模型是合法取值，拒绝保存会让「先配 Agent 再配供应商」不可能。
+            但不提示也不行：拼错一个字母的后果是运行时失败。
+          -->
+          <n-alert
+            v-if="unknownModelNames.length"
+            type="warning"
+            :show-icon="true"
+            class="model-hint"
+            data-test="unknown-model-hint"
+          >
+            这些模型在当前供应商配置里找不到：{{ unknownModelNames.join('、') }}。
+            如果它们来自尚未登记的供应商，可以照常保存；否则请检查拼写。
+          </n-alert>
+          <n-alert v-if="backendLoadError" type="info" :show-icon="true" class="model-hint">
+            {{ backendLoadError }}（仍可手动输入模型 ID）
+          </n-alert>
           <div class="form-grid two-columns compact-top">
-            <label class="field"><span>Provider 白名单</span><n-input v-model:value="providerText" placeholder="用逗号分隔，留空表示不限制" /></label>
+            <!--
+              多选而不是逗号分隔的文本：后端名同样在另一个页面上，
+              而逗号分隔的输入还要用户自己记住分隔规则。
+              `tag` 保留，理由与模型链相同。
+            -->
+            <label class="field"><span>Provider 白名单</span>
+              <n-select
+                v-model:value="form.provider_allowlist"
+                multiple
+                filterable
+                tag
+                :options="providerOptions"
+                placeholder="留空表示不限制"
+                :input-props="{ 'aria-label': 'Provider 白名单' }"
+                data-test="provider-allowlist-select"
+              />
+            </label>
             <label class="field"><span>能力标记</span><n-input v-model:value="capabilitiesText" placeholder="例如 research, code" /></label>
           </div>
         </section>
@@ -1026,9 +1119,11 @@ h4 { margin: 0; font-size: var(--font-size-base); }
 .field-hint { margin: 0; color: var(--text-color-secondary); font-size: var(--font-size-sm); line-height: var(--line-height-relaxed); }
 .compact-top { margin-top: var(--space-4); }
 .ordered-list { display: grid; gap: var(--space-2); }
+/* 提示与下面的字段网格之间留一档间距，避免读成同一块。 */
+.model-hint { margin-top: var(--space-3); }
 .ordered-row { gap: var(--space-3); min-width: 0; }
 .order-number { display: grid; place-items: center; flex: 0 0 28px; width: 28px; height: 28px; border-radius: var(--radius-pill); color: var(--primary-color-text); background: var(--selection-bg-color); font-size: var(--font-size-sm); font-weight: 650; }
-.ordered-row > .n-input, .binding-row > .n-select, .binding-row > .n-input, .relation-row > .n-input, .relation-row > .n-select { min-width: 0; flex: 1; }
+.ordered-row > .n-select, .ordered-row > .n-input, .binding-row > .n-select, .binding-row > .n-input, .relation-row > .n-input, .relation-row > .n-select { min-width: 0; flex: 1; }
 .resource-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
 .resource-section { min-width: 0; padding: var(--space-4); border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--muted-bg-color); }
 .resource-section-header { align-items: flex-start; }

@@ -29,6 +29,22 @@ from kirara_ai.workflow.core.workflow.registry import WorkflowRegistry
 from .exceptions import AgentConfigurationNotFound, WorkflowNotFoundException
 
 
+#: 解析不到 Agent 时给用户看的话。
+#:
+#: 原文是 `No Agent is configured for this channel identity`——用户不知道
+#: Agent 是什么、去哪配、要配什么，而且它是全项目唯一暴露给用户的英文报错。
+#:
+#: 现在启动时会兜底建一个默认 Agent（`entry.provision_default_agent`），
+#: 因此这句话只在两种**真实处境**下出现：用户主动删光了 Agent，或者所有
+#: Agent 都被停用。文案据此写，而不再说「没有配置」——那会让一个刚把
+#: 唯一 Agent 停用的人去找一个「配置」入口。
+_NO_AGENT_MESSAGE = (
+    "没有可用的 Agent：当前渠道解析不到任何已启用的 Agent。"
+    "请在「模型与 Agent → Agent 管理」里新建一个并勾选「设为默认 Agent」，"
+    "或启用一个已停用的 Agent。"
+)
+
+
 class WorkflowDispatcher:
     """工作流调度器"""
 
@@ -310,13 +326,13 @@ class WorkflowDispatcher:
         if not self.container.has(AgentRegistry):
             if require_agent:
                 raise AgentConfigurationNotFound(
-                    "No Agent is configured for this channel identity"
+                    _NO_AGENT_MESSAGE
                 )
             return None
         if not self.container.has(AgentRuntimeExecutor):
             if require_agent:
                 raise AgentConfigurationNotFound(
-                    "No Agent is configured for this channel identity"
+                    _NO_AGENT_MESSAGE
                 )
             return None
 
@@ -333,7 +349,7 @@ class WorkflowDispatcher:
                 raise
             if require_agent:
                 raise AgentConfigurationNotFound(
-                    "No Agent is configured for this channel identity"
+                    _NO_AGENT_MESSAGE
                 )
             self.logger.debug(
                 "No Agent binding matched channel context; keeping workflow compatibility path"

@@ -20,6 +20,7 @@ from kirara_ai.im.adapter import (
     IMActionTimeoutError,
     IMAdapter,
 )
+from kirara_ai.im.dispatch_failure import describe_dispatch_failure
 from kirara_ai.im.message import (FileMessage, ImageMessage, IMMessage, MentionElement, MessageElement, TextMessage,
                                   VideoElement, VoiceMessage)
 from kirara_ai.im.profile import UserProfile
@@ -596,9 +597,28 @@ class QQBotAdapter(botpy.WebHookClient, IMAdapter, BotProfileAdapter):
                 return
         try:
             await self.dispatcher.dispatch(self, im_message, require_agent=True)
-        except BaseException:
+        except asyncio.CancelledError:
+            # 取消不是失败：不给用户发「处理失败」，否则正常停机时
+            # 每个在途会话都会收到一条错误。
             if receipts is not None and event_key is not None:
                 receipts.retry(event_key)
+            raise
+        except BaseException as exc:
+            if receipts is not None and event_key is not None:
+                receipts.retry(event_key)
+            # 告诉用户失败了。此前这条路径**只记日志**，用户那侧完全静默——
+            # 他无法区分「机器人挂了」与「我的消息没发出去」，只会反复重发。
+            try:
+                await self.send_message(
+                    IMMessage(
+                        sender=im_message.sender,
+                        message_elements=[TextMessage(describe_dispatch_failure(exc))],
+                    ),
+                    im_message.sender,
+                )
+            except Exception:
+                # 发送失败不能盖掉原始异常。
+                self.logger.opt(exception=True).error("QQ 失败提示发送失败")
             raise
         if receipts is not None and event_key is not None:
             receipts.complete(event_key)

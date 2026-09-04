@@ -25,6 +25,7 @@ from kirara_ai.im.adapter import (
     MessageSendResult,
     UserProfileAdapter,
 )
+from kirara_ai.im.dispatch_failure import describe_dispatch_failure
 from kirara_ai.im.message import (
     AtElement,
     EmojiMessage,
@@ -708,10 +709,34 @@ class OneBotAdapter(
         try:
             message = await self.convert_to_message(event)
             await self.dispatcher.dispatch(self, message, require_agent=True)
-        except BaseException:
+        except asyncio.CancelledError:
+            # 取消不是失败：收据放回可重领，但不给用户发「处理失败」——
+            # 那会在正常停机时给每个在途会话都发一条错误。
+            if receipts is not None and event_key is not None:
+                receipts.retry(event_key)
+            raise
+        except BaseException as exc:
             # 处理失败时把收据放回可重领状态，让上游重投仍能被处理一次。
             if receipts is not None and event_key is not None:
                 receipts.retry(event_key)
+            # 告诉用户失败了。此前这条路径**只记日志**：用户那侧完全静默，
+            # 而同一个上游故障在 Telegram 会看到一句英文、在企业微信会看到
+            # 中文分类说明。静默是三者里最糟的——用户无法区分「机器人挂了」
+            # 与「我的消息没发出去」，只会反复重发。
+            try:
+                await self.send_message(
+                    IMMessage(
+                        sender=ChatSender.from_c2c_chat(
+                            user_id=str(self.adapter_instance or "bot"),
+                            display_name="bot",
+                        ),
+                        message_elements=[TextMessage(describe_dispatch_failure(exc))],
+                    ),
+                    message.sender,
+                )
+            except Exception:
+                # 发送失败不能盖掉原始异常：原因在上面那个 exc 里。
+                self.logger.opt(exception=True).error("OneBot 失败提示发送失败")
             raise
         if receipts is not None and event_key is not None:
             receipts.complete(event_key)

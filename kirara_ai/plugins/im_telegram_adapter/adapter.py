@@ -25,6 +25,7 @@ from kirara_ai.im.adapter import (
     IncrementalReplyHandle,
     UserProfileAdapter,
 )
+from kirara_ai.im.dispatch_failure import describe_dispatch_failure
 from kirara_ai.im.message import (FileElement, ImageMessage, IMMessage, MentionElement, MessageElement, TextMessage,
                                   VideoMessage, VoiceMessage)
 from kirara_ai.im.profile import UserProfile
@@ -354,10 +355,11 @@ class TelegramAdapter(
             if outbox is not None:
                 outbox.retry_inbound(update_id)
             try:
-                await update.message.reply_text(
-                    "Workflow execution failed, please try again later: "
-                    f"{str(exc)}"
-                )
+                # 统一的失败描述（`kirara_ai/im/dispatch_failure.py`）。
+                # 原来这里是全项目唯一暴露给用户的英文报错，而同一个失败在
+                # 企业微信那侧已经有一套中文分类说明——两个渠道说不同的话，
+                # 会让同时接了两个渠道的人以为是渠道本身的问题。
+                await update.message.reply_text(describe_dispatch_failure(exc))
             except Exception:
                 self.logger.opt(exception=True).error(
                     "Failed to send Telegram workflow error reply"

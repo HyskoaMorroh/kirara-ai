@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from quart import Blueprint, Response, g, jsonify, request
 
 from kirara_ai.agent_runtime import AgentRegistry, RuntimeStatus
+from kirara_ai.workflow.core.dispatch.exceptions import AgentConfigurationNotFound
 from kirara_ai.config.config_loader import CONFIG_FILE, ConfigLoader
 from kirara_ai.credential_keys import NON_CREDENTIAL_KEY_NAMES, is_credential_key
 from kirara_ai.config.global_config import GlobalConfig, LLMBackendConfig
@@ -431,7 +432,10 @@ async def webui_chat():
         logger.debug("Rejected invalid WebUI chat request: {}", error.error_count())
         return jsonify({"error": "Invalid WebUI chat request"}), 400
     except LookupError as error:
-        if str(error) == "No Agent is configured for this channel identity":
+        # 按**异常类型**判断而不是比字符串：文案是给用户看的，改一个字
+        # 这里的 409 就会静默退化成 400，而 409 是「配置缺失、重试也没用」
+        # 与 400「这次请求本身不对」的区别。
+        if isinstance(error, AgentConfigurationNotFound):
             return jsonify({"error": str(error)}), 409
         logger.warning("WebUI chat rejected: {}", error)
         return jsonify({"error": str(error)}), 400
@@ -534,7 +538,9 @@ async def webui_chat_stream():
                 reply_stream_mode="incremental",
             )
         except LookupError as error:
-            if str(error) == "No Agent is configured for this channel identity":
+            # 同上：按类型判断。这一支与下一支目前都回 error 事件，
+            # 保留分支是为了让「配置缺失」这条路径的日志级别与其他失败区分开。
+            if isinstance(error, AgentConfigurationNotFound):
                 return {"_event": "error", "error": str(error)}
             logger.warning("WebUI stream chat rejected: {}", error)
             return {"_event": "error", "error": str(error)}

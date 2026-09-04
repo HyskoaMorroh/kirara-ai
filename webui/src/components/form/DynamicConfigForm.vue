@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fieldPlaceholder, isReadOnlyField } from './fieldPresentation'
 import { watch, h } from 'vue'
 import {
   NFormItem,
@@ -120,12 +121,13 @@ const renderInputComponent = (
 ) => {
   const commonProps = {
     value: itemValue,
-    placeholder:
-      property.examples?.[0] || (property.default !== undefined && property.default !== null)
-        ? String(property.default)
-        : '',
+    // `||` 的优先级高于 `?:`，所以原来那行等价于
+    // `(examples?.[0] || default存在) ? String(default) : ''`——
+    // 条件为真时一律取 default，`examples` **永远不会被用到**。
+    // 凡是给了示例值的字段，界面显示的都是默认值。
+    placeholder: fieldPlaceholder(property),
     onUpdateValue: updateItemValue,
-    disabled: property.readOnly === true
+    disabled: isReadOnlyField(property)
   }
 
   switch (itemType) {

@@ -24,7 +24,7 @@ from kirara_ai.llm.llm_manager import LLMManager
 from kirara_ai.llm.llm_registry import LLMAbility, LLMBackendRegistry
 from kirara_ai.web.app import WebServer, create_web_api_app
 from kirara_ai.web.auth.services import AuthService, MockAuthService
-from kirara_ai.workflow.core.dispatch.dispatcher import WorkflowDispatcher
+from kirara_ai.workflow.core.dispatch.dispatcher import _NO_AGENT_MESSAGE, WorkflowDispatcher
 from kirara_ai.workflow.core.dispatch.models.dispatch_rules import CombinedDispatchRule
 from kirara_ai.workflow.core.dispatch.registry import DispatchRuleRegistry
 from kirara_ai.workflow.core.workflow.registry import WorkflowRegistry
@@ -334,9 +334,12 @@ async def test_webui_chat_requires_an_agent_instead_of_running_fallback_workflow
     )
 
     assert response.status_code == 409
-    assert await response.get_json() == {
-        "error": "No Agent is configured for this channel identity"
-    }
+    # 文案由 `_NO_AGENT_MESSAGE` 统一给出（原来是英文，用户看不出该做什么）。
+    # 断言用共享常量而不是逐字重抄：重抄一份会在下一次改进文案时变成两处真相，
+    # 而那时红的是测试、改的是字符串，等于什么都没验证。
+    assert await response.get_json() == {"error": _NO_AGENT_MESSAGE}
+    # 关键信息必须在：告诉用户去哪配。
+    assert "Agent 管理" in _NO_AGENT_MESSAGE
     assert runtime.calls == []
     workflow_run.assert_not_called()
 

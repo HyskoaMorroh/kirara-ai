@@ -21,6 +21,7 @@ from wechatpy.replies import create_reply
 from kirara_ai.config import DATA_PATH
 from kirara_ai.database import DatabaseManager
 from kirara_ai.im.adapter import AdapterHealthProvider, AdapterHealthSnapshot, IMAdapter
+from kirara_ai.im.dispatch_failure import describe_dispatch_failure
 from kirara_ai.im.message import (FileElement, ImageMessage, IMMessage, MessageElement, TextMessage, VideoElement,
                                   VoiceMessage)
 from kirara_ai.im.sender import ChatSender
@@ -562,18 +563,11 @@ class WecomAdapter(IMAdapter, AdapterHealthProvider):
 
                     if not reply_task.done():
                         # 根据异常内容给出可读的失败原因，便于用户判断问题
-                        error_message = str(e)
-                        lowered = error_message.lower()
-                        if "524" in error_message or "timeout" in lowered or "timed out" in lowered:
-                            error_reply = f"请求超时：模型服务响应时间过长，所有备用模型均已尝试。\n详细信息：{error_message[:300]}"
-                        elif "401" in error_message or "403" in error_message:
-                            error_reply = f"认证失败：API 密钥无效或无权限，请检查模型配置。\n详细信息：{error_message[:300]}"
-                        elif "429" in error_message:
-                            error_reply = f"请求过于频繁：已触发速率限制，请稍后再试。\n详细信息：{error_message[:300]}"
-                        elif "connection" in lowered or "network" in lowered:
-                            error_reply = f"网络错误：无法连接到模型服务，请检查网络。\n详细信息：{error_message[:300]}"
-                        else:
-                            error_reply = f"消息处理失败：{error_message[:400]}"
+                        # 失败描述统一由 `kirara_ai/im/dispatch_failure.py` 给出。
+                        # 这套分类原来只在企业微信这一处有，而 Telegram 是一句英文、
+                        # OneBot 与 QQ 官方机器人只记日志——同一个上游故障在三个渠道上
+                        # 呈现成三种样子，而用户往往同时接了两个渠道。
+                        error_reply = describe_dispatch_failure(e)
 
                         try:
                             # 优先尝试企业微信主动发送

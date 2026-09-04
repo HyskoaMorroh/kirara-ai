@@ -17,6 +17,7 @@ from kirara_ai.im.message import IMMessage, TextMessage
 from kirara_ai.im.sender import ChatSender
 from kirara_ai.ioc.container import DependencyContainer
 from kirara_ai.workflow.core.dispatch.dispatcher import WorkflowDispatcher
+from kirara_ai.workflow.core.dispatch.exceptions import AgentConfigurationNotFound
 from kirara_ai.workflow.core.dispatch.models.dispatch_rules import CombinedDispatchRule
 from kirara_ai.workflow.core.dispatch.registry import DispatchRuleRegistry
 from kirara_ai.workflow.core.workflow.registry import WorkflowRegistry
@@ -437,7 +438,7 @@ async def test_agent_required_dispatch_does_not_fall_back_to_a_workflow(monkeypa
         send_message=AsyncMock(),
     )
 
-    with pytest.raises(LookupError, match="No Agent"):
+    with pytest.raises(AgentConfigurationNotFound):
         await dispatcher.dispatch(adapter, _message(), require_agent=True)
 
     assert runtime.calls == []
@@ -459,7 +460,7 @@ async def test_expected_missing_agent_configuration_is_not_logged_as_an_error():
         send_message=AsyncMock(),
     )
 
-    with pytest.raises(LookupError, match="No Agent"):
+    with pytest.raises(AgentConfigurationNotFound):
         await dispatcher.dispatch(adapter, _message(), require_agent=True)
 
     assert recording_logger.error_messages == []

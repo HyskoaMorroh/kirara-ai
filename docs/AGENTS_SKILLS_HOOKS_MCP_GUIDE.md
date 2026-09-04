@@ -25,6 +25,26 @@
 
 Agent 的实际执行仍由 WorkflowExecutor 完成；禁用对应规则或删除用户副本即可停止它。不要把能写文件、发消息、改配置、执行命令或产生费用的工具直接挂到公开规则。
 
+### 全新部署的第一个 Agent 由启动兜底建出
+
+`AgentRegistry.resolve()` 的优先链是「会话 > 账号 > 渠道 > 全局默认」，
+五级全空时抛 `AgentConfigurationNotFound`。而六个适配器、HTTP 旧接口和 WebUI 路由
+都走 `require_agent=True`——也就是说，一个刚 `up -d` 起来、还没有任何 Agent 的实例，
+**任何渠道都不会回复任何消息**，用户在 IM 里看到的是一句解析失败。
+
+因此 `init_agent_runtime` 在注册表**完全为空**时建一个 `default-agent`（显示名
+「默认助手」），绑定 `prompt` 与 `memory` 两类资源。三条边界是有意的：
+
+- **注册表非空时一律不动。** 兜底只负责「从零到一」，不参与之后的任何决定；
+  用户删掉自己所有 Agent 也不会被悄悄补回来以外的行为覆盖。
+- **没有具备 Chat 能力位的模型时不建。** 判据是 `type == "llm"` 且
+  `ability & LLMAbility.Chat`。硬建一个会把「你还没配模型」这个清楚的提示，
+  换成一次运行时解析失败——后者与用户做过的事看不出关系。
+- **不绑 `mcp` 与 `hook`。** 那两类会拉起进程或执行外部命令，
+  冷启动兜底不该代替用户决定要在这台机器上跑什么。
+
+兜底自身失败只写一条 warning 并继续启动：它是便利，不是启动前置条件。
+
 ### 可以绑定 Agent 的渠道
 
 `POST /backend-api/api/agents/<agent_id>/bind-channel` 接受的渠道类型是一份固定枚举：
