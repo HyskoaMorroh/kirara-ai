@@ -3,7 +3,7 @@
     {
       "path": "docs/AGENTS_SKILLS_HOOKS_MCP_GUIDE.md",
       "tokens": [
-        "3.3.0b16",
+        "3.3.0b17",
         "1.0.0",
         "1.0.0",
         "1.0.0"
@@ -12,20 +12,20 @@
     {
       "path": "docs/EXCELLENCE_DEPLOYMENT_GUIDE.md",
       "tokens": [
-        "3.3.0b16"
+        "3.3.0b17"
       ]
     },
     {
       "path": "docs/EXTENDING.md",
       "tokens": [
         "1.0.0",
-        "3.3.0b16"
+        "3.3.0b17"
       ]
     },
     {
       "path": "docs/WORKFLOW_OPERATIONS_GUIDE.md",
       "tokens": [
-        "3.3.0b16"
+        "3.3.0b17"
       ]
     }
   ],
@@ -37,6 +37,7 @@
     "3.3.0b14",
     "3.3.0b15",
     "3.3.0b16",
+    "3.3.0b17",
     "3.3.0b8",
     "3.3.0b9"
   ],
