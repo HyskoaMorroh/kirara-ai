@@ -563,7 +563,7 @@ $commit = (git rev-parse HEAD).Trim()
 | 工作流 | 触发 | 内容 |
 |---|---|---|
 | `Run Tests` | `pull_request` / `push` / `merge_group`（`main`、`master`）+ 手动 | 语法门禁（`compileall`）、全量后端用例（ubuntu + Python 3.11）；跨版本跨平台矩阵（ubuntu 3.10 / 3.13、windows 3.13）与 Docker 镜像校验默认只在默认分支、合并队列或手动触发时运行，PR 上打 `ci:full` 标签可强制拉起 |
-| `Release Preflight` | `push` / `pull_request` / `merge_group` + 手动 | 发布契约检查；WebUI 类型检查 → 单元测试 → 生产构建；ESLint 报告（不阻塞） |
+| `Release Preflight` | `push` / `pull_request` / `merge_group` + 手动 | 发布契约检查；`yarn install --frozen-lockfile`（从干净环境按锁文件重建，本机 `--no-install` 跑测试永远不会校验它）→ WebUI 类型检查 → 单元测试 → 生产构建；ESLint 报告（不阻塞） |
 | `Project Check` | `push` / `merge_group` + 手动 | mypy 类型检查报告 |
 | `PR Code Review` | `pull_request_target` | mypy 结果回帖到 PR |
 | `Docker build latest` / `Windows Quickstart` | 发布 Release；Windows 另支持手动 | 发布产物；镜像发布前会先重跑全量后端用例 |

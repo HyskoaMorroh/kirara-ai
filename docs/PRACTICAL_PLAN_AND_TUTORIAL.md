@@ -593,14 +593,21 @@ python3 scripts/version.py get       # 当前版本
 python3 scripts/version.py tag       # 对应的 tag 名
 ```
 
-发版前必须全绿的四项：
+发版前必须全绿的六项：
 
 ```bash
 .venv-win\Scripts\python.exe -m pytest tests -q    # 后端（Windows）
 cd webui && npm run type-check && npm run test:unit
+cd webui && npm run build-only                      # 生产构建
+cd webui && yarn install --frozen-lockfile          # 锁文件能否从干净环境重建
 git diff --check                                    # 行尾与空白
 python3 scripts/version.py check
 ```
+
+> **`--frozen-lockfile` 这一条不能省。** 本机跑 `npx --no-install vitest` 时
+> `node_modules` 早就装好了，锁文件从未被校验；CI 是干净环境、必须从锁文件重建。
+> 曾经有一次 1172 个测试全绿而 CI 装不起来——`package.json` 加了五个依赖没更新锁文件。
+> 「测试全绿」不等于「装得起来」。
 
 ### 6.1 本机跑不出来的四件事
 
