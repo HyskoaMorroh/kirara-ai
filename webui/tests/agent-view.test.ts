@@ -58,6 +58,9 @@ vi.mock('naive-ui', () => {
     NFormItem: passthrough('NFormItem'),
     NInput: { name: 'NInput', inheritAttrs: false, props: ['value', 'inputProps'], emits: ['update:value'], template: '<div class="n-input" v-bind="$attrs"><input v-bind="inputProps" :value="value" @input="$emit(\'update:value\', $event.target.value)" /></div>' },
     NInputNumber: { name: 'NInputNumber', props: ['value'], emits: ['update:value'], template: '<input type="number" v-bind="$attrs" :value="value" @input="$emit(\'update:value\', Number($event.target.value))" />' },
+    // 布局容器，只透传插槽。手写的 naive-ui mock 漏一个导出就整页崩，
+    // 而报错（No "NSpace" export is defined）与被测行为完全无关。
+    NSpace: { template: '<div class="n-space"><slot /></div>' },
     NSelect: { name: 'NSelect', inheritAttrs: false, props: ['value', 'options', 'inputProps'], emits: ['update:value'], template: '<div class="n-select" v-bind="$attrs"><select v-bind="inputProps" :value="value" @change="$emit(\'update:value\', $event.target.value)"><option v-for="option in options" :key="option.value" :value="option.value">{{ option.label }}</option></select></div>' },
     NSwitch: { name: 'NSwitch', props: ['value'], emits: ['update:value'], template: '<input type="checkbox" v-bind="$attrs" :checked="value" @change="$emit(\'update:value\', $event.target.checked)" />' },
     NTag: { template: '<span><slot /></span>' },

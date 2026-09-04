@@ -38,6 +38,9 @@ vi.mock('naive-ui', () => {
     template: `<${tag} v-bind="$attrs"><slot /></${tag}>`
   })
   return {
+    // 布局容器，只透传插槽。手写的 naive-ui mock 漏一个导出就整页崩，
+    // 而报错（No "NSpace" export is defined）与被测行为完全无关。
+    NSpace: { template: '<div class="n-space"><slot /></div>' },
     NAlert: passthrough('NAlert', 'section'),
     NButton: {
       name: 'NButton',

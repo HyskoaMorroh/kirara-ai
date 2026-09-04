@@ -1260,13 +1260,25 @@ class ResourceCatalogService:
         ]
         unique: dict[str, dict[str, Any]] = {item["catalog_id"]: item for item in filtered}
         ordered = [self._with_install_state(item) for item in unique.values()]
-        # A successful skills.sh response is already offset-applied.  Keep its
-        # page intact; only local-only searches use the catalog slice here.
-        page = (
-            ordered[:limit]
-            if remote_status["status"] == "ok"
-            else ordered[offset : offset + limit]
-        )
+        if remote_status["status"] == "ok":
+            # 远端已经按 offset 返回了它的那一页，因此**本地条目必须自己应用
+            # 同一个 offset**，否则两侧的页码语义不一致：远端给的是第 N 页，
+            # 而本地给的永远是第 1 页，合并后本地条目把远端那页挤出 `[:limit]`。
+            #
+            # 此前这里是 `ordered[:limit]`，靠一个没写出来的前提成立：
+            # 「本地内置里没有任何条目命中这个查询」。内置从 20 条扩到 52 条之后
+            # 那个前提就不再成立了——`skill:frontend-ui-engineering` 的描述里有
+            # 「interfaces and pages」，于是它命中 `q=page` 并占掉了唯一的名额。
+            #
+            # 远端结果排在前面：查询语义上「在线索引的这一页」是用户要的主体，
+            # 本地命中是补充。
+            local_hits = [
+                item for item in ordered if not item.get("source_key", "").count("/")
+            ]
+            remote_hits = [item for item in ordered if item not in local_hits]
+            page = (remote_hits + local_hits[offset : offset + limit])[:limit]
+        else:
+            page = ordered[offset : offset + limit]
         total_count = len(ordered)
         if remote_status["status"] == "ok":
             try:

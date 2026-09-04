@@ -55,6 +55,53 @@
   一处调用点回到只看 `npx` 在不在**——漏改一处会在那一条上恢复原样，而本机
   （包已缓存）看不出区别。
 
+- **模型优先链的顺序此前取决于上游返回顺序，也就是随机（需求 8）**：
+  这条链是「从上到下依次尝试」的队列，第一项决定绝大多数请求用哪个模型。
+  而从 `GET /llm/backends` 拉出来的候选按后端与声明顺序排——同一家族的新旧版本
+  混在一起，一条 16 项的链里可能第 1 项是过时的 flash、第 8 项才是当前最强的 gpt。
+
+  新增 `webui/src/views/llm/modelPriorityRules.ts`，三层规则：
+  家族固定 gpt → claude → gemini → 其余；同家族只留最高编号系列
+  （不写死版本号，按实际拉到的模型算）；gemini 只留带 `pro` 的。
+  同系列内按智能度档位排序：claude `opus > sonnet > fable > haiku`，
+  gpt `sol > terra > luna`。
+
+  **等级表是显式声明，不是从上游推出来的。** 查过 CLIProxyAPI：
+  `internal/registry/models/models.json` 只有 description 营销文案，
+  没有任何 rank / tier / intelligence 字段；`codex_client_models.json` 里的
+  `priority`（sol=6 / terra=7 / luna=8）由 `models.go:149-160` **按 display_name
+  字母序**算出，是列表显示顺序而不是能力评级——sol/terra/luna 恰好字母序一致，
+  属于巧合。因此表写在代码里并注明依据，避免以后有人拿那个 `priority` 当权威。
+  表里没有的档位排在已知档位**之后**而不是当最弱：新上游随时会出一个没见过的
+  档位名，当最弱会让一个可能更强的模型沉到链尾。
+
+  **带前缀的模型归组但绝不去重。** `ANT/claude-opus-5` 与 `claude-opus-5` 在网关上
+  是同一个上游模型（`conductor_models.go:685-698` 把前缀 `TrimPrefix` 掉才发上游，
+  `server_routes.go:403-404` 注明前缀不转发），但它们是**两个独立的路由目标**
+  （`service_models.go:600-614` 为裸 ID 与带前缀 ID 各注册一条 ModelInfo）：
+  带前缀的把候选收缩到那一条凭据（一套 key + base-url + proxy + headers），
+  不带前缀的匹配所有凭据由调度器轮询。去重等于删掉使用者配好的多凭据冗余。
+
+  gemini 必须**先筛 pro、再在 pro 里取最高编号**。反过来做会先算出「最新系列
+  是 3.5」再筛 pro 得到空列表——不存在 `gemini-3.5-pro`，于是 gemini 整族消失，
+  而这个错不抛任何异常。单独一条测试钉住这个顺序。
+
+  界面上是**显式动作**（「按规则重排」按钮）而不是自动重排：链是用户的配置，
+  每次打开页面悄悄改一遍会让「我明明把某个模型放在第一位」变成说不清的问题。
+  提示写明保留几项、移除几项——一次点击让 16 项变 11 项，不说明看起来像丢了配置。
+
+- **目录搜索在远端成功时会把本地命中挤掉远端那一页（需求 22.3）**：
+  `search()` 里远端成功走 `ordered[:limit]`、本地 only 走
+  `ordered[offset:offset+limit]`。远端已按 offset 返回了它的第 N 页，
+  而本地条目从来没应用 offset——本地给的永远是第 1 页。两侧页码语义不一致，
+  合并后本地条目把远端那页挤出了 `[:limit]`。
+
+  这条路径此前一直「正确」，靠一个没写出来的前提：**本地内置里没有任何条目
+  命中这个查询**。20 条内置时碰巧成立；内置扩到 52 条后
+  `skill:frontend-ui-engineering` 的描述含「interfaces and pages」，
+  命中 `q=page` 并占掉了唯一的名额。改为远端结果优先、本地条目自己应用同一个
+  offset。
+
 - **本机在用的插件预置进项目，拉取镜像后默认装好（需求 4）**：
   内置目录从 20 条扩到 52 条：31 个随包技能、5 个随包角色提示词、
   12 个 MCP 模板（补齐 puppeteer / everything / ui5 / notion）、

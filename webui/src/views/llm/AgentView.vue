@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { NAlert, NButton, NInput, NInputNumber, NSelect, NSwitch, NTag, useDialog } from 'naive-ui'
+import { NAlert, NButton, NInput, NInputNumber, NSelect, NSpace, NSwitch, NTag, useDialog } from 'naive-ui'
 
 import {
   clearSessionHistory,
@@ -33,6 +33,7 @@ import {
   collectProviderChoices,
   unknownModels
 } from './agentModelChoices'
+import { rankModelPriority } from './modelPriorityRules'
 
 type BindingKey = 'prompt_bindings' | 'skill_bindings' | 'memory_bindings' | 'mcp_bindings' | 'hook_bindings'
 
@@ -333,6 +334,34 @@ function addModel() {
 
 function removeModel(index: number) {
   if (form.value.model_priority.length > 1) form.value.model_priority.splice(index, 1)
+}
+
+/**
+ * 按规则重排模型优先链。
+ *
+ * 做成**显式动作**而不是自动重排：这条链是用户的配置，
+ * 每次打开页面就悄悄改一遍会让「我明明把某个模型放在第一位」变成一个
+ * 说不清的问题。按钮点下去改的是表单，仍然要保存才生效。
+ *
+ * 会淘汰旧系列与非 pro 的 gemini，因此提示里说明改了几条、去掉了几条——
+ * 不说明的话，一次点击让 16 项变 11 项，看起来像丢了配置。
+ */
+function reorderModels() {
+  const before = form.value.model_priority.map((model) => model.trim()).filter(Boolean)
+  const after = rankModelPriority(before)
+  if (!after.length) {
+    // 全被规则淘汰时保持原样：清空一条用户配好的链比顺序不对更糟。
+    errorMessage.value = '按规则重排后没有剩余模型（可能全是旧系列或非 pro 的 gemini），已保持原样'
+    return
+  }
+  const dropped = before.filter((model) => !after.includes(model))
+  form.value.model_priority = after
+  errorMessage.value = ''
+  // 说明改了几条、去掉了几条：不说明的话，一次点击让 16 项变 11 项
+  // 看起来像丢了配置。
+  savedMessage.value = dropped.length
+    ? `已按规则重排：保留 ${after.length} 项，移除 ${dropped.length} 项（旧系列或非 pro 的 gemini）。保存后生效。`
+    : `已按规则重排 ${after.length} 项。保存后生效。`
 }
 
 function parseList(value: string) {
@@ -721,7 +750,26 @@ function channelIdentityTitle(session: SessionSummary): string {
         </section>
 
         <section class="editor-section" aria-labelledby="model-heading">
-          <div class="section-heading"><div><h3 id="model-heading">模型优先链</h3><p>从上到下依次尝试，前一个模型不可用时自动进入备用链。</p></div><n-button size="small" secondary @click="addModel">添加模型</n-button></div>
+          <div class="section-heading">
+            <div>
+              <h3 id="model-heading">模型优先链</h3>
+              <p>从上到下依次尝试，前一个模型不可用时自动进入备用链。</p>
+            </div>
+            <n-space :size="8">
+              <!--
+                重排是显式动作：这条链是用户的配置，自动重排会让
+                「我明明把某个模型放在第一位」变成一个说不清的问题。
+              -->
+              <n-button
+                size="small"
+                tertiary
+                data-test="reorder-models"
+                title="按 gpt → claude → gemini 分组，同族只留最高编号系列并按智能度排序；gemini 只留 pro"
+                @click="reorderModels"
+              >按规则重排</n-button>
+              <n-button size="small" secondary @click="addModel">添加模型</n-button>
+            </n-space>
+          </div>
           <div class="ordered-list">
             <div v-for="(model, index) in form.model_priority" :key="index" class="ordered-row">
               <span class="order-number">{{ index + 1 }}</span>

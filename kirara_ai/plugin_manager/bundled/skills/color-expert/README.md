@@ -152,24 +152,15 @@ Automatically detects your installed agents and places the skill
 in the correct directory. Works with Claude Code, Codex, Cursor,
 Copilot, OpenCode, and others.
 
-### Manual
+## 在本项目中的安装方式
 
-Clone and symlink into your agent's skills directory:
+这份技能**随镜像分发**，由启动时的 `ensure_builtins()` 装到
+`data/resources/`，不需要 clone 仓库、也不需要手建符号链接。
+上游仓库那套指向 AI 工具本机配置目录的符号链接指路因此不适用，已移除——
+它同时也是本项目私有路径门禁（`tests/test_no_private_paths.py`）拦下的内容：
+本机配置目录路径一律不进仓库。
 
-```bash
-git clone https://github.com/meodai/skill.color-expert ~/Sites/color-expert
-```
-
-| Agent               | Symlink target                  |
-| ------------------- | ------------------------------- |
-| Claude Code         | `~/.claude/skills/color-expert` |
-| Codex               | `~/.codex/skills/color-expert`  |
-| OpenCode            | `~/.agents/skills/color-expert` |
-| Project-level (any) | `.agents/skills/color-expert`   |
-
-```bash
-ln -s ~/Sites/color-expert ~/.claude/skills/color-expert
-```
+要取上游原版：<https://github.com/meodai/skill.color-expert>
 
 ### Updating
 
