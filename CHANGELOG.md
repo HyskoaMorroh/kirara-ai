@@ -2,76 +2,22 @@
 
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的分类方式，记录**源代码、默认配置、部署文件、文档与测试**变化。
 
-比较基线为 `3.2.0`，比较目标为 `3.3.0b15`。本文件记录源码与发布行为的对应关系；实际发布状态以 GitHub 和镜像仓库为准。
+比较基线为 `3.2.0`，比较目标为 `3.3.0b16`。本文件记录源码与发布行为的对应关系；实际发布状态以 GitHub 和镜像仓库为准。
 
 > 不纳入比较：`.git/`、编辑器缓存、测试缓存、运行日志、`data/db/`、记忆/媒体/插件运行数据、虚拟环境和任何本地密钥或密码文件。这些内容会随机器和使用状态变化，不属于可复现的产品功能。
 
-## [3.3.0b15]
+## [3.3.0b16]
 
-本轮以「1.txt 逐条要求」为验收口径，先由只读子代理建立现场证据，再对每一处
-**有 file:line 证据、可构造失败用例**的缺陷补回归测试、改最小范围代码、跑聚焦测试。
-未能在本机验证的外部场景（真实 Docker 重启、真实 QQ 扫码、真实多 Provider 上游、
-真实客户端渲染）一律标记为未验证，不计入已完成。
+本轮修的是三处**不报错**的缺陷：全新部署解析不到 Agent 导致六个渠道全部不回话、
+同一个失败在四个渠道说四套话（其中两个完全静默）、以及 Agent 的模型链要手打
+而那些名字就在另一个页面上。第三处顺带查出动态配置表单的占位符表达式有运算
+优先级错误，`examples` 从来不生效。
 
-补充一轮现场报障（compose 重启后 QQ 显示未连接、工作流块重叠、二维码总是过期、
-流式与非流式、「系统显示成功到收到回复间隔很久」、回复排版含 `$\to` 残片）的定位与
-修正也记在本节。这一轮的证据链有两条与前几轮不同的地方：一是把用户贴出的**原始
-回复文本与原始日志行**直接喂进渲染与解析函数复现（而不是构造相似输入），
-二是对「Telegram / WeCom 没有这个现象」这类对照说法逐条核实——其中「节流只有 QQ 有」
-成立，而「LaTeX 完全没处理」不成立（处理存在，缺的是若干同义命令与配对边界）。
+三处的共同形态是「界面上看不出问题」：没有报错、没有白屏，只是行为不对——
+第一处要等到用户在 IM 里发第一句话，第二处要等到出故障，
+第三处要等到某次真实对话解析不到那个拼错的模型 ID。
 
-### Fixed（发布后补修）
-
-- **`webui/yarn.lock` 与 `package.json` 对不上，CI 从干净环境装不起来**：
-  上一个提交给 `package.json` 加了五个依赖（`date-fns` / `highlight.js` /
-  `semver` / `@codingame/monaco-vscode-configuration-service-override` /
-  `vscode-languageclient`）而没有更新锁文件。逐条核对差异：
-  `highlight.js` 要 `^11.11.1` 而锁里键是 `^11.8.0`；`vscode-languageclient`
-  要 `^9.0.1` 而锁里是 `~9.0.1`；`semver` 要顶层 `^7.7.1` 而锁里只有传递依赖的
-  `^7.3.6/7.5.4/7.6.3`。于是 `yarn install --frozen-lockfile` 直接失败：
-  `error Your lockfile needs to be updated`。
-
-  **为什么本机 1172 个测试全绿却没发现**：本机一直用 `npx --no-install vitest`
-  与 `npx --no-install vue-tsc` 跑，`node_modules` 早就装好了，锁文件从未被校验过。
-  CI 是干净环境、必须从锁文件重建，因此只在那里暴露。这是验证方式的盲区——
-  把「测试全绿」当成了「装得起来」。
-
-  重新解析锁文件时还踩到第二层：本机 `~/.npmrc` 指向 `registry.npmmirror.com`，
-  于是新解析出的三条 `resolved` 带上了镜像地址。
-  `tests/test_webui_build_contract.py` 的白名单守卫当场抓住了它——
-  那条测试正是为「镜像地址漏进锁文件」写的。改用
-  `yarn install --registry https://registry.npmjs.org` 重新生成后通过，
-  并实测 `yarn install --frozen-lockfile` 退出码 0。
-
-- **`context-mode` 与 `caveman` 的依赖建模是错的**（需求 10）：
-  两条登记项此前标为 `kind="claude-plugin"`、`install_supported=False`、
-  探测宿主 `claude --version`，理由写着「装在操作者自己的 Claude 配置里，
-  不是服务器运行时组件」。实测推翻了这个前提：
-
-  ```
-  npm view context-mode version   ->  1.0.169
-  npm ls -g --depth=0             ->  context-mode@1.0.169
-  package.json  "bin": {"context-mode": "./cli.bundle.mjs"}
-  自述：Works with Claude Code, Gemini CLI, VS Code Copilot, OpenCode, Codex CLI
-  ```
-
-  它是 npm 上有 `bin` 入口的普通包，不绑定任何宿主，完全可以装到 Linux VPS 上。
-  按 `claude --version` 探测会**两个方向都答错**：装了 `context-mode` 但没装
-  Claude CLI 的 VPS 报 `missing`，装了 Claude CLI 却没装 `context-mode` 的机器
-  报 `ready`。现改为 `kind="cli"`、探测 `context-mode --version`、
-  安装 `npm install -g context-mode`。
-
-  `caveman` 一并纠正但结论不同：它同样有自己的可执行文件（本机
-  `caveman-installer@2.0.0`，`bin: caveman`），但公共 npm 上
-  `caveman-installer` 是 404、`caveman` 是一个无关的 JS 模板引擎。
-  因此它保持只探测不代装——**原因是分发渠道而不是「它是插件」**，
-  运维指引里写明这两个名字各是什么：猜一条 `npm i -g caveman` 会装上模板引擎，
-  命令存在、探测通过、功能完全不对，比报 `missing` 更糟。
-
-  两条同时加入 `_SKILL_NAME_DEPENDENCY_IDS`：此前被排除让需求 10 点名的五个工具
-  里有两个永远不参与技能就绪判定，技能广告不会说「服务器上没有这个命令」，
-  模型照着一份它执行不了的说明自信作答。「能不能代装」与「要不要参与就绪判定」
-  是两个问题——后者的判据是「这台机器上有没有这个命令」，而那对两者都有答案。
+### Fixed
 
 - **全新部署无法回复任何消息：解析不到 Agent，四个渠道各说一套话（需求 10、19.5）**：
   用户在 Telegram 发一句话，收到的是
@@ -142,6 +88,74 @@
   `false` 与 `0` 当有效值（用 `||` 判断会跳过它们，而默认关闭的开关、默认 `0` 的超时
   都是正常声明），只读只认显式 `true`（把「没声明」当只读会让一整页表单静默变成不可填）。
   放在 `.vue` 里只能靠 grep 源码「验证」，而那种断言看得见字符串、看不见运算优先级。
+
+## [3.3.0b15]
+
+本轮以「1.txt 逐条要求」为验收口径，先由只读子代理建立现场证据，再对每一处
+**有 file:line 证据、可构造失败用例**的缺陷补回归测试、改最小范围代码、跑聚焦测试。
+未能在本机验证的外部场景（真实 Docker 重启、真实 QQ 扫码、真实多 Provider 上游、
+真实客户端渲染）一律标记为未验证，不计入已完成。
+
+补充一轮现场报障（compose 重启后 QQ 显示未连接、工作流块重叠、二维码总是过期、
+流式与非流式、「系统显示成功到收到回复间隔很久」、回复排版含 `$\to` 残片）的定位与
+修正也记在本节。这一轮的证据链有两条与前几轮不同的地方：一是把用户贴出的**原始
+回复文本与原始日志行**直接喂进渲染与解析函数复现（而不是构造相似输入），
+二是对「Telegram / WeCom 没有这个现象」这类对照说法逐条核实——其中「节流只有 QQ 有」
+成立，而「LaTeX 完全没处理」不成立（处理存在，缺的是若干同义命令与配对边界）。
+
+### Fixed（发布后补修）
+
+- **`webui/yarn.lock` 与 `package.json` 对不上，CI 从干净环境装不起来**：
+  上一个提交给 `package.json` 加了五个依赖（`date-fns` / `highlight.js` /
+  `semver` / `@codingame/monaco-vscode-configuration-service-override` /
+  `vscode-languageclient`）而没有更新锁文件。逐条核对差异：
+  `highlight.js` 要 `^11.11.1` 而锁里键是 `^11.8.0`；`vscode-languageclient`
+  要 `^9.0.1` 而锁里是 `~9.0.1`；`semver` 要顶层 `^7.7.1` 而锁里只有传递依赖的
+  `^7.3.6/7.5.4/7.6.3`。于是 `yarn install --frozen-lockfile` 直接失败：
+  `error Your lockfile needs to be updated`。
+
+  **为什么本机 1172 个测试全绿却没发现**：本机一直用 `npx --no-install vitest`
+  与 `npx --no-install vue-tsc` 跑，`node_modules` 早就装好了，锁文件从未被校验过。
+  CI 是干净环境、必须从锁文件重建，因此只在那里暴露。这是验证方式的盲区——
+  把「测试全绿」当成了「装得起来」。
+
+  重新解析锁文件时还踩到第二层：本机 `~/.npmrc` 指向 `registry.npmmirror.com`，
+  于是新解析出的三条 `resolved` 带上了镜像地址。
+  `tests/test_webui_build_contract.py` 的白名单守卫当场抓住了它——
+  那条测试正是为「镜像地址漏进锁文件」写的。改用
+  `yarn install --registry https://registry.npmjs.org` 重新生成后通过，
+  并实测 `yarn install --frozen-lockfile` 退出码 0。
+
+- **`context-mode` 与 `caveman` 的依赖建模是错的**（需求 10）：
+  两条登记项此前标为 `kind="claude-plugin"`、`install_supported=False`、
+  探测宿主 `claude --version`，理由写着「装在操作者自己的 Claude 配置里，
+  不是服务器运行时组件」。实测推翻了这个前提：
+
+  ```
+  npm view context-mode version   ->  1.0.169
+  npm ls -g --depth=0             ->  context-mode@1.0.169
+  package.json  "bin": {"context-mode": "./cli.bundle.mjs"}
+  自述：Works with Claude Code, Gemini CLI, VS Code Copilot, OpenCode, Codex CLI
+  ```
+
+  它是 npm 上有 `bin` 入口的普通包，不绑定任何宿主，完全可以装到 Linux VPS 上。
+  按 `claude --version` 探测会**两个方向都答错**：装了 `context-mode` 但没装
+  Claude CLI 的 VPS 报 `missing`，装了 Claude CLI 却没装 `context-mode` 的机器
+  报 `ready`。现改为 `kind="cli"`、探测 `context-mode --version`、
+  安装 `npm install -g context-mode`。
+
+  `caveman` 一并纠正但结论不同：它同样有自己的可执行文件（本机
+  `caveman-installer@2.0.0`，`bin: caveman`），但公共 npm 上
+  `caveman-installer` 是 404、`caveman` 是一个无关的 JS 模板引擎。
+  因此它保持只探测不代装——**原因是分发渠道而不是「它是插件」**，
+  运维指引里写明这两个名字各是什么：猜一条 `npm i -g caveman` 会装上模板引擎，
+  命令存在、探测通过、功能完全不对，比报 `missing` 更糟。
+
+  两条同时加入 `_SKILL_NAME_DEPENDENCY_IDS`：此前被排除让需求 10 点名的五个工具
+  里有两个永远不参与技能就绪判定，技能广告不会说「服务器上没有这个命令」，
+  模型照着一份它执行不了的说明自信作答。「能不能代装」与「要不要参与就绪判定」
+  是两个问题——后者的判据是「这台机器上有没有这个命令」，而那对两者都有答案。
+
 
 ### Added
 
