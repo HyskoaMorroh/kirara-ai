@@ -1301,7 +1301,7 @@ wheels = [
 
 [[package]]
 name = "kirara-ai"
-version = "3.3.0b17"
+version = "3.3.0b18"
 source = { editable = "." }
 dependencies = [
     { name = "aiocqhttp" },
