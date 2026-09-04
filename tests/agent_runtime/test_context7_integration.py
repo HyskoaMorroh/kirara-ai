@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.utils.external_tools import require_tool
+from tests.utils.external_tools import require_npx_package
 
 from kirara_ai.agent_runtime import (
     AgentDefinition,
@@ -131,11 +131,14 @@ def _agent() -> AgentDefinition:
 @pytest.mark.integration
 @pytest.mark.usefixtures("creator_principal")
 async def test_real_context7_mcp_completes_agent_turn_after_model_failover():
-    # context7 是一个 npm 包，靠 `npx` 拉起。运行时镜像不装 Node——
-    # MCP 服务器由使用者自己的环境提供，不是本镜像的职责。
-    # 没有 npx 时这条用例无从执行；报 error 会把「环境缺一个工具」
-    # 说成「MCP 集成坏了」。
-    require_tool("npx", reason="context7 MCP 服务器需要 Node 运行时")
+    # context7 是一个 npm 包，靠 `npx` 拉起。两种处境都要 skip 而不是 error：
+    # 运行时镜像不装 Node（MCP 服务器由使用者的环境提供，不是本镜像的职责）；
+    # 装了 Node 但包不在本地 npm 缓存里——那时 `npx -y` 会联网下载，
+    # 而 MCP 连接预算只有 `startup_timeout_ms`（默认 120 秒），
+    # 注册表慢一点就在那里超时，报出来的却是「连接 MCP 超时」。
+    require_npx_package(
+        "@upstash/context7-mcp", reason="context7 MCP 服务器需要 Node 运行时"
+    )
     config = GlobalConfig(
         mcp=MCPConfig(
             servers=[

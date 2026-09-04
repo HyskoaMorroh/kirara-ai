@@ -157,6 +157,39 @@
   是两个问题——后者的判据是「这台机器上有没有这个命令」，而那对两者都有答案。
 
 
+- **一条 integration 用例挡住了镜像发布，而它失败的原因是 npm 注册表慢**（需求 23.3、24.4）：
+  `v3.3.0b16` 的 `Docker build latest` 被
+
+      FAILED tests/agent_runtime/test_context7_integration.py::
+          test_real_context7_mcp_completes_agent_turn_after_model_failover
+
+  挡下。日志时间戳指出原因：`05:28:53 Connecting to MCP server context7` →
+  `05:30:53 连接到 MCP 服务器 context7 超时`，正好 120 秒，也就是
+  `startup_timeout_ms` 的默认值。
+
+  `require_tool("npx")` 只问「PATH 上有没有 `npx`」。GitHub runner **装了 Node**，
+  于是它不 skip，用例接着做一次真实的 `npx -y @upstash/context7-mcp`——那是一次
+  **联网下载**，被塞进 MCP 的连接预算里。它是网络竞态而非代码缺陷，证据是同一个
+  提交上三次运行互相矛盾：ubuntu-py3.11 在 `Run Tests` 里过、在 `Docker build latest`
+  里失败；ubuntu-py3.13 反过来。
+
+  判据换成「这个包能不能**从本地缓存**拉起」：新增 `require_npx_package()`，用
+  `npm exec --offline`（cache 模式 `only-if-cached`）探一次，缓存里没有就立刻以
+  `ENOTCACHED` 失败并 skip（实测 0.7 秒），绝不联网；命中时 1.0 秒，且执行的是
+  `node --version` 而不是 context7 自身，所以探针不会真的拉起一个 MCP 进程。
+  三种处境因此分开：没装 Node、装了 Node 但包没缓存、包已缓存（真的跑）。
+  探针自身也有 90 秒上界——一个卡住的探针与它要防的那个超时是同一种故障。
+
+  写这条修复时踩到第二层：`subprocess.run(["npm", ...])` 在 Windows 上抛
+  `FileNotFoundError`，因为 npm 是 `npm.cmd` 而不带 shell 时只补 `.exe`。
+  那会让探针退化成「在 Windows 上永远 skip」——等于把这条用例在半个矩阵上删掉，
+  且完全没有症状。改为用 `shutil.which("npm")` 解析出的完整路径。
+
+  三个调用点全部改判据，并由 `tests/utils/test_external_tools_guard.py`（11 项）
+  锁住：探针不联网、`--offline` 不能被去掉、三种处境各自的结果、以及**没有任何
+  一处调用点回到只看 `npx` 在不在**——漏改一处会在那一条上恢复原样，而本机
+  （包已缓存）看不出区别。
+
 ### Added
 
 - **两个体检脚本：把「撞一个修一个」换成「一次列全」**（需求 14）：
