@@ -352,6 +352,12 @@ def _definitions() -> tuple[DependencyDefinition, ...]:
             # 按 `claude --version` 探测的后果是：一台装了 context-mode 但没装
             # Claude CLI 的 VPS 会被报成 missing，而一台装了 Claude CLI 却没装
             # context-mode 的机器会被报成 ready——两个方向都答错。
+            #
+            # 实测（context-mode@1.0.169）：`--version` 退出码 0 但**不打印任何东西**,
+            # 因此依赖面板上这一条的版本列是空的，而状态是 ready。那是准确的：
+            # 命令在（不在就是 Popen 的 OSError → 127 → missing），版本拿不到。
+            # 不要改成 `--help` 去「拿点输出」——`_public_probe_result` 把首行当版本，
+            # 那会让版本列显示 `Usage:`；一个假的版本号比空白更糟。
             probe_commands=(("context-mode", "--version"),),
             install_commands=(("npm", "install", "-g", "context-mode"),),
             prerequisites=("node-runtime",),
@@ -372,7 +378,11 @@ def _definitions() -> tuple[DependencyDefinition, ...]:
             #     $ npm view caveman-installer  -> E404 Not Found
             #     $ npm view caveman            -> 一个无关的 JS 模板引擎
             #
-            # 本机那份是 caveman-installer@2.0.0（bin: caveman -> bin/install.js）。
+            # 本机那份是 caveman-installer@2.0.0（bin: caveman -> bin/install.js），
+            # 但它装在操作者的 Claude 插件缓存目录里、**不在 PATH 上**
+            # （`npm ls -g` 里没有它，`command -v caveman` 找不到）。因此这台机器上
+            # 探测报 `missing` 是正确答案，不是探测写错了：这条依赖问的是
+            # 「服务进程能不能执行 caveman」，而答案确实是不能。
             # 猜一个 `npm i -g caveman` 会装上那个模板引擎：命令存在、
             # 探测通过、而功能完全不是要的那个——比报 missing 更糟。
             probe_commands=(("caveman", "--version"),),
