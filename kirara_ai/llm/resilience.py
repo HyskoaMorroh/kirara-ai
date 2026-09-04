@@ -63,6 +63,20 @@ def _status_code(error: BaseException) -> Optional[int]:
     return None
 
 
+def _is_timeout_error(error: BaseException) -> bool:
+    """超时判断，不硬依赖任何 HTTP 客户端。
+
+    `requests.exceptions.Timeout` 与 `httpx.TimeoutException` 都不是内置
+    `TimeoutError` 的子类，但都是 `OSError`（requests）或独立异常（httpx）。
+    按**类名**匹配可以同时覆盖两者，也不会因为本模块 import 一个可选依赖而变脆。
+    """
+    for klass in type(error).__mro__:
+        name = klass.__name__.lower()
+        if "timeout" in name and name != "timeouterror":
+            return True
+    return False
+
+
 def classify_llm_error(error: BaseException) -> ErrorCategory:
     """Classify an error conservatively before any request is replayed."""
 
@@ -78,8 +92,28 @@ def classify_llm_error(error: BaseException) -> ErrorCategory:
         return ErrorCategory.RATE_LIMIT
     if status_code is not None and 500 <= status_code <= 599:
         return ErrorCategory.UPSTREAM
+    # 4xx 里除 408 / 429 之外一律**不可重试**：这一支必须在下面那两条
+    # `isinstance` 之前返回。
+    #
+    # `requests.exceptions.HTTPError` 的继承链是
+    # `HTTPError → RequestException → OSError`，因此 `raise_for_status()` 抛出的
+    # 任何状态码都会落进 `isinstance(error, (ConnectionError, OSError))`
+    # 而被判成 `network`——一个可重试类别。现场后果：一次 `404 page not found`
+    # 触发 72 次尝试（只有 3 次真的发出了请求，其余是熔断打开后的空转），
+    # 三个 Provider 的熔断器全部被打开，而 `404` 换一家、重试一次都不会变。
+    #
+    # 既有测试没能发现，是因为它用自定义的 `HttpError(Exception)` 构造，
+    # 那不是 `OSError` 的子类，永远走不到下面那条分支。
+    if status_code is not None and 400 <= status_code <= 499:
+        return ErrorCategory.INVALID_REQUEST
 
     if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+        return ErrorCategory.TIMEOUT
+    # 超时要在 network 之前判：`requests` 的 `ReadTimeout` / `ConnectTimeout`
+    # 同样是 `OSError` 子类，却**不是** `TimeoutError` 子类，
+    # 落到下一句会被判成 `network`。两者都可重试，所以这不改变转移行为，
+    # 但会让「超时」这类失败在追踪与统计里显示成「网络错误」。
+    if _is_timeout_error(error):
         return ErrorCategory.TIMEOUT
     if isinstance(error, (ConnectionError, OSError)):
         return ErrorCategory.NETWORK

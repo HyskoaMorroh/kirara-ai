@@ -113,8 +113,18 @@ def test_ensure_builtins_is_idempotent_when_the_remote_directory_resolves_elsewh
         catalog.ensure_builtins()
 
     assert calls == [1], "第二次启动又下载了一遍——没认出已装的资源"
-    assert [
+    # 这条用例问的是「**远端**技能有没有被装两遍」，因此只看那一条的身份。
+    # 随包技能（`bundled_dir`）也会被 `ensure_builtins()` 装上，它们与本用例
+    # 无关；把它们一起要求会让这条断言变成「内置里只许有一个 skill」，
+    # 而那不是它想守的边界。
+    bundled_ids = {
+        str(item["catalog_id"]).replace(":", ".", 1)
+        for item in _BUILTINS
+        if item.get("bundled_dir")
+    }
+    remote_skills = [
         resource["resource_id"]
         for resource in lifecycle.list_resources()
-        if resource["type"] == "skill"
-    ] == ["skill.rootlevel"]
+        if resource["type"] == "skill" and resource["resource_id"] not in bundled_ids
+    ]
+    assert remote_skills == ["skill.rootlevel"]

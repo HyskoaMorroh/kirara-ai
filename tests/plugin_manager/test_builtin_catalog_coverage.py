@@ -141,13 +141,21 @@ def test_every_builtin_declares_the_fields_the_installer_reads():
 
 
 def test_skill_builtins_carry_a_resolvable_source_key():
-    """skill 走 GitHub 安装，`source_key` 必须是 `owner/repo:directory`。
+    """从 GitHub 安装的 skill，`source_key` 必须是 `owner/repo:directory`。
 
-    `install()` 对 skill 直接 `split(":", 1)` 再 `split("/", 1)`，格式不对会抛
+    `install()` 对这类 skill 直接 `split(":", 1)` 再 `split("/", 1)`，格式不对会抛
     ValueError——而那发生在用户点了安装之后。
+
+    **随包技能（`bundled_dir`）不在此列**：它们的正文在 wheel 里，安装不出网，
+    因此没有 GitHub 坐标也不需要有。把它们一起要求会让这条断言从「格式校验」
+    变成「禁止随包」——那是两件不同的事。
     """
-    skills = [item for item in _BUILTINS if item["type"] == "skill"]
-    assert skills, "没有任何内置 skill"
+    skills = [
+        item
+        for item in _BUILTINS
+        if item["type"] == "skill" and not item.get("bundled_dir")
+    ]
+    assert skills, "没有任何走 GitHub 安装的内置 skill"
     for item in skills:
         source_key = item.get("source_key")
         assert isinstance(source_key, str) and ":" in source_key, (

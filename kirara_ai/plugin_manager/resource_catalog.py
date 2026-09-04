@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import pathlib
 import zipfile
 from typing import Any, Mapping
 
@@ -544,6 +545,644 @@ _BUILTINS: tuple[dict[str, Any], ...] = (
         "tags": ["browser", "automation", "skill"],
         "installs": 763401,
     },
+    # ---- 随包角色提示词（不出网即可安装）---------------------------------
+    #
+    # 这些是 Claude Code 的 `agents/*.md`。本项目的「Agent」是
+    # `AgentDefinition`（模型链 + 资源绑定），而那些文件是**行为说明**——
+    # 在本项目的关系模型里对应 `prompt` 类资源：可绑到任意 Agent、进 system
+    # 消息。不把它们硬塞成 Agent，因为一个 Agent 还要模型链与渠道绑定，
+    # 而这些文件里一个都没有。
+    {
+        "catalog_id": "prompt:code-reviewer",
+        "type": "prompt",
+        "name": "code-reviewer",
+        "description": "Senior code reviewer that evaluates changes across five dimensions — correctness, readability, architecture, security, and performance. Use for thorough code review before merge.",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "PROMPT.md",
+        "source": "bundled://kirara/prompt/code-reviewer",
+        "bundled_dir": "prompts/code-reviewer",
+        "tags": ["bundled", "prompt", "role"],
+    },
+    {
+        "catalog_id": "prompt:content-creator",
+        "type": "prompt",
+        "name": "Content Creator",
+        "description": "The Content Creator specializes in cross-platform content generation, from long-form blog posts to engaging video scripts and social media content. This agent understands how to adapt messaging across different formats w",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "PROMPT.md",
+        "source": "bundled://kirara/prompt/content-creator",
+        "bundled_dir": "prompts/content-creator",
+        "tags": ["bundled", "prompt", "role"],
+    },
+    {
+        "catalog_id": "prompt:security-auditor",
+        "type": "prompt",
+        "name": "security-auditor",
+        "description": "Security engineer focused on vulnerability detection, threat modeling, and secure coding practices. Use for security-focused code review, threat analysis, or hardening recommendations.",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "PROMPT.md",
+        "source": "bundled://kirara/prompt/security-auditor",
+        "bundled_dir": "prompts/security-auditor",
+        "tags": ["bundled", "prompt", "role"],
+    },
+    {
+        "catalog_id": "prompt:test-engineer",
+        "type": "prompt",
+        "name": "test-engineer",
+        "description": "QA engineer specialized in test strategy, test writing, and coverage analysis. Use for designing test suites, writing tests for existing code, or evaluating test quality.",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "PROMPT.md",
+        "source": "bundled://kirara/prompt/test-engineer",
+        "bundled_dir": "prompts/test-engineer",
+        "tags": ["bundled", "prompt", "role"],
+    },
+    {
+        "catalog_id": "prompt:web-performance-auditor",
+        "type": "prompt",
+        "name": "web-performance-auditor",
+        "description": "Web performance engineer focused on Core Web Vitals, loading, rendering, and network optimization. Use for performance-focused audits, CWV analysis, and identifying structural performance anti-patterns in web application",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "PROMPT.md",
+        "source": "bundled://kirara/prompt/web-performance-auditor",
+        "bundled_dir": "prompts/web-performance-auditor",
+        "tags": ["bundled", "prompt", "role"],
+    },
+    # ---- 本机在用、补齐为模板的 MCP -------------------------------------
+    #
+    # 只收「靠 npx 拉起、不依赖本机绝对路径」的。`node_repl` 与
+    # `context-mode` 的命令是本机专属的绝对路径（Codex 自带运行时、
+    # 全局 npm 目录），预置进去在任何别的机器上都是一条死配置——
+    # 而界面上它看起来与其他模板一样正常。
+    {
+        "catalog_id": "mcp:puppeteer",
+        "type": "mcp",
+        "name": "Puppeteer Browser",
+        "description": "用 Puppeteer 驱动 Chromium：导航、截图、执行页面脚本。",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "server.json",
+        "source": "catalog://mcp/puppeteer",
+        "tags": ["browser", "automation", "stdio"],
+        "runtime_dependency": "npx",
+        "content": {
+            "id": "puppeteer",
+            "name": "Puppeteer Browser",
+            "server": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+                # env 一律留空：模板会写进 `data/resources/` 并可能随备份导出，
+                # 预填令牌会跟着走。需要密钥的在 description 里说明要填什么。
+                "env": {},
+            },
+            "apps": {
+                "claude": False,
+                "claude-desktop": False,
+                "codex": True,
+                "gemini": False,
+                "grokbuild": False,
+                "opencode": False,
+                "openclaw": False,
+                "hermes": False,
+            },
+            "description": "用 Puppeteer 驱动 Chromium：导航、截图、执行页面脚本。",
+            "tags": ["browser", "automation", "stdio"],
+            "homepage": "https://github.com/modelcontextprotocol/servers",
+            "metadata": {"catalog_id": "mcp:puppeteer", "managed": True},
+        },
+    },
+    {
+        "catalog_id": "mcp:everything",
+        "type": "mcp",
+        "name": "MCP Everything (Reference)",
+        "description": "MCP 官方参考实现：提供 echo、采样、资源等示例能力，用于验证 MCP 链路是否通。",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "server.json",
+        "source": "catalog://mcp/everything",
+        "tags": ["reference", "diagnostics", "stdio"],
+        "runtime_dependency": "npx",
+        "content": {
+            "id": "everything",
+            "name": "MCP Everything (Reference)",
+            "server": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-everything"],
+                # env 一律留空：模板会写进 `data/resources/` 并可能随备份导出，
+                # 预填令牌会跟着走。需要密钥的在 description 里说明要填什么。
+                "env": {},
+            },
+            "apps": {
+                "claude": False,
+                "claude-desktop": False,
+                "codex": True,
+                "gemini": False,
+                "grokbuild": False,
+                "opencode": False,
+                "openclaw": False,
+                "hermes": False,
+            },
+            "description": "MCP 官方参考实现：提供 echo、采样、资源等示例能力，用于验证 MCP 链路是否通。",
+            "tags": ["reference", "diagnostics", "stdio"],
+            "homepage": "https://github.com/modelcontextprotocol/servers",
+            "metadata": {"catalog_id": "mcp:everything", "managed": True},
+        },
+    },
+    {
+        "catalog_id": "mcp:ui5",
+        "type": "mcp",
+        "name": "UI5 Development",
+        "description": "SAP UI5 开发辅助：项目脚手架、API 参考与 lint。",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "server.json",
+        "source": "catalog://mcp/ui5",
+        "tags": ["ui5", "sap", "development", "stdio"],
+        "runtime_dependency": "npx",
+        "content": {
+            "id": "ui5",
+            "name": "UI5 Development",
+            "server": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "@ui5/mcp-server"],
+                # env 一律留空：模板会写进 `data/resources/` 并可能随备份导出，
+                # 预填令牌会跟着走。需要密钥的在 description 里说明要填什么。
+                "env": {},
+            },
+            "apps": {
+                "claude": False,
+                "claude-desktop": False,
+                "codex": True,
+                "gemini": False,
+                "grokbuild": False,
+                "opencode": False,
+                "openclaw": False,
+                "hermes": False,
+            },
+            "description": "SAP UI5 开发辅助：项目脚手架、API 参考与 lint。",
+            "tags": ["ui5", "sap", "development", "stdio"],
+            "homepage": "https://github.com/SAP/ui5-mcp-server",
+            "metadata": {"catalog_id": "mcp:ui5", "managed": True},
+        },
+    },
+    {
+        "catalog_id": "mcp:notion",
+        "type": "mcp",
+        "name": "Notion Workspace",
+        "description": "读写 Notion 页面与数据库。需要在启用后自行填入 Notion 集成令牌。",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "server.json",
+        "source": "catalog://mcp/notion",
+        "tags": ["notion", "documents", "stdio"],
+        "runtime_dependency": "npx",
+        "content": {
+            "id": "notion",
+            "name": "Notion Workspace",
+            "server": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "@notionhq/notion-mcp-server"],
+                # env 一律留空：模板会写进 `data/resources/` 并可能随备份导出，
+                # 预填令牌会跟着走。需要密钥的在 description 里说明要填什么。
+                "env": {},
+            },
+            "apps": {
+                "claude": False,
+                "claude-desktop": False,
+                "codex": True,
+                "gemini": False,
+                "grokbuild": False,
+                "opencode": False,
+                "openclaw": False,
+                "hermes": False,
+            },
+            "description": "读写 Notion 页面与数据库。需要在启用后自行填入 Notion 集成令牌。",
+            "tags": ["notion", "documents", "stdio"],
+            "homepage": "https://github.com/makenotion/notion-mcp-server",
+            "metadata": {"catalog_id": "mcp:notion", "managed": True},
+        },
+    },
+    # ---- 随包技能（不出网即可安装）-----------------------------------------
+    #
+    # 这批技能的正文随 wheel 与镜像一起分发，因此 `ensure_builtins()` 在离线
+    # 部署里同样能把它们装上——与上面 `skill:agent-browser` 那条从 GitHub 下载
+    # 的条目形成对照：后者装不上只是少一条可选技能，而随包技能装不上意味着
+    # 「开箱就该有的东西没有」。
+    #
+    # 只收**纯文档**技能。带 `.sh` / `.js` / `.py` 脚本或二进制样例的技能装进
+    # 运行时镜像会得到一个「启用了但跑不起来」的东西——镜像里没有 Node，
+    # 也没有那些脚本要的解释器与依赖，而界面上它看起来是好的。
+    {
+        "catalog_id": "skill:investigate-first",
+        "type": "skill",
+        "name": "investigate-first",
+        "description": "Diagnose ambiguous failures before editing. Use for unknown causes, intermittent behavior, performance regressions, or investigations needing evidence-ranked hypotheses.",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/investigate-first",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/investigate-first",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:debugging-and-error-recovery",
+        "type": "skill",
+        "name": "debugging-and-error-recovery",
+        "description": "Guides systematic root-cause debugging. Use when tests fail, builds break, behavior doesn't match expectations, or you encounter any unexpected error. Use when you need a systematic approach to finding and fixing the roo",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/debugging-and-error-recovery",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/debugging-and-error-recovery",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:code-review-and-quality",
+        "type": "skill",
+        "name": "code-review-and-quality",
+        "description": "Conducts multi-axis code review. Use before merging any change. Use when reviewing code written by yourself, another agent, or a human. Use when you need to assess code quality across multiple dimensions before it enters",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/code-review-and-quality",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/code-review-and-quality",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:code-simplification",
+        "type": "skill",
+        "name": "code-simplification",
+        "description": "Simplifies code for clarity. Use when refactoring code for clarity without changing behavior. Use when code works but is harder to read, maintain, or extend than it should be. Use when reviewing code that has accumulated",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/code-simplification",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/code-simplification",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:test-driven-development",
+        "type": "skill",
+        "name": "test-driven-development",
+        "description": "Drives development with tests. Use when implementing any logic, fixing any bug, or changing any behavior. Use when you need to prove that code works, when a bug report arrives, or when you're about to modify existing fun",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/test-driven-development",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/test-driven-development",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:safe-refactor",
+        "type": "skill",
+        "name": "safe-refactor",
+        "description": "Restructure code while preserving behavior. Use for extraction, consolidation, ownership moves, or cleanup where verification must bracket structural edits.",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/safe-refactor",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/safe-refactor",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:api-and-interface-design",
+        "type": "skill",
+        "name": "api-and-interface-design",
+        "description": "Guides stable API and interface design. Use when designing APIs, module boundaries, or any public interface. Use when creating REST or GraphQL endpoints, defining type contracts between modules, or establishing boundarie",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/api-and-interface-design",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/api-and-interface-design",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:documentation-and-adrs",
+        "type": "skill",
+        "name": "documentation-and-adrs",
+        "description": "Records decisions and documentation. Use when making architectural decisions, changing public APIs, shipping features, or when you need to record context that future engineers and agents will need to understand the codeb",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/documentation-and-adrs",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/documentation-and-adrs",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:planning-and-task-breakdown",
+        "type": "skill",
+        "name": "planning-and-task-breakdown",
+        "description": "Breaks work into ordered tasks. Use when you have a spec or clear requirements and need to break work into implementable tasks. Use when a task feels too large to start, when you need to estimate scope, or when parallel ",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/planning-and-task-breakdown",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/planning-and-task-breakdown",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:spec-driven-development",
+        "type": "skill",
+        "name": "spec-driven-development",
+        "description": "Creates specs before coding. Use when starting a new project, feature, or significant change and no specification exists yet. Use when requirements are unclear, ambiguous, or only exist as a vague idea.",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/spec-driven-development",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/spec-driven-development",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:source-driven-development",
+        "type": "skill",
+        "name": "source-driven-development",
+        "description": "Grounds every implementation decision in official documentation. Use when you want authoritative, source-cited code free from outdated patterns. Use when building with any framework or library where correctness matters.",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/source-driven-development",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/source-driven-development",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:incremental-implementation",
+        "type": "skill",
+        "name": "incremental-implementation",
+        "description": "Delivers changes incrementally. Use when implementing any feature or change that touches more than one file. Use when you're about to write a large amount of code at once, or when a task feels too big to land in one step",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/incremental-implementation",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/incremental-implementation",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:verification-before-completion",
+        "type": "skill",
+        "name": "verification-before-completion",
+        "description": "Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions a",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/verification-before-completion",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/verification-before-completion",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:doubt-driven-development",
+        "type": "skill",
+        "name": "doubt-driven-development",
+        "description": "Subjects every non-trivial decision to a fresh-context adversarial review before it stands. Use when correctness matters more than speed, when working in unfamiliar code, when stakes are high (production, security-sensit",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/doubt-driven-development",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/doubt-driven-development",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:security-and-hardening",
+        "type": "skill",
+        "name": "security-and-hardening",
+        "description": "Hardens code against vulnerabilities. Use when handling user input, authentication, data storage, or external integrations. Use when building any feature that accepts untrusted data, manages user sessions, or interacts w",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/security-and-hardening",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/security-and-hardening",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:performance-optimization",
+        "type": "skill",
+        "name": "performance-optimization",
+        "description": "Optimizes application performance across frontend, backend, queries, and databases. Use when performance requirements exist, when you suspect performance regressions, when Core Web Vitals or load times need improvement, ",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/performance-optimization",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/performance-optimization",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:observability-and-instrumentation",
+        "type": "skill",
+        "name": "observability-and-instrumentation",
+        "description": "Instruments code so production behavior is visible and diagnosable. Use when adding logging, metrics, tracing, or alerting. Use when shipping any feature that runs in production and you need evidence it works. Use when p",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/observability-and-instrumentation",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/observability-and-instrumentation",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:git-workflow-and-versioning",
+        "type": "skill",
+        "name": "git-workflow-and-versioning",
+        "description": "Structures git workflow practices. Use when making any code change. Use when committing, branching, resolving conflicts, or when you need to organize work across multiple parallel streams. Use when cutting a release, cho",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/git-workflow-and-versioning",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/git-workflow-and-versioning",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:ci-cd-and-automation",
+        "type": "skill",
+        "name": "ci-cd-and-automation",
+        "description": "Automates CI/CD pipeline setup. Use when setting up or modifying build and deployment pipelines. Use when you need to automate quality gates, configure test runners in CI, or establish deployment strategies.",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/ci-cd-and-automation",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/ci-cd-and-automation",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:deprecation-and-migration",
+        "type": "skill",
+        "name": "deprecation-and-migration",
+        "description": "Manages deprecation and migration. Use when removing old systems, APIs, or features. Use when migrating users from one implementation to another. Use when deciding whether to maintain or sunset existing code.",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/deprecation-and-migration",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/deprecation-and-migration",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:context-engineering",
+        "type": "skill",
+        "name": "context-engineering",
+        "description": "Optimizes agent context setup. Use when starting a new session, when agent output quality degrades, when switching between tasks, or when you need to configure rules files and context for a project.",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/context-engineering",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/context-engineering",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:writing-plans",
+        "type": "skill",
+        "name": "writing-plans",
+        "description": "Use when you have a spec or requirements for a multi-step task, before touching code",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/writing-plans",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/writing-plans",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:using-agent-skills",
+        "type": "skill",
+        "name": "using-agent-skills",
+        "description": "Discovers and invokes agent skills. Use when starting a session or when you need to discover which skill applies to the current task. This is the meta-skill that governs how all other skills are discovered and invoked.",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/using-agent-skills",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/using-agent-skills",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:interview-me",
+        "type": "skill",
+        "name": "interview-me",
+        "description": "Extracts what the user actually wants instead of what they think they should want. Achieves this through one-question-at-a-time interview until ~95% confidence about the underlying intent. Use when an ask is underspecifi",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/interview-me",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/interview-me",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:color-expert",
+        "type": "skill",
+        "name": "color-expert",
+        "description": "Use when working with color naming, color theory, color spaces, color definitions, or any task involving color knowledge - palettes, ramps, gradients, conversions, accessibility, perceptual matching, pigment mixing, prin",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/color-expert",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/color-expert",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:frontend-design",
+        "type": "skill",
+        "name": "frontend-design",
+        "description": "Guidance for distinctive, intentional visual design when building new UI or reshaping an existing one. Helps with aesthetic direction, typography, and making choices that don't read as templated defaults.",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/frontend-design",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/frontend-design",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:frontend-ui-engineering",
+        "type": "skill",
+        "name": "frontend-ui-engineering",
+        "description": "Builds production-quality, accessible, responsive user-facing UIs. Use when building or modifying interfaces and pages, creating components, implementing layouts, meeting WCAG accessibility requirements, managing state, ",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/frontend-ui-engineering",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/frontend-ui-engineering",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:learn-codebase",
+        "type": "skill",
+        "name": "learn-codebase",
+        "description": "Prime a codebase by reading every source file in full. Use when starting work on a new or unfamiliar project, or when the user asks to \"learn the codebase\", \"read the codebase\", \"prime\", or \"get up to speed\".",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/learn-codebase",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/learn-codebase",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:smart-explore",
+        "type": "skill",
+        "name": "smart-explore",
+        "description": "Token-optimized structural code search using tree-sitter AST parsing. Use instead of reading full files when you need to understand code structure, find functions, or explore a codebase efficiently.",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/smart-explore",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/smart-explore",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:make-plan",
+        "type": "skill",
+        "name": "make-plan",
+        "description": "Create a detailed, phased implementation plan with documentation discovery. Use when asked to plan a feature, task, or multi-step implementation — especially before executing with do.",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/make-plan",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/make-plan",
+        "tags": ["bundled", "skill"],
+    },
+    {
+        "catalog_id": "skill:what-the",
+        "type": "skill",
+        "name": "what-the",
+        "description": "\"What the? Use when the user wants a plain-English breakdown of something technical — the who, what, where, why, and when.\"",
+        "version": "1.0.0",
+        "permissions": ["workflow.read"],
+        "entry": "SKILL.md",
+        "source": "bundled://kirara/skill/what-the",
+        # 随包：正文在 wheel 里，安装不出网。见 `_install_bundled_skill`。
+        "bundled_dir": "skills/what-the",
+        "tags": ["bundled", "skill"],
+    },
 )
 
 
@@ -654,11 +1293,34 @@ class ResourceCatalogService:
         item = self._find(catalog_id)
         existing = self._installed_for_catalog(item)
         if existing is not None:
-            if item["type"] != "skill" and Version(str(item["version"])) > Version(
+            # `version` 只有**内置条目**才有。`_find()` 为在线搜索结果合成的
+            # skill 条目没有这个键（版本号来自上游、本地无从比较），
+            # 因此必须先判存在再比较——直接 `item["version"]` 会在
+            # 「重装一个已装的远端技能」这条路径上抛 `KeyError: 'version'`。
+            bundled_version = item.get("version")
+            if bundled_version is not None and Version(str(bundled_version)) > Version(
                 str(existing["current_version"])
             ):
-                return self._backfilled(item, self._install_builtin(item, update=True))
+                # 随包资源（技能与角色提示词）与其他内置一样按版本推进。
+                if item.get("bundled_dir"):
+                    return self._backfilled(
+                        item, self._install_bundled_skill(item, update=True)
+                    )
+                if item["type"] != "skill":
+                    return self._backfilled(item, self._install_builtin(item, update=True))
             return self._backfilled(item, existing)
+        if item.get("bundled_dir"):
+            # 随包资源：正文就在 wheel / 镜像里，安装不出网。判据是
+            # **有没有 `bundled_dir`**，而不是 `type == "skill"`——随包角色提示词
+            # 与随包技能的落盘方式完全一样（打包一个目录的全部文件），
+            # 只有 type 不同。按 type 判会让 `prompt:*` 落到下面的
+            # `_install_builtin`，那里读 `item["content"]` 而随包条目没有这个键，
+            # 于是抛 `KeyError: 'content'`——一个与「这个资源装不上」毫无关系的错。
+            #
+            # 与 `skill:agent-browser` 那种从 GitHub 下载的条目分开处理：
+            # 后者装不上只是少一条可选技能，而随包资源装不上意味着
+            # 「开箱就该有的东西没有」，两者的失败含义不同。
+            return self._backfilled(item, self._install_bundled_skill(item))
         if item["type"] == "skill":
             source_key = str(item["source_key"])
             owner_repo, directory = source_key.split(":", 1)
@@ -774,10 +1436,33 @@ class ResourceCatalogService:
             data = content.encode("utf-8")
         else:
             data = (json.dumps(content, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-        files = {str(item["entry"]): data}
+        return self._install_files(item, {str(item["entry"]): data}, update=update)
+
+    def _install_files(
+        self,
+        item: Mapping[str, Any],
+        files: Mapping[str, bytes],
+        *,
+        update: bool = False,
+    ) -> dict[str, Any]:
+        """Build the verified archive for one resource and hand it to lifecycle.
+
+        抽出来是因为随包技能与单文件内置只差「files 怎么来」这一步：
+        清单、`content_sha256`、zip 打包与落盘必须逐字节一致，
+        否则两条路径装出来的资源在校验上不同形，而那种差异只会在
+        下一次载入时才暴露。
+        """
+
+        # 必须**按路径排序**：校验端 `ResourceLifecycleService._content_hash()`
+        # 算的是 `sorted(files, key=path)`，这里不排序时两侧对同一批文件得出
+        # 不同的 `content_sha256`，安装直接被判为
+        # 「resource content digest does not match manifest」。
+        #
+        # 单文件资源上两种顺序恰好一致，所以这个错在内置提示词、记忆、MCP
+        # 上完全没有症状——只有多文件的随包技能才会暴露。
         records = [
             {"path": path, "size": len(value), "sha256": hashlib.sha256(value).hexdigest()}
-            for path, value in files.items()
+            for path, value in sorted(files.items())
         ]
         content_hash = hashlib.sha256(
             b"".join(f"{record['path']}:{record['size']}:{record['sha256']}\n".encode("ascii") for record in records)
@@ -820,6 +1505,43 @@ class ResourceCatalogService:
             return self.lifecycle.install_archive(temporary)
         finally:
             temporary.unlink(missing_ok=True)
+
+    #: 随包资源的根目录（`bundled/skills/<id>/`）。
+    #:
+    #: 用 `__file__` 定位而不是 `Path.cwd()`：安装后这些文件住在 site-packages
+    #: 里，而进程的工作目录是部署者的，两者无关。
+    _BUNDLED_ROOT = pathlib.Path(__file__).resolve().parent / "bundled"
+
+    def _install_bundled_skill(
+        self, item: Mapping[str, Any], *, update: bool = False
+    ) -> dict[str, Any]:
+        """Package a resource that ships inside the wheel, without any network call.
+
+        名字沿用 `_skill` 是为了不改动既有调用点，但它对**任何**带
+        `bundled_dir` 的类型都成立（目前是 skill 与 prompt）。
+
+        与 `_install_builtin` 的区别只有一处：正文来自**一个目录的全部文件**
+        而不是单个 `content` 字段。技能天然是多文件的（`SKILL.md` 加若干
+        参考文档），把它们拼成一个字段会丢掉目录结构，而 `SKILL.md` 里的
+        相对链接正是按那个结构写的。
+        """
+
+        directory = self._BUNDLED_ROOT / str(item["bundled_dir"])
+        if not directory.is_dir():
+            raise ResourceCatalogError(
+                f"随包技能目录缺失：{directory}（wheel 打包漏了 package-data？）"
+            )
+        files: dict[str, bytes] = {}
+        for path in sorted(directory.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(directory).as_posix()
+            files[relative] = path.read_bytes()
+        if str(item["entry"]) not in files:
+            raise ResourceCatalogError(
+                f"随包技能 {item['catalog_id']} 缺少入口文件 {item['entry']}"
+            )
+        return self._install_files(item, files, update=update)
 
     def _find(self, catalog_id: str) -> dict[str, Any]:
         for item in _BUILTINS:

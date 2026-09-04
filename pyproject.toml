@@ -91,6 +91,9 @@ namespaces = true
 "kirara_ai.web" = ["static/*"]
 "kirara_ai.plugins.im_onebot_adapter" = ["assets/*"]
 "kirara_ai.workflow.presets" = ["*/*.yaml", "catalog.json"]
+# 随包技能正文（31 条 `bundled_dir` 内置条目）。`**/*` 覆盖技能目录下的
+# 子目录，因为技能天然是多文件的：SKILL.md 加若干参考文档。
+"kirara_ai.plugin_manager" = ["bundled/skills_index.json", "bundled/skills/**/*"]
 
 # 不把本机运行或构建时生成的字节码带进 wheel。源码会由 Python 在目标环境
 # 按实际解释器版本重新生成缓存；将其打包既无运行收益，也会降低构建可复现性。

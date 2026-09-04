@@ -10,5 +10,11 @@ recursive-include kirara_ai/web/static *
 # 预设，多模态 / 分段回复 / 深度思考等增强工作流全部缺失。
 recursive-include kirara_ai/workflow/presets *
 
+# 随包技能：`_BUILTINS` 里 31 条 `bundled_dir` 条目的正文。缺它们时
+# `ensure_builtins()` 会对每一条报「随包技能目录缺失」——而那正是「测试全绿
+# 但 pip 装完少东西」的形状（本项目在 yarn.lock 上踩过同一种：本机有、
+# 干净环境没有）。
+recursive-include kirara_ai/plugin_manager/bundled *
+
 recursive-exclude kirara_ai __pycache__
 recursive-exclude kirara_ai *.py[cod]

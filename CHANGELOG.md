@@ -55,6 +55,94 @@
   一处调用点回到只看 `npx` 在不在**——漏改一处会在那一条上恢复原样，而本机
   （包已缓存）看不出区别。
 
+- **本机在用的插件预置进项目，拉取镜像后默认装好（需求 4）**：
+  内置目录从 20 条扩到 52 条：31 个随包技能、5 个随包角色提示词、
+  12 个 MCP 模板（补齐 puppeteer / everything / ui5 / notion）、
+  1 个记忆策略、1 个审计 Hook。其中 36 条带 `bundled_dir`，
+  正文随 wheel 与镜像分发，**安装不出网**——实测 51 条离线可装、耗时 2.1 秒。
+
+  **为什么不是把 115 个技能全塞进来**：先按「里面有什么」分类而不是按名字猜。
+  本机 `~/.cc-switch/skills/` 共 117 个目录、135MB，其中含脚本或二进制的 31 个
+  占了 **127MB**（`gorden-ppt-skill` 一个就 101.84MB）。运行时镜像只装了
+  Python、ffmpeg 与 libmagic1，没有 Node、也没有那些脚本要的解释器与依赖，
+  装进去只会得到一个「界面显示正常、一使用就失败」的技能——比不装更糟。
+  因此只收**纯文档**技能，并按本项目场景（调试排障、代码质量、测试、API 设计、
+  规划、安全、可观测、前端设计）筛出 31 个，共 2.5MB。
+  这条纪律由 `tests/plugin_manager/test_bundled_resources.py` 的
+  `FORBIDDEN_SUFFIXES` 守着：新增一个带 `.sh` / `.js` / `.py` 的随包技能会让它红。
+
+  `node_repl` 与 `context-mode` 两条 MCP **不收**：它们的命令是本机绝对路径
+  （Codex 自带运行时、全局 npm 目录），在别人的机器与容器里都不存在。
+  预置一条死配置，而界面上它与其他模板同形——测试单独钉住「模板命令不得是
+  绝对路径」。
+
+  Claude Code 的 `agents/*.md` 按 **prompt 类资源**接入而不是 Agent：
+  本项目的「Agent」是 `AgentDefinition`（模型链 + 资源绑定），
+  而那些文件是行为说明，一个都没有模型链与渠道绑定。
+
+  **预置不等于放权**：新增 `test_preset_permission_boundary.py`（53 项）证明
+  这条边界在预置之后仍然成立——随包资源一条都不许声明 `process.execute` /
+  `filesystem.write` 等能改服务器的权限（唯一例外 `hook:ai-debug` 单独钉住并
+  说明理由）；默认配置下 `creator_channel_identities` 为空；
+  没有 principal 时 `principal_can_control_agent()` 一律返回 False，
+  即 IM 渠道默认拿不到能操作 VPS 的工具。白名单空 + 门禁拒绝是「默认安全」
+  的两半，少任何一半预置就等于默认开放。
+
+  修复过程中撞到三处自身缺陷：**打包端摘要不按路径排序**，而校验端
+  `_content_hash()` 排序，于是多文件资源安装被判
+  「resource content digest does not match manifest」——单文件资源上两种顺序
+  恰好一致，所以这个错在提示词、记忆、MCP 上完全没有症状；
+  **`install()` 按 `type == "skill"` 判随包**，让随包 prompt 落到读
+  `item["content"]` 的分支抛 `KeyError: 'content'`，判据改为「有没有
+  `bundled_dir`」；**无条件读 `item["version"]`** 让「重装一个已装的远端技能」
+  抛 `KeyError: 'version'`（在线搜索合成的条目没有这个键）。
+
+- **`404` 被判成网络错误，一次拼错的地址打满整条故障转移队列（需求 21.2）**：
+  现场日志里一条 Telegram 消息触发了 **72 次** LLM 尝试、全程 1.06 秒，
+  最后抛 `FailoverExecutionError`。但其中只有 **3 次**真的发出了 HTTP 请求——
+  三个模型各一次，全部 `404 page not found`；其余 69 次是三个 Provider 的
+  熔断器被打开之后的空转。
+
+  根因在 `classify_llm_error`：状态码分支只显式认 401/403/408/429/5xx，其余落进
+
+      if isinstance(error, (ConnectionError, OSError)):
+          return ErrorCategory.NETWORK
+
+  而 `requests.exceptions.HTTPError` 的继承链是
+  `HTTPError → RequestException → OSError`。于是 `raise_for_status()` 抛出的
+  **任何** 4xx 都被判成可重试的网络错误。`404` 的含义是「这个上游没有这个路径
+  或这个模型」，换一家不会变、重试一次也不会变。
+
+  **既有测试为什么没发现**：`tests/llm/test_resilience.py` 用自定义的
+  `HttpError(Exception)` 构造，那不是 `OSError` 的子类，永远走不到那条分支。
+  测试覆盖了「带 status_code 的异常」，但没覆盖「真实 HTTP 客户端抛出的异常」，
+  而生产里只有后者。新测试因此一律用真实的 `requests.Response.raise_for_status()`
+  构造，并单独钉住 `isinstance(http_error(404), OSError)` 这条事实——
+  它解释了缺陷为什么存在，也防止「换个基类」的错误修法。
+
+  同一根因还有第二个受害者：`requests` 的 `ReadTimeout` / `ConnectTimeout`
+  也是 `OSError` 子类却**不是**内置 `TimeoutError` 子类，因此超时一直被归类成
+  `network`。两者都可重试，所以转移行为没错，但追踪与统计里「超时」会显示成
+  「网络错误」——排查时会去查网络，而实际要调的是超时预算。新增
+  `_is_timeout_error()` 按类名匹配，同时覆盖 requests 与 httpx，
+  不为此 import 一个可选依赖。
+
+  `501 Not Implemented` 归在**可重试**一侧：故障转移的判据是「换一家会不会
+  变好」，不是「重试会不会变好」——另一家上游可能实现了这个方法。
+
+- **追踪 WebSocket 主动断开时弹「连接追踪系统失败」（需求 22）**：
+  用户在「系统记录 → 使用统计」页看到这条红色提示，而那一页从头到尾没有
+  `connectWebSocket` 调用——它只发 `GET /tracing/llm/statistics`。
+  提示来自**上一个页面**遗留的 socket。服务端日志排除了鉴权与路径问题
+  （`GET /tracing/ws` 全部返回 `101`），同时暴露出第二个症状：
+  一秒内握手两次。
+
+  两处句柄泄漏：`disconnectWebSocket()` 只把 `onclose` 置空就 `close()`，
+  而浏览器在连接尚未 OPEN 时关闭会**补发一个 `error` 事件**；
+  `connectWebSocket()` 关旧 socket 前也没摘处理器，旧 socket 的 `onclose`
+  见 `wasClean === false` 就排一次重连——「关掉旧连接」反而又开一条。
+  两处改用同一个 `detachAndClose()`：摘掉四个处理器再关。
+
 - **`reconnecting` 只在「掉线时恰好有人看着面板」的情况下才生效（需求 1、18.1）**：
   需求 1 的报障是 `docker compose down && pull && up -d` 之后 QQ 显示未连接。
   `reconnecting` 状态就是为它加的——上游反向 WebSocket 掉线后自己会回连，

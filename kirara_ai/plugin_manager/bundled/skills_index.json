@@ -1,0 +1,428 @@
+[
+ {
+  "id": "api-and-interface-design",
+  "name": "api-and-interface-design",
+  "description": "Guides stable API and interface design. Use when designing APIs, module boundaries, or any public interface. Use when creating REST or GraphQL endpoints, defining type contracts between modules, or establishing boundaries between frontend and backend.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "ci-cd-and-automation",
+  "name": "ci-cd-and-automation",
+  "description": "Automates CI/CD pipeline setup. Use when setting up or modifying build and deployment pipelines. Use when you need to automate quality gates, configure test runners in CI, or establish deployment strategies.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "code-review-and-quality",
+  "name": "code-review-and-quality",
+  "description": "Conducts multi-axis code review. Use before merging any change. Use when reviewing code written by yourself, another agent, or a human. Use when you need to assess code quality across multiple dimensions before it enters the main branch.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "code-simplification",
+  "name": "code-simplification",
+  "description": "Simplifies code for clarity. Use when refactoring code for clarity without changing behavior. Use when code works but is harder to read, maintain, or extend than it should be. Use when reviewing code that has accumulated unnecessary complexity.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "color-expert",
+  "name": "color-expert",
+  "description": "Use when working with color naming, color theory, color spaces, color definitions, or any task involving color knowledge - palettes, ramps, gradients, conversions, accessibility, perceptual matching, pigment mixing, print-vs-screen color, CSS color syntax, or historical color terminology. Use this s",
+  "files": [
+   "README.md",
+   "SECURITY.md",
+   "SKILL.md",
+   "THIRD_PARTY_NOTICES.md",
+   "references/INDEX.md",
+   "references/contemporary/accessible-color-combinations-count.md",
+   "references/contemporary/atlas-of-rare-familiar-colour.md",
+   "references/contemporary/bird-color-theory-hue-circuits.md",
+   "references/contemporary/bird-complementary-colors-tetrachromacy.md",
+   "references/contemporary/bjorn-ottosson-oklab-articles.md",
+   "references/contemporary/briggs-colours-objects-light.md",
+   "references/contemporary/briggs-controlling-colour-history.md",
+   "references/contemporary/briggs-dimensions-of-colour-today.md",
+   "references/contemporary/briggs-elements-of-colour.md",
+   "references/contemporary/briggs-what-is-a-colour.md",
+   "references/contemporary/bujack-non-riemannian-color-geometry.md",
+   "references/contemporary/chroma-vs-saturation.md",
+   "references/contemporary/cie-1931-standard-observer.md",
+   "references/contemporary/ciecam02-color-appearance-model.md",
+   "references/contemporary/color-temperature-spectral-bias.md",
+   "references/contemporary/color-theory-critical-fine.md",
+   "references/contemporary/colorandcontrast/accessibility.md",
+   "references/contemporary/colorandcontrast/color-effects.md",
+   "references/contemporary/colorandcontrast/color-models.md",
+   "references/contemporary/colorandcontrast/color-properties.md",
+   "references/contemporary/colorandcontrast/color-spaces.md",
+   "references/contemporary/colorandcontrast/color-vision.md",
+   "references/contemporary/colorandcontrast/publications.md",
+   "references/contemporary/colorandcontrast/ui-design.md",
+   "references/contemporary/colors-screens-cant-show-moulton.md",
+   "references/contemporary/colour-subjectivisms-philosophy.md",
+   "references/contemporary/computerphile-colourspaces.md",
+   "references/contemporary/computerphile-jpeg-color.md",
+   "references/contemporary/designing-programmes-gerstner.md",
+   "references/contemporary/everything-about-color-25min.md",
+   "references/contemporary/everything-tiktok-taught-color-theory.md",
+   "references/contemporary/fairchild-color-appearance-models.md",
+   "references/contemporary/forbidden-colors-impossible-colors.md",
+   "references/contemporary/gao-color-palette-generation-review.md",
+   "references/contemporary/gencolor-color-concept-association.md",
+   "references/contemporary/gerritsen-color-wheel-spectral-perception.md",
+   "references/contemporary/golden-paint-making.md",
+   "references/contemporary/green-warm-or-cool-spectral.md",
+   "references/contemporary/how-eyes-turn-light-into-color.md",
+   "references/contemporary/huevaluechroma/ch01-dimensions-of-colour.md",
+   "references/contemporary/huevaluechroma/ch02-light-and-shade.md",
+   "references/contemporary/huevaluechroma/ch03-colour-vision.md",
+   "references/contemporary/huevaluechroma/ch04-additive-mixing.md",
+   "references/contemporary/huevaluechroma/ch05-subtractive-mixing.md",
+   "references/contemporary/huevaluechroma/ch06-mixing-of-paints.md",
+   "references/contemporary/huevaluechroma/ch07-hue.md",
+   "references/contemporary/huevaluechroma/ch08-lightness-and-chroma.md",
+   "references/contemporary/huevaluechroma/ch09-brightness-and-saturation.md",
+   "references/contemporary/huevaluechroma/ch10-principles-of-colour.md",
+   "references/contemporary/huevaluechroma/ch11-afterthoughts.md",
+   "references/contemporary/huevaluechroma/glossary.md",
+   "references/contemporary/huevaluechroma/links.md",
+   "references/contemporary/huevaluechroma/references.md",
+   "references/contemporary/hunt-pointer-measuring-colour.md",
+   "references/contemporary/iridescence-thin-film-interference.md",
+   "references/contemporary/iridescent-color-math.md",
+   "references/contemporary/iscc-aic-colour-literacy-project.md",
+   "references/contemporary/kim-heer-color-naming-across-languages.md",
+   "references/contemporary/koenderink-3d-metric-field-rgb.md",
+   "references/contemporary/koenderink-warm-cool-chromatic-gestalt.md",
+   "references/contemporary/lightness-vs-brightness.md",
+   "references/contemporary/macadam-ellipses-jnd.md",
+   "references/contemporary/magical-color-theory-rgb-shadows.md",
+   "references/contemporary/nist-any-wavelength-laser-photonic-chip.md",
+   "references/contemporary/oklab-perceptual-color-space-minecraft.md",
+   "references/contemporary/olo-newly-discovered-color.md",
+   "references/contemporary/opponent-process-color-blindness.md",
+   "references/contemporary/palette-based-photo-recoloring.md",
+   "references/contemporary/physics-hypertextbook-color.md",
+   "references/contemporary/pixar-color-science-khan-academy.md",
+   "references/contemporary/pleasing-colour-palette-sorting.md",
+   "references/contemporary/pointers-gamut-real-surface-colors.md",
+   "references/contemporary/schloss-palmer-color-combinations.md",
+   "references/contemporary/scienceclic-geometry-of-colours.md",
+   "references/contemporary/warm-cool-color-temperature.md",
+   "references/contemporary/web-wheel-web-safe-colors.md",
+   "references/contemporary/webexhibits-causes-of-color.md",
+   "references/contemporary/your-colors-suck-acerola.md",
+   "references/historical/albers-interaction-of-color.md",
+   "references/historical/amy-sawyer-forgotten-color-theorist.md",
+   "references/historical/bardwell-18th-century-portrait-colour.md",
+   "references/historical/birren-industrial-color-code-seafoam.md",
+   "references/historical/caravaggio-copper-resinate-greens.md",
+   "references/historical/cheskin-1953-color-wheel.md",
+   "references/historical/color-definitions-webster-iscc.md",
+   "references/historical/colour-librarian-parkinson.md",
+   "references/historical/elizabeth-lewis-1931-color-wheel.md",
+   "references/historical/esoteric-color-mysticism.md",
+   "references/historical/gage-colour-and-culture.md",
+   "references/historical/ira-marcks-color-history-art-movements.md",
+   "references/historical/itten-seven-contrasts-critical-review.md",
+   "references/historical/moses-harris-1769-color-wheel.md",
+   "references/historical/munsell-hue-value-chroma.md",
+   "references/historical/oldest-color-wheel-with-magenta.md",
+   "references/historical/ostwald-color-wheel.md",
+   "references/historical/reilly-controlled-palette.md",
+   "references/historical/ridgway-color-standards-1912.md",
+   "references/historical/ryb-vs-cmy-color-wheels.md",
+   "references/historical/what-happened-to-indigo.md",
+   "references/techniques/aladdin-color-analysis.md",
+   "references/techniques/apca-myndex-contrast.md",
+   "references/techniques/ardov-color-lab.md",
+   "references/techniques/book-of-shaders-color.md",
+   "references/techniques/brucelindbloom-color-math.md",
+   "references/techniques/censor-palette-analyser.md",
+   "references/techniques/choosing-colors-with-confidence.md",
+   "references/techniques/color-buddy-palette-lint.md",
+   "references/techniques/color-description-library.md",
+   "references/techniques/color-mixing-hexaflexagon-paths.md",
+   "references/techniques/color-name-lists.md",
+   "references/techniques/color-palette-shader.md",
+   "references/techniques/color-spd-spectral-picker.md",
+   "references/techniques/color-triangle-jinjer-markley.md",
+   "references/techniques/colordisk-trillium.md",
+   "references/techniques/colordx-color-library.md",
+   "references/techniques/colornames-oklab-blue-noise-names.md",
+   "references/techniques/colornerd-paint-manufacturer-swatches.md",
+   "references/techniques/colorpalette-pro-synthesizer.md",
+   "references/techniques/colorsort-js.md",
+   "references/techniques/coolors-co-not-generative.md",
+   "references/techniques/css-color-generation-technique.md",
+   "references/techniques/cubehelix-color-scheme.md",
+   "references/techniques/culori-color-spaces-api.md",
+   "references/techniques/cusphanger-gamut-triangle-palettes.md",
+   "references/techniques/designbook-reactive-design-token-spec.md",
+   "references/techniques/digital-color-fidget.md",
+   "references/techniques/dittotones-palette-from-systems.md",
+   "references/techniques/drawing-codex-color-proportion.md",
+   "references/techniques/erika-mulvenna-color-theory-interview.md",
+   "references/techniques/farbvelo-random-palette-generator.md",
+   "references/techniques/florent-farges-color-harmony-painters.md",
+   "references/techniques/focalpaint-impossible-pigments.md",
+   "references/techniques/fontana-generative-color-approach.md",
+   "references/techniques/francis-balanced-generative-palettes.md",
+   "references/techniques/francis-coloring-with-code-lch.md",
+   "references/techniques/futur-academy-color-playlist.md",
+   "references/techniques/glsl-lut-color-grading.md",
+   "references/techniques/goethe-edge-colors-design-hack.md",
+   "references/techniques/hsluv-better-than-hsl.md",
+   "references/techniques/icc-profile-color-management.md",
+   "references/techniques/image-color-extraction-tools.md",
+   "references/techniques/imaginary-pigments-mixbox.md",
+   "references/techniques/iq-cosine-palette-formula.md",
+   "references/techniques/jaffer-color-name-dictionaries.md",
+   "references/techniques/jaffer-resene-paint-colours.md",
+   "references/techniques/jaffer-winsor-newton-watercolours.md",
+   "references/techniques/mattdesl-generative-color-workshop.md",
+   "references/techniques/nutelch-gamut-relative-chroma.md",
+   "references/techniques/paint-mixing-lecture-ufv.md",
+   "references/techniques/pickypalette-interactive-tool.md",
+   "references/techniques/piterpasma-tweaked-rainbow-palette.md",
+   "references/techniques/pixel-art-color-palettes.md",
+   "references/techniques/pixel-parmesan-color-theory-pixel-artists.md",
+   "references/techniques/poline-esoteric-palette-generator.md",
+   "references/techniques/pro-color-harmonies.md",
+   "references/techniques/procreate-color-wheel-critique.md",
+   "references/techniques/rampensau-palette-generation.md",
+   "references/techniques/ray-color-raytraced-palettes.md",
+   "references/techniques/rybitten-ryb-color-space.md",
+   "references/techniques/screen-to-print-colour-fidelity.md",
+   "references/techniques/skin-tones-color-mixing-youthforia.md",
+   "references/techniques/spectraljs-pigment-mixing.md",
+   "references/techniques/spectrimage-color-spectrum-visualization.md",
+   "references/techniques/strom-least-wrong-colors-simulated-annealing.md",
+   "references/techniques/two-color-combinations-toolkit.md",
+   "references/techniques/tyler-hobbs-generative-color.md",
+   "references/techniques/viridis-matplotlib-colormap-design.md",
+   "references/techniques/w3c-css-color-4-and-5.md",
+   "references/techniques/wijffelaars-intuitive-color-palettes.md",
+   "references/techniques/youre-wrong-about-color-harmony.md"
+  ]
+ },
+ {
+  "id": "context-engineering",
+  "name": "context-engineering",
+  "description": "Optimizes agent context setup. Use when starting a new session, when agent output quality degrades, when switching between tasks, or when you need to configure rules files and context for a project.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "debugging-and-error-recovery",
+  "name": "debugging-and-error-recovery",
+  "description": "Guides systematic root-cause debugging. Use when tests fail, builds break, behavior doesn't match expectations, or you encounter any unexpected error. Use when you need a systematic approach to finding and fixing the root cause rather than guessing.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "deprecation-and-migration",
+  "name": "deprecation-and-migration",
+  "description": "Manages deprecation and migration. Use when removing old systems, APIs, or features. Use when migrating users from one implementation to another. Use when deciding whether to maintain or sunset existing code.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "documentation-and-adrs",
+  "name": "documentation-and-adrs",
+  "description": "Records decisions and documentation. Use when making architectural decisions, changing public APIs, shipping features, or when you need to record context that future engineers and agents will need to understand the codebase.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "doubt-driven-development",
+  "name": "doubt-driven-development",
+  "description": "Subjects every non-trivial decision to a fresh-context adversarial review before it stands. Use when correctness matters more than speed, when working in unfamiliar code, when stakes are high (production, security-sensitive logic, irreversible operations), or any time a confident output would be che",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "frontend-design",
+  "name": "frontend-design",
+  "description": "Guidance for distinctive, intentional visual design when building new UI or reshaping an existing one. Helps with aesthetic direction, typography, and making choices that don't read as templated defaults.",
+  "files": [
+   "LICENSE.txt",
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "frontend-ui-engineering",
+  "name": "frontend-ui-engineering",
+  "description": "Builds production-quality, accessible, responsive user-facing UIs. Use when building or modifying interfaces and pages, creating components, implementing layouts, meeting WCAG accessibility requirements, managing state, or when the output needs to look and feel production-quality rather than AI-gene",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "git-workflow-and-versioning",
+  "name": "git-workflow-and-versioning",
+  "description": "Structures git workflow practices. Use when making any code change. Use when committing, branching, resolving conflicts, or when you need to organize work across multiple parallel streams. Use when cutting a release, choosing a semantic version bump, tagging, or writing a changelog.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "incremental-implementation",
+  "name": "incremental-implementation",
+  "description": "Delivers changes incrementally. Use when implementing any feature or change that touches more than one file. Use when you're about to write a large amount of code at once, or when a task feels too big to land in one step.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "interview-me",
+  "name": "interview-me",
+  "description": "Extracts what the user actually wants instead of what they think they should want. Achieves this through one-question-at-a-time interview until ~95% confidence about the underlying intent. Use when an ask is underspecified (\"build me X\" without \"for whom\" or \"why now\"), when the user explicitly invo",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "investigate-first",
+  "name": "investigate-first",
+  "description": "Diagnose ambiguous failures before editing. Use for unknown causes, intermittent behavior, performance regressions, or investigations needing evidence-ranked hypotheses.",
+  "files": [
+   "SKILL.md",
+   "agents/openai.yaml"
+  ]
+ },
+ {
+  "id": "learn-codebase",
+  "name": "learn-codebase",
+  "description": "Prime a codebase by reading every source file in full. Use when starting work on a new or unfamiliar project, or when the user asks to \"learn the codebase\", \"read the codebase\", \"prime\", or \"get up to speed\".",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "make-plan",
+  "name": "make-plan",
+  "description": "Create a detailed, phased implementation plan with documentation discovery. Use when asked to plan a feature, task, or multi-step implementation — especially before executing with do.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "observability-and-instrumentation",
+  "name": "observability-and-instrumentation",
+  "description": "Instruments code so production behavior is visible and diagnosable. Use when adding logging, metrics, tracing, or alerting. Use when shipping any feature that runs in production and you need evidence it works. Use when production issues are reported but you can't tell what happened from the availabl",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "performance-optimization",
+  "name": "performance-optimization",
+  "description": "Optimizes application performance across frontend, backend, queries, and databases. Use when performance requirements exist, when you suspect performance regressions, when Core Web Vitals or load times need improvement, when N+1 query patterns need fixing, or when profiling reveals bottlenecks.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "planning-and-task-breakdown",
+  "name": "planning-and-task-breakdown",
+  "description": "Breaks work into ordered tasks. Use when you have a spec or clear requirements and need to break work into implementable tasks. Use when a task feels too large to start, when you need to estimate scope, or when parallel work is possible.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "safe-refactor",
+  "name": "safe-refactor",
+  "description": "Restructure code while preserving behavior. Use for extraction, consolidation, ownership moves, or cleanup where verification must bracket structural edits.",
+  "files": [
+   "SKILL.md",
+   "agents/openai.yaml"
+  ]
+ },
+ {
+  "id": "security-and-hardening",
+  "name": "security-and-hardening",
+  "description": "Hardens code against vulnerabilities. Use when handling user input, authentication, data storage, or external integrations. Use when building any feature that accepts untrusted data, manages user sessions, or interacts with third-party services.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "smart-explore",
+  "name": "smart-explore",
+  "description": "Token-optimized structural code search using tree-sitter AST parsing. Use instead of reading full files when you need to understand code structure, find functions, or explore a codebase efficiently.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "source-driven-development",
+  "name": "source-driven-development",
+  "description": "Grounds every implementation decision in official documentation. Use when you want authoritative, source-cited code free from outdated patterns. Use when building with any framework or library where correctness matters.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "spec-driven-development",
+  "name": "spec-driven-development",
+  "description": "Creates specs before coding. Use when starting a new project, feature, or significant change and no specification exists yet. Use when requirements are unclear, ambiguous, or only exist as a vague idea.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "test-driven-development",
+  "name": "test-driven-development",
+  "description": "Drives development with tests. Use when implementing any logic, fixing any bug, or changing any behavior. Use when you need to prove that code works, when a bug report arrives, or when you're about to modify existing functionality.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "using-agent-skills",
+  "name": "using-agent-skills",
+  "description": "Discovers and invokes agent skills. Use when starting a session or when you need to discover which skill applies to the current task. This is the meta-skill that governs how all other skills are discovered and invoked.",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "verification-before-completion",
+  "name": "verification-before-completion",
+  "description": "Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "what-the",
+  "name": "what-the",
+  "description": "\"What the? Use when the user wants a plain-English breakdown of something technical — the who, what, where, why, and when.\"",
+  "files": [
+   "SKILL.md"
+  ]
+ },
+ {
+  "id": "writing-plans",
+  "name": "writing-plans",
+  "description": "Use when you have a spec or requirements for a multi-step task, before touching code",
+  "files": [
+   "SKILL.md",
+   "plan-document-reviewer-prompt.md"
+  ]
+ }
+]

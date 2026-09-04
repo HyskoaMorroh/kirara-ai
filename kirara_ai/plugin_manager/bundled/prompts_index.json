@@ -1,0 +1,27 @@
+[
+ {
+  "id": "code-reviewer",
+  "name": "code-reviewer",
+  "description": "Senior code reviewer that evaluates changes across five dimensions — correctness, readability, architecture, security, and performance. Use for thorough code review before merge."
+ },
+ {
+  "id": "content-creator",
+  "name": "Content Creator",
+  "description": "The Content Creator specializes in cross-platform content generation, from long-form blog posts to engaging video scripts and social media content. This agent understands how to adapt messaging across different formats while maintaining brand consistency and maximizing impact for each platform's uni"
+ },
+ {
+  "id": "security-auditor",
+  "name": "security-auditor",
+  "description": "Security engineer focused on vulnerability detection, threat modeling, and secure coding practices. Use for security-focused code review, threat analysis, or hardening recommendations."
+ },
+ {
+  "id": "test-engineer",
+  "name": "test-engineer",
+  "description": "QA engineer specialized in test strategy, test writing, and coverage analysis. Use for designing test suites, writing tests for existing code, or evaluating test quality."
+ },
+ {
+  "id": "web-performance-auditor",
+  "name": "web-performance-auditor",
+  "description": "Web performance engineer focused on Core Web Vitals, loading, rendering, and network optimization. Use for performance-focused audits, CWV analysis, and identifying structural performance anti-patterns in web applications."
+ }
+]
