@@ -48,9 +48,30 @@ _NPX_CALL_SITES = (
 )
 
 
+def _pretend_node_is_installed(monkeypatch) -> None:
+    """让 `shutil.which` 报告 npx / npm 都在。
+
+    这两条断言问的是「缓存未命中那一支说了什么」，而**不是**「这台机器有没有
+    Node」。不 stub 的话，运行时镜像里没有 Node，探针在第一道 `require_tool("npx")`
+    就 skip 掉，断言拿到的是「npx 不可用」——测试于是在镜像里失败，
+    而失败原因与被断言的行为无关。这正是本文件要修的那种形态。
+    """
+    monkeypatch.setattr(
+        "tests.utils.external_tools.shutil.which", lambda name: f"/usr/bin/{name}"
+    )
+
+
 class TestTheProbeNeverReachesTheNetwork:
     def test_a_missing_package_skips_instead_of_downloading(self):
-        """缓存里没有的包必须立刻 skip，而不是去下载它。"""
+        """缓存里没有的包必须立刻 skip，而不是去下载它。
+
+        这一条用**真的** npm 探一次，因此它是唯一能证明「不联网」的用例——
+        stub 掉 `subprocess.run` 就等于把被证明的那件事替换成了假设。
+        代价是它需要本机有 npm：没有 npm 时这个问题在这台机器上无从回答，
+        所以显式 skip（运行时镜像就是这种处境）。
+        """
+        require_tool("npm", reason="这一条要用真的 npm 证明探针不联网")
+
         started = time.monotonic()
         with pytest.raises(pytest.skip.Exception) as caught:
             require_npx_package(
@@ -64,14 +85,25 @@ class TestTheProbeNeverReachesTheNetwork:
         assert elapsed < 30, f"探针耗时 {elapsed:.1f} 秒，说明它在联网"
         assert "本地 npm 缓存" in str(caught.value)
 
-    def test_the_skip_message_says_how_to_run_it_locally(self):
-        """skip 不能只说「跳过了」——要说清怎样让它跑起来。"""
+    def test_the_skip_message_says_how_to_run_it_locally(self, monkeypatch):
+        """skip 不能只说「跳过了」——要说清怎样让它跑起来。
+
+        这一条只问文案，因此把「有没有 Node」与「包在不在缓存里」都固定下来：
+        它在任何机器上都必须给出同一个答案。
+        """
+        _pretend_node_is_installed(monkeypatch)
+        monkeypatch.setattr(
+            "tests.utils.external_tools.subprocess.run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(args, 1, b"", b"ENOTCACHED"),
+        )
+
         with pytest.raises(pytest.skip.Exception) as caught:
             require_npx_package("@kirara-ai/another-absent-package", reason="探针测试")
 
         message = str(caught.value)
         assert "npx -y" in message
         assert "@kirara-ai/another-absent-package" in message
+        assert "本地 npm 缓存" in message
 
     def test_the_probe_uses_offline_mode(self):
         """`--offline` 是「绝不联网」这件事的唯一实现手段，不能被去掉。
