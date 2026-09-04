@@ -243,11 +243,38 @@ export function useTracingViewModel<S extends TraceStatistics>(
     }
   }
 
+  /**
+   * 摘掉一个 socket 的全部事件处理器，然后关闭它。
+   *
+   * 只清 `onclose` 是不够的：浏览器在连接尚未 OPEN 时被 `close()` 会**补发一个
+   * `error` 事件**，于是 `handleWebSocketError` 弹出全局「连接追踪系统失败」——
+   * 而此时用户往往已经离开这一页了（现场就是在「使用统计」页看到这条提示，
+   * 而那一页根本不连 WebSocket）。
+   *
+   * `onmessage` 一并摘掉：一条在关闭竞态里到达的消息会写进已经不再显示的列表。
+   */
+  const detachAndClose = (target: WebSocket | null) => {
+    if (!target) return
+    target.onopen = null
+    target.onclose = null
+    target.onerror = null
+    target.onmessage = null
+    try {
+      target.close()
+    } catch (error) {
+      // 关闭一个已经关掉的 socket 不是错误，也不该冒泡成用户可见的失败。
+      console.debug('关闭追踪 WebSocket 时忽略异常:', error)
+    }
+  }
+
   // WebSocket连接管理
   const connectWebSocket = async () => {
     try {
       if (socket && socket.readyState !== WebSocket.CLOSED) {
-        socket.close()
+        // 必须先摘处理器再关：旧 socket 的 `onclose` 会看到
+        // `wasClean === false` 而排一次重连，于是「关掉旧连接」反而又开一条。
+        // 服务端日志里的「一秒内两次 101 握手」就是这条路径。
+        detachAndClose(socket)
       }
 
       socket = http.ws('/tracing/ws')
@@ -357,8 +384,7 @@ export function useTracingViewModel<S extends TraceStatistics>(
       reconnectTimer = null
     }
     if (socket) {
-      socket.onclose = null
-      socket.close()
+      detachAndClose(socket)
       socket = null
       isConnected.value = false
     }
