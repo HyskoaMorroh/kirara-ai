@@ -92,7 +92,7 @@ class FileBasedAuthService(AuthService):
                     # other file invalidate every issued token with no
                     # explanation.
                     logger.warning(
-                        "Ignoring a stale creator identity at %s; the active identity is %s",
+                        "Ignoring a stale creator identity at {}; the active identity is {}",
                         legacy,
                         self.subject_file,
                     )
@@ -106,7 +106,7 @@ class FileBasedAuthService(AuthService):
             # change keep working.
             adopted = self._read_subject(legacy)
             self._write_subject(adopted)
-            logger.info("Adopted the existing creator identity from %s", legacy)
+            logger.info("Adopted the existing creator identity from {}", legacy)
             return self._read_subject(self.subject_file)
 
         return self._write_subject(secrets.token_urlsafe(32))

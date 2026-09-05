@@ -1380,7 +1380,7 @@ class ResourceCatalogService:
         try:
             return self.lifecycle.set_display_metadata(resource_id, **patch)
         except Exception as error:  # noqa: BLE001 - 补显示名失败不该让安装失败
-            logger.warning("资源 %s 的显示名补齐失败（不影响安装）：%s", resource_id, error)
+            logger.warning("资源 {} 的显示名补齐失败（不影响安装）：{}", resource_id, error)
             return dict(resource)
 
     def ensure_builtins(self) -> None:
@@ -1400,8 +1400,11 @@ class ResourceCatalogService:
                 self.install(catalog_id)
             except Exception as error:  # noqa: BLE001 - 启动路径只降级，不阻断
                 skips.append({"catalog_id": catalog_id, "reason": str(error) or type(error).__name__})
+                # loguru 用 `{}` 而不是 `%s`：写成 `%s` 时参数被丢弃，
+                # 日志里留下的是字面量 `%s`，而这条日志的全部作用就是说出
+                # 「哪一条、为什么」——两个值都没了等于没记。
                 logger.warning(
-                    "内置资源 %s 预置失败，已跳过（不影响启动）：%s", catalog_id, error
+                    "内置资源 {} 预置失败，已跳过（不影响启动）：{}", catalog_id, error
                 )
         self._builtin_skips = skips
 

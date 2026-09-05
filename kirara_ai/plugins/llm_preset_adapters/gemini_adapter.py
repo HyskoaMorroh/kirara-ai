@@ -315,7 +315,7 @@ class GeminiAdapter(
                 if rectified is None or record is None:
                     raise
                 self.logger.warning(
-                    "整流器改写请求后重试：%s %s", record.kind, record.details
+                    "整流器改写请求后重试：{} {}", record.kind, record.details
                 )
                 applied_rectifications.add(record.kind)
                 data = rectified
@@ -460,7 +460,7 @@ class GeminiAdapter(
                 if rectified is None or record is None:
                     raise error
                 self.logger.warning(
-                    "整流器改写流式请求后重试：%s %s", record.kind, record.details
+                    "整流器改写流式请求后重试：{} {}", record.kind, record.details
                 )
                 applied_rectifications.add(record.kind)
                 data = rectified

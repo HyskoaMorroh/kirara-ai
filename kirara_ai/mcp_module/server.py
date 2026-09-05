@@ -342,14 +342,14 @@ class MCPServer:
                 path = self._root_path(configured_root)
                 if path.is_symlink() or not path.exists():
                     logger.warning(
-                        "Skipping unavailable or symlinked MCP root for %s",
+                        "Skipping unavailable or symlinked MCP root for {}",
                         self.server_config.id,
                     )
                     continue
                 roots.append(types.Root(uri=path.as_uri(), name=path.name or str(path)))
             except (OSError, ValueError, TypeError):
                 logger.warning(
-                    "Skipping invalid MCP root for %s",
+                    "Skipping invalid MCP root for {}",
                     self.server_config.id,
                 )
         return types.ListRootsResult(roots=roots)
