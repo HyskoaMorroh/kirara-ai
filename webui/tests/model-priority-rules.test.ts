@@ -261,3 +261,74 @@ describe('带前缀与不带前缀是同一模型的两个路由目标', () => {
     expect(ranked).toEqual(['CHMA/claude-opus-5', 'ANT/claude-haiku-5'])
   })
 })
+
+describe('变体序号与次版本的歧义（真实链上的缺陷）', () => {
+  /**
+   * `claude-fable-5-1` 与 `claude-opus-4-6` 字面完全同形
+   * （`<家族>-<档位>-<数字>-<数字>`），但含义相反：
+   * 前者 `-1` 是变体序号（系列仍是 5），后者 `-6` 是次版本（4.6）。
+   *
+   * 坏版本把两者都读成小数，于是 `fable-5-1` 算出 5.1 盖过 `opus-5` 的 5，
+   * **整个 opus 家族被当成旧系列淘汰**。真实链上出现过：19 项里只剩一条
+   * `ANT/claude-fable-5-1`，而应该排第一的 `claude-opus-5` 消失了。
+   * 这个错不抛异常，只是让最强的模型不参与故障转移。
+   */
+  it('变体序号不把同族更强的档位挤掉——这一条是修复的核心', () => {
+    const ranked = rankModelPriority([
+      'ANT/claude-fable-5-1',
+      'claude-opus-5',
+      'claude-sonnet-5'
+    ])
+
+    // 坏版本在这里只返回 `ANT/claude-fable-5-1`。
+    expect(ranked).toEqual([
+      'claude-opus-5',
+      'claude-sonnet-5',
+      'ANT/claude-fable-5-1'
+    ])
+  })
+
+  it('同族存在无歧义的同系列时，连字符后的数字判为变体', () => {
+    // `opus-5` 确认了 `5` 是一个系列，因此 `fable-5-1` 的 `-1` 是变体。
+    const ranked = rankModelPriority(['claude-fable-5-1', 'claude-opus-5'])
+
+    expect(ranked).toEqual(['claude-opus-5', 'claude-fable-5-1'])
+  })
+
+  it('同族没有别的同系列时，连字符仍按次版本读', () => {
+    // 只有 `gemini-3-1-pro` 一种写法时 `3` 不是公认系列，
+    // 因此读作 3.1——这保住了「`-3-1` 与 `-3.1` 等效」那条规则。
+    const ranked = rankModelPriority(['gemini-3-1-pro', 'gemini-2.5-pro'])
+
+    expect(ranked).toEqual(['gemini-3-1-pro'])
+  })
+
+  it('真实的次版本仍然淘汰旧系列', () => {
+    // `claude-opus-4-6` 里 `4` 不是公认系列（没有别的 `*-4`），
+    // 所以读作 4.6，而 5 更高。
+    const ranked = rankModelPriority(['claude-opus-4-6', 'claude-opus-5'])
+
+    expect(ranked).toEqual(['claude-opus-5'])
+  })
+
+  it('截图里那条 19 项真实链：opus 必须排在 claude 最前', () => {
+    const ranked = rankModelPriority([
+      'gemini-3.1-pro-preview-customtools', 'CHMA/claude-opus-5', 'gemini-3.5-flash',
+      'CHMA/claude-opus-4-6', 'gemini-3.1-pro-low', 'ANT/claude-4.5-haiku',
+      'gemini-3.1-pro-preview', 'gpt-5.6-sol', 'claude-sonnet-4-20250514',
+      'CHMA/gpt-5-codex', 'ANT/claude-fable-5', 'GLE/gemini-3.1-pro',
+      'GLE/gemini-3.1-pro-high', 'claude-opus-5', 'claude-opus-5-thinking',
+      'CHMA/gemini-3.1-pro-preview-customtools', 'CHMA/gpt-5.6-sol',
+      'ANT/claude-fable-5-1', 'CDX/gpt-5-codex'
+    ])
+
+    // gpt 在最前，随后 claude 段必须以 opus 开头。
+    expect(ranked[0]).toBe('gpt-5.6-sol')
+    const firstClaude = ranked.find((m) => m.includes('claude'))
+    expect(firstClaude).toContain('claude-opus-5')
+    // 旧系列与非 pro 的 gemini 被淘汰。
+    expect(ranked).not.toContain('gemini-3.5-flash')
+    expect(ranked).not.toContain('CHMA/claude-opus-4-6')
+    expect(ranked).not.toContain('claude-sonnet-4-20250514')
+  })
+})

@@ -55,6 +55,8 @@ const TIER_ORDER: Readonly<Record<string, readonly string[]>> = {
 interface ModelCoordinate {
   raw: string
   family: Family
+  /** 系列号的两种读法；歧义在 `resolveSeries` 里按全族已确认的系列消解。 */
+  candidate: SeriesCandidate | null
   series: number | null
   isPro: boolean
   /**
@@ -91,24 +93,76 @@ function familyOf(name: string): Family {
 }
 
 /**
- * 解析系列号。
+ * 解析系列号候选。
  *
- * `-3-5` 与 `-3.5` 等价，因此两种分隔符都按「主版本.次版本」读。
- * 只取**第一段**版本号：`claude-sonnet-4-20250514` 读成 4，
- * 而不是把日期当成次版本读成 4.20250514。
+ * 一个字面上无法消解的歧义
+ * --------------------
+ * 连字符后的数字有两种含义，而它们**字面完全同形**：
+ *
+ * - **次版本**：`claude-opus-4-6` 的 `-6`，等价于 `4.6`（与 `-3.5` 同义）。
+ * - **变体序号**：`claude-fable-5-1` 的 `-1`，系列仍是 **5**，
+ *   与 `-preview` / `-thinking` 属同一类后缀。
+ *
+ * 两者都是 `<家族>-<档位>-<数字>-<数字>`，因此单看一个名字分不开。
+ * 而误判的代价极不对称：把 `fable-5-1` 读成 5.1 会让它盖过
+ * `claude-opus-5` 的 5，于是**整个 opus 家族被当成旧系列淘汰**——真实链上
+ * 就出现过：19 项里只剩一条 `ANT/claude-fable-5-1`，应该排第一的
+ * `claude-opus-5` 消失了。这个错不抛异常，只是让最强的模型不参与故障转移。
+ *
+ * 解法：**两遍扫描**。第一遍收集全族里所有**无歧义**的系列号
+ * （点号形式、以及数字直接结尾的形式）；第二遍解析歧义名字时，
+ * 若它的主版本已经是该族公认的系列，就把后面那个数字当变体、系列取主版本。
+ *
+ * 这与规则「跟着刷新出来的模型动态调整」一致：`5` 是不是一个系列，
+ * 取决于这一批模型里有没有别的 `*-5`，而不取决于写法。
  */
-function seriesOf(name: string): number | null {
-  // 先试 `<主>.<次>` 或 `<主>-<次>`，两位都要是数字且次版本不超过两位——
-  // 这排除了日期后缀（20250514 有八位）。
-  const paired = name.match(/(?:^|[-_])(\d+)[.-](\d{1,2})(?![\d])/)
-  if (paired) {
-    return Number.parseFloat(`${paired[1]}.${paired[2]}`)
+interface SeriesCandidate {
+  /** 无歧义时的系列号；歧义形态下是主版本。 */
+  major: number
+  /** 歧义形态下的次版本候选；无歧义时为 `null`。 */
+  minorCandidate: number | null
+}
+
+function seriesCandidate(name: string): SeriesCandidate | null {
+  // 点号形式：无歧义。`gpt-5.6-sol` 就是 5.6。
+  const dotted = name.match(/(?:^|[-_])(\d+)\.(\d{1,2})(?![\d])/)
+  if (dotted) {
+    return {
+      major: Number.parseFloat(`${dotted[1]}.${dotted[2]}`),
+      minorCandidate: null,
+    }
+  }
+  // 连字符形式：歧义。记下两种读法，等第二遍再定。
+  // 次版本限两位以排除日期后缀（`claude-sonnet-4-20250514` 的 8 位）。
+  const hyphenated = name.match(/(?:^|[-_])(\d+)-(\d{1,2})(?![\d])/)
+  if (hyphenated) {
+    return {
+      major: Number.parseFloat(hyphenated[1]),
+      minorCandidate: Number.parseFloat(`${hyphenated[1]}.${hyphenated[2]}`),
+    }
   }
   const single = name.match(/(?:^|[-_])(\d+)(?![\d.])/)
   if (single) {
-    return Number.parseFloat(single[1])
+    return { major: Number.parseFloat(single[1]), minorCandidate: null }
   }
   return null
+}
+
+/**
+ * 第二遍：用全族已确认的系列集合消解歧义。
+ *
+ * `confirmed` 是这一批模型里所有**无歧义**的系列号。若一个歧义名字的主版本
+ * 已在其中，说明该主版本本身就是一个系列，后面那个数字是变体序号。
+ * 否则采用小数读法——那时它更可能真的是次版本（例如全族只有
+ * `gemini-3-1-pro` 一种写法时，3.1 才是对的）。
+ */
+function resolveSeries(
+  candidate: SeriesCandidate | null,
+  confirmed: ReadonlySet<number>
+): number | null {
+  if (candidate === null) return null
+  if (candidate.minorCandidate === null) return candidate.major
+  return confirmed.has(candidate.major) ? candidate.major : candidate.minorCandidate
 }
 
 /**
@@ -133,7 +187,9 @@ function parse(model: string): ModelCoordinate {
   return {
     raw: model,
     family,
-    series: seriesOf(bareName),
+    // 先留候选，`series` 在收齐全族的无歧义系列之后才能定（见 resolveSeries）。
+    candidate: seriesCandidate(bareName),
+    series: null,
     // `pro` 必须作为独立词段出现，避免把 `improved` 这类子串误判成 pro。
     isPro: /(?:^|[-_/])pro(?:$|[-_.])/.test(bareName),
     tier: tierOf(family, bareName),
@@ -199,6 +255,20 @@ export function rankModelPriority(models: readonly string[]): string[] {
     if (!trimmed || seen.has(trimmed)) continue
     seen.add(trimmed)
     coordinates.push(parse(trimmed))
+  }
+
+  // 第一遍：收集**无歧义**的系列号。点号形式（`5.6`）与数字结尾形式（`opus-5`）
+  // 都不需要猜，它们构成「这一批模型里公认存在哪些系列」。
+  const confirmed = new Set<number>()
+  for (const item of coordinates) {
+    if (item.candidate && item.candidate.minorCandidate === null) {
+      confirmed.add(item.candidate.major)
+    }
+  }
+  // 第二遍：据此消解 `fable-5-1` 这类歧义——`5` 已是公认系列，
+  // 所以 `-1` 是变体序号而不是次版本。
+  for (const item of coordinates) {
+    item.series = resolveSeries(item.candidate, confirmed)
   }
 
   const ranked: string[] = []

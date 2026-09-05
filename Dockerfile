@@ -56,6 +56,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 COPY ./data/fonts/sarasa-mono-sc-regular.ttf /usr/share/fonts/
 
 # 安装系统依赖
+#
+# `poppler-utils` 是随包 pdf 技能里 `pdf2image` 的**运行前提**：那个包只是
+# poppler 的 Python 绑定，缺了二进制会在调用时抛 `PDFInfoNotInstalledError`，
+# 而报错文字与「PDF 转图片」这件事看不出关系。约 15MB。
+#
+# `fonts-noto-cjk` 是文档生成技能的前提：容器里没有中文字体时，生成的
+# PPT/PDF 里所有中文渲染成方框。文件本身是好的、打开才发现看不了，
+# 而那时用户会以为是文件损坏。约 50MB。
 RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
         sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources; \
     fi && \
@@ -65,7 +73,9 @@ RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
     apt-get -o Acquire::Retries=5 -yqq update && \
     apt-get -o Acquire::Retries=5 -yqq install --no-install-recommends \
         ffmpeg \
-        libmagic1 && \
+        libmagic1 \
+        poppler-utils \
+        fonts-noto-cjk && \
     apt-get -yq clean && \
     apt-get -yq purge --auto-remove -o APT::AutoRemove::RecommendsImportant=false && \
     rm -rf /var/lib/apt/lists/*

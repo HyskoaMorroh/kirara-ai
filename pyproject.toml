@@ -61,6 +61,30 @@ dependencies = [
     "pygls>=1.3,<2",
     "jedi",
     "pyflakes",
+
+    # ---- 随包技能的运行依赖 ----
+    #
+    # 这些包不被 kirara_ai 自身 import，而是**随包技能的脚本**要用的。
+    # 不预装的后果不是「少一个功能」，而是「界面上装好了、一使用就 ImportError」——
+    # 那比不提供这个技能更糟：用户按文档操作，得到一个与操作无关的报错。
+    #
+    # CC Switch 的做法是只放技能目录、不管依赖，因为它跑在开发者本机（那里恰好
+    # 什么都有）。本项目跑在别人的 VPS 上，照搬那个做法必然踩这个坑。
+    #
+    # 判据是「这个包被哪个随包技能 import」，不是「可能有用」：
+    # 逐个扫过 115 个技能的 .py 文件取 import 名再减去标准库得出。
+    "lxml>=5.0",             # docx / pptx / xlsx：OOXML 解析
+    "defusedxml>=0.7",       # 同上，防 XXE 的安全解析器
+    "openpyxl>=3.1",         # xlsx：读写 Excel
+    "python-docx>=1.1",      # docx：读写 Word
+    "python-pptx>=0.6.23",   # pptx 与六个 PPT 类技能
+    "pypdf>=4.0",            # pdf：读取与表单
+    "pdfplumber>=0.11",      # pdf：文本与表格抽取
+    "pdf2image>=1.17",       # pdf：转图片（另需系统 poppler-utils，见 Dockerfile）
+    "orjson>=3.9",           # planning-with-files 全系列（6 个技能）
+    "PyYAML>=6.0",           # skill-creator 等
+    "rich>=13.0",            # 若干技能的终端输出
+    "numpy>=1.26",           # 图像处理类 PPT 技能
 ]
 
 
